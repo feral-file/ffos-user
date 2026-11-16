@@ -865,3 +865,36 @@ func TestAutomaticCapture_DoesNotSnapshotMutableRedirect(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, used)
 }
+
+// PR #461 review F15: an onchfs work on screen is protected and current for
+// the warmer (so speculative reclaim keeps it), while the warmer never
+// classifies or captures it (OnchfsMaterializer writes it).
+func TestPlaybackCache_OnchfsWorkIsProtectedButNeverCaptured(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=7200")
+		_, _ = io.WriteString(w, "image")
+	}))
+	defer origin.Close()
+	onchfsWork := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.evm.onchfs.invalid/?fxhash=1"
+	var classified sync.Map
+	classify := playbackClassifier(func(_ context.Context, source string) (MediaClass, error) {
+		classified.Store(source, true)
+		return ClassMedia, nil
+	})
+	store := playbackStore(t)
+	s := playbackService(t, store, classify)
+	require.NoError(t, s.Start(context.Background()))
+	defer s.Stop()
+	items := []dp1playlist.PlaylistItem{{Source: onchfsWork}, {Source: origin.URL + "/next"}}
+	s.automatic.observe(items, 0, true)
+
+	require.True(t, s.automatic.protectedKeys()[SourceKey(onchfsWork)], "the work on screen is protected")
+	require.Equal(t, SourceKey(onchfsWork), s.automatic.currentKey())
+	require.Eventually(t, func() bool {
+		_, err := store.LoadItem(SourceKey(origin.URL + "/next"))
+		return err == nil
+	}, 3*time.Second, 5*time.Millisecond, "the next item is still warmed")
+	_, asked := classified.Load(onchfsWork)
+	require.False(t, asked, "the onchfs work is never classified for capture")
+}

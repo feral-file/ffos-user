@@ -31,8 +31,12 @@
 // RewriteURL). The DP-1 item source stays byte-for-byte what the app cast:
 // `Fetch.continueRequest`'s `url` override is invisible to the page, so
 // ff-player, the offline-cache identity (`sha256(item.source)`), and every
-// log still see the original URL. Anything on a matching host that is NOT a
-// CID path keeps the User-Agent rule above.
+// log still see the original URL. Slash runs and repeated `ipfs` segments
+// before the CID (`/ipfs//<cid>`, `/ipfs/ipfs/<cid>`: common tokenURI
+// mistakes the gateways redirect or refuse) are collapsed first, so those
+// are rewritten too (contentpath.IPFS, the parser the media-health probe
+// shares). Anything on a matching host that is NOT a CID path keeps the
+// User-Agent rule above.
 //
 // This package is intentionally pure: it holds no CDP connection, performs
 // no I/O, and knows nothing about how interception is armed. That keeps the
@@ -48,6 +52,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 // DefaultUserAgent is the token sent in place of Chromium's own.
@@ -314,34 +320,27 @@ func (p *Policy) RewriteURL(rawURL string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if !isCIDPath(u.EscapedPath()) {
+	cid, rest, ok := contentpath.IPFS(u.EscapedPath())
+	if !ok {
+		return "", false
+	}
+	escaped := "/ipfs/" + cid + rest
+	path, err := url.PathUnescape(escaped)
+	if err != nil {
 		return "", false
 	}
 	out := url.URL{
 		Scheme:     p.replacement.Scheme,
 		Host:       p.replacement.Host,
-		Path:       u.Path,
-		RawPath:    u.RawPath,
+		Path:       path,
 		RawQuery:   u.RawQuery,
 		ForceQuery: u.ForceQuery,
 	}
+	if escaped != (&url.URL{Path: path}).EscapedPath() {
+		// Keep the source's own percent-encoding byte-for-byte.
+		out.RawPath = escaped
+	}
 	return out.String(), true
-}
-
-// isCIDPath reports whether an escaped URL path is `/ipfs/<cid>` optionally
-// followed by `/...`, where <cid> parses as a CID (see isCID). A `%` in the
-// segment means percent-encoding, which no CID alphabet contains.
-func isCIDPath(escapedPath string) bool {
-	const prefix = "/ipfs/"
-	if !strings.HasPrefix(escapedPath, prefix) {
-		return false
-	}
-	rest := escapedPath[len(prefix):]
-	cid := rest
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		cid = rest[:i]
-	}
-	return isCID(cid)
 }
 
 // normalizeReplacementGateway reduces an operator-written gateway to scheme

@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/net/idna"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 )
 
 // Display grants (§5.7): what a Play site holds after an owner approved it
@@ -197,11 +199,11 @@ func (a *Authority) refuseDisplay(adm *Admission, ctl string, window Window, cod
 
 // admitDisplay is §3.4 steps 5-6 for a display record, in every state but
 // locked (OpenFrom answered that already): legacy included, because a
-// legacy device issues display grants too (§5.7). A display ctl may send
-// exactly two things, the Play cast (Permits) and its own self-revoke. An
+// legacy device issues display grants too (§5.7). A display ctl can cast,
+// revoke itself, or read display status over relay v2. An
 // inactive record is access_revoked; for an active one every other op or
 // command is permission_denied. Refusals spend the ctr.
-func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64) (*Admission, error) {
+func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64, route Route) (*Admission, error) {
 	adm, c := pre.adm, pre.claims
 	adm.SignerRole = RoleDisplay
 	if err := g.Window.Check(c.Ctr); err != nil {
@@ -236,7 +238,7 @@ func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64) (
 		}
 		return a.succeed(adm, struct{}{})
 	}
-	if !Permits(p, c.Cmd, c.Req) {
+	if (c.Cmd == string(commands.CMD_DEVICE_STATUS) && route != RouteRelayV2) || !Permits(p, c.Cmd, c.Req) {
 		return a.refuseDisplay(adm, g.Ctl, window, CodePermissionDenied)
 	}
 	adm.Command, adm.Request, adm.Principal = c.Cmd, c.Req, p
@@ -247,12 +249,20 @@ func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64) (
 }
 
 // Permits reports whether p may run cmd with req (§7.1). A display grant is
-// confined to the Play cast (§5.7): displayPlaylist in the exact Play
-// shape, nothing else, not even a status read. Every other role is decided
-// by the tier table. admitCmd and commandrouter's re-check both use it.
+// limited to the exact Play cast shape and a read-only display status query.
+// The admission path additionally limits the status query to relay v2. Every
+// other role is decided by the tier table.
 func Permits(p Principal, cmd string, req json.RawMessage) bool {
 	if p.Role == RoleDisplay {
-		return cmd == cmdDisplayPlaylist && isPlayCastShape(req)
+		switch commands.Type(cmd) {
+		case commands.CMD_DEVICE_STATUS:
+			var args map[string]json.RawMessage
+			return json.Unmarshal(req, &args) == nil && args != nil && len(args) == 0
+		case commands.CMD_DISPLAY_PLAYLIST:
+			return isPlayCastShape(req)
+		default:
+			return false
+		}
 	}
 	return TierOf(cmd).Allows(p.Role)
 }

@@ -5,13 +5,29 @@ import (
 	"errors"
 	"sync"
 
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 )
+
+// recastSchedulerSourceHint is the internal-only command.Arguments key
+// recastForMode attaches to its re-entrant CMD_DISPLAY_PLAYLIST call, the
+// same pattern as "retireBlockedCurrent"/"mediaHealth" (handler.go): a Go
+// playlistschedule.Source value a decoded wire command could never produce
+// (JSON decoding never yields this struct type), so the type assertion
+// reading it IS the boundary against a caller injecting one. It carries the
+// ORIGINAL cast's scheduler source (the playlistUrl or inline dynamic
+// playlist that started it) across the rebuilt-as-static-dp1_call re-cast,
+// so handler.go can restore it instead of letting the static branch's own
+// zero-value schedulerSource overwrite the scheduler's durable source
+// (feralfile-bot F1 on PR #454, 2026-11-10).
+const recastSchedulerSourceHint = "recastSchedulerSource"
 
 // SetSeriesPlayback wires the device-level series-playback override store, if
 // h supports it (the concrete *handler built by New, not the gate wrapper) —
@@ -26,6 +42,26 @@ func SetSeriesPlayback(h Handler, store *seriesplayback.Store, logger *zap.Logge
 }
 
 func (h *handler) setSeriesPlayback(store *seriesplayback.Store) { h.seriesPlayback = store }
+
+// SeriesPlaybackSource exposes h's own device-level series-playback getter
+// (currentSeriesPlaybackMode) to callers outside this package — namely
+// main.go, which wires status.Poller.SetSeriesPlaybackSource against the
+// same handler it builds here, so the poller's pushed player_status and
+// this package's own direct checkStatus reply (annotateSeriesPlaybackReply,
+// called from sendCDPRequest) read the identical device-level store and can
+// never disagree. ok is false (fn nil) when h is not a *handler built by
+// New — same concrete-handler-only, pre-NewGate contract as
+// SetOverlaySource/SetSeriesPlayback; the method itself is nil-safe even
+// without a store wired (it returns nil, meaning "follow the document"),
+// so ok says nothing about whether a store was wired, only whether this
+// handler type supports the seam at all.
+func SeriesPlaybackSource(h Handler) (fn func() *dp1.SeriesPlaybackMode, ok bool) {
+	target, ok := h.(*handler)
+	if !ok {
+		return nil, false
+	}
+	return target.currentSeriesPlaybackMode, true
+}
 
 // ResetSeriesPlayback returns the device-level series-playback override to
 // "follow the document" and removes it from disk. Used by factory reset: the
@@ -43,12 +79,13 @@ func ResetSeriesPlayback(h Handler) error {
 }
 
 // currentSeriesPlaybackMode reads the device-level override without taking
-// the store's lock, mirroring contentpolicy.Store.Snapshot: the cast path
-// this feeds (the static dp1_call branch) already runs ahead of the content-
-// policy lock and the kiosk playback lock, and must not add a third lock to
-// that ordering for a value this cheap to read lock-free. nil means "follow
-// the document" — either because no override is set, or because no store was
-// wired (a build before this seam, or a test).
+// the store's lock, mirroring contentpolicy.Store.Snapshot: the cast paths
+// this feeds (all three CMD_DISPLAY_PLAYLIST branches — playlistUrl, dp1_call
+// static, dp1_call dynamic, feral-file/ffos-user#452) already run ahead of
+// the content-policy lock and the kiosk playback lock, and must not add a
+// fourth lock to that ordering for a value this cheap to read lock-free. nil
+// means "follow the document" — either because no override is set, or
+// because no store was wired (a build before this seam, or a test).
 func (h *handler) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
 	if h.seriesPlayback == nil {
 		return nil
@@ -90,6 +127,13 @@ type displayedSeriesCast struct {
 	shell          dp1.Playlist
 	plan           dp1.CastPlan
 	contentContext contentpolicy.Context
+	// source is the ORIGINAL cast's scheduler source (playlistUrl or inline
+	// dynamic playlist) — kept so recastForMode can carry it through its
+	// rebuilt-as-static-dp1_call re-cast via recastSchedulerSourceHint,
+	// rather than letting the static branch's own zero-value schedulerSource
+	// silently reset the scheduler's durable source (feralfile-bot F1 on PR
+	// #454, 2026-11-10).
+	source playlistschedule.Source
 }
 
 // rememberSeriesCast records what Process just resolved for a
@@ -108,7 +152,7 @@ type displayedSeriesCast struct {
 // series whose editions all 404 but whose representative is reachable is
 // rejected in full yet accepted narrowed to "first", replacing whatever is
 // actually on screen (PR #429 review F2).
-func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context) uint64 {
+func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, contentContext contentpolicy.Context, source playlistschedule.Source) uint64 {
 	h.lastSeriesCast.mu.Lock()
 	defer h.lastSeriesCast.mu.Unlock()
 	h.lastSeriesCast.seq++
@@ -118,6 +162,7 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 		h.lastSeriesCast.shell = dp1.Playlist{}
 		h.lastSeriesCast.plan = dp1.CastPlan{}
 		h.lastSeriesCast.contentContext = ""
+		h.lastSeriesCast.source = playlistschedule.Source{}
 		return h.lastSeriesCast.seq
 	}
 	shell := playlist
@@ -126,6 +171,7 @@ func (h *handler) rememberSeriesCast(playlist dp1.Playlist, plan dp1.CastPlan, c
 	h.lastSeriesCast.shell = shell
 	h.lastSeriesCast.plan = plan
 	h.lastSeriesCast.contentContext = contentContext
+	h.lastSeriesCast.source = source
 	return h.lastSeriesCast.seq
 }
 
@@ -155,6 +201,7 @@ func (h *handler) settleSeriesCast(seq uint64, accepted bool) {
 	h.lastSeriesCast.shell = dp1.Playlist{}
 	h.lastSeriesCast.plan = dp1.CastPlan{}
 	h.lastSeriesCast.contentContext = ""
+	h.lastSeriesCast.source = playlistschedule.Source{}
 }
 
 // clearSeriesCast invalidates the displayed-series cache without recording a
@@ -180,6 +227,7 @@ func (h *handler) clearSeriesCast() {
 	h.lastSeriesCast.shell = dp1.Playlist{}
 	h.lastSeriesCast.plan = dp1.CastPlan{}
 	h.lastSeriesCast.contentContext = ""
+	h.lastSeriesCast.source = playlistschedule.Source{}
 }
 
 // handleSeriesPlayback serves getSeriesPlayback/setSeriesPlayback. Both are
@@ -338,6 +386,7 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	shell := h.lastSeriesCast.shell
 	plan := h.lastSeriesCast.plan
 	contentContext := h.lastSeriesCast.contentContext
+	source := h.lastSeriesCast.source
 	seqBefore := h.lastSeriesCast.seq
 	h.lastSeriesCast.mu.Unlock()
 
@@ -347,6 +396,20 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// rebuild is controld's own, same as CMD_RECENTLY_PLAYED_REPLAY's.
 	rebuilt.Signatures = nil
 	rebuilt.Signature = ""
+	// shell is the exact *Playlist a dynamic-origin cast's
+	// ProcessPlaylistURLForCast/ProcessDynamicPlaylistForCast returned, so
+	// it still carries the ORIGINAL DynamicQuery/DynamicQueries — rebuilt
+	// here holds the already-resolved, already-narrowed Items instead.
+	// Left alone, MarshalJSON would still emit dynamicQuery(.pagination),
+	// so re-entering Process below would see HasDynamicContent() true and
+	// re-run the whole dynamic resolution (a fresh network round trip) on
+	// every setSeriesPlayback call, instead of the free, local re-narrow
+	// this cache exists to provide (run-reviewer F1 on #454, 2026-11-10).
+	// A static-origin cast's shell never has these set, so this is a no-op
+	// for it.
+	rebuilt.DynamicQuery = nil
+	rebuilt.DynamicQueries = nil
+	rebuilt.DynamicQueryPagination = nil
 
 	b, err := h.json.Marshal(rebuilt)
 	if err != nil {
@@ -363,7 +426,56 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	if contentContext != "" {
 		recastArgs["contentContext"] = string(contentContext)
 	}
-	_, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
+	// Carries the ORIGINAL cast's scheduler source through this rebuilt
+	// dp1_call, which Process below classifies as static (no dynamic
+	// fields survive, see above) and would otherwise prepare with a
+	// zero-value Source — silently resetting the scheduler's durable
+	// playlistUrl/inline-dynamic source on every setSeriesPlayback call
+	// (feralfile-bot F1 on PR #454, 2026-11-10). See
+	// recastSchedulerSourceHint's doc for why this cannot be forged by an
+	// external caller.
+	if !source.IsZero() {
+		recastArgs[recastSchedulerSourceHint] = source
+	}
+	procResult, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
+
+	// Candidate picks for the push below, computed now (pure, no shared
+	// state) but not yet tagged with a Seq or sent: pushed only when the
+	// re-cast was actually ACCEPTED by the player — the same two-part
+	// check handler.go's own defer uses, not procErr == nil alone: Process
+	// can legitimately return (result, nil) with result's own ok field
+	// false (a designed player refusal — e.g. handler_pending,
+	// no_artwork — carries no Go error), which an earlier, procErr-only
+	// check let through as if the re-cast had displayed (run-reviewer
+	// consolidated F2 on this fix, 2026-11-16). The re-entrant Process
+	// call above runs its own copy of this same push (handler.go), but on
+	// an empty CastPlan — rebuilt carries no seriesRegistry marker, so
+	// that call's own ResolveSeriesCastPlan resolves no groups to push
+	// picks for — so this is the only place a setSeriesPlayback-driven
+	// re-narrow's own random pick (feral-file/ffos-user#459, F6 reopened)
+	// is ever recorded.
+	//
+	// rebuilt.Items is plan.Narrow's own UNFILTERED output; the re-entrant
+	// Process call above applies its own content-policy filtering to it
+	// internally, and this function has no visibility into whether a
+	// candidate pick survived that (run-reviewer consolidated F1 on pass 1
+	// of this fix, 2026-11-16 — handler.go's own push re-checks against
+	// its final, post-filter playlist.Items directly, which this call
+	// site cannot see). Each candidate's own edition is instead
+	// re-checked here against a lock-free content-policy snapshot — the
+	// same established read narrowStable's own displayFilter uses — and
+	// dropped if the policy would withhold it. Accepted, narrower residual
+	// risk: this does not also re-check schedule (displayAt) exclusion the
+	// way handler.go's own membership check does, since recovering that
+	// visibility here would need the same cross-call plumbing threading
+	// Process's final item list back to this caller, which this fix does
+	// not build (scope: fix the push's own correctness, not add a new
+	// Process-return surface).
+	var picks []dp1.RandomGroupPick
+	if procErr == nil && playerresponse.OK(procResult) && h.acceptedPickRecorder != nil {
+		candidates := plan.RandomPicksFromNarrowed(device, rebuilt.Items)
+		picks = survivingContentPolicyPicks(h.contentPolicy, contentContext, &rebuilt, candidates)
+	}
 
 	// The re-entrant Process call's own dp1_call branch just ran
 	// rememberSeriesCast on the rebuilt (already-narrowed) document, which
@@ -376,6 +488,20 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// Restored as accepted whether or not the re-cast succeeded: the plan
 	// was accepted when captured above, and a failed re-cast leaves that
 	// same series on screen.
+	//
+	// picks is tagged with seqBefore+1 under this SAME check, not before
+	// it: that value is only known to be this re-entrant call's own real
+	// seq when nothing else wrote lastSeriesCast.seq in the meantime —
+	// exactly what this check already verifies for the restore above.
+	// Tagging it unconditionally, before this check, let an untagged
+	// guess collide with (or appear no older than) a genuinely newer,
+	// independent cast's own real Seq for the same group — silently
+	// defeating the Seq ordering guard this fix's pass 1 added (F3) in
+	// precisely the race it was meant to close (run-reviewer consolidated
+	// F1 on pass 2 of this fix, 2026-11-16). Nil'd out instead of pushed
+	// when the check fails: the narrowStable live-display self-heal this
+	// whole fix exists to bypass only in the withheld-pick case is still
+	// there to catch an ordinary one.
 	h.lastSeriesCast.mu.Lock()
 	if h.lastSeriesCast.seq == seqBefore+1 {
 		h.lastSeriesCast.valid = true
@@ -383,12 +509,75 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 		h.lastSeriesCast.shell = shell
 		h.lastSeriesCast.plan = plan
 		h.lastSeriesCast.contentContext = contentContext
+		h.lastSeriesCast.source = source
+		for i := range picks {
+			picks[i].Seq = seqBefore + 1
+		}
+	} else {
+		picks = nil
 	}
 	h.lastSeriesCast.mu.Unlock()
+
+	if len(picks) > 0 {
+		h.acceptedPickRecorder(picks)
+	}
 
 	if procErr != nil {
 		h.logger.Warn("series playback: re-cast after a setting change failed", zap.Error(procErr))
 	}
+}
+
+// survivingContentPolicyPicks keeps only the candidates whose own edition
+// policy (a lock-free Snapshot, matching playlist-refresher's own
+// established read — see narrowStable's displayFilter) still admits under
+// context. This is recastForMode's own, narrower stand-in for handler.go's
+// post-filter membership check against the final playlist.Items: it has no
+// equivalent visibility into what the re-entrant Process call's filtering
+// actually kept, so it predicts content-policy admission directly instead
+// (see recastForMode's own doc on the residual, accepted schedule-exclusion
+// gap this leaves). nil policy means nothing is filtered — matching
+// Process's own filterUnderPolicy guard — so every candidate survives.
+func survivingContentPolicyPicks(policy *contentpolicy.Store, context contentpolicy.Context, playlist *dp1.Playlist, candidates []dp1.RandomGroupPick) []dp1.RandomGroupPick {
+	if policy == nil || len(candidates) == 0 {
+		return candidates
+	}
+	snap := policy.Snapshot()
+	survived := make([]dp1.RandomGroupPick, 0, len(candidates))
+	for _, pick := range candidates {
+		item, found := findPlaylistItemBySource(playlist, pick.Source)
+		if !found || snap.Allows(item, context) {
+			survived = append(survived, pick)
+		}
+	}
+	return survived
+}
+
+// survivingRandomPicks keeps only the candidates whose Source is present in
+// final — the playlist items as they actually stood at the moment a cast
+// was accepted, after every content-policy and scheduler filtering stage
+// (handler.go's own push reads this fresh from playlist.Items at defer
+// time). candidates must come from RandomPicksFromNarrowed's own, PRE-
+// filter lockstep walk; checking by content (Source membership) here,
+// rather than re-running that walk against final, is required because
+// filtering can remove items from the middle of a segment's own
+// contribution, which would silently desync a second lockstep pass over
+// the already-filtered list (run-reviewer consolidated F1 on this fix,
+// 2026-11-16).
+func survivingRandomPicks(candidates []dp1.RandomGroupPick, final []dp1playlist.PlaylistItem) []dp1.RandomGroupPick {
+	if len(candidates) == 0 {
+		return nil
+	}
+	present := make(map[string]struct{}, len(final))
+	for _, item := range final {
+		present[item.Source] = struct{}{}
+	}
+	survived := make([]dp1.RandomGroupPick, 0, len(candidates))
+	for _, pick := range candidates {
+		if _, ok := present[pick.Source]; ok {
+			survived = append(survived, pick)
+		}
+	}
+	return survived
 }
 
 func parseSeriesPlaybackRequest(args map[string]interface{}) (*dp1.SeriesPlaybackMode, bool) {

@@ -130,6 +130,29 @@ too, so the fallback itself can never reintroduce the same collision
 (logged at `Error`, mirroring `staticserver.go`'s `safeLoopbackAddr` guard
 for the same class of "config typo breaks an isolation invariant" hazard).
 
+### 2.0 A second producer: onchfs works (`onchfs.go`)
+
+Capture is not the only writer of item records. An onchfs work has no host
+since fxhash closed (ffos-user#427), so `OnchfsMaterializer` reads its tree
+from chain, verifies every inode, and writes it as an `Automatic`, complete
+record under the work's device-local source
+(`https://<base32 root>.onchfs.invalid/…`). Replay serves it exactly as it
+serves a capture. Three rules in this document bend for it:
+
+- **"Item.Source is never rewritten" holds within the cache, not before
+  it.** `dp1` maps an `onchfs://` source to its device-local form at every
+  exit, before the cache, the player or replay sees the item. The mapped
+  string is the identity everywhere downstream.
+- **"Offline cache off" no longer means no replay.** `BootstrapCore` (store,
+  replay; no static server, no Service, no capture) runs on every device. It
+  is lazy: it dials the kiosk only once an onchfs scope is first armed. In
+  that mode the materializer bounds and collects its own records.
+- **`ClassOnchfs` is classified without a request, ahead of the source
+  guard** (whose DNS check would refuse the `.invalid` host). Downloads and
+  automatic warming skip it as they skip `ClassInline`.
+
+Design, limits and node list: [`onchfs.md`](onchfs.md).
+
 ### 2.1 Resource-aware admission (`admission.go`)
 
 Process separation keeps capture from *touching* the kiosk's state, but not
@@ -1008,7 +1031,12 @@ offline-artworks/
   items/<sha256(item.source)>.json        # the ONE per-source record (ItemRecord in types.go)
   playlists/<playlistId>.json             # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
   playlists/by-url/<sha256(url)>.json     # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
+  playlists/series-segments/<playlistId>.json  # series-group identity for a curated playlist's seriesRegistry items, when any resolved (SeriesSegment in types.go)
 ```
+
+The `series-segments` sidecar (feral-file/ffos-user#455, #453) exists because the playlist record above is the **flattened** result (every `seriesRegistry` item already replaced by its editions, same as a live `ExpandSeriesItems`) — the resolve that produced it keeps each series' group identity (representative, full edition set, the document's stated mode, `artworkModel`) only long enough to flatten it, and this sidecar is what survives that moment: `commandrouter` converts the resolve's `dp1.CastPlan.Segments` to this package's own `SeriesSegment` (it cannot import `dp1` — see that type's doc) and `Store.SavePlaylistSeriesSegments` writes it, nested the same invisible-to-`ListPlaylistIDs` way `by-url/` already is. `Service.CachedPlaylistForURL` returns it alongside the raw playlist so an offline fallback/resync can rebuild a `dp1.CastPlan` and call its existing `Narrow(deviceMode)` — the live-cast narrowing logic — without a second catalog round trip; see `docs/api-design.md`'s "DP-1 `seriesRegistry` expansion" section for the full mechanism. `DeletePlaylist` removes this sidecar too (unlike the `by-url/` index, which is deliberately left stale on a clear): it is interpreted directly against whatever `Items` a *later* save of the same playlist id holds, so a stray sidecar could silently narrow a future, unrelated playlist against the wrong group set. That delete is itself best-effort, logged on failure rather than surfaced — so the sidecar's envelope also carries a hex SHA-256 digest of the exact playlist body it was saved alongside. `LoadPlaylistSeriesSegments` recomputes the digest from the body the caller just loaded and discards the sidecar as `ErrPlaylistNotFound` (the same "nothing to narrow by" outcome every caller already handles) on a mismatch — whether that mismatch comes from a reader landing between the body write and this sidecar's own write, or from an earlier delete that silently failed to remove a sidecar now paired with unrelated content (feralfile-bot F2, 2026-11-12).
+
+That digest cannot catch every stale-sidecar case, though: a RE-download of the IDENTICAL raw playlist bytes — the catalog's answer for the same series changed since the last download, or the document no longer resolves to a series at all — produces a NEW `segments` value with the SAME digest as the OLD sidecar, since the digest is a pure function of the body bytes alone. `Service.savePlaylistAndURLIndex` therefore invalidates whatever sidecar the playlist id currently holds right after the new body is durably saved, before writing any new segments for it, and aborts the whole save if that invalidation itself fails, instead of letting a new sidecar land next to — or an empty save silently leave in place — an old sidecar that would still validate against the new body. On success there is at most a brief window with no sidecar at all, which is the same safe "nothing to narrow by" outcome every caller already handles (feralfile-bot F2, round 3 on this fix, 2026-11-12). Invalidating is deliberately ordered AFTER the body save, not before: `SavePlaylist` either fully replaces the body or, on failure, leaves it untouched (temp file + rename), so invalidating first would destroy a still-correctly-paired sidecar for the OLD body on nothing more than a transient body-write failure (run-reviewer, round 3 on this fix, 2026-11-12).
 
 **An item's cache identity is its `source` URL, never its DP-1 `id`**
 (`SourceKey` in `types.go`: `hex(sha256(source))` over the exact byte
@@ -1868,9 +1896,15 @@ recovery) does not leave replay silently detached.
 ### What `maxDiskBytes` actually bounds
 
 `Store.DiskUsage` sums **every** directory the cache persists — blobs,
-item records, playlist bodies, and the by-url index — not just `blobs/`.
-It once counted blobs alone, which left real cache data outside the
-ceiling `offlineCache.maxDiskBytes` is documented to enforce.
+item records, playlist bodies, the by-url index, and the series-segments
+sidecar (feral-file/ffos-user#455, #453) — not just `blobs/`. It once
+counted blobs alone, which left real cache data outside the ceiling
+`offlineCache.maxDiskBytes` is documented to enforce; the series-segments
+sidecar reopened exactly that gap when it landed as a second nested
+subdirectory of `playlists/` that `dirSize`'s "skip subdirectories" rule
+(by design, so `by-url/` is not double-counted) also skipped, until
+`DiskUsage` was extended to measure it explicitly alongside `by-url/`
+(feralfile-bot F4, 2026-11-12).
 
 Playlist metadata was the sharp edge: `downloadPlaylist` persists a
 playlist's raw JSON (and its URL-index entry) *before* any item is
@@ -2244,7 +2278,8 @@ and every `source` inside it is a URL this daemon will dial on the
 playlist's behalf from four separate places:
 
 - `classify.go`'s `HEAD` / ranged-`GET` probe,
-- `probe.go`'s cast-time liveness preflight (#304),
+- `mediahealth_fetcher.go`'s L0 media probe (#304, #392: the cast-time pass
+  and the during-play lookahead),
 - `mediacapture.go`'s direct body download,
 - `capture.go`'s `Page.navigate` in the headless browser.
 
@@ -2261,10 +2296,10 @@ browser — both reachable by anyone on the LAN.
 function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
 before any I/O and before any job is queued. A rejected source is
 therefore never probed, never downloaded, and never navigated to. The
-cast-time preflight does not cross `Classify`: it applies the same guard
-directly (`guard.check` plus the guarded transport, both inside
-`probe.go`), so a policy change in the guard must be re-checked against
-that path separately. It
+media health fetcher does not cross `Classify`: it applies the same guard
+directly (`guard.check` plus the guarded probe transport, both inside
+`mediahealth_fetcher.go`), so a policy change in the guard must be
+re-checked against that path separately. It
 rejects, with `ErrUnsafeSource`:
 
 - any scheme outside `http`/`https` — an allowlist, not a denylist, since
@@ -2643,21 +2678,20 @@ origins from the device's egress IP — the source guard confines targets
 to public addresses, so this is a reflection/reachability surface, not an
 internal scanner. Accepted alongside the guard's other residuals (#3471:
 the LAN control plane is unauthenticated by design); the storm gate, the
-per-cast probe budget, and the prober's process-wide 8 MiB peer-controlled parsing
-budget are the containment. A probe uses a status-only HTTP/1 client that accepts
-at most 64 KiB and 128 fields across informational plus final header blocks, then
-closes before the body so trailers are never parsed. It discards fields through a
-fixed reader instead of allowing `net/http` to materialize a cardinality-amplified
-header map. The shared semaphore has 32 x 256 KiB budget units. HTTP spends one;
-HTTPS spends four (1 MiB), caps the whole inbound TLS handshake at 64 KiB before
-`crypto/tls` can parse certificates, and does not retain TLS connection state in
-the response. The resulting envelope admits at most 32 HTTP parsers or eight TLS
-parsers. Disabling the storm gate removes its rate and command-concurrency
-controls but not these weighted units; the `sourceProbe` config kill switch
-removes the surface entirely if it is ever abused.
+per-pass probe budget (256 distinct wire URLs), and the fetcher's process-wide
+admission budget are the containment. The media health probe reads the first
+32 KiB of a source through the guarded transport (64 KiB response-header
+ceiling, guarded redirects, keep-alives off so `net/http` never silently
+replays a request) and caps body bytes read; a weighted semaphore of 32 units
+(HTTP spends one, HTTPS four) admits at most 32 HTTP or eight TLS peers to
+have this daemon parsing their headers and certificates at once. Disabling
+the storm gate removes its rate and command-concurrency controls but not
+these weighted units; the `mediaHealth.disabled` config kill switch removes
+the surface entirely if it is ever abused.
 
 ## 10. See also
 
+- `docs/onchfs.md` — onchfs works: the second producer of records (§2.0).
 - `components/feral-controld/offlinecache/` — the implementation;
   `classify.go` (routing), `capture.go` (software/headless path),
   `mediacapture.go` (direct-download path, §3.3), `replay.go` (serving

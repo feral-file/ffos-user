@@ -205,6 +205,11 @@ func DefaultGateConfig() GateConfig {
 		// no CDP round trip — but is still deduped at the query tier for the
 		// same unlisted-Default concurrency-slot reason as getContentPolicy.
 		commands.CMD_GET_SERIES_PLAYBACK: query,
+		// getMediaHealth reads the local store plus one serialized CDP
+		// checkStatus round trip for the item list, so it is deduped at the
+		// query tier like getRecentlyPlayed; the handler rejects a non-empty
+		// request for the same dedupe-key reason.
+		commands.CMD_GET_MEDIA_HEALTH: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,
@@ -299,6 +304,11 @@ func (g *gate) Process(ctx context.Context, command commands.Command) (interface
 	}
 
 	p, key := g.policyFor(command.Type)
+	principal, hasPrincipal := control.PrincipalFrom(ctx)
+	if principal.Role == control.RoleDisplay && command.Type == commands.CMD_DEVICE_STATUS {
+		// All browser grants share one budget separate from controller status.
+		key = "\x00display-status"
+	}
 
 	// Deduped commands collapse identical in-flight requests into one
 	// execution. Only the leader consumes rate/concurrency budget; followers
@@ -317,8 +327,8 @@ func (g *gate) Process(ctx context.Context, command commands.Command) (interface
 		// identical in-flight command (feral-file#3551 F4): sharing one
 		// execution across principals would hand one controller a result
 		// produced on another's authority. Plaintext keeps today's key.
-		if p, ok := control.PrincipalFrom(ctx); ok {
-			flightKey = "ctl\x00" + p.ControllerID + "\x00" + flightKey
+		if hasPrincipal {
+			flightKey = "ctl\x00" + principal.ControllerID + "\x00" + flightKey
 		}
 		res, err, _ := g.flight.Do(flightKey, func() (interface{}, error) {
 			return g.admit(ctx, command, p, key)

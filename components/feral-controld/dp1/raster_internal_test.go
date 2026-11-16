@@ -49,7 +49,8 @@ func TestRasterSourceURL(t *testing.T) {
 		{"ipfs query is kept for fxhash seeds", "", "ipfs://QmFx/?fxhash=oo123", "fxhash", "https://ipfs.raribleuserdata.com/ipfs/QmFx/?fxhash=oo123"},
 		{"scheme match is case-insensitive", "", "IPFS://QmUpper", "", "https://ipfs.raribleuserdata.com/ipfs/QmUpper"},
 		{"arweave", "", "ar://TxId123", "", "https://arweave.net/TxId123"},
-		{"onchfs", "", "onchfs://abcdef/index.html", "", "https://onchfs.fxhash2.xyz/abcdef/index.html"},
+		{"onchfs passes through: no host serves it", "", "onchfs://abcdef/index.html", "", "onchfs://abcdef/index.html"},
+		{"onchfs keeps the fxhash seed byte for byte", "", "ONCHFS://1639e8c9/?fxhash=0x06ec&fxiteration=1", "fxhash", "onchfs://1639e8c9/?fxhash=0x06ec&fxiteration=1"},
 		{"empty ipfs rest is nothing to play", "", "ipfs://", "", ""},
 		{"data URI is not playable by the wall", "", "data:text/html,hi", "", ""},
 		{"bare CID is not playable", "", "QmBare", "", ""},
@@ -60,6 +61,7 @@ func TestRasterSourceURL(t *testing.T) {
 			got := rasterSourceURL(&rasterMedia{NormalizedContentURL: tc.normalized, ContentURL: tc.content}, tc.platform)
 			assert.Equal(t, tc.want, got)
 			assert.NotContains(t, got, "ipfs.io")
+			assert.NotContains(t, got, "fxhash2.xyz", "fxhash's onchfs gateway is gone (#427)")
 		})
 	}
 	assert.Equal(t, "", rasterSourceURL(nil, "Feral File"))
@@ -297,12 +299,12 @@ func TestRasterWalk_OrderIsTheAppsWhateverRasterReturns(t *testing.T) {
 	}
 	want := []string{"w-1-9", "w-c-1", "w-b-1", "w-a-1", "w-2-9", "w-2-10"}
 
-	forward := &dp1{rasterHTTP: &pagedHTTP{bodies: []string{walkPage(false, "", nodes...)}}, logger: zap.NewNop()}
+	forward := &dp1{httpClient: &pagedHTTP{bodies: []string{walkPage(false, "", nodes...)}}, logger: zap.NewNop()}
 	assert.Equal(t, want, walkTitles(t, forward, 0), "work id compares as a string, as the app's does: :9 sorts above :10")
 
 	reversed := append([]string(nil), nodes...)
 	slices.Reverse(reversed)
-	backward := &dp1{rasterHTTP: &pagedHTTP{bodies: []string{walkPage(false, "", reversed...)}}, logger: zap.NewNop()}
+	backward := &dp1{httpClient: &pagedHTTP{bodies: []string{walkPage(false, "", reversed...)}}, logger: zap.NewNop()}
 	assert.Equal(t, want, walkTitles(t, backward, 0), "the same wallet in any page order resolves identically")
 }
 
@@ -314,7 +316,7 @@ func TestRasterWalk_CapReadsOnThroughATieGroup(t *testing.T) {
 		walkPage(true, "c1", walkNode("1", "1", t3), walkNode("a", "1", t2)),
 		walkPage(true, "c2", walkNode("f", "1", t2), walkNode("2", "1", t1)),
 	}}
-	d := &dp1{rasterHTTP: fake, logger: zap.NewNop()}
+	d := &dp1{httpClient: fake, logger: zap.NewNop()}
 	assert.Equal(t, []string{"w-1-1", "w-f-1"}, walkTitles(t, d, 2),
 		"the tied 0xfff… token from page two outranks page one's 0xaaa…")
 	assert.Equal(t, 2, fake.calls, "page two ends older than the cap item, so the walk stops there")
@@ -324,7 +326,7 @@ func TestRasterWalk_CapStopsWhenThePageEndsOlder(t *testing.T) {
 	fake := &pagedHTTP{bodies: []string{
 		walkPage(true, "c1", walkNode("1", "1", t3), walkNode("a", "1", t2), walkNode("b", "1", t1)),
 	}}
-	d := &dp1{rasterHTTP: fake, logger: zap.NewNop()}
+	d := &dp1{httpClient: fake, logger: zap.NewNop()}
 	assert.Equal(t, []string{"w-1-1", "w-a-1"}, walkTitles(t, d, 2))
 	assert.Equal(t, 1, fake.calls, "nothing unread can make the cut, so no second request")
 }

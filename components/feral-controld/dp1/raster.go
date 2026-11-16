@@ -19,8 +19,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
-
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // Raster wallet walk (feral-file/feral-file#3576, step 6).
@@ -41,15 +39,18 @@ import (
 // exact `source` string, so a different gateway is a second cache entry) and
 // the item id inputs (the legacy indexer path's UUID inputs, so ids stay
 // stable across the indexer -> Raster switch).
+//
+// `onchfs://` is not in the gateway table. fxhash's gateway, the only one
+// that ever served it, is gone (ffos-user#427), so this file passes the URI
+// through unchanged and the device reads the work from chain itself
+// (contentpath.ParseOnchfs, offlinecache's onchfs materializer). ff-app and
+// art-catalog-service follow the same rule: no repository maps onchfs to a
+// host.
 
 const (
 	// RasterTokensOwnedItemSchema is the responseMapping.itemSchema that selects
 	// this resolver. `dp1/*` stays on dp1-go; any other schema is refused.
 	RasterTokensOwnedItemSchema = "raster/tokensOwned/1.0" //nolint:gosec // a schema name, not a credential
-
-	// rasterAPIKeyHeader carries the device's own Raster read key. It is never
-	// read from the document: the playlist is cast and may be published.
-	rasterAPIKeyHeader = "x-api-key"
 
 	// rasterMaxPages caps one walk. At Raster's 250-per-page cap that is 50,000
 	// holdings, far past any wallet a wall should try to play; hitting it is an
@@ -78,7 +79,6 @@ const (
 	gatewayIPFS          = "https://ipfs.raribleuserdata.com/ipfs/"
 	gatewayIPFSFeralFile = "https://ipfs.feralfile.com/ipfs/"
 	gatewayArweave       = "https://arweave.net/"
-	gatewayOnchfs        = "https://onchfs.fxhash2.xyz/"
 
 	// feralFilePlatform is Raster's `platform.name` for Feral File works,
 	// compared case-insensitively. Feral File pins its own works, so its
@@ -90,28 +90,20 @@ const (
 )
 
 // rasterHosts is the allowlist a Raster walk's endpoint must be on. The
-// endpoint arrives inside a controller-supplied document, and the walk
-// attaches the device's own API key to every request, so an unrestricted
-// host would let a crafted playlist both aim the device's queries at an
-// arbitrary server and hand it the key. Same posture as ffindexer's
-// FF_INDEXER_HOSTS for the legacy path. Relaxed only by controld --debug
-// (httptest servers), the same switch that relaxes dp1-go's endpoint policy.
+// endpoint arrives inside a controller-supplied document, so an unrestricted
+// host would let a crafted playlist aim the device's paged queries (up to
+// rasterMaxPages POSTs per cast) at an arbitrary server and have it map that
+// server's answer into items. Same posture as ffindexer's FF_INDEXER_HOSTS
+// for the legacy path. Relaxed only by controld --debug (httptest servers),
+// the same switch that relaxes dp1-go's endpoint policy.
+//
+// The walk is unauthenticated: Raster's read API needs no key, so the device
+// carries none (an earlier device-side `raster.apiKey` was removed). If a key
+// ever returns, it needs its own redirect-refusing client: Go keeps custom
+// headers such as x-api-key across a cross-host redirect, so this allowlist
+// alone would not keep the key on Raster.
 var rasterHosts = map[string]bool{
 	"api.raster.art": true,
-}
-
-// NewRasterHTTPClient builds the client the Raster walk sends the device key
-// through: the daemon's usual whole-request timeout, and NO redirect
-// following. A 3xx comes back as the response it is, fetchRasterPage reports
-// it as a failed page, and the key never leaves the allowlisted host. Pinned
-// by TestNewRasterHTTPClient_DoesNotFollowRedirects.
-func NewRasterHTTPClient() wrapper.HTTPClient {
-	return wrapper.NewHTTPClientFrom(&http.Client{
-		Timeout: wrapper.HTTPClientTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	})
 }
 
 // ErrRasterQuery marks a Raster walk the device cannot or will not run:
@@ -511,10 +503,12 @@ func shortContract(contract string) string {
 
 // rasterSourceURL makes a Raster content URL playable, or returns "" when there
 // is nothing a wall can open. `normalizedContentUrl` wins over `contentUrl`
-// (first non-blank). Order: retired-host rewrite, then `ipfs://`, `ar://` and
-// `onchfs://` through the gateway table (a doubled `ipfs://ipfs/<cid>` prefix
-// is collapsed; path and query are kept, which matters for fxhash `?fxhash=`
-// seeds). Plain http(s) is returned exactly as given, never re-serialized, so
+// (first non-blank). Order: retired-host rewrite, then `ipfs://` and `ar://`
+// through the gateway table (a doubled `ipfs://ipfs/<cid>` prefix is
+// collapsed; path and query are kept, which matters for fxhash `?fxhash=`
+// seeds). `onchfs://` is returned as `onchfs://` plus everything after the
+// scheme, byte for byte, because no host serves it: the device reads it from
+// chain (see the file header). Plain http(s) is returned exactly as given, never re-serialized, so
 // host case and percent-encoding stay as Raster sent them: the same string the
 // app and the catalog store, which is what the offline cache keys on. Any other
 // scheme (`data:`, a bare CID, a proprietary URL) is "".
@@ -556,8 +550,8 @@ func rasterSourceURL(media *rasterMedia, platform string) string {
 		return gatewayIPFS + rest
 	case "ar":
 		return gatewayArweave + rest
-	default:
-		return gatewayOnchfs + rest
+	default: // onchfs
+		return "onchfs://" + rest
 	}
 }
 
@@ -676,10 +670,6 @@ func (d *dp1) processRasterWalk(ctx context.Context, playlist Playlist, minimal 
 	if err != nil {
 		return nil, err
 	}
-	if d.rasterAPIKey == "" {
-		d.logger.Warn("raster apiKey not configured; walking the wallet unauthenticated",
-			zap.String("playlist_id", playlist.ID))
-	}
 
 	var items []rasterWalkItem
 	skipped := 0
@@ -788,31 +778,18 @@ func (d *dp1) fetchRasterPage(ctx context.Context, plan rasterWalkPlan, cursor s
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	// The document's headers ride along as dp1-go would send them.
 	for k, v := range plan.headers {
-		// The document's headers ride along as dp1-go would send them, except
-		// the key header: the key is the device's, never the document's.
-		if strings.EqualFold(k, rasterAPIKeyHeader) {
-			continue
-		}
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if d.rasterAPIKey != "" {
-		req.Header.Set(rasterAPIKeyHeader, d.rasterAPIKey)
-	}
 
-	resp, err := d.rasterHTTP.Do(req)
+	resp, err := d.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// rasterHTTP does not follow redirects, so the response's request is the
-	// one built above. If it is not, the injected client followed one and the
-	// key may already have left the host: fail loudly rather than carry on.
-	if resp.Request != nil && resp.Request.URL != nil && resp.Request.URL.String() != plan.endpoint {
-		return nil, fmt.Errorf("request was redirected to %q; the Raster client must not follow redirects", resp.Request.URL.Host)
-	}
 	body, err := goio.ReadAll(goio.LimitReader(resp.Body, rasterMaxPageBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)

@@ -1,0 +1,524 @@
+// Package mediahealth is feral-controld's device-side media observation
+// store (feral-file/ffos-user#392): one record per playlist item source,
+// written by the L0 byte probe (this package), by the play outcomes the
+// player reports, and later by the L1 nightly render. The record decides
+// two things and reports a third:
+//
+//   - the per-item HINT handed to the player on every displayPlaylist
+//     push, so a conclusively broken item is skipped without being mounted;
+//   - the admission verdict of a cast (every item dead ⇒ sourceUnreachable),
+//     derived from the same probe pass that used to be the standalone
+//     preflight (#304);
+//   - the per-item health the app sees on player_status / getMediaHealth.
+//
+// Boundary rules (pinned by importlint_test.go): this package never imports
+// the transports (hub, relayer, mediator) or the router (commandrouter). It
+// never dials on its own either — every network fetch goes through the
+// Fetcher the offline cache builds over its source guard, because dialing
+// playlist-supplied URLs is only safe there (see offlinecache.ErrUnsafeSource).
+//
+// Two invariants every writer must keep:
+//
+//  1. No observation hides a work. A hint is produced only by this device's
+//     own CONCLUSIVE verdict (a broken record inside its recheck window); a
+//     transient failure (429, 5xx, timeout, guard refusal) is never persisted
+//     as a verdict. Nothing central is ever consumed as a block list.
+//  2. Source URLs stay on the device. The record holds the source so hints
+//     can be keyed by it over loopback CDP; every log line goes through the
+//     Fetcher's redacted label, and the status surfaces (ItemHealth, Report)
+//     carry no URL at all.
+package mediahealth
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/url"
+	"time"
+)
+
+// Key is the store key for a source: sha256 hex over the exact source
+// string. It is byte-identical to offlinecache.SourceKey (the cache identity)
+// on purpose — the same item is the same record in both stores — and pinned
+// equal by a test in that package, since this one cannot import it.
+func Key(source string) string {
+	sum := sha256.Sum256([]byte(source))
+	return hex.EncodeToString(sum[:])
+}
+
+// State is a record's verdict. The absence of a record is "unknown"; the
+// surfaces spell that out (StateUnknown) rather than inventing a record.
+type State string
+
+const (
+	// StateOK: the last conclusive observation rendered or passed L0.
+	StateOK State = "ok"
+	// StateBroken: a conclusive failure. Hints and the admission verdict
+	// read it only while the record is inside its recheck window
+	// (Record.Conclusive); the status surfaces show it regardless, since it
+	// is still the last thing this device saw.
+	StateBroken State = "broken"
+	// StateSuspect: an L1 (nightly render) verdict. Reported to the app,
+	// never hinted and never counted toward rejection — L1 is an experiment
+	// (its gate is behind config) and a blank frame is weaker evidence than
+	// a byte-level failure.
+	StateSuspect State = "suspect"
+	// StateUnknown is a surface value only: no record exists, or the record
+	// carries no verdict yet (transient attempts only). Never stored.
+	StateUnknown State = "unknown"
+)
+
+// Layer names which probe set the current verdict.
+type Layer string
+
+const (
+	LayerL0   Layer = "l0"
+	LayerPlay Layer = "play"
+	LayerL1   Layer = "l1"
+)
+
+// Category is the app-facing failure class: a closed set the mobile app
+// renders a label for. Reason carries the detail code underneath it.
+type Category string
+
+const (
+	// CategorySourceMissing: the origin said the resource is not there for
+	// anyone (404/410-class), or the host does not resolve.
+	CategorySourceMissing Category = "source_missing"
+	// CategorySourceUnreachable: the work exists as far as the device can
+	// tell, but nothing it tried would serve it — an origin that gave no
+	// usable answer for a day (the unreachable streak), or a gateway that
+	// answered 404 for a content-addressed source no other gateway
+	// confirmed missing. Still broken (skipped, rechecked daily), but not
+	// source_missing: arweave.net timing out on a transaction that is on
+	// chain read "missing" to the app for nine works on the office FF1
+	// (2026-11-09), which the owner reads as "this work is gone".
+	CategorySourceUnreachable Category = "source_unreachable"
+	// CategorySourceBlocked: the kiosk itself was refused (401/403 seen by
+	// the player's own HEAD). L0 treats those statuses as transient because
+	// its request identity is not the kiosk's; only the play layer can
+	// conclude them.
+	CategorySourceBlocked Category = "source_blocked"
+	// CategoryNotMedia: the bytes are a page, not the media the item
+	// declares — an error page, a gateway directory listing, a JSON error.
+	CategoryNotMedia Category = "not_media"
+	// CategoryCorruptFile: empty, truncated, or a container whose header
+	// does not parse.
+	CategoryCorruptFile Category = "corrupt_file"
+	// CategoryUnsupported: a shape the device cannot play at all (an
+	// unsupported scheme, a malformed data: URI).
+	CategoryUnsupported Category = "unsupported"
+	// CategoryRenderFailed: the player mounted it and it failed (load,
+	// decode, watchdog, exhausted retries). Corroborated before it counts.
+	CategoryRenderFailed Category = "render_failed"
+	// CategoryRenderBlank: the L1 nightly render saw a blank frame or a
+	// known-bad fingerprint. Always StateSuspect.
+	CategoryRenderBlank Category = "render_blank"
+	// CategoryDeviceLimit: a device-local condition (WebGL context loss).
+	// Recorded on the play stats, never a verdict about the source.
+	CategoryDeviceLimit Category = "device_limit"
+)
+
+// Reason is the detail code under a Category. The L0 values mirror
+// ff-indexer-v2's media_viewability taxonomy string-for-string so a device
+// record and an indexer row read the same; the play values are this
+// package's own.
+type Reason string
+
+const (
+	ReasonHTTPStatus        Reason = "http_status"
+	ReasonDNS               Reason = "dns"
+	ReasonTypeMismatch      Reason = "type_mismatch"
+	ReasonContainerInvalid  Reason = "container_invalid"
+	ReasonDirectoryListing  Reason = "directory_listing"
+	ReasonKnownErrorPage    Reason = "known_error_page"
+	ReasonZeroLength        Reason = "zero_length"
+	ReasonTruncated         Reason = "truncated"
+	ReasonInvalidURL        Reason = "invalid_url"
+	ReasonUnsupportedScheme Reason = "unsupported_scheme"
+	ReasonTransport         Reason = "transport"
+	ReasonDataURIInvalid    Reason = "data_uri_invalid"
+	// ReasonUnsupportedMimeType: a data: URI declaring a type the kiosk
+	// cannot display at all (data:application/html downloads, so the frame
+	// stays blank). Same string as ff-indexer-v2's.
+	ReasonUnsupportedMimeType Reason = "unsupported_mime_type"
+	// ReasonUnreachable: the origin gave no usable answer on every counted
+	// attempt for a day (UnreachableDeadAfter) — no response or a server
+	// error. A DNS-only streak concludes ReasonDNS instead.
+	ReasonUnreachable Reason = "unreachable"
+
+	// Play-layer reasons, one per outcome stage that can conclude.
+	ReasonRenderDetect    Reason = "render_detect"
+	ReasonRenderLoad      Reason = "render_load"
+	ReasonRenderDecode    Reason = "render_decode"
+	ReasonRenderWatchdog  Reason = "render_watchdog"
+	ReasonRenderExhausted Reason = "render_exhausted"
+	ReasonWebGLLost       Reason = "webgl_lost"
+
+	// Reserved for the L1 render probe (its own PR); listed so the category
+	// table is complete and pinned now.
+	ReasonRenderBlank    Reason = "render_blank"
+	ReasonRenderKnownBad Reason = "render_known_bad"
+)
+
+// CategoryOf maps a reason (plus the HTTP status behind an http_status
+// reason) to its app-facing category. The table is closed: an unknown
+// reason reads as CategoryRenderFailed for play reasons and
+// CategoryNotMedia otherwise would be a guess, so it returns "" and the
+// caller must treat that as a programming error (categories_test pins
+// every Reason constant).
+func CategoryOf(reason Reason, httpStatus int) Category {
+	switch reason {
+	case ReasonHTTPStatus:
+		switch httpStatus {
+		case 401, 403, 407, 429:
+			// 429 only reaches a verdict from the PLAY layer (L0 keeps it
+			// transient): the kiosk itself refused, play after play.
+			return CategorySourceBlocked
+		default:
+			return CategorySourceMissing
+		}
+	case ReasonDNS:
+		return CategorySourceMissing
+	case ReasonUnreachable:
+		return CategorySourceUnreachable
+	case ReasonTypeMismatch, ReasonDirectoryListing, ReasonKnownErrorPage:
+		return CategoryNotMedia
+	case ReasonZeroLength, ReasonTruncated, ReasonContainerInvalid:
+		return CategoryCorruptFile
+	case ReasonInvalidURL, ReasonUnsupportedScheme, ReasonDataURIInvalid, ReasonUnsupportedMimeType, ReasonTransport:
+		return CategoryUnsupported
+	case ReasonRenderDetect, ReasonRenderLoad, ReasonRenderDecode, ReasonRenderWatchdog, ReasonRenderExhausted:
+		return CategoryRenderFailed
+	case ReasonWebGLLost:
+		return CategoryDeviceLimit
+	case ReasonRenderBlank:
+		return CategoryRenderBlank
+	case ReasonRenderKnownBad:
+		// A frame matching a known-bad fingerprint is a gateway's error
+		// page (or placeholder) served with a 200: the same fact as L0's
+		// known_error_page, so the same category. Still render evidence
+		// (its layer is read from the reason, layers.go).
+		return CategoryNotMedia
+	}
+	return ""
+}
+
+// Recheck policy. Records never expire; these are how often a verdict is
+// re-examined so a fixed source heals and a transient blip is retried.
+const (
+	// RecheckBroken: a broken verdict is re-probed after this while the
+	// item is on the wall (the lookahead) or in the background sweep.
+	RecheckBroken = 24 * time.Hour
+	// RecheckBrokenBackoff replaces RecheckBroken once a record has been
+	// re-probed broken BrokenBackoffAfter times in a row: a host that has
+	// been gone for a week is not worth a daily request from every wall.
+	RecheckBrokenBackoff = 7 * 24 * time.Hour
+	BrokenBackoffAfter   = 7
+	// RecheckOK: an ok verdict is re-probed weekly; a play success refreshes
+	// it for free, so items that actually play are rarely re-probed.
+	RecheckOK = 7 * 24 * time.Hour
+	// RetryTransient: a transient attempt (no verdict) schedules a retry
+	// after this; the stored verdict, if any, is untouched.
+	RetryTransient = time.Hour
+	// UnreachableDeadAfter / UnreachableDeadMinFailures: the one transient
+	// class that concludes on its own (ProbeResult.Unreachable). A name that fails to resolve on every counted
+	// attempt for a day (at least DNSDeadMinFailures attempts, each while
+	// the device resolved other names) is broken, reason dns: the zone is
+	// gone for this device whatever the resolver's excuse (an expired
+	// domain answers SERVFAIL, not NXDOMAIN, on most resolvers). A single
+	// SERVFAIL never is — it can be the device's own resolver. The verdict
+	// keeps the normal broken recheck, so it heals the day the zone
+	// returns.
+	UnreachableDeadAfter       = 24 * time.Hour
+	UnreachableDeadMinFailures = 3
+)
+
+// recordVersion is the record envelope version. Readers refuse a higher
+// version (an older binary must not rewrite a record it does not understand)
+// and migrate lower ones in Store.decode.
+const recordVersion = 1
+
+// Record is one source's observation history. Field names are the wire
+// (bbolt value) contract: add fields, never rename.
+type Record struct {
+	V int `json:"v"`
+	// Source is item.source exactly as pushed to the player: the hint key.
+	// Device-only — see the package doc.
+	Source string `json:"source"`
+	// WireURL is the URL the L0 probe actually dialed (after the kiosk
+	// gateway rewrite and any redirects), Host its host. Empty until L0 ran.
+	WireURL string `json:"wireUrl,omitempty"`
+	Host    string `json:"host,omitempty"`
+
+	State    State    `json:"state,omitempty"`
+	Category Category `json:"category,omitempty"`
+	Reason   Reason   `json:"reason,omitempty"`
+	Layer    Layer    `json:"layer,omitempty"`
+
+	HTTPStatus   int    `json:"httpStatus,omitempty"`
+	DeclaredType string `json:"declaredType,omitempty"`
+	SniffedType  string `json:"sniffedType,omitempty"`
+	MediaType    string `json:"mediaType,omitempty"`
+
+	// CheckedAt is when the current State was set; RecheckAfter when it is
+	// due for another look (the `recheck` bucket indexes this).
+	CheckedAt    time.Time `json:"checkedAt"`
+	RecheckAfter time.Time `json:"recheckAfter"`
+	// ObservedAt is when the device last really looked at the source,
+	// whether or not the look changed the verdict: a probe that got an
+	// answer, a play outcome, a wall frame, a nightly render (observe).
+	// Kept apart from CheckedAt and LastErrorAt because a look that
+	// leaves the verdict alone moves neither — a valid probe over a
+	// suspect or a render-layer broken, which also clears LastErrorAt
+	// (PR #451 review, F1). Never set by an answer served from the store,
+	// a player skip on a hint, or an attempt that got no answer during an
+	// outage.
+	ObservedAt time.Time `json:"observedAt,omitempty"`
+	// ObservedTracked marks a record written since ObservedAt exists (put
+	// sets it on every write): its ObservedAt is the whole truth, zero
+	// meaning "no real look yet". A record without it is from before, and
+	// decode seeds its ObservedAt once from the times that then stood in
+	// for it (legacyObservedAt), so an older outcome drained after the
+	// upgrade can never move it back (PR #451 review, F2, F3).
+	ObservedTracked bool `json:"observedTracked,omitempty"`
+
+	// LastError / LastErrorAt describe the most recent transient attempt.
+	// They never change State. RetryAfter is when the next attempt may run
+	// after one — tracked apart from RecheckAfter so a rate-limited origin
+	// is left alone for RetryTransient WITHOUT extending an expired broken
+	// verdict's authority to skip playback (Conclusive reads RecheckAfter
+	// only).
+	LastError   string     `json:"lastError,omitempty"`
+	LastErrorAt *time.Time `json:"lastErrorAt,omitempty"`
+	RetryAfter  time.Time  `json:"retryAfter,omitempty"`
+
+	// UnreachableSince / UnreachableFailures track an unbroken streak of
+	// attempts in which the origin gave no usable answer (DNS without
+	// NXDOMAIN, no response, a server error), counted only while the
+	// device reached other origins (ProbeResult.NetworkHealthy). Any
+	// answer — alive, dead, a 401/403/429 — ends the streak. See
+	// UnreachableDeadAfter for when it concludes.
+	UnreachableSince    *time.Time `json:"unreachableSince,omitempty"`
+	UnreachableFailures int        `json:"unreachableFailures,omitempty"`
+	// Issue / IssueSince are the latest real attempt's problem and when
+	// the current run of trouble began (see Issue). Cleared by a real
+	// answer and by any verdict; shown to the app only while State is not
+	// broken.
+	Issue      Issue      `json:"issue,omitempty"`
+	IssueSince *time.Time `json:"issueSince,omitempty"`
+	// ServedBy is the gateway origin the kiosk loads this content-addressed
+	// source through because the source's own gateway answered 404/410
+	// while this one served it (Probe.confirmAbsence). Set on an alive
+	// probe through a fallback gateway, cleared when the source's own
+	// gateway serves again or the content is confirmed missing. Indexed by
+	// content id in bucketServedBy for the kiosk's per-request lookup.
+	ServedBy string `json:"servedBy,omitempty"`
+	// legacyDNS* are the DNS-only streak fields an earlier build of this
+	// branch wrote; Store.decode folds them into the unreachable streak
+	// and they are never written again.
+	LegacyDNSFailSince *time.Time `json:"dnsFailSince,omitempty"`
+	LegacyDNSFailures  int        `json:"dnsFailures,omitempty"`
+
+	// ConsecutiveBroken counts L0 re-probes that stayed broken, for the
+	// recheck backoff. Reset by any ok.
+	ConsecutiveBroken int `json:"consecutiveBroken,omitempty"`
+
+	Plays PlayStats `json:"plays"`
+	// L1 is the nightly render probe's sub-record (l1.go); nil until it
+	// has rendered this source. Its own due time (Next) is deliberately
+	// NOT part of dueAt: L1 work is found by Store.L1Candidates, never by
+	// the L0 lookahead or sweep.
+	L1 *L1Verdict `json:"l1,omitempty"`
+	// Wall is the last classified capture of the wall (wall.go).
+	Wall  *WallObservation `json:"wall,omitempty"`
+	Build Build            `json:"build"`
+}
+
+// WallObservation is the last classified capture of the wall for a source
+// (wall.go): render evidence from the kiosk's own GPU, beside the nightly
+// headless render's L1Verdict.
+type WallObservation struct {
+	Verdict  RenderVerdict `json:"verdict"`
+	PHash    string        `json:"phash,omitempty"`
+	Variance float64       `json:"variance,omitempty"`
+	Label    string        `json:"label,omitempty"`
+	Clipped  bool          `json:"clipped,omitempty"`
+	// MainStatus is the kiosk's own document response when it failed in
+	// this mount (the frame is then the error page: Verdict stalled).
+	MainStatus int       `json:"mainStatus,omitempty"`
+	At         time.Time `json:"at"`
+}
+
+// PlayStats is what the player reported about this source.
+type PlayStats struct {
+	OK      int `json:"ok"`
+	Fail    int `json:"fail"`
+	Skipped int `json:"skipped,omitempty"`
+	// ConsecutiveFail counts failures since the last success; the
+	// corroboration rule (Store.ApplyOutcome) concludes at 2.
+	ConsecutiveFail int          `json:"consecutiveFail,omitempty"`
+	LastOKAt        *time.Time   `json:"lastOkAt,omitempty"`
+	LastFailAt      *time.Time   `json:"lastFailAt,omitempty"`
+	LastFail        *PlayFailure `json:"lastFail,omitempty"`
+	// RunFail is the open run's last COUNTED failure (the one that advanced
+	// ConsecutiveFail), meaningful only while ConsecutiveFail > 0. It
+	// classifies the run — fetchRunOpen, frameRunOpen — and is what
+	// revertHeadRefusal may undo. Kept apart from LastFail, which is the
+	// most recent failure for the app and takes a play's uncounted stages
+	// too (its terminal stage is the diagnostic): an uncounted entry — the
+	// same play, an overruled HEAD, offline — must never reclassify the run
+	// or be reverted as if it had counted (PR #450 review, F5, F8).
+	RunFail *PlayFailure `json:"runFail,omitempty"`
+}
+
+// PlayFailure is the most recent failing outcome, kept whole so the app and
+// the support bundle can say what the player actually saw.
+type PlayFailure struct {
+	Stage     string    `json:"stage"`
+	Code      string    `json:"code,omitempty"`
+	MediaType string    `json:"mediaType,omitempty"`
+	Attempt   int       `json:"attempt,omitempty"`
+	At        time.Time `json:"at"`
+	// Superseded marks a content-type check refusal the kiosk's own GET of
+	// the same document overruled (served 2xx in the same play): its count
+	// was reverted (revertHeadRefusal) and it takes part in nothing.
+	Superseded bool `json:"superseded,omitempty"`
+	// ServedBy is the record's gateway route when the failure was counted
+	// ("" for the source's own gateway). The kiosk routes every request
+	// through that route, the player's content-type check included, so it
+	// names the gateway that refused: a frame through another gateway is
+	// not that conflict (learnableErrorPage, PR #450 review F1).
+	ServedBy string `json:"servedBy,omitempty"`
+	// Prev is, on RunFail only, the run's counted failure before this one
+	// (one level; its own Prev is dropped), restored when this one is
+	// reverted so the run keeps classifying by what still counts.
+	Prev *PlayFailure `json:"prev,omitempty"`
+	// Settled marks a counted failure no GET may revert: one handed the
+	// run back after the refusal counted on top of it was overruled (an
+	// earlier play's; F9), or a content-type check refusal its own play's
+	// GET confirmed by failing too (F16) — the real fetch agreed, whatever
+	// order the two arrived in.
+	Settled bool `json:"settled,omitempty"`
+	// Replaced is, on a content-type check refusal that concluded a play
+	// verdict, the verdict it replaced: withdrawing the HEAD's verdict
+	// restores it — state, reason, window, backoff and route — instead of
+	// erasing an independently established one (PR #450 review, F17), and
+	// brings back the fallback route the conclusion dropped (F15).
+	Replaced *VerdictSnapshot `json:"replaced,omitempty"`
+}
+
+// VerdictSnapshot is a record's verdict as it stood before a content-type
+// check refusal replaced it (PlayFailure.Replaced).
+type VerdictSnapshot struct {
+	State             State      `json:"state,omitempty"`
+	Layer             Layer      `json:"layer,omitempty"`
+	Category          Category   `json:"category,omitempty"`
+	Reason            Reason     `json:"reason,omitempty"`
+	HTTPStatus        int        `json:"httpStatus,omitempty"`
+	CheckedAt         time.Time  `json:"checkedAt"`
+	RecheckAfter      time.Time  `json:"recheckAfter"`
+	ConsecutiveBroken int        `json:"consecutiveBroken,omitempty"`
+	LastError         string     `json:"lastError,omitempty"`
+	LastErrorAt       *time.Time `json:"lastErrorAt,omitempty"`
+	ServedBy          string     `json:"servedBy,omitempty"`
+}
+
+func (r *Record) snapshotVerdict() *VerdictSnapshot {
+	return &VerdictSnapshot{
+		State: r.State, Layer: r.Layer, Category: r.Category, Reason: r.Reason, HTTPStatus: r.HTTPStatus,
+		CheckedAt: r.CheckedAt, RecheckAfter: r.RecheckAfter, ConsecutiveBroken: r.ConsecutiveBroken,
+		LastError: r.LastError, LastErrorAt: r.LastErrorAt, ServedBy: r.ServedBy,
+	}
+}
+
+func (r *Record) restoreVerdict(v *VerdictSnapshot) {
+	r.State, r.Layer, r.Category, r.Reason, r.HTTPStatus = v.State, v.Layer, v.Category, v.Reason, v.HTTPStatus
+	r.CheckedAt, r.RecheckAfter, r.ConsecutiveBroken = v.CheckedAt, v.RecheckAfter, v.ConsecutiveBroken
+	r.LastError, r.LastErrorAt, r.ServedBy = v.LastError, v.LastErrorAt, v.ServedBy
+}
+
+// Build records which software produced the current verdict.
+type Build struct {
+	Controld string `json:"controld,omitempty"`
+	Player   string `json:"player,omitempty"`
+}
+
+// observe records a real look at the source at `at` (ObservedAt); it never
+// moves the time back.
+func (r *Record) observe(at time.Time) {
+	if at.After(r.ObservedAt) {
+		r.ObservedAt = at
+	}
+}
+
+// lastObservedAt is the latest moment the device really looked at this
+// source, whether or not the look changed the verdict: ObservedAt, with
+// CheckedAt (only a look sets it). Zero for a source never observed — a
+// record holding only events that are not looks (a skip, a WebGL failure,
+// an attempt during an outage) included.
+func (r *Record) lastObservedAt() time.Time {
+	if r.CheckedAt.After(r.ObservedAt) {
+		return r.CheckedAt
+	}
+	return r.ObservedAt
+}
+
+// legacyObservedAt is the freshness a record from before ObservedAt
+// carries: the latest of its verdict, a probe attempt (LastErrorAt), a play
+// outcome either way, a wall frame and a nightly render. Some of those are
+// also set by things that are not looks, which is why it is read once, at
+// decode, for an untracked record only — never for a record the new code
+// wrote.
+func (r *Record) legacyObservedAt() time.Time {
+	seen := r.CheckedAt
+	later := func(t time.Time) {
+		if t.After(seen) {
+			seen = t
+		}
+	}
+	for _, p := range []*time.Time{r.LastErrorAt, r.Plays.LastOKAt, r.Plays.LastFailAt} {
+		if p != nil {
+			later(*p)
+		}
+	}
+	if r.Wall != nil {
+		later(r.Wall.At)
+	}
+	if r.L1 != nil {
+		later(r.L1.At)
+	}
+	return seen
+}
+
+// Conclusive reports whether the record's broken verdict is current enough
+// to act on: hints and the admission verdict read ONLY this. A broken
+// record past its recheck window is still shown to the app as broken (it
+// is the last thing observed) but no longer skips the work — "no
+// observation hides a work" means a stale one must not either.
+func (r *Record) Conclusive(now time.Time) bool {
+	return r != nil && r.State == StateBroken && now.Before(r.RecheckAfter)
+}
+
+// Due reports whether the record wants another look: past its recheck
+// time AND past any transient retry hold.
+func (r *Record) Due(now time.Time) bool {
+	return r == nil || !now.Before(r.dueAt())
+}
+
+// dueAt is the later of the verdict recheck and the transient retry hold;
+// the recheck index is keyed on it.
+func (r *Record) dueAt() time.Time {
+	if r.RetryAfter.After(r.RecheckAfter) {
+		return r.RetryAfter
+	}
+	return r.RecheckAfter
+}
+
+// hostOf extracts the host of a URL for the record, "" when unparsable.
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}

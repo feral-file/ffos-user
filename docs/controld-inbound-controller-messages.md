@@ -70,8 +70,12 @@ for relayer topic assignment:
   device's content policy for the cast's `contentContext` before it reaches
   CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
   when the policy admits all of its items (see "Content policy effect on
-  playlists" below).
-- `startMintPairingSession`, `joinMintPairingChannel`,
+  playlists" below). An optional `request.startItem`
+  (`{ "id", "source" }`, either member optional) names the work the cast
+  opens on; controld forwards it to the player untouched and the player
+  resolves it against the list it admits, starting at the beginning when the
+  work is absent (contract in `api-design.md`).
+- `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`,
   `closeMintPairingSession`, and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `getRecentlyPlayed`, `playRecentlyPlayed`, `getContentPolicy`, and
@@ -83,6 +87,8 @@ for relayer topic assignment:
   `feral-controld` as commandrouter pre-CDP special cases, owned by the
   `offlinecache` package (see "Offline Artwork Caching Inbound Messages"
   below).
+- `getMediaHealth` is likewise a commandrouter pre-CDP special case, owned by
+  the `mediahealth` package (see "getMediaHealth" below).
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -687,8 +693,8 @@ Dynamic DP1 example:
 
 Raster wallet-walk example (what ff-app casts for an address playlist with
 no hidden works; the address is inlined in the query, the page cursor is the
-only variable, and no API key travels in the document — the device adds its
-own `x-api-key` from config `raster.apiKey`; contract in
+only variable, and no API key travels anywhere — Raster's read API is
+unauthenticated; contract in
 [`api-design.md`](api-design.md), "DP-1 `dynamicQuery` resolution"):
 
 ```json
@@ -1778,6 +1784,54 @@ requests, and encrypted browser results. Relayer approval dispatch and
 transport, or token minting policy. Runtime support is opt-in through
 `mintPairing.enabled` in `feral-controld` config and starts only after a
 controller sends `startMintPairingSession` or `joinMintPairingChannel`.
+
+### getMintPairingSession
+
+Read-only owner command, handled in `feral-controld` before CDP. Send an empty
+request. Unlike `startMintPairingSession`, this never starts, renews, cancels,
+or re-displays a pairing; it performs no broker or player I/O and works while
+Chromium is unavailable. Poll this command to inspect pairing state.
+
+```json
+{
+  "command": "getMintPairingSession",
+  "request": {}
+}
+```
+
+The RPC message is `{ "ok": true, "status": "none", "active": false,
+"pendingApproval": null }` when idle (also for an expired device-created
+session awaiting worker cleanup). `status: "starting"`, `active: false` means
+a start/join is still in flight. An active session returns:
+
+```json
+{
+  "ok": true,
+  "status": "active",
+  "active": true,
+  "phase": "pairing_code",
+  "channelID": "ch_example",
+  "expiresAt": "2026-11-16T04:00:00Z",
+  "codeAgeSeconds": 12,
+  "pendingApproval": null
+}
+```
+
+`phase` is `pairing_code`, `joined` (site-initiated, with no screen overlay),
+or `pending_approval`. `codeAgeSeconds` is a nonnegative whole-second age of
+the current device-created code, omitted outside `pairing_code`. The code
+itself and broker/browser credentials are never returned. An undecided,
+unexpired approval for this channel appears as
+`pendingApproval: { "approvalRequestID": "mpa_example", "expiresAt": "..." }`;
+accepted, ended, expired, or absent approvals return null. The phase can remain
+`pending_approval` while an accepted decision is being delivered.
+
+A joined channel remains active until its worker removes it: an in-flight
+broker poll can extend its reported expiry. This snapshot neither contacts
+the broker to verify liveness nor mutates worker state. Disabled mint pairing
+returns the existing `disabled` command error. Secure control requires owner
+authority, like the other mint-pairing commands; pure reporting is also
+available during the staged factory-reset window.
 
 ### startMintPairingSession
 
@@ -3301,6 +3355,117 @@ their claim.
 Error cases: `invalidRequest`, `seriesPlaybackUnavailable` (the durable write
 failed, or its directory entry could not be confirmed durable even on retry —
 `ok:true` means saved, the same contract `setContentPolicy` holds).
+
+### getMediaHealth
+
+Purpose: read this device's media verdict for every item of the playlist on
+screen (feral-file/ffos-user#392, `docs/media-health.md`), so a controller can
+show which works play and why one does not. The rows are built from the
+player's own item list, so they line up with what the app already displays.
+
+Request: `{}` for the original form (the first 2048 rows, `truncated` past
+that), or a **paged** request with any of:
+
+| Field | Type | Rule |
+|---|---|---|
+| `offset` | integer ≥ 0 | first row to return, among the rows the filter admits |
+| `limit` | integer 1–1000 | default 500 |
+| `filter` | `"all"` \| `"attention"` | `attention` = `state` broken or suspect, or any `issue`, or `skipped` |
+
+Any other key, type or value is **rejected** with
+`{ "ok": false, "status": "error", "error": "invalid request" }` rather than
+ignored — the storm gate dedupes query-class commands on type + arguments, so
+the argument space must stay bounded (valid pages are bounded by the
+playlist's size, the same reason `getContentPolicy` rejects arguments). A
+paged reply carries `offset`, `limit`, `matched` (rows the filter admits
+across the whole wall) and `nextOffset` (omitted on the last page) beside
+`total`; every row keeps its absolute playlist `index`; `castSeq` is the
+consistency token — if it changes between pages the wall changed, start
+over. Typical use is one request: `{"filter":"attention"}`.
+
+```json
+{
+  "ok": true,
+  "status": "ok",
+  "castSeq": 3,
+  "total": 2,
+  "truncated": false,
+  "items": [
+    { "index": 0, "id": "a", "title": "Genome #12", "state": "broken",
+      "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "skipped": true,
+      "checkedAt": "2026-11-04T10:00:00Z", "lastObservedAt": "2026-11-04T10:00:00Z",
+      "plays": { "ok": 0, "fail": 2 } },
+    { "index": 1, "id": "b", "title": "Study", "state": "ok", "skipped": false,
+      "checkedAt": "2026-11-04T09:00:00Z", "lastObservedAt": "2026-11-04T13:05:00Z",
+      "issue": "play_failed", "issueSince": "2026-11-04T13:05:00Z",
+      "nextCheckAt": "2026-11-11T09:00:00Z", "failedPlays": 1,
+      "plays": { "ok": 12, "fail": 1 } },
+    { "index": 3, "id": "d", "title": "Interface Token", "state": "unknown",
+      "skipped": false, "issue": "no_answer",
+      "issueSince": "2026-11-06T06:58:51Z", "nextCheckAt": "2026-11-06T07:58:51Z",
+      "failedPlays": 1, "plays": { "ok": 0, "fail": 1 } },
+    { "index": 2, "id": "c", "title": "Drift", "state": "broken",
+      "category": "source_missing", "reason": "http_status", "layer": "l0",
+      "skipped": false, "unskipped": "expired",
+      "checkedAt": "2026-11-01T10:00:00Z" }
+  ]
+}
+```
+
+`skipped` is whether the player is resolving past the row right now, from
+the player's own report of the hint map it holds — the only input for a
+"Skip" label; `state` is the last observation and the two differ (an
+expired verdict, a replayable source, a player without the contract, a push
+not yet received). `unskipped` (`expired` | `replayable` | `player` |
+`pending`) says which, and is present only when `state` is `broken` and
+`skipped` is false.
+
+`state` is `ok`, `broken`, `suspect` (an L1 render verdict, reported but never
+acted on) or `unknown` (never observed). `category` is the closed app-facing
+set — `source_missing`, `source_unreachable`, `source_blocked`, `not_media`, `corrupt_file`,
+`unsupported`, `render_failed`, `render_blank`, `device_limit` — and `reason`
+the detail code beneath it; `layer` says which probe set the state (`l0`,
+`play`, `l1`). `castSeq` echoes the player's outcome-ring cast sequence when
+the player declares the `mediaHealth` contract.
+
+`issue` is the latest real attempt's problem when there is no verdict to say
+so — `no_answer`, `dns`, `server_error`, `rate_limited`, `access_denied`,
+`play_failed` — a closed set the app renders labels for, present only while
+`state` is not `broken`. It complements `state`: an `ok` row with
+`rate_limited` plays fine while the host throttles the device's checks.
+`checkedAt` is when the current `state` was set — the verdict's age, which a
+look that does not change the verdict (a play that fails once, a probe that
+only hits a transient error, a render with no evidence) leaves as it was.
+`lastObservedAt` is when the device last looked at the source by any means —
+a probe attempt, a play outcome, a wall frame, a nightly render — and is the
+value to show as "last checked" (never earlier than `checkedAt`; absent for a
+source never observed). Row 1 above is a work verified at 09:00 whose play
+failed at 13:05: "verified 4 h ago", "last checked 15 min ago", "play failed
+15 min ago".
+`issueSince` is when the current run of trouble began, `nextCheckAt` when the
+device next probes the source on its own schedule (any state) — a play of
+the work is judged whenever it plays, so a work with `failedPlays` can
+conclude well before `nextCheckAt`; `failedPlays` the failed plays since the last
+real success (a verdict at 2, omitted at 0). `servedBy` is the **host** of the fallback
+gateway the device loads the work through when the source's own gateway
+could not serve it (e.g. `"gateway.pinata.cloud"`), never a URL; absent when the
+source's own gateway serves it. An outage writes no issue: the
+device only reports a source's problem while it can reach other hosts. See
+`docs/media-health.md` for what sets and clears each value. Rows are capped at 2048
+(`truncated: true` past that); `total` is the full item count. No source URL
+ever appears in a row.
+
+`{ "ok": true, "status": "empty", "items": [], "total": 0 }` when nothing is
+on screen. `{ "ok": false, "status": "error", "error": "mediaHealthUnavailable" }`
+when the feature is disabled by config or its store could not be opened.
+
+The same verdicts ride every `player_status` notification as the index-aligned
+`mediaHealth` array (state, category, reason, layer, skipped, unskipped and
+`issue` — the time fields stay here), and every
+`displayPlaylist` push carries a controld-owned `mediaHealth` request field
+naming the conclusively broken items for the player to skip — a controller
+cannot set that field; any value sent is dropped.
 
 ### Content policy effect on playlists
 
