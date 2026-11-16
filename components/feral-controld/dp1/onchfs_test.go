@@ -125,3 +125,30 @@ func TestOnchfsSourceVariantsAndSameWork(t *testing.T) {
 	assert.False(t, dp1.SameOnchfsWork(caseyReasEVMHost+"/?fxhash=2", raw), "another iteration is another work")
 	assert.False(t, dp1.SameOnchfsWork("https://cdn.example/x.png", "https://cdn.example/x.png"), "not onchfs")
 }
+
+// Catalog editions leave the plan mapped, not only Narrow's output: the
+// refresher re-narrows the plan itself (narrowStable) and matches random
+// picks by source, so a raw onchfs:// edition there reached the player on
+// every 5-minute refresh (pre-staging review of #459, 2026-11-16).
+func TestResolveSeriesCastPlan_MapsOnchfsEditionsInThePlan(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	a, b := editionItem("a"), editionItem("b")
+	a.Source = "onchfs://" + caseyReasRoot + "/?fxhash=1"
+	b.Source = "onchfs://" + caseyReasRoot + "/?fxhash=2"
+	serveEditions(ts, "playlist-1", "item-series", editionsBody(2, a, b))
+	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) })
+
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
+	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, castPlanBody(seriesItemRaw("full")), nil, 0)
+
+	require.True(t, plan.HasSeriesGroups())
+	editions := plan.Segments[0].Group.Editions
+	require.Len(t, editions, 2)
+	for _, e := range editions {
+		assert.Equal(t, caseyReasEVMHost+"/?fxhash="+e.Source[len(e.Source)-1:], e.Source,
+			"the plan's own editions carry the device-local source")
+	}
+}

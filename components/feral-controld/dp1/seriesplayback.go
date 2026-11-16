@@ -610,7 +610,15 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				seg = CastSegment{Group: unresolvedSeriesGroup(item, documentMode)}
 				break
 			}
-			inherited := inheritInstanceFields(item, editions)
+			// Catalog editions are the one input here not already mapped to
+			// their device-local onchfs source (playlist items are mapped on
+			// fetch). Mapped once, at the plan, so every reader of the plan
+			// sees one spelling: Narrow, the refresher's narrowStable (which
+			// re-narrows the plan itself and never passed through Narrow's
+			// final mapping, so a 5-minute refresh sent raw onchfs:// to the
+			// player), random-pick matching by source, and the cached
+			// series-segments sidecar.
+			inherited := mapOnchfsSources(inheritInstanceFields(item, editions))
 			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true, ArtworkModel: artworkModel}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key
