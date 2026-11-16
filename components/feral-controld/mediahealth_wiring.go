@@ -66,6 +66,15 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 		RenderConclusive: cfg.RenderConclusive,
 		Logger:           logger,
 	})
+	if errors.Is(err, mediahealth.ErrStoreCheckRunaway) {
+		// The only fatal store error, and early in startup on purpose: the
+		// damaged file is already deleted, but the integrity check's
+		// goroutine on it cannot be stopped and keeps allocating. Exiting
+		// is the only way to stop it; Restart=always brings controld back
+		// in 5 s with a fresh store, so the cost is one restart, never a
+		// loop (see mediahealth.Open).
+		logger.Fatal("media health store check ran away on a damaged store; restarting with a fresh store", zap.Error(err))
+	}
 	if err != nil {
 		// Not fatal: this daemon owns every recovery surface on the device,
 		// and a store that will not open must cost observations, never the

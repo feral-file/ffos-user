@@ -130,10 +130,16 @@ var ErrLowDisk = errors.New("media health: store write refused, disk below reser
 // ErrNewerRecord is returned when a record was written by a newer binary.
 var ErrNewerRecord = errors.New("media health: record version is newer than this binary")
 
-// Open opens (creating if needed) the store at path. The parent directory is
-// created with 0750. A store written by a newer schema is refused rather
-// than rewritten.
-func Open(path string, opts Options) (*Store, error) {
+// errNewerSchema is the open error for a store written by a newer schema.
+// It is refused, never discarded: a rollback must not destroy what the
+// newer binary will read again after the next update (store_open.go).
+var errNewerSchema = errors.New("media health: store schema is not readable by this binary")
+
+// openStore opens (creating if needed) the store at path. The parent
+// directory is created with 0750. A store written by a newer schema is
+// refused rather than rewritten. Open wraps it with the integrity check and
+// the crash-safe discard.
+func openStore(path string, opts Options) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("media health: create store dir: %w", err)
 	}
@@ -175,7 +181,7 @@ func Open(path string, opts Options) (*Store, error) {
 		if raw := meta.Get(metaSchemaKey); raw != nil {
 			v, perr := strconv.Atoi(string(raw))
 			if perr != nil || v > schemaVersion {
-				return fmt.Errorf("media health: store schema %q is not readable by this binary", raw)
+				return fmt.Errorf("%w: %q", errNewerSchema, raw)
 			}
 			return nil
 		}
