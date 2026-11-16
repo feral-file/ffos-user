@@ -509,11 +509,29 @@ func fromStoreVerdict(rec *Record, now time.Time) Verdict {
 	}
 	switch rec.State {
 	case StateBroken:
+		if renderVerdict(rec) {
+			// The work failed to RENDER here (a watchdog, a decode error, a
+			// blank wall frame), which says nothing about whether its
+			// origin answers. Answered without a request, as any stored
+			// verdict is, but inconclusive: the hint still steps the wall
+			// past it, while an owner who casts that one work on purpose
+			// gets it played (the player's retry budget judges it) instead
+			// of a sourceUnreachable that names no unreachable source.
+			return VerdictInconclusive
+		}
 		return VerdictDead
 	case StateOK:
 		return VerdictAlive
 	}
 	return ""
+}
+
+// renderVerdict reports a broken record whose verdict is about rendering on
+// this device, not about the origin: the play layer's mounted-and-failed
+// class and the render (frame) class. A play-layer content-type answer
+// (404, 403) keeps its fetch category and still counts as dead at cast.
+func renderVerdict(rec *Record) bool {
+	return rec.Category == CategoryRenderFailed || rec.Category == CategoryRenderBlank
 }
 
 func storedResult(rec *Record, now time.Time) ProbeResult {
