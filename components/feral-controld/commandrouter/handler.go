@@ -1207,14 +1207,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, filterErr
 			}
 			// onchfs works (ffos-user#427) are read from chain into the
-			// offline cache's store here, so replay can serve the first one
-			// from its first frame. After the policy filter (nothing it
-			// removed is read) and before the preflight; outside both locks,
-			// like the preflight, because it is network-bound. Every item
-			// already carries its device-local source (dp1/onchfs.go), which
-			// the scope sync below hashes the same way.
+			// offline cache's store here, so replay can serve the opening one
+			// from its first frame (the cast waits only for that one; see
+			// onchfsOpening). After the policy filter (nothing it removed is
+			// read) and before the preflight; outside both locks, like the
+			// preflight, because it is network-bound. Every item already
+			// carries its device-local source (dp1/onchfs.go), which the
+			// scope sync below hashes the same way.
 			if h.onchfs != nil {
-				h.onchfs.Ensure(ctx, playlist.Items, onchfsCastWait)
+				items, wait := onchfsOpening(playlist.Items, command.Arguments["startItem"])
+				h.onchfs.Ensure(ctx, items, wait)
 			}
 			command.Arguments["contentContext"] = string(contentContext)
 			schedulerSource.ContentContext = string(contentContext)
