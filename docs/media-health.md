@@ -262,7 +262,10 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   to judge. The pass settles them inconclusive with no reason (never
   recorded), and `IsDeviceHeld` (`data:` or onchfs) keeps them out of the
   kiosk navigation observer, inferred play failures and the L1 render
-  probe. An RPC outage therefore cannot mark an onchfs work broken.
+  probe; the outcome drain (`Service.applyEntry`) records no player entry
+  for an onchfs source, so a work not yet read from chain that the player
+  fails is never counted. An RPC outage therefore cannot mark an onchfs
+  work broken.
 - Everything the pass settles outside the worker pool (`data:` URIs, a shared verdict fanned out to wire-identical siblings) is written in
   one store transaction after the request barrier, so a playlist repeating
   one source thousands of times costs one request and one write.

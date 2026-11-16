@@ -245,8 +245,14 @@ these paths skip it:
 - inferred play failures;
 - the L1 render probe.
 
-So an RPC outage can never mark an onchfs work broken. The bytes are verified when they are
-read.
+The player's outcome ring is not filtered by `IsDeviceHeld` (a `data:` work's play failures
+still count), so `Service.applyEntry` drops every entry for an onchfs source itself: a work
+not yet read fails in the player for want of bytes, and a verdict on it could never heal,
+because L0 never probes it and an iframe's `ready` is not evidence. The entry still ends
+another source's play run.
+
+So an RPC outage can never mark an onchfs work broken, and the player is free to skip one it
+cannot load. The bytes are verified when they are read.
 
 ## Known limitations
 
