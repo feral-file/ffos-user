@@ -188,11 +188,19 @@ func (c *Config) MediaHealthTuning(logger *zap.Logger) MediaHealthConfig {
 	var t MediaHealthConfig
 	if len(c.MediaHealth) > 0 {
 		if err := json.Unmarshal(c.MediaHealth, &t); err != nil {
+			// The kill switch survives a typo elsewhere in the block: an
+			// operator who wrote {"disabled":true,"castItems":"8"} asked
+			// for the feature off, and a malformed sibling must not turn it
+			// back on. Same rule as OnchfsTuning.
+			var sw struct {
+				Disabled bool `json:"disabled"`
+			}
+			disabled := json.Unmarshal(c.MediaHealth, &sw) == nil && sw.Disabled
 			if logger != nil {
 				logger.Warn("mediaHealth config block malformed; using defaults",
-					zap.Error(err), zap.String("raw", string(c.MediaHealth)))
+					zap.Bool("disabled", disabled), zap.Error(err), zap.String("raw", string(c.MediaHealth)))
 			}
-			t = MediaHealthConfig{Malformed: true}
+			t = MediaHealthConfig{Malformed: true, Disabled: disabled}
 		}
 	}
 	if c.SourceProbe != nil && c.SourceProbe.Disabled {

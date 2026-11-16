@@ -308,7 +308,14 @@ of a flat hour.
 
 The admission rule is unchanged: the cast is rejected with `sourceUnreachable`
 only when EVERY item is dead (now including a conclusive broken record), and
-the offline-cache rescue applies as before. The rejection message names items
+the offline-cache rescue applies as before. A stored **render** verdict
+(`render_failed`, `render_blank`: the work mounted on this device and failed,
+or its frame read blank) is answered from the store as inconclusive, not dead:
+it says nothing about the origin, so an owner who casts that one work gets it
+played, judged by the player's retry budget, instead of a `sourceUnreachable`
+that names no unreachable source. The hint still steps the wall past it. A
+play-layer content-type answer (404, 403) keeps its fetch category and still
+counts as dead. The rejection message names items
 by index and HTTP status, or by reason code for a content/DNS verdict, never
 by URL.
 
@@ -871,6 +878,23 @@ reads for hints and status; batched, fsynced writes; no eviction and no count
 bound (~300 B per record). A disk guard refuses writes while the filesystem is
 under the offline cache's 5 GiB reserve and logs once per episode. A record
 written by a newer binary is neither read nor rewritten.
+
+Open is crash-safe (`store_open.go`). A damaged bbolt file can panic, take an
+unrecoverable fault, loop in its first write transaction (a damaged
+freelist), or make `tx.Check` loop while allocating (a page cycle), instead of
+returning an error; controld opens the store before SoftAP, the OTA gate and
+the LAN hub start, under `Restart=always`. So the open runs inside a marker
+(`store.db.opening`), and `tx.Check`, a walk of every page, runs read-only
+before the first write. A marker found at start, or an open or check that
+fails, deletes the file and starts an empty store (no copy is kept: nothing
+on the device would read it). A check that does not finish within 5 s (or
+0.5 s after reporting damage) deletes the file and exits controld, whose
+restart opens the fresh store. At most one restart per damaged file (1,200
+page-corruption cases, none stuck), and the observations are re-learned. Not
+deleted: a newer schema (a rollback; kept for the newer binary), a lock
+timeout, and permission or missing-path errors; media health then runs
+without a store. An unclean shutdown leaves no marker and
+keeps the store.
 
 Lifetime: survives reboot; cleared by factory reset
 (`devicectl.SetMediaHealthResetter`); survives a full-image OTA once the ffos

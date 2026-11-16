@@ -23,7 +23,7 @@ address before anything is stored or shown.
 
 ```
 dp1 (every exit)          onchfs://<root>/?fxhash=…  ->  https://<base32 root>.onchfs.invalid/?fxhash=…
-commandrouter (cast)      OnchfsMaterializer.Ensure(items, 15 s for the first work)
+commandrouter (cast)      OnchfsMaterializer.Ensure(items, 15 s for the opening work if onchfs)
 offlinecache              materializer: onchfs.Resolver -> verified tree -> blobs + Automatic ItemRecord
 onchfs                    Resolver -> chain readers (EVM eth_call / Tezos run_script_view) -> verify
 offlinecache replay       Fetch interception serves the record to the kiosk, as for any cached work
@@ -189,8 +189,10 @@ within three days of expiry.
 
 The cast path (`commandrouter`) calls `Ensure` after the content-policy filter and before the
 preflight, outside both locks:
-- It waits up to 15 s for the first onchfs work in playlist order; the rest land in the
-  background. At most three works are read at once; background reads may use two, and
+- It waits up to 15 s only when the work the cast opens on (item 0, or the one `startItem`
+  names, found as the player finds it: `id` first, then `source`) is onchfs; the rest land
+  in the background. A cast that opens on an ordinary work never waits, even with onchfs
+  works further down and the chain RPCs unreachable (`commandrouter/onchfs_open.go`). At most three works are read at once; background reads may use two, and
   the work a cast waits for goes ahead of them (promoted if a refresh already queued it).
 - A read never restores a work the app cleared while it was in flight: the Service's
   clear epoch is checked before and after the record is saved.
