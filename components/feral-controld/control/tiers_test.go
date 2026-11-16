@@ -124,3 +124,15 @@ func TestTierOfAndAllows(t *testing.T) {
 		}
 	}
 }
+
+func TestPairingSessionProbeRequiresOwner(t *testing.T) {
+	if TierOf("getMintPairingSession") != TierOwner {
+		t.Fatal("pairing-session metadata must require owner access")
+	}
+	for _, role := range []Role{RoleOwner, RoleController} {
+		p := Principal{Role: role}
+		if got := Permits(p, "getMintPairingSession", nil); got != (role == RoleOwner) {
+			t.Errorf("role %s: permitted=%v", role, got)
+		}
+	}
+}

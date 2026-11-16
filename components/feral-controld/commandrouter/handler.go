@@ -415,12 +415,13 @@ func New(
 // is already staged has nothing to add, and once the stuck-reset watchdog
 // releases the latch a retry is accepted normally again.
 var servedDuringFactoryReset = map[commands.Type]bool{
-	commands.CMD_DEVICE_STATUS:       true,
-	commands.CMD_PROFILE:             true, // == CMD_SYS_METRICS ("deviceMetrics")
-	commands.CMD_DDC_PANEL_STATUS:    true,
-	commands.CMD_GET_CONTENT_POLICY:  true,
-	commands.CMD_GET_SERIES_PLAYBACK: true,
-	commands.CMD_GET_MEDIA_HEALTH:    true, // reads the store and the player's item list; writes nothing
+	commands.CMD_DEVICE_STATUS:            true,
+	commands.CMD_GET_MINT_PAIRING_SESSION: true,
+	commands.CMD_PROFILE:                  true, // == CMD_SYS_METRICS ("deviceMetrics")
+	commands.CMD_DDC_PANEL_STATUS:         true,
+	commands.CMD_GET_CONTENT_POLICY:       true,
+	commands.CMD_GET_SERIES_PLAYBACK:      true,
+	commands.CMD_GET_MEDIA_HEALTH:         true, // reads the store and the player's item list; writes nothing
 }
 
 // Process processes the command and returns the result
@@ -470,6 +471,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 	var result interface{}
 	var err error
+
+	if commandType == commands.CMD_GET_MINT_PAIRING_SESSION {
+		if h.mintPairing == nil {
+			return map[string]any{"ok": false, "error": map[string]any{
+				"code": "disabled", "message": "mint pairing is not enabled", "retryable": false,
+			}}, nil
+		}
+		return h.mintPairing.HandleGetPairingSession(ctx, command.Arguments)
+	}
 
 	if commandType == commands.CMD_START_MINT_PAIRING_SESSION {
 		if h.mintPairing == nil {

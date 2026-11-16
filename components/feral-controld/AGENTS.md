@@ -54,7 +54,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
   1. Commands where `Type.DeviceCtlCommand()` is true → `devicectl` executor (device control actions).
   2. `CMD_DISPLAY_PLAYLIST` → `dp1` (playlist resolution) then CDP (`window.handleCDPRequest(...)`).
   3. Everything else → CDP directly via `window.handleCDPRequest(...)`.
-  Mint pairing is the intentional pre-CDP special case: `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, and `mintPairingApprovalDecision` are routed by `commandrouter` into `mintpairing` so controld can own broker channels, approval notifications, and relayer session creation without exposing browser tokens to Chromium.
+  Mint pairing is the intentional pre-CDP special case: `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, and `mintPairingApprovalDecision` are routed by `commandrouter` into `mintpairing` so controld can own broker channels, approval notifications, and relayer session creation without exposing browser tokens to Chromium.
   Offline artwork caching is the same kind of pre-CDP special case:
   `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
   `clearPlaylistCache`, and `getOfflineCacheStatus` are routed by

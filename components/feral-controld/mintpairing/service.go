@@ -109,6 +109,8 @@ type Service interface {
 	Start(ctx context.Context)
 	Stop()
 	HandleStartPairingSession(ctx context.Context, args map[string]any) (any, error)
+	// HandleGetPairingSession snapshots session state without broker or display I/O.
+	HandleGetPairingSession(ctx context.Context, args map[string]any) (any, error)
 	// HandleJoinPairingChannel joins a broker channel a site created
 	// (site-initiated pairing): the app hands over the channel's pairing
 	// token or short code, and the device becomes its minter. Nothing is
@@ -544,12 +546,13 @@ type pendingApproval struct {
 }
 
 type activePairing struct {
-	channel     brokerChannel
-	channelID   string
-	pairingCode string
-	expiresAt   time.Time
-	phase       activePairingPhase
-	browserName string
+	channel       brokerChannel
+	channelID     string
+	pairingCode   string
+	codeCreatedAt time.Time
+	expiresAt     time.Time
+	phase         activePairingPhase
+	browserName   string
 	// listener is this session's owner side of the overlay, created once per
 	// session so re-shows of the same code are not treated as overrides. It
 	// also doubles as hideSession's ownership key via Controller.HideOwned,
@@ -991,13 +994,14 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 	}
 	sessionCtx, sessionCancel := context.WithDeadline(runCtx, expiresAt)
 	active := &activePairing{
-		channel:     channel,
-		channelID:   display.ChannelID,
-		pairingCode: pairingCode,
-		expiresAt:   expiresAt,
-		phase:       activePairingPhasePairingCode,
-		cancel:      sessionCancel,
-		done:        make(chan struct{}),
+		channel:       channel,
+		channelID:     display.ChannelID,
+		pairingCode:   pairingCode,
+		codeCreatedAt: time.Now(),
+		expiresAt:     expiresAt,
+		phase:         activePairingPhasePairingCode,
+		cancel:        sessionCancel,
+		done:          make(chan struct{}),
 	}
 	s.logger.Info("Mint pairing broker channel started", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
