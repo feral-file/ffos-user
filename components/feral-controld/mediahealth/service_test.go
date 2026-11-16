@@ -160,3 +160,51 @@ func TestPlayerContract_ReReadsOnChange(t *testing.T) {
 	assert.False(t, c.Supported(), "an unreadable manifest never latches true")
 	assert.False(t, (*PlayerContract)(nil).Supported())
 }
+
+// An onchfs work the device has not read from chain yet fails in the
+// player for want of bytes. Those failures, and the ready of its error
+// page, must leave no record: nothing could heal a verdict on a
+// device-held source (feral-file/ffos-user#427).
+func TestService_OnchfsOutcomesAreNotRecorded(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := newTestService(t, newTableFetcher(), clock, manifestWithContract)
+	defer func() { _ = s.Close() }()
+
+	src := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid/?fxhash=0x06ec"
+	list := items(src, "https://o/b")
+	play := func(seq int64) []Outcome {
+		return []Outcome{
+			{Seq: seq, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: CodeNetwork},
+			{Seq: seq + 1, Source: src, Kind: OutcomeFail, Stage: StageDetect, Code: "unreachable", Attempt: 1},
+			{Seq: seq + 2, Source: src, Kind: OutcomeFail, Stage: StageExhausted, Attempt: 3},
+			{Seq: seq + 3, Source: "https://o/b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"},
+		}
+	}
+	entries := append(play(1), play(5)...)
+	entries = append(entries, Outcome{Seq: 9, Source: src, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe"})
+	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 1, Entries: entries})
+
+	rec, err := s.Store().Get(src)
+	require.NoError(t, err)
+	assert.Nil(t, rec, "two failed plays and a ready of an onchfs work write nothing")
+	assert.Empty(t, s.Hints([]string{src}))
+}
+
+// An onchfs entry between two failures of another source ends that
+// source's play run like any other source's entry: the second failure is
+// a new play.
+func TestService_OnchfsEntryEndsAnotherSourcesRun(t *testing.T) {
+	clock := &testClock{t: time.Now()}
+	s := newTestService(t, newTableFetcher(), clock, manifestWithContract)
+	defer func() { _ = s.Close() }()
+
+	onchfs := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.onchfs.invalid/"
+	s.ObservePlayback(items("https://o/a", onchfs), 0, nil, &Outcomes{CastSeq: 1, Entries: []Outcome{
+		{Seq: 1, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image", Attempt: 1},
+		{Seq: 2, Source: onchfs, Kind: OutcomeOK, Stage: StageReady, MediaType: "iframe"},
+		{Seq: 3, Source: "https://o/a", Kind: OutcomeFail, Stage: StageLoad, Code: "image", Attempt: 1},
+	}})
+	rec, err := s.Store().Get("https://o/a")
+	require.NoError(t, err)
+	assert.Equal(t, StateBroken, rec.State)
+}

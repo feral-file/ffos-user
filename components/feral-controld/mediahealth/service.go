@@ -9,6 +9,8 @@ import (
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 // Service is the one object main.go wires: the store, the prober and the
@@ -394,6 +396,18 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 // rules and into the store, and reports whether it counted toward a
 // verdict. Caller holds s.mu.
 func (s *Service) applyEntry(o Outcome, online bool) bool {
+	if contentpath.IsOnchfsSourceURL(o.Source) {
+		// An onchfs work plays only once the device has read it from chain
+		// (offlinecache's materializer); until then the player fails it
+		// for want of bytes, not because the work is broken, and an RPC
+		// outage or a slow first read must never conclude a verdict or
+		// hint a skip. Nothing heals one either: L0 never probes a
+		// device-held source and an iframe's ready is not evidence. So no
+		// entry for it is recorded. It still ends any other source's play
+		// run, as every entry for another source does.
+		s.endRun()
+		return false
+	}
 	var count bool
 	switch {
 	case o.Kind == OutcomeFail && s.kioskServedAfter(o):
@@ -493,8 +507,7 @@ func (s *Service) kioskServedAfter(o Outcome) bool {
 // one hides a work.
 func (s *Service) samePlay(o Outcome) bool {
 	if o.Kind != OutcomeFail {
-		s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
-		s.runFramed, s.runWithdrawn = false, false
+		s.endRun()
 		return false
 	}
 	// An observed navigation (Attempt 0) carries no attempt counter: it
@@ -514,6 +527,12 @@ func (s *Service) samePlay(o Outcome) bool {
 		s.runAttempt = o.Attempt
 	}
 	return same
+}
+
+// endRun closes the open play run, if any. Caller holds s.mu.
+func (s *Service) endRun() {
+	s.runSource, s.runAttempt, s.runEnded, s.runRefused = "", 0, false, false
+	s.runFramed, s.runWithdrawn = false, false
 }
 
 // Reset closes the store and removes its directory (factory reset). The
