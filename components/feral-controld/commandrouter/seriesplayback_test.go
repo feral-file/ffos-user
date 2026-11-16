@@ -1726,3 +1726,90 @@ func TestCommandHandler_SetSeriesPlayback_RecastDoesNotPushAGuessedSeqWhenAnothe
 			"recastForMode's own recast must never push a pick for its group under these interleaved conditions: its assumed seqBefore+1 is not the re-entrant call's real seq once another cast has landed in between")
 	}
 }
+
+// TestCommandHandler_DisplayPlaylist_PushesTheAcceptedPickEvenWhenTheGroupIsDisplayAtDeferred
+// pins run-reviewer's consolidated F1 on pass 4 of this fix (2026-11-16): a
+// random-mode group's edition is decided once, at this cast's own Narrow
+// call — a displayAt schedule only defers WHEN that decided edition
+// reaches the screen, never WHAT it is. Before this fix, the push's own
+// survival check read playlist.Items AFTER the scheduler narrowed it down
+// to the active-now cohort, so an entirely-future cast (the player is
+// never even sent anything — deferred:true) dropped the pick with no
+// survivor at all, leaving playlist-refresher with nothing to learn about
+// a cast that was genuinely accepted.
+func TestCommandHandler_DisplayPlaylist_PushesTheAcceptedPickEvenWhenTheGroupIsDisplayAtDeferred(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t)
+	ctx := context.Background()
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	var recorded []dp1.RandomGroupPick
+	commandrouter.SetAcceptedPickRecorder(handler, func(picks []dp1.RandomGroupPick) {
+		recorded = append(recorded, picks...)
+	}, logger)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "random"},
+	})
+	require.NoError(t, err)
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "387"}
+	futureEdition := dp1playlist.PlaylistItem{ID: "a", Source: "https://cdn.example.com/a.mp4", DisplayAt: strPtr("2026-07-22T00:00:00Z")}
+	group := &dp1.ResolvedSeriesGroup{
+		Key:            key,
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{futureEdition},
+		Resolved:       true,
+		ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+	}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(plan).
+		Times(1)
+
+	// Entirely future cohort: the player must never be sent anything.
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Times(0)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	result, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+	require.Equal(t, map[string]interface{}{"message": map[string]interface{}{"ok": true, "deferred": true}}, result,
+		"sanity: this cast is entirely future, so the scheduler defers it rather than sending anything")
+
+	require.Len(t, recorded, 1, "the random pick must be pushed even though its own segment is not due to display yet")
+	assert.Equal(t, key, recorded[0].Key)
+	assert.Equal(t, futureEdition.Source, recorded[0].Source)
+}

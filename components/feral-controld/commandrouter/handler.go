@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
@@ -728,6 +729,27 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
+		// scheduleUnfilteredItems is set only inside the
+		// CMD_DISPLAY_PLAYLIST+scheduler branch further down, to that
+		// branch's own fullPlaylist.Items — the content-policy-filtered
+		// but NOT YET schedule-filtered list — right where that branch
+		// captures fullPlaylist, before PrepareWithSource narrows playlist
+		// itself down to the active-now cohort. Declared at this outer
+		// scope because that branch and the accepted-pick push defer
+		// (further down still) sit in different, narrower blocks that do
+		// not otherwise share one. Stays nil on every other path (no
+		// scheduler, or this cast carries no displayAt schedule at all),
+		// in which case the push defer falls back to playlist.Items
+		// directly. Without this, the defer's own survival check — reading
+		// playlist.Items AFTER PrepareWithSource has already dropped a
+		// not-yet-due segment's items entirely — would read a
+		// legitimately-decided but not-yet-displayed random pick as
+		// "never survived" and never push it (run-reviewer consolidated F1
+		// on pass 4 of this fix, 2026-11-16): displayAt only defers WHEN a
+		// segment shows, never WHAT it resolved to, so the survival check
+		// a pick needs is against the fully content-policy-filtered list,
+		// not the schedule-active subset.
+		var scheduleUnfilteredItems []dp1playlist.PlaylistItem
 		// replayScopeTouched records whether THIS request reached
 		// syncReplayScope (even a failed sync counts — it still bumps the
 		// playback generation). The corrective resync in the failure defer
@@ -1091,15 +1113,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// the screen, so there is nothing here for playlist-
 				// refresher's stable-pick memory to learn. Of the
 				// candidates Narrow actually picked, only the ones still
-				// present in playlist.Items — read now, after every
-				// content-policy/scheduler filtering stage this function
-				// applies below has already run — are pushed; checked by
-				// Source membership, never by re-running the lockstep walk
-				// against the filtered list, which filtering can desync
-				// (survivingRandomPicks's own doc).
+				// present in the content-policy-filtered item list — read
+				// now, after that filtering stage this function applies
+				// below has already run — are pushed; checked by Source
+				// membership, never by re-running the lockstep walk against
+				// the filtered list, which filtering can desync
+				// (survivingRandomPicks's own doc). That list is
+				// scheduleUnfilteredItems when this cast went through the
+				// scheduler branch (schedule-deferred is not the same as
+				// never-displayed — see that variable's own doc), or
+				// playlist.Items otherwise.
 				if accepted && h.acceptedPickRecorder != nil {
+					finalItems := playlist.Items
+					if scheduleUnfilteredItems != nil {
+						finalItems = scheduleUnfilteredItems
+					}
 					candidates := preFilterPlan.RandomPicksFromNarrowed(preFilterDeviceMode, preFilterItems)
-					survived := survivingRandomPicks(candidates, playlist.Items)
+					survived := survivingRandomPicks(candidates, finalItems)
 					for i := range survived {
 						survived[i].Seq = seriesCastSeq
 					}
@@ -1520,6 +1550,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
 				fullPlaylist := playlist
+				scheduleUnfilteredItems = fullPlaylist.Items
 				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
 				if playlist == nil {
 					err = fmt.Errorf("playlist has invalid displayAt")
