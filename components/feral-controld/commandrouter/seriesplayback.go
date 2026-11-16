@@ -439,43 +439,42 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	}
 	procResult, procErr := h.Process(ctx, commands.Command{Type: commands.CMD_DISPLAY_PLAYLIST, Arguments: recastArgs})
 
-	// Pushed only when the re-cast was actually ACCEPTED by the player —
-	// the same two-part check handler.go's own defer uses, not procErr ==
-	// nil alone: Process can legitimately return (result, nil) with
-	// result's own ok field false (a designed player refusal — e.g.
-	// handler_pending, no_artwork — carries no Go error), which the
-	// earlier procErr-only check let through as if the re-cast had
-	// displayed (run-reviewer consolidated F2 on this fix, 2026-11-16).
-	// The re-entrant Process call above runs its own copy of this same
-	// push (handler.go), but on an empty CastPlan — rebuilt carries no
-	// seriesRegistry marker, so that call's own ResolveSeriesCastPlan
-	// resolves no groups to push picks for — so this is the only place a
-	// setSeriesPlayback-driven re-narrow's own random pick (feral-file/
-	// ffos-user#459, F6 reopened) is ever recorded.
+	// Candidate picks for the push below, computed now (pure, no shared
+	// state) but not yet tagged with a Seq or sent: pushed only when the
+	// re-cast was actually ACCEPTED by the player — the same two-part
+	// check handler.go's own defer uses, not procErr == nil alone: Process
+	// can legitimately return (result, nil) with result's own ok field
+	// false (a designed player refusal — e.g. handler_pending,
+	// no_artwork — carries no Go error), which an earlier, procErr-only
+	// check let through as if the re-cast had displayed (run-reviewer
+	// consolidated F2 on this fix, 2026-11-16). The re-entrant Process
+	// call above runs its own copy of this same push (handler.go), but on
+	// an empty CastPlan — rebuilt carries no seriesRegistry marker, so
+	// that call's own ResolveSeriesCastPlan resolves no groups to push
+	// picks for — so this is the only place a setSeriesPlayback-driven
+	// re-narrow's own random pick (feral-file/ffos-user#459, F6 reopened)
+	// is ever recorded.
 	//
 	// rebuilt.Items is plan.Narrow's own UNFILTERED output; the re-entrant
 	// Process call above applies its own content-policy filtering to it
 	// internally, and this function has no visibility into whether a
-	// candidate pick survived that (run-reviewer consolidated F1 on this
-	// fix, 2026-11-16 — handler.go's own push re-checks against its final,
-	// post-filter playlist.Items directly, which this call site cannot
-	// see). Each candidate's own edition is instead re-checked here
-	// against a lock-free content-policy snapshot — the same established
-	// read narrowStable's own displayFilter uses — and dropped if the
-	// policy would withhold it. Accepted, narrower residual risk: this
-	// does not also re-check schedule (displayAt) exclusion the way
-	// handler.go's own membership check does, since recovering that
+	// candidate pick survived that (run-reviewer consolidated F1 on pass 1
+	// of this fix, 2026-11-16 — handler.go's own push re-checks against
+	// its final, post-filter playlist.Items directly, which this call
+	// site cannot see). Each candidate's own edition is instead
+	// re-checked here against a lock-free content-policy snapshot — the
+	// same established read narrowStable's own displayFilter uses — and
+	// dropped if the policy would withhold it. Accepted, narrower residual
+	// risk: this does not also re-check schedule (displayAt) exclusion the
+	// way handler.go's own membership check does, since recovering that
 	// visibility here would need the same cross-call plumbing threading
 	// Process's final item list back to this caller, which this fix does
 	// not build (scope: fix the push's own correctness, not add a new
 	// Process-return surface).
+	var picks []dp1.RandomGroupPick
 	if procErr == nil && playerresponse.OK(procResult) && h.acceptedPickRecorder != nil {
 		candidates := plan.RandomPicksFromNarrowed(device, rebuilt.Items)
-		survived := survivingContentPolicyPicks(h.contentPolicy, contentContext, &rebuilt, candidates)
-		for i := range survived {
-			survived[i].Seq = seqBefore + 1
-		}
-		h.acceptedPickRecorder(survived)
+		picks = survivingContentPolicyPicks(h.contentPolicy, contentContext, &rebuilt, candidates)
 	}
 
 	// The re-entrant Process call's own dp1_call branch just ran
@@ -489,6 +488,20 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// Restored as accepted whether or not the re-cast succeeded: the plan
 	// was accepted when captured above, and a failed re-cast leaves that
 	// same series on screen.
+	//
+	// picks is tagged with seqBefore+1 under this SAME check, not before
+	// it: that value is only known to be this re-entrant call's own real
+	// seq when nothing else wrote lastSeriesCast.seq in the meantime —
+	// exactly what this check already verifies for the restore above.
+	// Tagging it unconditionally, before this check, let an untagged
+	// guess collide with (or appear no older than) a genuinely newer,
+	// independent cast's own real Seq for the same group — silently
+	// defeating the Seq ordering guard this fix's pass 1 added (F3) in
+	// precisely the race it was meant to close (run-reviewer consolidated
+	// F1 on pass 2 of this fix, 2026-11-16). Nil'd out instead of pushed
+	// when the check fails: the narrowStable live-display self-heal this
+	// whole fix exists to bypass only in the withheld-pick case is still
+	// there to catch an ordinary one.
 	h.lastSeriesCast.mu.Lock()
 	if h.lastSeriesCast.seq == seqBefore+1 {
 		h.lastSeriesCast.valid = true
@@ -497,8 +510,17 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 		h.lastSeriesCast.plan = plan
 		h.lastSeriesCast.contentContext = contentContext
 		h.lastSeriesCast.source = source
+		for i := range picks {
+			picks[i].Seq = seqBefore + 1
+		}
+	} else {
+		picks = nil
 	}
 	h.lastSeriesCast.mu.Unlock()
+
+	if len(picks) > 0 {
+		h.acceptedPickRecorder(picks)
+	}
 
 	if procErr != nil {
 		h.logger.Warn("series playback: re-cast after a setting change failed", zap.Error(procErr))

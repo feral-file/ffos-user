@@ -1604,3 +1604,125 @@ func TestCommandHandler_SetSeriesPlayback_RecastDoesNotPushWhenThePlayerRefusesT
 
 	assert.Empty(t, recorded, "a player-refused re-cast must never push the pick it computed — it was never actually displayed")
 }
+
+// TestCommandHandler_SetSeriesPlayback_RecastDoesNotPushAGuessedSeqWhenAnotherCastInterleaves
+// pins run-reviewer's consolidated F1 on pass 2 of this fix (2026-11-16):
+// recastForMode captures seqBefore before releasing h.lastSeriesCast.mu and
+// calling its own re-entrant Process, so an unrelated, independent
+// CMD_DISPLAY_PLAYLIST cast landing in that window advances the SAME shared
+// seq counter before recastForMode's own re-entrant call gets its turn —
+// making seqBefore+1 wrong. This test forces exactly that interleaving (a
+// plain, non-series cast fired from inside the re-entrant call's own
+// ResolveSeriesCastPlan, deterministically, before that call's own
+// rememberSeriesCast runs) and requires that the recast's push either never
+// happens or carries a Seq that is not simply assumed — never a stale
+// seqBefore+1 recorded as if it were ground truth.
+func TestCommandHandler_SetSeriesPlayback_RecastDoesNotPushAGuessedSeqWhenAnotherCastInterleaves(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExecutor := newRoutableExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	logger := zaptest.NewLogger(t)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
+	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
+
+	var recorded []dp1.RandomGroupPick
+	commandrouter.SetAcceptedPickRecorder(handler, func(picks []dp1.RandomGroupPick) {
+		recorded = append(recorded, picks...)
+	}, logger)
+
+	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "387"}
+	group := &dp1.ResolvedSeriesGroup{
+		Key:            key,
+		Representative: seriesEditionItem("item-series"),
+		Editions:       []dp1playlist.PlaylistItem{seriesEditionItem("a"), seriesEditionItem("b"), seriesEditionItem("c")},
+		Resolved:       true,
+		ArtworkModel:   dp1.SeriesArtworkModelMultiUnique,
+	}
+	initialPlan := dp1.CastPlan{Segments: []dp1.CastSegment{{Group: group}}}
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(initialPlan).
+		Times(1)
+
+	// AnyTimes passthrough for every later call (A's own rebuild, and the
+	// interleaved cast's own resolution): resolves no groups, like a
+	// document carrying no seriesRegistry marker. On its very FIRST entry
+	// — which is always A's rebuild, since that is the next
+	// ResolveSeriesCastPlan call after the dedicated one above — it first
+	// fires a completely unrelated CMD_DISPLAY_PLAYLIST cast to
+	// completion, synchronously, before computing its own return value:
+	// this reproduces the exact interleaving the finding describes,
+	// deterministically, without needing real goroutines.
+	entries := 0
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ interface{}, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+			entries++
+			if entries == 1 {
+				interleavedPlaylist := map[string]interface{}{
+					"dpVersion": "1.0.0",
+					"id":        "playlist-interleaved",
+					"items":     []interface{}{map[string]interface{}{"id": "other-item", "source": "https://cdn.example.com/other.mp4"}},
+				}
+				_, err := handler.Process(context.Background(), commands.Command{
+					Type:      commands.CMD_DISPLAY_PLAYLIST,
+					Arguments: map[string]interface{}{"dp1_call": interleavedPlaylist},
+				})
+				require.NoError(t, err)
+			}
+			segments := make([]dp1.CastSegment, len(playlist.Items))
+			for i := range playlist.Items {
+				item := playlist.Items[i]
+				segments[i] = dp1.CastSegment{Item: &item}
+			}
+			return dp1.CastPlan{Segments: segments}
+		}).
+		AnyTimes()
+
+	var expressions []string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			expressions = append(expressions, expr)
+			return playerOkResponse(), nil
+		}).
+		Times(3) // initial A cast + the interleaved cast + A's own recast
+	mockStatusPoller.EXPECT().ForceRefresh().Times(3)
+
+	playlistMap := map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"items": []interface{}{map[string]interface{}{
+			"id":     "item-series",
+			"source": "https://cdn.artworks.feralfile.io/0.mp4",
+			"provenance": map[string]interface{}{
+				"type":     "seriesRegistry",
+				"contract": map[string]interface{}{"chain": "evm", "seriesId": 387},
+			},
+		}},
+	}
+	_, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"dp1_call": playlistMap},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, recorded, "no device override yet: the default (full) mode makes no random choice to push")
+
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type:      commands.CMD_SET_SERIES_PLAYBACK,
+		Arguments: map[string]interface{}{"seriesPlayback": "random"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, true, result.(map[string]interface{})["ok"], "the setting itself must still persist")
+	require.Len(t, expressions, 3)
+
+	for _, pick := range recorded {
+		assert.NotEqual(t, key, pick.Key,
+			"recastForMode's own recast must never push a pick for its group under these interleaved conditions: its assumed seqBefore+1 is not the re-entrant call's real seq once another cast has landed in between")
+	}
+}
