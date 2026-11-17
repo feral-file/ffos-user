@@ -246,5 +246,10 @@ tool assumptions and are not counted as passing. Logs use the `reorg-*` prefix.
 
 The full CI container requires Wayland >=1.23 and wayland-protocols >=1.38
 for the pinned mpv build. Ubuntu 24.04 was rejected; the development container
-now pins Ubuntu 26.04 and its manifest digest. The full remote build result
-will be recorded separately when it completes.
+now pins Ubuntu 26.04 and its manifest digest. The clean [GitHub run 44124375553](https://github.com/feral-file/ffos-user/actions/runs/44124375553)
+passed at source commit `0b7156f0873383b01caad7325ec14b46fc7c57e1`: full CEF and
+private-media compilation, all eleven Linux tests, schema freshness, installation,
+and artifact upload. `evidence/ci-linux-build.log.gz` retains the full log;
+`evidence/ci-artifacts.json` records artifact size/digest. Later commits only
+update documentation/evidence. This does not qualify GPU presentation or replace
+the pinned FFOS pacman package qualification.
