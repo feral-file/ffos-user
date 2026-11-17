@@ -55,7 +55,7 @@ var playerCommands = []string{
 	"connect", "disconnect", "checkStatus", "moveToArtwork", "updateIndex", "refreshArtwork",
 	"updateArtFraming", "updateDisplaySettings", "cursorUpdate", "displayPlaylist", "refreshPlaylist",
 	"setSleepMode", "setShuffle", "setLoop", "displayDefaultPlaylist", "updateDefaultDuration",
-	"getRecentlyPlayed", "resolveRecentlyPlayed",
+	"getRecentlyPlayed", "resolveRecentlyPlayed", "setMediaHealth",
 	"ping", "mintPairingDisplay", "setupDisplay", "getContentPolicy", "setContentPolicy",
 }
 
@@ -121,6 +121,18 @@ func TestTierOfAndAllows(t *testing.T) {
 	} {
 		if tc.tier.Allows(tc.role) != tc.ok {
 			t.Errorf("%s.Allows(%s) != %v", tc.tier, tc.role, tc.ok)
+		}
+	}
+}
+
+func TestPairingSessionProbeRequiresOwner(t *testing.T) {
+	if TierOf("getMintPairingSession") != TierOwner {
+		t.Fatal("pairing-session metadata must require owner access")
+	}
+	for _, role := range []Role{RoleOwner, RoleController} {
+		p := Principal{Role: role}
+		if got := Permits(p, "getMintPairingSession", nil); got != (role == RoleOwner) {
+			t.Errorf("role %s: permitted=%v", role, got)
 		}
 	}
 }

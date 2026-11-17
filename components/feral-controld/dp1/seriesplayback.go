@@ -3,6 +3,7 @@ package dp1
 import (
 	"context"
 	"encoding/json"
+	"math/rand/v2"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -20,9 +21,10 @@ const (
 	SeriesPlaybackFirst SeriesPlaybackMode = "first"
 	// SeriesPlaybackFull casts every edition the catalog returned.
 	SeriesPlaybackFull SeriesPlaybackMode = "full"
-	// SeriesPlaybackRandom is accepted and stored like any other mode, but
-	// FF1 has no re-roll-per-loop behavior and narrowEditions resolves it to
-	// SeriesPlaybackFirst at cast time — see that function's doc.
+	// SeriesPlaybackRandom picks one genuinely random edition at cast time
+	// for a multi_unique series (NarrowEditions); FF1 still has no
+	// re-roll-per-loop behavior, so the pick is made once per cast, not once
+	// per loop iteration — see NarrowEditions' doc.
 	SeriesPlaybackRandom SeriesPlaybackMode = "random"
 )
 
@@ -65,17 +67,35 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 }
 
 // NarrowEditions returns the editions a cast in mode actually carries.
-// full casts every catalog edition; first and random both narrow to
-// representative — the series item's OWN declared edition (dp1/series.go:
-// "its own `source` is one representative edition"), not editions[0]. The
-// catalog's ordering has no guarantee of matching what the document itself
-// named as representative (feralfile-bot F1, 2026-10-30), so first/random
-// must use representative directly rather than slicing the catalog's
-// answer. FF1 has no re-roll-per-loop behavior, so random has nothing to
-// randomize AT CAST TIME and resolves to the same single edition first
-// would (owner decision, 2026-10-30; AC4 of feral-file/ffos-user#425).
-// random is still stored and returned as its own value everywhere else —
-// only this narrowing step collapses it.
+// full casts every catalog edition; first always narrows to representative
+// — the series item's OWN declared edition (dp1/series.go: "its own `source`
+// is one representative edition"), not editions[0]. The catalog's ordering
+// has no guarantee of matching what the document itself named as
+// representative (feralfile-bot F1, 2026-10-30), so first must use
+// representative directly rather than slicing the catalog's answer.
+//
+// random narrows to ONE genuinely randomly-picked edition out of the full
+// editions slice (randomEdition) when artworkModel.hasDistinctEditions() —
+// there is an actual choice to make — and otherwise falls back to
+// representative exactly like first, since a single/multi series' editions
+// are not distinguishable to begin with. This supersedes AC4 of
+// feral-file/ffos-user#425 ("random has nothing to randomize AT CAST TIME,"
+// because FF1 had no re-roll-per-loop behavior): a re-roll on every loop
+// iteration is still out of reach without player-side changes, but a
+// genuinely random PICK made once, at cast/narrow time, is both possible and
+// now wanted (owner decision, 2026-11-06). random is still stored and
+// returned as its own value everywhere else — only this narrowing step acts
+// on it.
+//
+// full is itself gated by artworkModel.hasDistinctEditions(): the full/first
+// config only has a real choice to make for a `multi_unique` series, whose
+// editions are genuinely different artworks. A `single` (1/1) series has
+// only ever the one artwork, and a `multi` series' editions are identical
+// copies of one artwork, so both narrow to the representative regardless of
+// mode — casting N identical copies under `full` shows nothing a viewer
+// could tell apart from casting one (owner decision, 2026-11-06). An empty
+// or unrecognized artworkModel (the catalog did not state it) is NOT
+// narrowed this way — see hasDistinctEditions' doc.
 //
 // The representative itself still carries the document's series marker
 // (contract.seriesId, no tokenId) — it IS the series item, unmodified — so
@@ -84,11 +104,30 @@ func ResolveSeriesPlaybackMode(document, device *SeriesPlaybackMode) SeriesPlayb
 // itself, so a later re-entry into Process built from this output (a
 // setSeriesPlayback re-cast, a recently-played replay) is never re-read as
 // an unresolved series (feralfile-bot F4, 2026-10-30).
-func NarrowEditions(mode SeriesPlaybackMode, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
-	if mode == SeriesPlaybackFull {
+func NarrowEditions(mode SeriesPlaybackMode, artworkModel SeriesArtworkModel, representative dp1playlist.PlaylistItem, editions []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	switch {
+	case mode == SeriesPlaybackFull && artworkModel.hasDistinctEditions():
 		return editions
+	case mode == SeriesPlaybackRandom && artworkModel.hasDistinctEditions() && len(editions) > 0:
+		return []dp1playlist.PlaylistItem{clearSeriesMarker(randomEdition(editions))}
+	default:
+		return []dp1playlist.PlaylistItem{clearSeriesMarker(representative)}
 	}
-	return []dp1playlist.PlaylistItem{clearSeriesMarker(representative)}
+}
+
+// randomEdition picks one edition out of editions uniformly at random.
+// editions is never empty at this call site (NarrowEditions guards len(editions)
+// > 0 before calling it).
+//
+// Randomness source: math/rand/v2's top-level N functions (rand.IntN here),
+// which since Go 1.22 are backed by a process-global ChaCha8 source that
+// self-seeds from the OS CSPRNG on first use — no explicit seeding needed,
+// and safe for concurrent callers. This is a cast-time pick, not a
+// cryptographic one, but there is no reason to prefer a weaker, manually
+// seeded source over the runtime's own default.
+func randomEdition(editions []dp1playlist.PlaylistItem) dp1playlist.PlaylistItem {
+	//nolint:gosec // G404: this picks which artwork edition to display, not a security decision; math/rand/v2's self-seeded source is sufficient.
+	return editions[rand.IntN(len(editions))]
 }
 
 // clearSeriesMarker returns a copy of item with its seriesRegistry series
@@ -201,6 +240,11 @@ type ResolvedSeriesGroup struct {
 	Representative dp1playlist.PlaylistItem
 	Editions       []dp1playlist.PlaylistItem
 	Resolved       bool
+	// ArtworkModel is the catalog's own `series.artworkModel` for this
+	// group — empty for unresolvedSeriesGroup, which has no catalog answer
+	// to read it from. NarrowEditions treats empty the same as an
+	// unrecognized value: see SeriesArtworkModel.hasDistinctEditions.
+	ArtworkModel SeriesArtworkModel
 }
 
 // CastSegment is one position in a playlist as resolveSeriesCastPlan walked
@@ -269,13 +313,169 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 			items = append(items, *seg.Item)
 		} else {
 			mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
-			items = append(items, NarrowEditions(mode, seg.Group.Representative, seg.Group.Editions)...)
+			items = append(items, NarrowEditions(mode, seg.Group.ArtworkModel, seg.Group.Representative, seg.Group.Editions)...)
+		}
+		if p.maxItems > 0 && len(items) >= p.maxItems {
+			items = items[:p.maxItems]
+			break
+		}
+	}
+	return mapOnchfsSources(items) // catalog editions are an exit too (onchfs.go)
+}
+
+// RandomGroupPick is one SeriesPlaybackRandom group's resolved edition, as
+// it actually ended up in a Narrow(device) call's own returned items —
+// never re-derived by a second call to NarrowEditions/randomEdition, which
+// would roll a DIFFERENT pick than the one already accepted and on screen.
+// See RandomPicksFromNarrowed.
+type RandomGroupPick struct {
+	Key          SeriesGroupKey
+	Source       string
+	ArtworkModel SeriesArtworkModel
+	// Seq is the cast's own monotonic acceptance order (commandrouter's
+	// h.lastSeriesCast.seq at the moment this pick's cast was accepted),
+	// filled in by the caller after RandomPicksFromNarrowed returns — this
+	// function has no cast-ordering concept of its own. playlist-refresher
+	// compares it against whatever it already holds for the same Key
+	// before overwriting, so two casts of the same group that settle out
+	// of order can never let the older one's push win over the newer
+	// (run-reviewer consolidated F3 on feral-file/ffos-user#459's cast-time
+	// push fix, 2026-11-16).
+	Seq uint64
+}
+
+// narrowedCount reports how many items NarrowEditions(mode, artworkModel,
+// _, editions) returns, without picking a random edition — RandomPicksFromNarrowed
+// needs this to stay in lockstep with Narrow's own per-segment item count
+// while walking an already-narrowed item list. Mirrors NarrowEditions' own
+// two outcomes: full on a distinct-editions group returns every edition,
+// and every other case (first, random, or full/random on a single/multi
+// group) returns exactly one item (the representative or, for random, the
+// one picked edition).
+func narrowedCount(mode SeriesPlaybackMode, artworkModel SeriesArtworkModel, editions []dp1playlist.PlaylistItem) int {
+	if mode == SeriesPlaybackFull && artworkModel.hasDistinctEditions() {
+		return len(editions)
+	}
+	return 1
+}
+
+// RandomPicksFromNarrowed re-derives, from items a PRIOR p.Narrow(device)
+// call already returned, the edition each SeriesPlaybackRandom
+// distinct-editions group in p actually resolved to — the exact value a
+// cast is about to put, or already put, on screen. It does NOT call Narrow
+// or NarrowEditions itself: randomEdition is genuinely random, so a second
+// call would roll a different pick than the one items already carries, and
+// the whole point here is to recover what WAS chosen, not choose again.
+//
+// items must be exactly p.Narrow(device)'s own return value for the SAME
+// device — this walks p.Segments and items in the identical lockstep order
+// Narrow built them in (via narrowedCount), so a mismatched items/device
+// pair silently reads the wrong positions. Callers that already called
+// Narrow (handler.go's cast path, recastForMode) have both values on hand
+// already; this just avoids a second, re-rolling pass over the same plan.
+//
+// Exists for feral-file/ffos-user#459, F6 reopened: playlist-refresher's
+// own stable-pick memory only ever learns of a newer cast's random choice
+// by reading the live display on its next periodic tick — a read that is
+// itself skipped whenever the group's PREVIOUSLY remembered pick is
+// content-policy-withheld (narrowStable's rememberedWithheld guard,
+// feralfile-bot F8, 2026-11-13), silently reverting a legitimate newer
+// cast's choice back to the withheld one. Pushing the pick this function
+// recovers straight into that memory at cast-acceptance time (see
+// commandrouter's use of playlist-refresher's AcceptedPickRecorder) closes
+// that gap at the source, rather than teaching the live-display check to
+// tell the two cases apart.
+func (p CastPlan) RandomPicksFromNarrowed(device *SeriesPlaybackMode, items []dp1playlist.PlaylistItem) []RandomGroupPick {
+	var picks []RandomGroupPick
+	idx := 0
+	for _, seg := range p.Segments {
+		if idx >= len(items) {
+			break
+		}
+		if seg.Item != nil {
+			idx++
+			continue
+		}
+		mode := ResolveSeriesPlaybackMode(seg.Group.DocumentMode, device)
+		// seg.Group.Resolved excludes unresolvedSeriesGroup's catalog-
+		// failure fallback (ArtworkModel left at its zero value "", which
+		// hasDistinctEditions() treats as true BY DESIGN for the casting
+		// decision — see that method's own doc — but which is not a real
+		// random choice: Editions is just [representative], one item,
+		// behind no actual catalog data). Without this, a transient
+		// catalog error on ANY later cast of an already-resolved,
+		// genuinely random group reported a "pick" for the representative
+		// and, tagged with a newer Seq than the real remembered pick,
+		// unconditionally overwrote it in playlist-refresher's memory —
+		// corrupting the very pick this fix exists to protect, with no
+		// setSeriesPlayback change involved at all (run-reviewer
+		// consolidated F1 on pass 5 of this fix, 2026-11-16).
+		if seg.Group.Resolved && mode == SeriesPlaybackRandom && seg.Group.ArtworkModel.hasDistinctEditions() && len(seg.Group.Editions) > 0 {
+			picks = append(picks, RandomGroupPick{
+				Key:          seg.Group.Key,
+				Source:       items[idx].Source,
+				ArtworkModel: seg.Group.ArtworkModel,
+			})
+		}
+		idx += narrowedCount(mode, seg.Group.ArtworkModel, seg.Group.Editions)
+	}
+	return picks
+}
+
+// Full flattens the plan the way expandSeriesItems already does for the
+// offline-cache download path (feral-file/ffos-user#455, #453): every group
+// contributes its FULL edition set, unconditionally — never narrowed by
+// ArtworkModel.hasDistinctEditions() the way Narrow's default case would
+// (which collapses a single/multi group to its representative alone). This
+// is deliberate: offline caching must keep expanding every series in full,
+// unaffected by seriesPlayback or device mode (docs/api-design.md,
+// feral-file/ffos-user#446's own accepted scope) — only the DISPLAY/narrow
+// decision (Narrow) is mode-aware, never what gets downloaded.
+//
+// The group's own Representative is appended too, when its Source is not
+// already one of Editions' sources. NarrowEditions' default case (first, or
+// any mode on a single/multi series) selects Representative verbatim — but
+// the catalog's /editions answer only guarantees each edition's OWN source,
+// never that the series item's own declared source appears among them
+// (feralfile-bot F1, 2026-11-12). Without this, a later offline Narrow could
+// select an item whose source was never queued for download, leaving nothing
+// playable for a cast this exact scenario was meant to serve.
+// unresolvedSeriesGroup already sets Editions to []{Representative}, so the
+// source there always matches and nothing is appended twice.
+//
+// maxItems is applied exactly like Narrow applies it, for the same reason:
+// a zero value (the offline-cache path's own uncapped contract) never
+// truncates.
+func (p CastPlan) Full() []dp1playlist.PlaylistItem {
+	items := make([]dp1playlist.PlaylistItem, 0, len(p.Segments))
+	for _, seg := range p.Segments {
+		if seg.Item != nil {
+			items = append(items, *seg.Item)
+		} else {
+			items = append(items, seg.Group.Editions...)
+			if !editionsHaveSource(seg.Group.Editions, seg.Group.Representative.Source) {
+				items = append(items, clearSeriesMarker(seg.Group.Representative))
+			}
 		}
 		if p.maxItems > 0 && len(items) >= p.maxItems {
 			return items[:p.maxItems]
 		}
 	}
 	return items
+}
+
+// editionsHaveSource reports whether editions already carries an item whose
+// Source exactly matches source — the same no-normalization comparison
+// commandrouter's findPlaylistItemBySource uses — so Full() never
+// double-queues a representative the catalog's editions answer already
+// included under the same source.
+func editionsHaveSource(editions []dp1playlist.PlaylistItem, source string) bool {
+	for _, edition := range editions {
+		if edition.Source == source {
+			return true
+		}
+	}
+	return false
 }
 
 // rawPlaylistItem is the subset of one playlist item's own JSON this package
@@ -300,8 +500,11 @@ type rawPlaylistItem struct {
 //
 // Matching is by ARRAY INDEX between raw's `items` and the caller's already-
 // parsed playlist.Items, which is only valid when raw is the very bytes that
-// parse produced — true at this package's one call site with a real
-// document (commandrouter's static dp1_call branch, before any filtering).
+// parse produced — true at both of this package's real-document call
+// sites: commandrouter's static dp1_call branch (via the exported
+// ResolveSeriesCastPlan, before any filtering) and ProcessPlaylistURLForCast
+// (dp1.go), which passes fetchPlaylist's own raw bytes straight through with
+// no filtering either (feral-file/ffos-user#452).
 func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesPlaybackMode {
 	modes := make([]*SeriesPlaybackMode, n)
 	if len(raw) == 0 {
@@ -392,7 +595,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 
 		default:
 			attempts++
-			editions, err := d.seriesEditions(ctx, playlist.ID, item)
+			editions, artworkModel, err := d.seriesEditions(ctx, playlist.ID, item)
 			if err != nil || len(editions) == 0 {
 				if err != nil {
 					d.logger.Warn("series item kept unexpanded; its representative still plays",
@@ -407,8 +610,16 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 				seg = CastSegment{Group: unresolvedSeriesGroup(item, documentMode)}
 				break
 			}
-			inherited := inheritInstanceFields(item, editions)
-			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true}
+			// Catalog editions are the one input here not already mapped to
+			// their device-local onchfs source (playlist items are mapped on
+			// fetch). Mapped once, at the plan, so every reader of the plan
+			// sees one spelling: Narrow, the refresher's narrowStable (which
+			// re-narrows the plan itself and never passed through Narrow's
+			// final mapping, so a 5-minute refresh sent raw onchfs:// to the
+			// player), random-pick matching by source, and the cached
+			// series-segments sidecar.
+			inherited := mapOnchfsSources(inheritInstanceFields(item, editions))
+			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true, ArtworkModel: artworkModel}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key
 			}
@@ -430,8 +641,11 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 }
 
 // ResolveSeriesCastPlan is resolveSeriesCastPlan, exported for the
-// commandrouter package: the one call site with the raw document bytes a
-// cast needs to read seriesPlayback from (see the DP1 interface doc).
+// commandrouter package's static dp1_call branch — one of this package's
+// two real-document call sites (the other is ProcessPlaylistURLForCast,
+// which calls resolveSeriesCastPlan directly with fetchPlaylist's own raw
+// bytes) with the raw document bytes a cast needs to read seriesPlayback
+// from (see the DP1 interface doc).
 func (d *dp1) ResolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawPlaylist json.RawMessage, deviceMode *SeriesPlaybackMode, maxItems int) CastPlan {
 	return d.resolveSeriesCastPlan(ctx, playlist, rawPlaylist, deviceMode, maxItems)
 }

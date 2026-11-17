@@ -33,6 +33,34 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+// passthroughCastPlan is ResolveSeriesCastPlan's no-op shape, mirroring
+// commandrouter_test's identical helper (feral-file/ffos-user#455, #453):
+// one plain Item segment per input item, no series groups — exactly what
+// the real implementation returns for a playlist with no seriesRegistry
+// items, which is every playlist in this package's tests.
+func passthroughCastPlan(_ context.Context, playlist dp1.Playlist, _ json.RawMessage, _ *dp1.SeriesPlaybackMode, _ int) dp1.CastPlan {
+	segments := make([]dp1.CastSegment, len(playlist.Items))
+	for i := range playlist.Items {
+		item := playlist.Items[i]
+		segments[i] = dp1.CastSegment{Item: &item}
+	}
+	return dp1.CastPlan{Segments: segments}
+}
+
+// stubPassthroughCastPlan wires passthroughCastPlan onto m as a blanket,
+// unbounded ResolveSeriesCastPlan stub — every test below that mocks
+// FetchPlaylist for narrowedPlaylistFromURL's non-dynamic branch needs
+// SOME answer for the ResolveSeriesCastPlan call that immediately follows
+// it (feral-file/ffos-user#453), and none of them is itself about series
+// behavior, so one generic, playlist-shape-agnostic stub per MockDP1
+// covers every call site in its test.
+func stubPassthroughCastPlan(m *mocks.MockDP1) {
+	m.EXPECT().
+		ResolveSeriesCastPlan(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
+		AnyTimes()
+}
+
 type testSetup struct {
 	ctrl             *gomock.Controller
 	ctx              context.Context
@@ -63,6 +91,7 @@ func setupWithLogger(t *testing.T, logger *zap.Logger) *testSetup {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 
 	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), nil, mockClock, logger)
@@ -406,7 +435,11 @@ func TestRefresher_ProcessPlayingPlaylist_PlaylistURL(t *testing.T) {
 
 	// Expect DP1 to process playlist URL
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		FetchPlaylist(ts.ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -442,6 +475,7 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -466,7 +500,11 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
@@ -511,6 +549,7 @@ func TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidR
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -536,14 +575,18 @@ func TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidR
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
+		FetchPlaylist(ctx, playlistURL).
+		DoAndReturn(func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			// The concurrent scheduler-owned cast: bumps AuthorityToken
 			// exactly inside the pass's sample→guard window.
 			sched.PrepareWithSource(mockPlaylist, playlistschedule.Source{})
-			return mockPlaylist, nil
+			return mockPlaylist, nil, nil
 		}).
 		MinTimes(1)
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *mockPlaylist, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), sched, mockClock, logger)
 	r.Start()
@@ -572,6 +615,7 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	// This test's CDP send returns a bare "success" string rather than a
@@ -599,7 +643,11 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -674,6 +722,7 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -701,7 +750,11 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 	mockCDP.EXPECT().
@@ -770,6 +823,7 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -797,12 +851,12 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		Return(nil, errors.New("network unreachable")).
+		FetchPlaylist(ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), errors.New("network unreachable")).
 		AnyTimes()
 	mockOfflineCache.EXPECT().
 		CachedPlaylistForURL(playlistURL).
-		Return(json.RawMessage(cachedRaw), nil).
+		Return(json.RawMessage(cachedRaw), nil, nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/video1.mp4"}).
@@ -837,6 +891,7 @@ func TestRefresher_ProcessPlayingPlaylist_NoCachedFallbackReturnsOriginalError(t
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
@@ -860,12 +915,12 @@ func TestRefresher_ProcessPlayingPlaylist_NoCachedFallbackReturnsOriginalError(t
 		}).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		Return(nil, errors.New("network unreachable")).
+		FetchPlaylist(ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), errors.New("network unreachable")).
 		AnyTimes()
 	mockOfflineCache.EXPECT().
 		CachedPlaylistForURL(playlistURL).
-		Return(nil, errors.New("offline cache: no playlist saved for this url")).
+		Return(nil, nil, errors.New("offline cache: no playlist saved for this url")).
 		AnyTimes()
 	// Neither must ever be called: with no cached fallback available,
 	// the pass must fail out before reaching sync or CDP resend.
@@ -898,6 +953,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -921,7 +977,11 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 	mockKioskReplay.EXPECT().
@@ -987,6 +1047,7 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -1021,12 +1082,12 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 
 	var resolveCalls atomic.Int64
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, url, false).
-		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
+		FetchPlaylist(ctx, url).
+		DoAndReturn(func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			if resolveCalls.Add(1)%2 == 1 {
-				return newPlaylist, nil
+				return newPlaylist, nil, nil
 			}
-			return oldPlaylist, nil
+			return oldPlaylist, nil, nil
 		}).
 		AnyTimes()
 
@@ -1085,6 +1146,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -1118,8 +1180,8 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			FetchPlayerStatus(ctx).
 			Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &url, nil), nil),
 		mockDP1.EXPECT().
-			ProcessPlaylistURL(ctx, url, false).
-			Return(newPlaylist, nil),
+			FetchPlaylist(ctx, url).
+			Return(newPlaylist, json.RawMessage(nil), nil),
 		mockKioskReplay.EXPECT().
 			SyncPlaylist(ctx, []string{"https://example.com/item-new"}).
 			Return(1, nil),
@@ -1133,8 +1195,8 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			FetchPlayerStatus(ctx).
 			Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &url, nil), nil),
 		mockDP1.EXPECT().
-			ProcessPlaylistURL(ctx, url, false).
-			Return(oldPlaylist, nil),
+			FetchPlaylist(ctx, url).
+			Return(oldPlaylist, json.RawMessage(nil), nil),
 		mockKioskReplay.EXPECT().
 			SyncPlaylist(ctx, []string{"https://example.com/item-old"}).
 			Return(1, nil),
@@ -1266,6 +1328,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -1418,8 +1481,8 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessPlaylistURLError(t *testing.
 
 	// Expect DP1 to fail processing playlist URL
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
-		Return(nil, errors.New("dp1 processing error")).
+		FetchPlaylist(ts.ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), errors.New("dp1 processing error")).
 		AnyTimes()
 
 	// Expect Sleep to be called during retry logic
@@ -1489,7 +1552,11 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendError(t *testing.T) {
 
 	// Expect DP1 to process playlist URL successfully
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		FetchPlaylist(ts.ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -1555,7 +1622,11 @@ func TestRefresher_SendCDPRequest_Success(t *testing.T) {
 
 	// Expect DP1 to process playlist URL
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		FetchPlaylist(ts.ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -1633,7 +1704,11 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 
 	// Expect DP1 to process playlist (needed for processPlayingPlaylist to succeed)
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(gomock.Any(), gomock.Any(), gomock.Any()).
+		FetchPlaylist(gomock.Any(), gomock.Any()).
+		Return(createMockPlaylist(), json.RawMessage(nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(gomock.Any(), *createMockPlaylist(), false).
 		Return(createMockPlaylist(), nil).
 		AnyTimes()
 
@@ -1711,7 +1786,11 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 
 	// Expect DP1 to process playlist (needed for processPlayingPlaylist to succeed)
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(gomock.Any(), gomock.Any(), gomock.Any()).
+		FetchPlaylist(gomock.Any(), gomock.Any()).
+		Return(createMockPlaylist(), json.RawMessage(nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(gomock.Any(), *createMockPlaylist(), false).
 		Return(createMockPlaylist(), nil).
 		AnyTimes()
 
@@ -1825,7 +1904,11 @@ func TestRefresher_HeadlessBoot_CDPConnectsLater(t *testing.T) {
 		AnyTimes()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		FetchPlaylist(ts.ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -1885,6 +1968,8 @@ type fakePlaylistScheduler struct {
 	commits         int
 	source          playlistschedule.Source
 	inlineDynamic   *dp1.Playlist
+	refreshSourceID string
+	refreshSource   playlistschedule.Source
 	restored        chan struct{}
 }
 
@@ -1941,6 +2026,20 @@ func (f *fakePlaylistScheduler) InlineDynamicSource() *dp1.Playlist {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.inlineDynamic
+}
+func (f *fakePlaylistScheduler) SetRefreshSource(playlistID string, source playlistschedule.Source) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshSourceID = playlistID
+	f.refreshSource = source
+}
+func (f *fakePlaylistScheduler) RefreshSource(playlistID string) playlistschedule.Source {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if playlistID == "" || f.refreshSourceID != playlistID {
+		return playlistschedule.Source{}
+	}
+	return f.refreshSource
 }
 
 func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
@@ -2008,6 +2107,19 @@ func (f *fakePlaylistScheduler) preparesCount() int {
 	defer f.mu.Unlock()
 	return f.prepares
 }
+
+// waitForPushLock blocks until the refresher has taken the scheduler's push
+// lock at least once (WithPlayerPush), the point where an obsolete result is
+// re-checked and discarded. A fixed sleep raced the refresh pass on a loaded
+// CI runner once #459 gave that pass more work before the push (the same fix
+// as waitForReplaySync, #458). Stop runs after it, so a prepare the pass would
+// wrongly make under the lock still lands before the caller asserts none.
+func waitForPushLock(t *testing.T, f *fakePlaylistScheduler) {
+	t.Helper()
+	require.Eventually(t, func() bool { return f.pushCallsCount() >= 1 }, 10*time.Second, 5*time.Millisecond,
+		"the refresh pass never reached the push lock")
+}
+
 func (f *fakePlaylistScheduler) pushCallsCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -2039,6 +2151,7 @@ func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	playlistURL := "https://example.com/daily.json"
 	fakeSched := &fakePlaylistScheduler{
@@ -2054,8 +2167,8 @@ func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) 
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		Return(nil, &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
+		FetchPlaylist(ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
 		AnyTimes()
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
@@ -2077,6 +2190,7 @@ func TestRefresher_SchedulerOwnedFutureSourceDoesNotUseStalePlayerStatus(t *test
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	futureURL := "https://example.com/future.json"
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
@@ -2102,13 +2216,13 @@ func TestRefresher_SchedulerOwnedFutureSourceDoesNotUseStalePlayerStatus(t *test
 	mockStatusPoller.EXPECT().FetchPlayerStatus(gomock.Any()).Times(0)
 	resolved := make(chan struct{}, 1)
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, futureURL, false).
-		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
+		FetchPlaylist(ctx, futureURL).
+		DoAndReturn(func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			select {
 			case resolved <- struct{}{}:
 			default:
 			}
-			return futureOnlyPlaylist(now.Add(time.Hour)), nil
+			return futureOnlyPlaylist(now.Add(time.Hour)), nil, nil
 		}).
 		AnyTimes()
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2140,6 +2254,7 @@ func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: true}
 
@@ -2152,8 +2267,8 @@ func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T)
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		Return(nil, errors.New("invalid character 'x' looking for beginning of value")).
+		FetchPlaylist(ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), errors.New("invalid character 'x' looking for beginning of value")).
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
@@ -2176,6 +2291,7 @@ func TestRefresher_TransientURLError_WithoutCache_SurfacesError(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: false}
 
@@ -2188,8 +2304,8 @@ func TestRefresher_TransientURLError_WithoutCache_SurfacesError(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		Return(nil, &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
+		FetchPlaylist(ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
@@ -2212,6 +2328,7 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	playlistURL := "https://example.com/plain.json"
 	fakeSched := &fakePlaylistScheduler{
@@ -2228,8 +2345,8 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		Return(nil, &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
+		FetchPlaylist(ctx, playlistURL).
+		Return(nil, json.RawMessage(nil), &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
@@ -2262,6 +2379,7 @@ func TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection(
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	playlistURL := "https://example.com/daily.json"
 	mockPlaylist := createMockPlaylist()
@@ -2275,7 +2393,11 @@ func TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection(
 
 	mockStatusPoller.EXPECT().FetchPlayerStatus(gomock.Any()).Times(0)
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(mockPlaylist, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -2325,6 +2447,7 @@ func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: false}
 
@@ -2338,7 +2461,11 @@ func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(pl, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
 		Return(pl, nil).
 		AnyTimes()
 	mockCDP.EXPECT().
@@ -2366,6 +2493,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{}
 
@@ -2381,16 +2509,20 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
-		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
+		FetchPlaylist(ctx, playlistURL).
+		DoAndReturn(func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			select {
 			case <-resolveStarted:
 			default:
 				close(resolveStarted)
 			}
 			<-releaseResolve
-			return pl, nil
+			return pl, nil, nil
 		}).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
+		Return(pl, nil).
 		AnyTimes()
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
@@ -2405,7 +2537,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 	fakeSched.AdvanceAuthority()
 	close(releaseResolve)
 
-	time.Sleep(100 * time.Millisecond)
+	waitForPushLock(t, fakeSched)
 	r.Stop()
 
 	assert.Zero(t, fakeSched.preparesCount(), "obsolete refresh must not replace scheduler cache")
@@ -2422,6 +2554,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{}
 
@@ -2444,7 +2577,11 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 		}).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(createMockPlaylist(), json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *createMockPlaylist(), false).
 		Return(createMockPlaylist(), nil).
 		AnyTimes()
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
@@ -2460,7 +2597,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 	fakeSched.AdvanceAuthority()
 	close(releaseStatusRead)
 
-	time.Sleep(100 * time.Millisecond)
+	waitForPushLock(t, fakeSched)
 	r.Stop()
 
 	assert.Zero(t, fakeSched.preparesCount(), "obsolete status snapshot must not replace scheduler cache")
@@ -2477,6 +2614,7 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true, restored: make(chan struct{}, 1)}
 
@@ -2490,7 +2628,11 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(pl, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
 		Return(pl, nil).
 		AnyTimes()
 	mockCDP.EXPECT().
@@ -2524,6 +2666,7 @@ func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *t
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	boundary := now.Add(time.Minute)
@@ -2559,8 +2702,8 @@ func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *t
 	// must be selected before status is read, so A cannot replace it.
 	mockStatusPoller.EXPECT().FetchPlayerStatus(gomock.Any()).Times(0)
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, persistedURL, false).
-		Return(futureOnlyPlaylist(boundary), nil).
+		FetchPlaylist(ctx, persistedURL).
+		Return(futureOnlyPlaylist(boundary), json.RawMessage(nil), nil).
 		AnyTimes()
 	pushed := make(chan struct{}, 1)
 	mockCDP.EXPECT().
@@ -2638,6 +2781,7 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: true, cacheOnPrepare: true}
 
@@ -2692,6 +2836,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
 
@@ -2746,6 +2891,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
 
@@ -2792,6 +2938,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
 
@@ -2846,6 +2993,7 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
 
@@ -2898,6 +3046,7 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
 
@@ -2911,7 +3060,11 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(pl, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
 		Return(pl, nil).
 		AnyTimes()
 	mockCDP.EXPECT().
@@ -2940,6 +3093,7 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true, restored: make(chan struct{}, 1)}
 
@@ -2963,7 +3117,11 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(pl, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
 		Return(pl, nil).
 		AnyTimes()
 	mockCDP.EXPECT().
@@ -3040,6 +3198,7 @@ func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
 
@@ -3056,7 +3215,11 @@ func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) 
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 	mockDP1.EXPECT().
-		ProcessPlaylistURL(ctx, playlistURL, false).
+		FetchPlaylist(ctx, playlistURL).
+		Return(pl, json.RawMessage(nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ctx, *pl, false).
 		Return(pl, nil).
 		AnyTimes()
 	mockCDP.EXPECT().
@@ -3158,6 +3321,7 @@ func TestRefresher_StaticInlineFallbackKeepsDisplayedReplayScope(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -3204,16 +3368,21 @@ func TestRefresher_StaticInlineFallbackKeepsDisplayedReplayScope(t *testing.T) {
 		MinTimes(1)
 	// The assertion: the representative the player actually holds. A strict
 	// mock fails on the editions, which is what this path used to pass.
+	synced := make(chan struct{})
+	var syncedOnce sync.Once
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/representative.mp4"}).
-		Return(1, nil).
+		DoAndReturn(func(context.Context, []string) (int, error) {
+			syncedOnce.Do(func() { close(synced) })
+			return 1, nil
+		}).
 		MinTimes(1)
 	// And nothing is re-sent, which is why the scope had to come from the
 	// player in the first place (gomock fails the test on an unexpected Send).
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
-	time.Sleep(100 * time.Millisecond)
+	waitForReplaySync(t, synced)
 	r.Stop()
 }
 
@@ -3235,6 +3404,7 @@ func TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope(t *testi
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
+	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -3274,13 +3444,35 @@ func TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope(t *testi
 		ExpandSeriesItems(deadlinedWithin(dp1.DefensiveSeriesExpansionTimeout), *displayed, 0).
 		Return(expanded).
 		MinTimes(1)
+	synced := make(chan struct{})
+	var syncedOnce sync.Once
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"http://example.com/representative.mp4"}).
-		Return(1, nil).
+		DoAndReturn(func(context.Context, []string) (int, error) {
+			syncedOnce.Do(func() { close(synced) })
+			return 1, nil
+		}).
 		MinTimes(1)
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
-	time.Sleep(100 * time.Millisecond)
+	waitForReplaySync(t, synced)
 	r.Stop()
 }
+
+// waitForReplaySync blocks until the refresher's first pass has re-pointed
+// offline replay (SyncPlaylist is the last call that pass makes, after the
+// defensive ExpandSeriesItems), or fails after a generous bound. It replaces a
+// fixed 100 ms sleep before Stop: on a loaded CI runner under -race the first
+// pass had not reached SyncPlaylist yet, Stop canceled it, and the MinTimes(1)
+// expectations failed as "missing call(s)" with nothing actually wrong.
+func waitForReplaySync(t *testing.T, synced <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-synced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresher never re-pointed offline replay to the displayed playlist")
+	}
+}
+
+func (*fakePlaylistScheduler) SetHintSource(playlistschedule.HintSource) {}

@@ -85,6 +85,28 @@ func TestGate_RateLimitRejectsBeyondBurst(t *testing.T) {
 	assert.Equal(t, int64(2), inner.calls.Load(), "only burst-many commands reach inner")
 }
 
+func TestGate_DisplayStatusHasSeparateRateBudget(t *testing.T) {
+	cfg := GateConfig{
+		Enabled: true,
+		Policies: map[commands.Type]Policy{
+			commands.CMD_DEVICE_STATUS: {Rate: 1, Burst: 1, Dedupe: true},
+		},
+		now: frozenClock(),
+	}
+	g := NewGate(&stubHandler{}, cfg, zap.NewNop())
+	cmd := commands.Command{Type: commands.CMD_DEVICE_STATUS}
+	site := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "site", Role: control.RoleDisplay})
+	otherSite := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "other", Role: control.RoleDisplay})
+	owner := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "owner", Role: control.RoleOwner})
+
+	_, err := g.Process(site, cmd)
+	require.NoError(t, err)
+	_, err = g.Process(otherSite, cmd)
+	require.True(t, IsRateLimited(err))
+	_, err = g.Process(owner, cmd)
+	require.NoError(t, err)
+}
+
 func TestGate_DedupeCollapsesConcurrentIdentical(t *testing.T) {
 	inner := &stubHandler{
 		result:  "shared",

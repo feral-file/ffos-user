@@ -19,6 +19,131 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.0.1 — full-image (paired with the ffos release)
+
+Everything on `develop` since `v3.0.0`. The ffos-user diff touches only
+`components/**`, so `check-release-rail.sh` would pass a package-only
+release; it is cut on the full-image rail anyway, because its ffos half has
+no package path: the generated `controld.json` pins the media-health
+switches and gateway lists and drops the `raster` block (ffos#178, #181),
+and the OTA carry of `.state/media-health` is an image-rail script
+(ffos#178). A package-only release would run media health on code defaults
+(L1 and the wall frame off) and lose the store on every OTA.
+
+ffos-user, package rail (`components/**`):
+
+- **Media health (#392).** L0 source probes at cast and ahead of play
+  (#438), the nightly L1 render (#443), the wall's own frame and a render
+  negative as play evidence (#450, `renderConclusive` off), `lastObservedAt`
+  (#451), the probe sends the kiosk's User-Agent (#456), onchfs sources never
+  feed play outcomes (#464). A per-device bbolt store at
+  `/home/feralfile/.state/media-health/store.db`.
+- **onchfs works on the device (#427).** The chain reader (#428) and the
+  on-device materializer and replay (#461); `onchfs://` is no longer
+  rewritten to the dead fxhash gateway.
+- **Playlists.** Series playback on every live-cast path (#446, #447,
+  #454), series-group identity through the offline cache (#459), a
+  `displayPlaylist` `startItem` passed to the player (#462).
+- **Control.** Display grants may read the screen orientation (#449); a
+  read-only mint pairing session probe, owner tier (#463).
+- The device Raster API key is gone (#457).
+- **Pre-staging review fixes** (this entry's PR):
+  - A damaged media-health store is replaced by a fresh one instead of crash-looping or
+    hanging controld before SoftAP and the hub start; at most one restart
+    (`mediahealth/store_open.go`).
+  - A render-only verdict no longer refuses a cast of that work with
+    `sourceUnreachable`.
+  - A cast waits for onchfs only when the work it opens on is onchfs.
+  - A malformed `mediaHealth` block keeps an explicit `disabled:true`.
+  - A series whose catalog editions are onchfs works keeps their
+    device-local sources on the 5-minute refresh; the refresher's re-narrow
+    (#459) sent the raw `onchfs://` URI to the player.
+
+`ffos`, image rail only: the controld.json media-health pins (L0 on, L1 and
+the wall frame on, `renderConclusive:false`, `arweave.net` alone as the
+Arweave fallback) and the `raster` block dropped (ffos#178, #181); the
+best-effort OTA carry of `.state/media-health` (ffos#178). The carry first
+runs on the update AFTER this one: a 3.0.0 device updates to 3.0.1 with
+3.0.0's scripts, so its store starts empty on 3.0.1, which costs one
+re-probe cycle.
+
+Player: ff-player `main` `978266e` (#323-#336): the default-playlist host,
+image rendering, autoplay and video rendering, the progress-aware load
+watchdog, a declared load failure for a silent content-type check, the
+media-health contract (hints, skips, the outcome ring), refreshed-playlist
+moves, `startItem`.
+
+### Before dispatch
+
+- **Merge order.** This entry merges into `develop` before the
+  `develop -> staging` promotion PR, in both repos.
+- **Player.** `ff_player_ref` pinned to
+  `978266e9b62109ae3ae52b4221df67e71c84bc39` in every run of this release.
+- **Recovery (3.0.0 P2).** If 3.0.0's P2 has not run, this release is the
+  preferred carrier: its Staging run sets `update_recovery_version=true` and
+  repeats the 3.0.0 S2 bench (reset onto it, first-owner claim, relay v2 off
+  the LAN) before its Production run. The release operator decides.
+- **Bench a Staging image on an FF1** before the Production run:
+  - 3.0.0 → 3.0.1 OTA; controld up, `getMediaHealth` answers.
+  - Media health on a real wall: an IPFS work with many subresources and an
+    Arweave video (the UA interceptor now pauses every `/ipfs/` and
+    `arweave.net` request); a heavy 4K WebGL work while the wall frame is
+    captured; a cold IPFS CID (its HEAD may outlive the player's 10 s, see
+    Known risks).
+  - The `docs/onchfs.md` verification bench (an Ethereum and a Tezos work,
+    the second play with the WAN unplugged), plus a mixed IPFS + onchfs
+    playlist that opens on the IPFS work: the cast does not wait.
+  - Series playback: cast a `seriesRegistry` playlist and change the mode.
+  - A damaged store: stop controld, write garbage over `store.db`, start
+    it; the hub answers, the journal logs "damaged store deleted" and
+    `getMediaHealth` answers from an empty store.
+
+| Input | Staging | Production |
+|---|---|---|
+| `version` | `3.0.1` | `3.0.1` |
+| `soak-test` | `false` | `false` |
+| `environment` | `Staging` | `Production` |
+| `pacman_snapshot` | `2026/07/13` | `2026/07/13` |
+| `ffos_user_ref` | `staging` | `release` |
+| `ff_player_ref` | `978266e9b62109ae3ae52b4221df67e71c84bc39` | same |
+| `dev_iso` | `false` | `false` |
+| `update_min_version` | `true` | `true` |
+| `update_required_version` | `false` | `false` |
+| `update_recovery_version` | see "Recovery" above | see "Recovery" above |
+
+Agents never dispatch a Production run, and dispatch a Staging one only
+after explicit in-session confirmation (`scripts/agent-iso-build-guard.sh`).
+After the Production run, tag `v3.0.1` on the ffos-user
+`staging -> release` merge commit.
+
+### Known risks (accepted)
+
+- A content-type HEAD that outlives the player's 10 s budget
+  (`detect/unreachable`) counts as a failed play by design (ff-player#329).
+  Two such plays conclude the work broken and the wall skips it for 24 h;
+  a cold IPFS CID or a saturated link can do this to a healthy work. A cast
+  of that work alone still plays it (the render-verdict fix above).
+- A series mode set on a `playlistUrl` cast reverts to `full` at the next
+  periodic refresh (#453, #455).
+- Every `/ipfs/` and `arweave.net` request in the kiosk makes a CDP round
+  trip through controld while the UA rewrite is on (bench item above).
+- A wrongly blank wall frame can turn one later transient failure into a
+  24 h skip while `renderConclusive` is off.
+- onchfs: no negative cache (an unreachable work is re-read on every
+  refresher pass and cast); an RPC answer may be up to ~129 MiB before the
+  tree budget is charged.
+- All display grants share one `getDeviceStatus` rate budget.
+- A develop build before this release could write an offline-cache
+  series-segments sidecar with raw `onchfs://` editions; offline, the
+  refresher's cached fallback replays it until the next cast rewrites it.
+  Bench and dev devices only (3.0.0 writes no sidecar).
+
+### Release notes (must say)
+
+- The Art Computer now notices artworks that no longer load and steps past
+  them, and plays fxhash works stored on chain (onchfs) directly from the
+  chain.
+
 ## 3.0.0 — full-image (cross-rail; paired with the ffos release)
 
 The first control-enabled production release (feral-file#3551: controller

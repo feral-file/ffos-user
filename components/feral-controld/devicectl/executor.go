@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
@@ -81,6 +82,13 @@ type Executor interface {
 	// because the executor must not depend on the policy store or the command
 	// router. Set once at wiring time.
 	SetContentPolicyResetter(reset func() error)
+	// SetMediaHealthResetter registers the callback that discards the
+	// device's media observation store during a factory reset
+	// (feral-file/ffos-user#392). The store is evidence about the previous
+	// owner's playlists, so it falls with the claim for the same rollback
+	// reason the device name does. Same seam shape as
+	// SetContentPolicyResetter; set once at wiring time.
+	SetMediaHealthResetter(reset func() error)
 	// SetSetupUI injects the process-wide setup-narration surface so the
 	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
@@ -112,6 +120,9 @@ type executor struct {
 	// contentPolicyResetter, when set, restores default content policy during a
 	// factory reset. See SetContentPolicyResetter.
 	contentPolicyResetter func() error
+	// mediaHealthResetter, when set, discards the media observation store
+	// during a factory reset. See SetMediaHealthResetter.
+	mediaHealthResetter func() error
 
 	// control is the feral-file#3551 claim-QR/reset seam (SetControl); nil
 	// when control.enabled is false, which leaves the claim QR and the
@@ -502,6 +513,11 @@ type executor struct {
 	// executor, violate the sleepScheduleFileMu discipline, and put file I/O on
 	// the CDP connect loop. Zero value "" is neither awake nor sleeping.
 	sleepScheduleDesiredCache sleepschedule.State
+	// sleepConfirmedAt is when the last player apply succeeded at
+	// sleeping (applySleepTransition stamps every transition into sleep);
+	// meaningful only while sleepPlayerState == playerSleeping. Read by
+	// PlayerAsleepSince for the media-health L1 gate's grace period.
+	sleepConfirmedAt time.Time
 	// Panel (FFP DDC) leg: sleepPanelState/sleepPanelOK is the last state the async
 	// panel-power worker reached. It lets the loop re-enqueue a best-effort DDC
 	// alignment when a transient ddcutil failure left the panel behind, without
@@ -755,6 +771,10 @@ func (e *executor) resetOwnerTailscale() {
 
 func (e *executor) SetContentPolicyResetter(reset func() error) {
 	e.contentPolicyResetter = reset
+}
+
+func (e *executor) SetMediaHealthResetter(reset func() error) {
+	e.mediaHealthResetter = reset
 }
 
 func (e *executor) SetDeviceNameObserver(observer func(name string)) {
@@ -1913,6 +1933,13 @@ func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, versi
 }
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
+	if p, ok := control.PrincipalFrom(ctx); ok && p.Role == control.RoleDisplay {
+		// Browser grants only need the orientation. Skip the full collector,
+		// which also reads network, playback, and device metadata.
+		return struct {
+			ScreenRotation string `json:"screenRotation"`
+		}{ScreenRotation: status.ReadScreenRotation(e.os)}, nil
+	}
 	resp, err := e.deviceStatus.GetStatus(ctx)
 	if err != nil || resp == nil {
 		return resp, err
@@ -3425,6 +3452,14 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	if e.contentPolicyResetter != nil {
 		if err := e.contentPolicyResetter(); err != nil {
 			e.logger.Warn("Failed to reset content policy during factory reset", zap.Error(err))
+		}
+	}
+	// The media observation store is the previous owner's playlist evidence
+	// (which works they cast, which failed): best-effort, same rollback
+	// reasoning as the content policy above.
+	if e.mediaHealthResetter != nil {
+		if err := e.mediaHealthResetter(); err != nil {
+			e.logger.Warn("Failed to discard the media health store during factory reset", zap.Error(err))
 		}
 	}
 

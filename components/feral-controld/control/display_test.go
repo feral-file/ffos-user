@@ -160,6 +160,11 @@ func TestDisplayGrantAdmission(t *testing.T) {
 	rc := d.cmdClaims(site, "displayPlaylist", testCast)
 	rc.Ctr = 1
 	d.expectCode(site, rc, CodeReplay)
+	rc = d.cmdClaims(site, "getDeviceStatus", `{}`)
+	adm, err := d.a.OpenFrom(d.seal(site, rc), Origin{Route: RouteRelayV2, Known: true})
+	if err != nil || !adm.Execute() || adm.Command != "getDeviceStatus" || adm.Principal.Role != RoleDisplay {
+		t.Fatalf("relay v2 status admission = %+v, err = %v", adm, err)
+	}
 	// Denials spend the ctr in the display store too.
 	d.expectCode(site, d.cmdClaims(site, "getDeviceStatus", `{}`), CodePermissionDenied)
 	d.expectCode(site, d.cmdClaims(site, "displayPlaylist", `{"dp1_call":{}}`), CodePermissionDenied)
@@ -373,7 +378,10 @@ func TestPermits(t *testing.T) {
 		{display, "displayPlaylist", testCast, true},
 		{display, "displayPlaylist", `{"dp1_call":{}}`, false},
 		{display, "displayPlaylist", `{"intent":{"action":"now_display"},"dp1_call":{},"x":1}`, false},
-		{display, "getDeviceStatus", `{}`, false},
+		{display, "getDeviceStatus", `{}`, true},
+		{display, "getDeviceStatus", `null`, false},
+		{display, "getDeviceStatus", `{"extra":true}`, false},
+		{display, "rotate", `{"clockwise":true}`, false},
 		{display, "connect", `{}`, false},
 		{display, CmdListControllers, `{}`, false},
 		{display, "ping", `{}`, false},
