@@ -650,9 +650,11 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// no page JS: it arms Fetch interception on offlinecache's own CDP
 		// socket, and it must be armed as early as possible so the reloaded
 		// document's asset requests are intercepted rather than escaping to
-		// the live network. Its COMPANION half — re-applying the previously
-		// enabled item scope, which does need a hydrated page to resolve what
-		// is playing — is the "replay-scope-resync" reconciler instead; see
+		// the live network. It also re-arms the scope remembered on disk from
+		// the last successful sync, which is what serves a kept work to the
+		// first load after a boot with no network. Its COMPANION half —
+		// syncing scope to what is actually playing, which does need a
+		// hydrated page — is the "replay-scope-resync" reconciler instead; see
 		// replayScopeResyncReconciler for why splitting them is load-bearing.
 		//
 		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
@@ -854,7 +856,9 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // This is the half of the reconnect resync that cannot run inline on the CDP
 // connect callback next to AttachOnReconnect. AttachOnReconnect resets scope
 // (a new top-level socket starts with Fetch disabled — see replayer.attachRoot)
-// and deliberately does not re-apply it; something must call SyncPlaylist.
+// and re-arms only the scope remembered from the last successful sync, as a
+// pass-through-on-miss head start (offlinecache/replayscope.go); the scope
+// for what is actually on screen still needs something to call SyncPlaylist.
 // ForceRefresh is that something, but the pass it triggers resolves what is
 // playing via statusPoller.FetchPlayerStatus, which evaluates
 // window.handleCDPRequest in the page. Fired inline at connect time that
@@ -865,9 +869,9 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // the resync exists to close. As a reconciler it runs once the new document
 // has installed its command handler, so the status fetch can actually answer.
 //
-// Nothing is lost by deferring it: scope is disabled between attach and
-// handler-ready either way, so assets fetched in that window miss
-// interception regardless of when this runs.
+// Nothing is lost by deferring it: between attach and handler-ready only the
+// remembered scope is armed either way, so the window is the same regardless
+// of when this runs.
 //
 // Known residual, deliberately accepted: the generation-ready worker gates on
 // StageHandler, which proves window.handleCDPRequest is INSTALLED, not that
