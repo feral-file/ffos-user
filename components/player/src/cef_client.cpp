@@ -33,13 +33,21 @@ void ArtworkClient::OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame
 void ArtworkClient::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
   auto b=presentation_.bounds(occurrence_.display);rect={0,0,b.width,b.height};view_width_=b.width;view_height_=b.height;
 }
+bool ArtworkClient::admit_paint(){
+  if(closing)return false;
+  // CEF can deliver several capture callbacks before the host gets its next
+  // turn. Copy only one: the others cannot be presented and waiting on all of
+  // their producer fences delays commands. Retain no borrowed handle/pixels.
+  if(paint_pending_){refresh_needed_=true;presentation_.coalesced_frame();return false;}
+  paint_pending_=true;return true;
+}
 void ArtworkClient::OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList&,const void* data,int width,int height) {
-  if(type!=PET_VIEW)return;
+  if(type!=PET_VIEW||!admit_paint())return;
   try {presentation_.software(surface,data,width,height);}catch(const std::exception& e){playback_.failed(id,e.what());}
 }
 void ArtworkClient::OnAcceleratedPaint(CefRefPtr<CefBrowser>, PaintElementType type,const RectList&,const CefAcceleratedPaintInfo& info) {
-  if(type!=PET_VIEW)return;
-  try {if(!presentation_.accelerated(surface,info)&&browser)browser->GetHost()->Invalidate(PET_VIEW);}
+  if(type!=PET_VIEW||!admit_paint())return;
+  try {presentation_.accelerated(surface,info);}
   catch(const std::exception& e){playback_.failed(id,e.what());}
 }
 void ArtworkClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus,int code,const CefString& detail) {
@@ -62,6 +70,15 @@ void ArtworkClient::configure(){
   auto message=CefProcessMessage::Create("renderer.configure");message->GetArgumentList()->SetString(0,config.dump());browser->GetMainFrame()->SendProcessMessage(PID_RENDERER,message);
 }
 void ArtworkClient::update_media(){
+  paint_pending_=false;
+  // Pace Chromium from host progress rather than its independent 60 Hz timer.
+  // Otherwise heavy WebGL can build a long producer queue while this UI thread
+  // waits for a copy; coalescing callbacks alone does not drain that GPU backlog.
+  if(browser)browser->GetHost()->SendExternalBeginFrame();
+  // A dropped post-load frame may have been a static document's only update.
+  // Request a replacement once per host turn, never recursively in OnPaint.
+  if(refresh_needed_&&browser){refresh_needed_=false;browser->GetHost()->Invalidate(PET_VIEW);}
+
   if(playback_.desired()&&playback_.desired()->id==id)occurrence_.display=playback_.desired()->display;
   else if(playback_.visible()&&playback_.visible()->id==id)occurrence_.display=playback_.visible()->display;
   auto bounds=presentation_.bounds(occurrence_.display);

@@ -17,7 +17,8 @@ class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu);
   ~Presentation();
-  bool accelerated(Surface& surface, const CefAcceleratedPaintInfo& info);
+  void accelerated(Surface& surface, const CefAcceleratedPaintInfo& info);
+  void coalesced_frame() { ++coalesced_frames_; }
   void software(Surface& surface, const void* data, int width, int height);
   void destroy(Surface& surface);
   void draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback);
@@ -40,7 +41,7 @@ class Presentation {
   int ui_width_ = 0, ui_height_ = 0;
   double pointer_x_ = 0, pointer_y_ = 0;
   uint64_t pointer_active_ = 0, gpu_copies_ = 0, cpu_copies_ = 0, swaps_ = 0;
-  uint64_t producer_busy_frames_ = 0;
+  uint64_t coalesced_frames_ = 0;
   double copy_ms_ = 0;
   void quad(GLuint texture, Bounds rect, float opacity = 1);
   void ui(const std::string& text, const std::string& qr, bool full);

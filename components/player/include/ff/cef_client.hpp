@@ -54,6 +54,8 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   std::string media_state_;
   int view_width_=0,view_height_=0;
   uint64_t ready_after_frame_=0;
+  bool paint_pending_=false, refresh_needed_=false;
+  bool admit_paint();
   void mark_ready();
   void configure();
   IMPLEMENT_REFCOUNTING(ArtworkClient);

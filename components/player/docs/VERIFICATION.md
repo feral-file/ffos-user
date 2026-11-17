@@ -253,3 +253,30 @@ and artifact upload. `evidence/ci-linux-build.log.gz` retains the full log;
 `evidence/ci-artifacts.json` records artifact size/digest. Later commits only
 update documentation/evidence. This does not qualify GPU presentation or replace
 the pinned FFOS pacman package qualification.
+
+## 2026-11-18: Transparent Grit frame-loop correction
+
+Homelab was awake and running a fresh FFOS filesystem; the prior native staging
+and package were absent. Restaged the pinned CEF and private media libraries from
+successful CI artifact 14347008935, then rebuilt the changed host on the device.
+The full CMake build and eleven CTest groups passed. Nine macOS core groups passed.
+The original kiosk, controld and watchdog remained active; native tests use an
+isolated systemd unit, socket and state directory.
+
+The GPU-copy experiment did not deadlock permanently inside `glFinish`: tracing
+showed repeated completed copies while commands timed out. CEF's pinned
+`CefMainRunner::DoMessageLoopWork` invokes `RunUntilIdle`, which continuous capture
+callbacks prevent from returning. Scheduling host work inside the CEF loop fixes
+that starvation, but independent frame production still built a long GPU queue.
+One admitted copy per host turn plus host-driven external BeginFrames removed
+that backlog in the regression run.
+
+`grit-render-loop-check.json` records two consecutive occurrences of the original
+Transparent Grit URL, sustained native state queries, no recovery/reselection,
+and two changing Cage compositor captures. All 154 calls completed (each includes
+hello plus the command): median 120.0 ms, p95 223.6 ms, maximum 310.8 ms. The two
+`grit-native-compositor-*.png` captures were visually inspected: both show the
+animated granular artwork and separate native artist/title/exhibition label,
+with different artwork geometry. They are compositor evidence, not photographs
+of the panel or artist-reference equivalence. Additional benchmark and renderer
+regression results follow in BENCHMARK.md. This is not whole-rewrite acceptance.

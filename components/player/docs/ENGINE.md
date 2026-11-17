@@ -1,7 +1,7 @@
 # Engine ownership and update procedure
 
 This is an implementation/maintenance record, not security-update acceptance.
-The previous-stable/current-stable build rehearsal passed both eleven-test Linux suites. Full portfolio qualification remains pending; Transparent Grit exposes an unresolved accelerated-buffer synchronization failure (BENCHMARK.md).
+The previous-stable/current-stable build rehearsal passed both eleven-test Linux suites. Full portfolio qualification remains pending. The Transparent Grit host scheduling/buffer regression and its verification are recorded in BENCHMARK.md.
 
 `dependencies.json` is the source of exact engine/library versions, download
 locations and SHA-256 hashes. The CEF pin is 156.0.30, Chromium 156.0.8078.96,
@@ -17,7 +17,7 @@ semantics. Its codec coverage is a separate outstanding corpus check.
 | `AMD_DEBUG=nodcc` | Workaround for accelerated rendering regression [CEF #4354](https://github.com/chromiumembedded/cef/issues/4354), reproduced on FF1 AMD hardware | Compare patched/upstream engine with and without it on holz, Living Code, GLB and media; capture GPU resets, memory and physical output |
 | `--use-angle=gl-egl` | Tested Wayland EGL path; `--use-gl=egl` caused GPU restart loops on this pin | Recheck supported ANGLE backend and AMD driver; do not copy the old Chromium command line |
 | `NO_STACK_PROTECTOR` on process entry | CEF zygote changes the stack canary; [CEF #3912](https://github.com/chromiumembedded/cef/issues/3912) | Build using package hardening flags and exercise renderer forks/restarts |
-| Implicit DMA-BUF producer readiness | CEF borrows plane handles only during the callback. The host must copy on GPU before returning, or skip that frame | Busy-buffer handling, no pre-ready presentation, resize/mixed media tests, copy/pacing counters. [CEF #4313](https://github.com/chromiumembedded/cef/issues/4313) concerns missing NVIDIA producer fences; host polling does not repair missing fences |
+| Implicit DMA-BUF producer readiness | Mesa orders imported reads after producer fences; the host completes its GPU copy during the borrowed callback. External BeginFrames and per-turn admission prevent producer/callback backlog | `device-render-loop-check.mjs`, static image/input/GLB readiness, copy/pacing counters. [CEF #4313](https://github.com/chromiumembedded/cef/issues/4313) concerns missing NVIDIA producer fences; host polling does not repair missing fences |
 | Per-context bundled scheme factory | Global factory registration did not serve independently created request contexts | Image and plain/Draco/KTX2 GLB load under fresh contexts; artist contexts cannot navigate to the bundled renderer |
 
 There is no applied local Chromium patch yet. Do not describe the AMD workaround

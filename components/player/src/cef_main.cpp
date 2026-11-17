@@ -2,15 +2,36 @@
 #include "ff/server.hpp"
 #include "ff/media_client.hpp"
 #include "include/cef_request_context.h"
+#include "include/cef_task.h"
 #include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <sys/stat.h>
-#include <thread>
+#include <exception>
 
-namespace {volatile std::sig_atomic_t stopping=0;void stop(int){stopping=1;}}
+namespace {
+volatile std::sig_atomic_t stopping=0;
+void stop(int){stopping=1;}
+// Run host work as a scheduled UI task. CefDoMessageLoopWork drains until idle:
+// a continuous stream of GPU paints can keep it from returning indefinitely.
+// Never put socket service, presentation or shutdown deadlines after that drain.
+class HostTick final : public CefTask {
+ public:
+  explicit HostTick(std::function<bool()> step):step_(std::move(step)){}
+  void Execute() override {
+    if(!step_()){CefQuitMessageLoop();return;}
+    if(!CefPostDelayedTask(TID_UI,this,1)){
+      std::cerr<<"CEF refused the next host tick; terminating host\n";
+      std::_Exit(1);
+    }
+  }
+ private:
+  std::function<bool()> step_;
+  IMPLEMENT_REFCOUNTING(HostTick);
+};
+}
 // Chromium changes the stack canary when the zygote forks. Its caller must
 // use the same annotation as CefExecuteProcess (CEF #3912).
 NO_STACK_PROTECTOR int main(int argc,char** argv){
@@ -65,11 +86,10 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         ff::require(it->second->status.contains("seekable")&&it->second->status["seekable"]==true,"unsupported","This media source is not seekable");it->second->seek(seconds);
       });
       std::string displayed;
-      while(!stopping){
-        CefDoMessageLoopWork();
+      auto frame=[&]{
         auto now=std::chrono::steady_clock::now().time_since_epoch();
         playback.tick(std::chrono::duration_cast<std::chrono::milliseconds>(now).count(),ff::wall_ms());server.poll();
-        if(!presentation.events([&](const ff::Json& event){try{if(event.value("kind","")=="releaseAll" || (playback.overlay().is_null()&&(!playback.desired()||playback.desired()->stage!="failed")))input(event);}catch(const std::exception& e){std::cerr<<"input: "<<e.what()<<'\n';}}))break;
+        if(!presentation.events([&](const ff::Json& event){try{if(event.value("kind","")=="releaseAll" || (playback.overlay().is_null()&&(!playback.desired()||playback.desired()->stage!="failed")))input(event);}catch(const std::exception& e){std::cerr<<"input: "<<e.what()<<'\n';}})){stopping=1;return;}
         input_state.flush();
         if(auto desired=playback.desired();desired&&desired->stage!="failed"&&!clients.contains(desired->id)&&!media.contains(desired->id)){
           if(ff::native_media(desired->item)){
@@ -81,7 +101,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
           // even if a browser never delivers its creation/close callback.
           ff::require(clients.size()<8,"renderer_capacity","Previous artwork browsers have not closed");
           auto url=ff::renderer_url(*desired);bool bundled=url=="ff-render://bundle/index.html";
-          CefWindowInfo window;window.SetAsWindowless(0);window.shared_texture_enabled=true;window.runtime_style=CEF_RUNTIME_STYLE_ALLOY;
+          CefWindowInfo window;window.SetAsWindowless(0);window.shared_texture_enabled=true;window.external_begin_frame_enabled=true;window.runtime_style=CEF_RUNTIME_STYLE_ALLOY;
           CefBrowserSettings browser_settings;browser_settings.windowless_frame_rate=60;browser_settings.background_color=CefColorSetARGB(255,0,0,0);
           // A fresh non-shared request context isolates cookies/cache/storage.
           // CEF may still share renderer/GPU processes: this is not a process guarantee.
@@ -117,18 +137,31 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
           if(!keep)it=media.erase(it);else ++it;
         }
         ff::reap_media_workers();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      playback.release_input();media.clear();for(auto& [id,client]:clients)client->close();
-      auto close_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
-      while(!clients.empty()){
+      };
+      bool closing=false;
+      std::exception_ptr frame_error;
+      std::chrono::steady_clock::time_point close_deadline;
+      auto tick=CefRefPtr<HostTick>(new HostTick([&]{
+        if(!stopping){
+          try{frame();}
+          catch(...){frame_error=std::current_exception();stopping=1;}
+        }
+        if(!stopping)return true;
+        if(!closing){
+          closing=true;playback.release_input();media.clear();
+          for(auto& [id,client]:clients)client->close();
+          close_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        }
         ff::reap_media_workers();
-        CefDoMessageLoopWork();
         for(auto it=clients.begin();it!=clients.end();)if(it->second->closed)it=clients.erase(it);else ++it;
+        if(clients.empty())return false;
         if(std::chrono::steady_clock::now()>close_deadline){std::cerr<<"CEF shutdown exceeded 5 seconds; terminating host\n";std::_Exit(1);}
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      }
+        return true;
+      }));
+      ff::require(CefPostTask(TID_UI,tick),"cef_initialization","Cannot schedule host work");
+      CefRunMessageLoop();
       std::cerr<<"presentation_metrics "<<presentation.metrics().dump()<<'\n';
+      if(frame_error)std::rethrow_exception(frame_error);
     }
     CefShutdown();return 0;
   }catch(const std::exception& e){std::cerr<<"ff-player-native: "<<e.what()<<'\n';if(initialized)CefShutdown();return 1;}

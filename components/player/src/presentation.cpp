@@ -5,10 +5,8 @@
 #include <drm_fourcc.h>
 #include <pango/pangocairo.h>
 #include <qrencode.h>
-#include <poll.h>
 #include <chrono>
 #include <iostream>
-#include <cerrno>
 
 namespace ff {
 namespace {
@@ -77,7 +75,7 @@ Presentation::~Presentation() {
   if (context_) SDL_GL_DeleteContext(context_); if (window_) SDL_DestroyWindow(window_); SDL_Quit();
 }
 void Presentation::destroy(Surface& surface) { glDeleteTextures(1, &surface.texture); surface = {}; }
-bool Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& info) {
+void Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& info) {
   require(SDL_GL_MakeCurrent(window_, context_) == 0, "graphics_error", SDL_GetError());
   const auto started = std::chrono::steady_clock::now();
   require(info.plane_count > 0 && info.plane_count <= 4, "graphics_error", "Invalid DMA-BUF plane count");
@@ -93,14 +91,9 @@ bool Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& 
   const EGLint pitches[] = {EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT, EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT};
   const EGLint mods[] = {EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT};
   for (int i = 0; i < info.plane_count; ++i) {
-    // Borrowed buffers cannot outlive the callback. Skip a busy producer and
-    // request another paint instead of blocking the command loop or declaring
-    // a temporary GPU wait terminal. No handle or stale contents are retained.
-    // This still cannot repair missing producer fences on CEF #4313/NVIDIA.
-    pollfd fd{info.planes[i].fd, POLLIN, 0};
-    int result=::poll(&fd,1,0);
-    if(result==0||(result<0&&errno==EINTR)){++producer_busy_frames_;return false;}
-    require(result>0&&(fd.revents&POLLIN),"graphics_error","DMA-BUF producer fence is invalid");
+    // EGL/driver implicit synchronization orders this read after the producer.
+    // Do not poll-and-drop: continuously busy artwork can lose every frame.
+    // The GPU copy below completes before CEF reuses its borrowed buffer.
     require(info.planes[i].offset <= INT32_MAX, "graphics_error", "DMA-BUF offset exceeds EGL range");
     attrs.insert(attrs.end(), {fds[i], info.planes[i].fd, offsets[i], static_cast<EGLint>(info.planes[i].offset), pitches[i], static_cast<EGLint>(info.planes[i].stride)});
     if (info.modifier != DRM_FORMAT_MOD_INVALID) attrs.insert(attrs.end(), {mods[i], static_cast<EGLint>(info.modifier & 0xffffffff), mods[i] + 1, static_cast<EGLint>(info.modifier >> 32)});
@@ -118,12 +111,14 @@ bool Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& 
   if (source_ok) glBlitFramebuffer(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height, 0, 0, rect.width, rect.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
   // CEF reuses its buffer immediately after this callback. Complete the GPU
   // copy here; never retain CEF's FD/image, and never read pixels on this path.
+  // This relies on Mesa's implicit DMA-BUF fences. It does not repair CEF #4313
+  // on NVIDIA. A driver/GPU stall is a shared process failure boundary requiring
+  // external watchdog recovery, not a recoverable artwork-renderer failure.
   glFinish(); auto error = glGetError(); glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDeleteFramebuffers(2, framebuffers); glDeleteTextures(1, &imported); release(display, image);
   require(source_ok && error == GL_NO_ERROR, "graphics_error", "DMA-BUF GPU copy failed");
   surface.accelerated = true; ++surface.frames; ++gpu_copies_;
   copy_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-  return true;
 }
 void Presentation::software(Surface& surface, const void* data, int width, int height) {
   require(diagnostic_cpu_, "acceleration_unavailable", "CEF returned CPU frames; accelerated playback is required");
@@ -253,5 +248,5 @@ bool Presentation::events(const std::function<void(const Json&)>& input) {
   }
   return true;
 }
-Json Presentation::metrics() const { return {{"gpuCopies",gpu_copies_},{"cpuCopies",cpu_copies_},{"producerBusyFrames",producer_busy_frames_},{"copyMilliseconds",copy_ms_},{"swaps",swaps_}}; }
+Json Presentation::metrics() const { return {{"gpuCopies",gpu_copies_},{"cpuCopies",cpu_copies_},{"coalescedFrames",coalesced_frames_},{"copyMilliseconds",copy_ms_},{"swaps",swaps_}}; }
 }

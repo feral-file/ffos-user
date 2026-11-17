@@ -74,10 +74,21 @@ faults still require external recovery.
 Borrowed CEF buffers are consumed during their callback. The normal path imports
 DMA-BUFs, performs one GPU copy into host-owned storage and completes the copy
 before releasing borrowed resources. It never reads pixels back to the CPU.
-Busy producer buffers are skipped, counted and requested again. A fresh frame
-after renderer readiness is required for presentation admission. `glFinish`
-currently provides conservative synchronization; its pacing cost and the complete
-GPU failure boundary still need qualification. CPU painting is diagnostic-only.
+Mesa's implicit fences order the GPU read after the producer; `glFinish` completes
+our copy before CEF reuses the buffer. Poll-and-drop is not used: it starved busy
+WebGL artwork. This is not a missing-fence repair for NVIDIA (CEF #4313).
+
+Host control, drawing and shutdown run as scheduled CEF UI tasks. They do not
+wait for `CefDoMessageLoopWork` to drain until idle, which continuous accelerated
+paint callbacks can prevent. Each host turn sends an external BeginFrame to
+Chromium. Each artwork admits at most one copy between host turns; surplus
+callbacks retain no resources and request one refresh on the next turn, including
+for static documents. A fresh frame after renderer readiness is still required
+for presentation admission. GPU copies can block on a driver/GPU failure: the
+external watchdog must recover that shared process boundary. CPU painting is
+diagnostic-only. Frame pacing, rotation and the complete failure boundary remain
+subject to portfolio/hardware qualification; see BENCHMARK.md for the measured
+Transparent Grit regression.
 
 Native SDL/Pango/QR presentation sits outside artwork DOMs. The host owns one
 pointer, held-key/button state and focus target, converts output pixels to artwork
