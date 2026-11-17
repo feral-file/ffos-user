@@ -233,3 +233,18 @@ The isolated CEF rehearsal built 156.0.28 (Chromium .88), then 156.0.30
 (Chromium .96), with all eleven Linux tests passing in each phase. Only the
 updated engine was launched. Its staged runtime passed media, recovery, input
 and model checks; retained engine evidence is still being collected.
+
+## Relocation and CI qualification
+
+The runtime source now lives in `ffos-user/components/player`. All nine macOS
+core test groups, the 28-exchange protocol schema suite, real C++/Go
+connectivity interop, Go race tests, full controld tests, vet and lint pass.
+The ffos-user script suite passes in Linux; root-only permission cases and the
+missing darkhttpd check are explicitly skipped by that suite. FFOS `make verify`
+passes in a non-root Linux container. macOS attempts encountered Linux-only
+tool assumptions and are not counted as passing. Logs use the `reorg-*` prefix.
+
+The full CI container requires Wayland >=1.23 and wayland-protocols >=1.38
+for the pinned mpv build. Ubuntu 24.04 was rejected; the development container
+now pins Ubuntu 26.04 and its manifest digest. The full remote build result
+will be recorded separately when it completes.
