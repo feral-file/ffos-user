@@ -280,3 +280,49 @@ animated granular artwork and separate native artist/title/exhibition label,
 with different artwork geometry. They are compositor evidence, not photographs
 of the panel or artist-reference equivalence. Additional benchmark and renderer
 regression results follow in BENCHMARK.md. This is not whole-rewrite acceptance.
+
+Final increment checks on the restored reviewed source (`689933a3`):
+
+- CEF renderer SIGKILL while Grit was active: same host instance/socket and
+  playback generation survived, bounded recovery presented a new occurrence in
+  1.776 s (`grit-cef-recovery.json`). Renderer PID was identified using this
+  isolated browser's diagnostic SystemInfo endpoint, then checked against its
+  systemd cgroup before signalling; CEF children retain zygote argv on this build.
+- Five native-input checks, 13 native-media checks and five media-recovery checks
+  passed. These include VA-API 4K H.264, 4096-square software decode fallback,
+  pause/seek/resume, same-URL EOS progression, HLS, audio controls and decoder
+  kill/hang recovery. The first media rerun used Python's generic HTTP server,
+  which does not advertise ranges; `seekable:false` correctly failed its fixture
+  precondition. Repeating with the repository's `test-media-server.py` passed.
+- EXIF orientation, animation, alpha/aspect-ratio pixel checks and all three
+  plain/Draco/KTX2 model decode/input checks passed (`grit-image-check.json`,
+  `grit-model-check.json`). Static documents still acquire post-ready frames.
+- The complete clean Linux CI build at `689933a3` passed all eleven CTest groups,
+  schema freshness, installation and artifact upload:
+  https://github.com/feral-file/ffos-user/actions/runs/44197619371 . Its compressed
+  log and artifact digest are retained as `grit-ci-linux-build.log.gz` and
+  `grit-ci-artifacts.json`.
+
+The BeginFrame-before-vsync experiment was reverted after it failed to show
+better frame pacing. It is not in the final source. See BENCHMARK.md for both
+measurements, engine/scene differences and remaining performance limitations.
+
+The related-work rerun (`grit-related-corpus.json`) presented holz and Sage
+Jenson's 36 Points #25. Their native compositor captures were visually reviewed:
+blue simulated logs for holz, granular circular forms for 36 Points, both with
+separate native labels. holz remained a top-level original URL with its CSP
+recorded in the response evidence. Returns and Slime Skelly still failed before
+navigation committed at their original ipfs.io URLs; their 60-second failures
+remain unresolved and are not counted as displayed works. Independent curl HEAD
+requests to both original URLs timed out after 15 seconds without an HTTP
+response (`grit-gateway-probe.log`); this is additional network evidence, not
+proof of a permanent gateway outage. Slime Skelly's compositor capture shows a
+readable native failure explanation. Raw captures are
+retained locally under `evidence/device/grit-related-corpus`, with hashes in the
+tracked evidence. This rerun is not full-corpus or physical-display acceptance.
+
+After verification, the isolated runtime and fixture server were stopped. The
+original kiosk, controld and watchdog were active. The owner CLI's signed
+`sleepNow` returned success and `currentState: sleeping`, `overrideState: sleeping`
+(`grit-final-sleep.json`). Native code is staged for development; partial controld
+migration has not been activated as the production session.

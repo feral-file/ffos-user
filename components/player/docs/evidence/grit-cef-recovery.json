@@ -1,0 +1,509 @@
+{
+  "before": {
+    "context": "curated",
+    "generation": 1,
+    "host": "responsive",
+    "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": false,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "gpu-loop-regression",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "label": {
+            "artist": "Dmitri Cherniak",
+            "title": "Transparent Grit"
+          },
+          "metadata": {
+            "artists": [
+              {
+                "name": "Dmitri Cherniak"
+              }
+            ]
+          },
+          "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+          "title": "Transparent Grit"
+        }
+      ],
+      "title": "Living Code"
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "Living Code",
+      "generation": 1,
+      "id": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "label": {
+          "artist": "Dmitri Cherniak",
+          "title": "Transparent Grit"
+        },
+        "metadata": {
+          "artists": [
+            {
+              "name": "Dmitri Cherniak"
+            }
+          ]
+        },
+        "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+        "title": "Transparent Grit"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "gpu-loop-regression",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "label": {
+            "artist": "Dmitri Cherniak",
+            "title": "Transparent Grit"
+          },
+          "metadata": {
+            "artists": [
+              {
+                "name": "Dmitri Cherniak"
+              }
+            ]
+          },
+          "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+          "title": "Transparent Grit"
+        }
+      ],
+      "title": "Living Code"
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "presented",
+    "revision": 5,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "Living Code",
+      "generation": 1,
+      "id": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "label": {
+          "artist": "Dmitri Cherniak",
+          "title": "Transparent Grit"
+        },
+        "metadata": {
+          "artists": [
+            {
+              "name": "Dmitri Cherniak"
+            }
+          ]
+        },
+        "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+        "title": "Transparent Grit"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "on",
+      "transitionMs": 650,
+      "volume": 0.5
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  },
+  "rendererPid": 223949,
+  "observations": [
+    {
+      "elapsed": 0.07489510699997481,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.20716916199944535,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.3402215099995374,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.4734151919992655,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.6075570590001007,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.7405407799997192,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.8733970329994918,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 1.007235053999466,
+      "stage": "loading",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.1401400959994135,
+      "stage": "loading",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.2740927509994435,
+      "stage": "loading",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.4065864650001458,
+      "stage": "loading",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.6538771420000558,
+      "stage": "committed",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.7757973029993082,
+      "stage": "presented",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    }
+  ],
+  "result": "passed",
+  "after": {
+    "context": "curated",
+    "generation": 1,
+    "host": "responsive",
+    "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": false,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "gpu-loop-regression",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "label": {
+            "artist": "Dmitri Cherniak",
+            "title": "Transparent Grit"
+          },
+          "metadata": {
+            "artists": [
+              {
+                "name": "Dmitri Cherniak"
+              }
+            ]
+          },
+          "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+          "title": "Transparent Grit"
+        }
+      ],
+      "title": "Living Code"
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "Living Code",
+      "generation": 1,
+      "id": "a48f341b-b383-4a6f-ade4-49e568fae311",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "label": {
+          "artist": "Dmitri Cherniak",
+          "title": "Transparent Grit"
+        },
+        "metadata": {
+          "artists": [
+            {
+              "name": "Dmitri Cherniak"
+            }
+          ]
+        },
+        "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+        "title": "Transparent Grit"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "gpu-loop-regression",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "label": {
+            "artist": "Dmitri Cherniak",
+            "title": "Transparent Grit"
+          },
+          "metadata": {
+            "artists": [
+              {
+                "name": "Dmitri Cherniak"
+              }
+            ]
+          },
+          "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+          "title": "Transparent Grit"
+        }
+      ],
+      "title": "Living Code"
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 1,
+      "exhausted": false,
+      "failedOccurrence": "ed9641c9-2bbd-499b-b037-ccfec2d2a0e1",
+      "lastError": "Renderer terminated (9): 9",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "presented",
+    "revision": 10,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "Living Code",
+      "generation": 1,
+      "id": "a48f341b-b383-4a6f-ade4-49e568fae311",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "label": {
+          "artist": "Dmitri Cherniak",
+          "title": "Transparent Grit"
+        },
+        "metadata": {
+          "artists": [
+            {
+              "name": "Dmitri Cherniak"
+            }
+          ]
+        },
+        "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+        "title": "Transparent Grit"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "on",
+      "transitionMs": 650,
+      "volume": 0.5
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  }
+}

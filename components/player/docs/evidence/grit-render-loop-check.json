@@ -179,5 +179,10 @@
     "maxMs": 310.83862499999987
   },
   "result": "passed_needs_capture_review",
-  "finishedAt": "2026-11-17T23:12:51.347Z"
+  "finishedAt": "2026-11-17T23:12:51.347Z",
+  "visualReview": {
+    "reviewed": true,
+    "observation": "Both compositor captures show changing granular artwork geometry and a separate stable native label.",
+    "physicalOutputVerified": false
+  }
 }

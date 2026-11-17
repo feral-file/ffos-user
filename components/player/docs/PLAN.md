@@ -59,3 +59,12 @@ Development CI builds and tests the complete CEF/media runtime without publishin
 - [ ] FF1 validation, update rehearsal, overnight evidence and review.
 
 2026-11-17 media milestone: native FFmpeg/libmpv build and sandboxed DMA-BUF playback verified on homelab. Details and limits are in `VERIFICATION.md`; this does not complete the migration.
+
+
+2026-11-18 failure investigation: user authorized waking homelab and correcting
+Transparent Grit. The device had a fresh filesystem; isolated staging was
+restored from the verified CI artifact, without activating partial controld.
+The host's RunUntilIdle loop and poll-and-drop path caused frame/control
+starvation. Scheduled UI ticks, callback coalescing and external BeginFrames
+passed the real artwork/control regression. Whole rewrite and coordinated FFOS
+activation remain incomplete; BENCHMARK.md records comparison and limitations.

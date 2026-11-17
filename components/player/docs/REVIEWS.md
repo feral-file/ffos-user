@@ -107,6 +107,33 @@ Transparent Grit creates a 1920-square canvas but native presentation starves on
 busy producer buffers. A two-millisecond poll budget did not fix it; an
 implicit-fence copy/completion experiment stalled command delivery. Both changes
 were reverted, and the staged runtime was restored. Evidence: BENCHMARK.md and
-`evidence/grit-sync-experiments.log`. Disposition: **open**, blocks portfolio
-qualification and activation. Anh is the change owner; no acceptance of this
-risk is inferred from the request to push the development branch.
+`evidence/grit-sync-experiments.log`. Initial disposition: **open**, blocking
+qualification and activation. The tested-path correction and current disposition
+are recorded below. Anh is the change owner; no acceptance of this risk is
+inferred from the request to push the development branch.
+
+
+## Transparent Grit correction, 2026-11-18
+
+Fresh-context `review_grit_frame_loop`, `review_surface: local`, inspected the
+full branch and correction at `689933a3`, its lifecycle/copy/readiness callers,
+new device harness and both compositor captures. Verdict **accept**, no material
+findings. Independently passed nine macOS CTest groups and the JavaScript syntax
+check. Linux execution was not independently rerun; final benchmark, shutdown
+and media/input/GLB/recovery results were pending during review. This is an
+increment review, not whole-rewrite qualification.
+
+BENCH-1 disposition: **fixed for the tested AMD FF1 path**. The root cause was host scheduling/backpressure as well as
+poll-and-drop admission, not an established CEF engine defect. The new host
+uses scheduled UI work, external BeginFrames, one admitted GPU copy per artwork
+per host turn and a deferred refresh for dropped static frames. The real-work
+regression passed 154 commands, repeated identical-URL occurrence replacement,
+and changing native compositor output. The historical poll-and-skip disposition
+above is superseded by this correction. Final qualification limits and benchmark
+results remain in BENCHMARK.md; AMD nodcc/NVIDIA fence engine limitations remain.
+
+The final external-frame runtime stopped through SIGTERM in 0.174 seconds,
+emitted presentation metrics and exited without hitting its five-second close
+or systemd eight-second stop deadline (`evidence/grit-fixed-runtime.log`). Systemd
+removed remaining zygote processes after the host exited. A hung GPU can still
+block the shared browser/native process and requires external recovery.
