@@ -2,9 +2,9 @@ name: Build Native Player
 on:
   push:
     branches: [develop, 'codex/**']
-    paths: ['components/player/**', '.github/workflows/build-player.yaml']
+    paths: ['components/player/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
   pull_request:
-    paths: ['components/player/**', '.github/workflows/build-player.yaml']
+    paths: ['components/player/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
   workflow_dispatch:
 permissions:
   contents: read
