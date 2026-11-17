@@ -99,3 +99,14 @@ Fresh-context reviewer `review_reorg_connectivity` found no material findings
 and returned **accept**. It independently ran mediator/playerlink race tests.
 Full container compilation was still running at review time; broad migration
 remains incomplete. Owner: Anh. No release or deployment qualification implied.
+
+## Hardware finding after the source-relocation review
+
+[BENCH-1][Major] Resolve accelerated buffer synchronization before activation.
+Transparent Grit creates a 1920-square canvas but native presentation starves on
+busy producer buffers. A two-millisecond poll budget did not fix it; an
+implicit-fence copy/completion experiment stalled command delivery. Both changes
+were reverted, and the staged runtime was restored. Evidence: BENCHMARK.md and
+`evidence/grit-sync-experiments.log`. Disposition: **open**, blocks portfolio
+qualification and activation. Anh is the change owner; no acceptance of this
+risk is inferred from the request to push the development branch.
