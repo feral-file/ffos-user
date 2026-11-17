@@ -1,0 +1,9 @@
+test-serve-feral-player: SKIPPED real-darkhttpd header validation (darkhttpd or curl not on PATH)
+test-serve-feral-player: OK
+test-headless-startup-contract: OK
+WARN: enable-wake-on-lan: enp2s0 does not advertise magic-packet wake support
+test-enable-wake-on-lan: OK
+readlink: illegal option -- e
+usage: readlink [-fn] [file ...]
+test-wifi-reading: factory check did not pick the second stick
+make: *** [verify-scripts] Error 1

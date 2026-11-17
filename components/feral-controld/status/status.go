@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +14,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/drm"
@@ -38,6 +35,7 @@ const (
 )
 
 type PlayerStatus struct {
+	Runtime        *RuntimeStatus              `json:"runtime,omitempty"`
 	Command        string                      `json:"castCommand,omitempty"`
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
 	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
@@ -300,10 +298,10 @@ type Poller interface {
 	SetSeriesPlaybackSource(fn func() *dp1.SeriesPlaybackMode)
 }
 
-// poller handles periodic polling of both player status via CDP and device status
+// poller publishes native player and device status through existing controller transports.
 type poller struct {
 	sync.RWMutex
-	cdp          cdp.CDP
+	player       PlayerStatusSource
 	relayer      relayer.Relayer
 	ws           ws.WS
 	deviceStatus DeviceStatus
@@ -334,12 +332,8 @@ type poller struct {
 	// on headless devices. Field (not a direct call) so tests can stub it.
 	displayConnected func() bool
 
-	// Whether CDP was initialized at the previous poll round. Only touched on the
-	// Start goroutine. Used to catch the disconnected→connected transition: a
-	// restarted Chromium reloads the web app from defaults, so status deduped
-	// against pre-restart hashes must be pushed fresh (the old
-	// PartOf=chromium-ready.target design reset these maps by restarting controld).
-	cdpWasInitialized bool
+	// Only accessed by the poll goroutine. A new runtime needs a fresh push.
+	lastRuntimeInstance string
 
 	// stampObserver, when set (SetStampObserver), is notified with every
 	// successfully-fetched round's document stamp and whether the field was
@@ -352,7 +346,8 @@ type poller struct {
 	// verificationLookup, when set (SetVerificationLookup), resolves the
 	// on-screen playlist's signature verdict. Same single-writer contract as
 	// stampObserver.
-	verificationLookup func(id, url string) (string, bool)
+	verificationLookup       func(id, url string) (string, bool)
+	nativeVerificationLookup func(instance string, generation uint64, id, url string) (string, bool)
 
 	// overlaySource, when set (SetOverlaySource), resolves whatever overlay
 	// is currently on screen, from whichever owner (issue #381). Same
@@ -371,7 +366,7 @@ type poller struct {
 }
 
 func NewPoller(
-	cdp cdp.CDP,
+	player PlayerStatusSource,
 	r relayer.Relayer,
 	ws ws.WS,
 	ds DeviceStatus,
@@ -380,7 +375,7 @@ func NewPoller(
 	logger *zap.Logger,
 ) Poller {
 	return &poller{
-		cdp:                     cdp,
+		player:                  player,
 		relayer:                 r,
 		ws:                      ws,
 		deviceStatus:            ds,
@@ -448,25 +443,14 @@ func (s *poller) Start(ctx context.Context) {
 		case <-statusTicker.C:
 			s.pollRound(ctx)
 		case <-s.refreshChan:
-			s.logger.Info("Force refreshing status due to CDP command")
+			s.logger.Info("Force refreshing player status")
 			s.pollRound(ctx)
 		}
 	}
 }
 
-// pollRound runs one full poll pass. Before polling it drops the dedup hashes
-// whenever CDP has just (re)connected: the restarted Chromium's web app reloaded
-// from defaults, so "unchanged since last push" no longer implies the client has
-// the state — everything must go out fresh once.
+// pollRound has no dependency on a browser document, page URL or CDP target.
 func (s *poller) pollRound(ctx context.Context) {
-	cdpInitialized := s.cdp.Initialized()
-	if cdpInitialized && !s.cdpWasInitialized {
-		s.logger.Info("CDP (re)connected, clearing status dedup caches for a fresh push")
-		clear(s.lastRelayerStatusHashes)
-		clear(s.lastWSStatusHashes)
-	}
-	s.cdpWasInitialized = cdpInitialized
-
 	s.pollPlayerStatus(ctx)
 	s.pollDeviceStatus(ctx)
 	s.pollDDCStatus(ctx)
@@ -507,6 +491,14 @@ func (s *poller) SetVerificationLookup(fn func(id, url string) (string, bool)) {
 	s.verificationLookup = fn
 }
 
+// SetNativeVerificationLookup binds trust to the host instance and presented
+// generation. A playlist ID or URL alone cannot distinguish two casts.
+func SetNativeVerificationLookup(p Poller, fn func(string, uint64, string, string) (string, bool)) {
+	if s, ok := p.(*poller); ok {
+		s.nativeVerificationLookup = fn
+	}
+}
+
 func (s *poller) SetOverlaySource(fn func() *Overlay) {
 	s.overlaySource = fn
 }
@@ -541,36 +533,15 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 			s.playbackObserver(nil)
 		}
 	}()
-	// While CDP is intentionally absent (headless boot with no monitor, or mid-reconnect
-	// after a kiosk/Chromium restart) every checkStatus send would fail at Error level and
-	// emit a player-status error notification each interval, flooding logs. Skip
-	// the poll entirely in that state, but keep playback-duration accounting moving with a
-	// "not playing" sample so metrics do not freeze while disconnected.
-	if !s.cdp.Initialized() {
-		s.updateArtPlaybackMetrics(false, time.Now())
-		return
-	}
-
-	pageURL, err := s.cdp.PageNavigationURL(ctx)
-	if err != nil {
-		s.logger.Debug("Failed to read page URL before player status poll", zap.Error(err))
-	} else if !isPlayerPageURL(pageURL) {
-		// Non-player pages do not support checkStatus at all, so polling CDP here
-		// cannot produce a real player update. Skipping the command avoids waking
-		// Chromium on QR/setup screens while keeping playback-duration accounting
-		// moving forward with a "not playing" sample.
-		s.updateArtPlaybackMetrics(false, time.Now())
-		return
-	}
 
 	now := time.Now()
 
 	playerStatus, err := s.FetchPlayerStatus(ctx)
 	if err != nil {
 		s.updateArtPlaybackMetrics(false, now)
-		s.logger.Error("Failed to get player status from CDP", zap.Error(err))
+		s.logger.Error("Failed to get native player status", zap.Error(err))
 
-		// Notify relayer about the CDP error in the expected format
+		// Preserve the external error envelope; a failed read is never an empty cast.
 		errorMessage := map[string]interface{}{
 			"ok":    false,
 			"error": err.Error(),
@@ -587,6 +558,12 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	if playerStatus == nil {
 		s.updateArtPlaybackMetrics(false, now)
 		return
+	}
+
+	if playerStatus.Runtime != nil && playerStatus.Runtime.Instance != s.lastRuntimeInstance {
+		clear(s.lastRelayerStatusHashes)
+		clear(s.lastWSStatusHashes)
+		s.lastRuntimeInstance = playerStatus.Runtime.Instance
 	}
 
 	// Report the observed stamp regardless of notification suppression below:
@@ -636,15 +613,23 @@ func (s *poller) annotateSignatureStatus(playerStatus *PlayerStatus) {
 	// spoofed reply) could have supplied this field. It is controld-owned:
 	// drop whatever arrived and set it only from the lookup below.
 	playerStatus.SignatureStatus = nil
-	if s.verificationLookup == nil {
-		return
-	}
 	id, url := "", ""
 	if playerStatus.Playlist != nil {
 		id = playerStatus.Playlist.ID
 	}
 	if playerStatus.PlaylistURL != nil {
 		url = *playerStatus.PlaylistURL
+	}
+	if runtime := playerStatus.Runtime; runtime != nil {
+		if s.nativeVerificationLookup != nil && runtime.Presented != nil {
+			if verdict, ok := s.nativeVerificationLookup(runtime.Instance, runtime.Presented.Generation, id, url); ok {
+				playerStatus.SignatureStatus = &verdict
+			}
+		}
+		return
+	}
+	if s.verificationLookup == nil {
+		return
 	}
 	if status, ok := s.verificationLookup(id, url); ok {
 		playerStatus.SignatureStatus = &status
@@ -713,10 +698,6 @@ func (s *poller) annotateSeriesPlayback(playerStatus *PlayerStatus) {
 	playerStatus.DeviceSettings.SeriesPlayback = mode
 }
 
-func isPlayerPageURL(url string) bool {
-	return strings.HasPrefix(url, constants.WEBAPP_URL)
-}
-
 func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, message interface{}) {
 	if message == nil {
 		s.logger.Debug("Notification message is nil, skipping notification",
@@ -777,60 +758,7 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 }
 
 func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
-	payload := map[string]interface{}{
-		"messageID": "",
-		"message": map[string]interface{}{
-			"command": "checkStatus",
-			"request": map[string]interface{}{},
-		},
-	}
-	// Marshal the payload to JSON string
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal checkStatus payload: %w", err)
-	}
-
-	// Send the payload to the CDP
-	expr := fmt.Sprintf("window.handleCDPRequest(%s)", string(payloadBytes))
-	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": expr,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("cdp evaluate failed: %w", err)
-	}
-
-	if result == nil {
-		// FIXME: This should not happen, resolve the root cause
-		// We accept it for now to avoid flooding error logs.
-		s.logger.Warn("CDP returned nil result for player status")
-		return nil, nil
-	}
-
-	// Check if the result is a map
-	resultMap, ok := result.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("unexpected result type: %T", result)
-	}
-
-	// Get the message from the result
-	message, ok := resultMap["message"]
-	if !ok {
-		return nil, fmt.Errorf("missing message in result")
-	}
-
-	// Marshal the message
-	jsonMessage, err := s.json.Marshal(message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	// Unmarshal the message
-	playerStatus := &PlayerStatus{}
-	if err := s.json.Unmarshal(jsonMessage, playerStatus); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
-	}
-
-	return playerStatus, nil
+	return s.player.FetchPlayerStatus(ctx)
 }
 
 // lightweightPlayerStatus creates a lightweight player status by removing the large fields (Playlist) from the player status

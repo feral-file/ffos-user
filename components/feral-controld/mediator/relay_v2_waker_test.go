@@ -2,7 +2,6 @@ package mediator_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 )
@@ -35,7 +33,7 @@ func TestMediator_ConnectivityEdgeWakesRelayV2(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
 			pr := &probingRelayer{MockRelayer: ts.mockRelayer}
-			ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCDP, ts.mockCommandHandler,
+			ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCommandHandler,
 				ts.mockExecutor, ts.mockRefresher, ts.mockJSON, ts.logger)
 			ts.mediator.SetConnectivityPushHook(func() {
 				select {
@@ -46,13 +44,11 @@ func TestMediator_ConnectivityEdgeWakesRelayV2(t *testing.T) {
 			sink, ok := ts.mediator.(interface{ SetRelayV2Waker(func()) })
 			require.True(t, ok, "mediator must expose the SetRelayV2Waker seam")
 			sink.SetRelayV2Waker(func() { pr.record("wake-v2") })
-			wireConnectivitySession(t, ts)
+			wireConnectivityPlayer(t, ts)
 
-			ts.mockCDP.EXPECT().
-				Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-					"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", tc.connected),
-				}).
-				Return(map[string]interface{}{"result": "ok"}, nil).
+			ts.mockPlayer.EXPECT().
+				SetConnectivity(gomock.Any(), tc.connected).
+				Return(nil).
 				Times(1)
 			ts.mockRelayer.EXPECT().IsConnected().Return(tc.legacyConnected).AnyTimes()
 			ts.mockRelayer.EXPECT().RetryableConnect(gomock.Any()).DoAndReturn(func(context.Context) error {
@@ -92,7 +88,7 @@ func TestMediator_ConnectivityEdgeWakesRelayV2BeforeAnyLegacyQuery(t *testing.T)
 	ts := setup(t)
 	defer ts.teardown()
 	pr := &probingRelayer{MockRelayer: ts.mockRelayer}
-	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCDP, ts.mockCommandHandler,
+	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCommandHandler,
 		ts.mockExecutor, ts.mockRefresher, ts.mockJSON, ts.logger)
 	ts.mediator.SetConnectivityPushHook(func() {
 		select {
@@ -104,11 +100,11 @@ func TestMediator_ConnectivityEdgeWakesRelayV2BeforeAnyLegacyQuery(t *testing.T)
 	sink, ok := ts.mediator.(interface{ SetRelayV2Waker(func()) })
 	require.True(t, ok)
 	sink.SetRelayV2Waker(func() { close(woke) })
-	wireConnectivitySession(t, ts)
+	wireConnectivityPlayer(t, ts)
 
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "window.handleConnectivityChange(true)"}).
-		Return(map[string]interface{}{"result": "ok"}, nil).
+	ts.mockPlayer.EXPECT().
+		SetConnectivity(gomock.Any(), true).
+		Return(nil).
 		Times(1)
 	// The legacy handshake is in progress: IsConnected blocks until released.
 	release := make(chan struct{})

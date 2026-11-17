@@ -1,0 +1,46 @@
+{
+  "recordedAt": "2026-11-17T09:37:36.373303+00:00",
+  "original": {
+    "ffos-user": {
+      "branch": "codex/device-id-relay",
+      "revision": "673f89f0673256bbfeff3cf3e029b3ebf22bd15c",
+      "dirty": false
+    },
+    "ffos": {
+      "branch": "develop",
+      "revision": "bf84a94bce5c682a6021ca0d39d0ff18b8e7f742",
+      "dirty": false
+    }
+  },
+  "repositories": {
+    "ffos-user": {
+      "revision": "25b191e0e8bfbda492f2fa6f74e293528365362e",
+      "branch": "codex/native-player",
+      "status": "",
+      "dirtyFileSHA256": {}
+    },
+    "ffos": {
+      "revision": "11c1f04c92be1775580026767284f4ba46a6b465",
+      "branch": "codex/native-player",
+      "status": "",
+      "dirtyFileSHA256": {}
+    },
+    "ff-player": {
+      "revision": "07805905f85d16a143bc9f409cb41a8df14c356e",
+      "branch": "codex/fix-player-log-fetch",
+      "status": " M docs/verification.md\n M public/ffos-player-contract.json\n A src/components/artwork-inspection/ArtworkInspection.module.scss\n A src/components/artwork-inspection/ArtworkInspection.test.tsx\n A src/components/artwork-inspection/ArtworkInspection.tsx\n A src/components/artwork-inspection/contract.test.ts\n A src/components/artwork-inspection/contract.ts\n M src/components/artwork-player/ArtworkPlayer.tsx\n M src/components/mint-pairing/MintPairingOverlay.tsx\n M src/components/setup/SetupOverlay.tsx\n",
+      "dirtyFileSHA256": {
+        "docs/verification.md": "1286520f1b06ae16bca2286f39bbe07fe9bfc08bd5158cada8e637de83c94fd8",
+        "public/ffos-player-contract.json": "9139700b3978851acf0a57ee1a2c92dcbe3325b8341947cde1174ed5bf7addb2",
+        "src/components/artwork-inspection/ArtworkInspection.module.scss": "a994d4be5d74c2ac4ce5a5e4e1b3f5a9b2036e6e642963490cac0b7db31574ff",
+        "src/components/artwork-inspection/ArtworkInspection.test.tsx": "203ff9b20fe72420512d0c5487fe6f16d188f1d8456b92c0c31056f753b603ba",
+        "src/components/artwork-inspection/ArtworkInspection.tsx": "caccf72fba2b43875afe33ec73ef1a4596fe71504c903a0bed8574ae8f62730d",
+        "src/components/artwork-inspection/contract.test.ts": "346a5b979f4cade4d87676be1c2e64c89242b8e92440936b725c0e771d486a4e",
+        "src/components/artwork-inspection/contract.ts": "a8056565ef8f4ade6a7e42e3022874d72e0024dd01ee535af1829edc3ea2823b",
+        "src/components/artwork-player/ArtworkPlayer.tsx": "498ba4e4031e40f20f15d7af8e7df1f10a51ebe35690c19a7d267d5af4584a5d",
+        "src/components/mint-pairing/MintPairingOverlay.tsx": "8bef17ac827ed3dd80d84f93780d65223079a3bf50424c6658ac08e5a4fcf5cb",
+        "src/components/setup/SetupOverlay.tsx": "e2cc78d8d1be0d6341b21275cc0e7a8fd0db92a2d475fce803379e5c8fb0698a"
+      }
+    }
+  }
+}

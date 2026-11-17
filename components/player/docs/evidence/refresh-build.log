@@ -1,0 +1,52 @@
+Nov 17 22:16:49 homelab systemd[928]: Started [systemd-run] /usr/bin/cmake --build build -j3.
+Nov 17 22:16:49 homelab cmake[2255399]: [0/1] Re-running CMake...
+Nov 17 22:16:50 homelab cmake[2255400]: Bundled model-viewer 4.3.1 matches pinned package; license retained
+Nov 17 22:16:50 homelab cmake[2255400]: Pinned Draco and Basis decoder assets packaged locally
+Nov 17 22:16:50 homelab cmake[2255400]: -- Configuring done (0.4s)
+Nov 17 22:16:50 homelab cmake[2255400]: -- Generating done (0.0s)
+Nov 17 22:16:50 homelab cmake[2255400]: -- Build files have been written to: /home/feralfile/ff-native-package-explicit/src/ff-player-native/build
+Nov 17 22:16:55 homelab cmake[2255399]: [1/45] Building CXX object CMakeFiles/ff_core.dir/src/store.cpp.o
+Nov 17 22:16:55 homelab cmake[2255399]: [2/45] Building CXX object CMakeFiles/ff_core.dir/src/json.cpp.o
+Nov 17 22:16:59 homelab cmake[2255399]: [3/45] Building CXX object CMakeFiles/ff_core.dir/src/playlist_update.cpp.o
+Nov 17 22:17:01 homelab cmake[2255399]: [4/45] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+Nov 17 22:17:02 homelab cmake[2255399]: [5/45] Building CXX object CMakeFiles/ff_core.dir/src/protocol.cpp.o
+Nov 17 22:17:03 homelab cmake[2255399]: [6/45] Building CXX object CMakeFiles/ff_core.dir/src/media_kind.cpp.o
+Nov 17 22:17:03 homelab cmake[2255399]: [7/45] Building CXX object CMakeFiles/ff_core.dir/src/server.cpp.o
+Nov 17 22:17:05 homelab cmake[2255399]: [8/45] Building CXX object CMakeFiles/ff_core.dir/src/input.cpp.o
+Nov 17 22:17:07 homelab cmake[2255399]: [9/45] Building CXX object CMakeFiles/ff_media_ipc.dir/src/media_ipc.cpp.o
+Nov 17 22:17:08 homelab cmake[2255399]: [10/45] Building CXX object CMakeFiles/ff_core.dir/src/overlay.cpp.o
+Nov 17 22:17:08 homelab cmake[2255399]: [11/45] Linking CXX static library libff_core.a
+Nov 17 22:17:08 homelab cmake[2255399]: [12/45] Building CXX object CMakeFiles/ff-player-core.dir/src/core_main.cpp.o
+Nov 17 22:17:11 homelab cmake[2255399]: [13/45] Building CXX object CMakeFiles/ff-player-import.dir/src/import_main.cpp.o
+Nov 17 22:17:14 homelab cmake[2255399]: [14/45] Building CXX object CMakeFiles/server-tests.dir/tests/server_test.cpp.o
+Nov 17 22:17:15 homelab cmake[2255399]: [15/45] Building CXX object CMakeFiles/input-tests.dir/tests/input_test.cpp.o
+Nov 17 22:17:18 homelab cmake[2255399]: [16/45] Building CXX object CMakeFiles/core-tests.dir/tests/core_test.cpp.o
+Nov 17 22:17:19 homelab cmake[2255399]: [17/45] Building CXX object CMakeFiles/scheduling-tests.dir/tests/scheduling_test.cpp.o
+Nov 17 22:17:19 homelab cmake[2255399]: [18/45] Building CXX object CMakeFiles/recovery-tests.dir/tests/recovery_test.cpp.o
+Nov 17 22:17:23 homelab cmake[2255399]: [19/45] Building CXX object CMakeFiles/modes-tests.dir/tests/modes_test.cpp.o
+Nov 17 22:17:23 homelab cmake[2255399]: [20/45] Linking CXX static library libff_media_ipc.a
+Nov 17 22:17:24 homelab cmake[2255399]: [21/45] Building CXX object CMakeFiles/overlay-tests.dir/tests/overlay_test.cpp.o
+Nov 17 22:17:25 homelab cmake[2255399]: [22/45] Building CXX object CMakeFiles/playlist-update-tests.dir/tests/playlist_update_test.cpp.o
+Nov 17 22:17:26 homelab cmake[2255399]: [23/45] Building CXX object CMakeFiles/media-ipc-tests.dir/tests/media_ipc_test.cpp.o
+Nov 17 22:17:27 homelab cmake[2255399]: [24/45] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+Nov 17 22:17:30 homelab cmake[2255399]: [25/45] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+Nov 17 22:17:33 homelab cmake[2255399]: [26/45] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+Nov 17 22:17:33 homelab cmake[2255399]: [27/45] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+Nov 17 22:17:36 homelab cmake[2255399]: [28/45] Building CXX object CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o
+Nov 17 22:17:37 homelab cmake[2255399]: [29/45] Linking CXX executable ff-player-core
+Nov 17 22:17:37 homelab cmake[2255399]: [30/45] Linking CXX executable ff-player-import
+Nov 17 22:17:37 homelab cmake[2255399]: [31/45] Linking CXX executable core-tests
+Nov 17 22:17:37 homelab cmake[2255399]: [32/45] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation.cpp.o
+Nov 17 22:17:37 homelab cmake[2255399]: [33/45] Linking CXX executable server-tests
+Nov 17 22:17:37 homelab cmake[2255399]: [34/45] Linking CXX executable input-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [35/45] Linking CXX executable scheduling-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [36/45] Linking CXX executable recovery-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [37/45] Linking CXX executable modes-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [38/45] Linking CXX executable playlist-update-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [39/45] Linking CXX executable media-ipc-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [40/45] Linking CXX executable overlay-tests
+Nov 17 22:17:38 homelab cmake[2255399]: [41/45] Linking CXX executable ff-media-worker
+Nov 17 22:17:38 homelab cmake[2255399]: [42/45] Linking CXX executable media-decode-tests
+Nov 17 22:17:39 homelab cmake[2255399]: [43/45] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+Nov 17 22:17:40 homelab cmake[2255399]: [44/45] Linking CXX executable ff-player-native
+Nov 17 22:17:40 homelab systemd[928]: ff-native-refresh-reviewed-build.service: Consumed 2min 27.324s CPU time over 50.644s wall clock time, 1.6G memory peak.

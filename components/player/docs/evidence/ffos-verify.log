@@ -1,0 +1,104 @@
+./scripts/verify.sh
+==> Checking shell syntax
+==> Running shellcheck
+==> Checking owner Tailscale integration
+...........................
+----------------------------------------------------------------------
+Ran 27 tests in 1.067s
+
+OK
+==> Validating GitHub workflow YAML
+Validated 13 workflow files.
+==> Checking verification workflow contract
+==> Checking offline-cache OTA persistence contract
+==> Checking OTA download helper
+== fast link
+== slow link, Range honored
+== slow link, Range refused
+== missing file
+ota-download: all cases passed
+==> Checking the internet check
+test-internet-check: ok
+==> Checking OTA control-state carry
+== live state present
+== live state absent, candidate clean
+== live state absent, candidate holds a stale copy
+== stop fails, controld still running
+== stop fails, no controld process
+== tombstone live (reset in progress)
+== tombstone absent live, present in candidate
+== tombstone plus directories
+== same size and mtime, different content
+== candidate entries that are symlinks
+== candidate .state is a symlink out of the candidate
+== feral-watchdog stop marker
+== restart fails
+== stat error other than ENOENT
+== live side symlinks
+== downgrade guard
+== best-effort media-health store
+== pre-download stop check
+== package rail
+== arming block
+== feral-system-update.sh wiring
+ota-control-state: all cases passed
+==> Checking OTA free-space precheck contract
+==> Checking image package prefetch
+==> Checking FF1 log-stream image configuration
+==> Checking controld.json secure-control release gate
+==> Checking feral-controld protocol capability marker
+==> Checking agent ISO build guard
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+test-agent-iso-build-guard: OK
+==> Checking agent branch flow guard
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+grep: warning: stray \ before /
+test-agent-branch-flow-guard: OK
+==> Checking kiosk console policy
+==> Checking README workflow inventory
+==> Verification complete

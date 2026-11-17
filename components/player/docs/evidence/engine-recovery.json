@@ -1,0 +1,47 @@
+{
+  "checks": [
+    {
+      "name": "decoder replacement",
+      "attempt": 1,
+      "seconds": 2.064697002992034,
+      "failedOccurrence": "3b2b26c2-c9b8-457e-8ad9-7fdea6cbadd5",
+      "presentedOccurrence": "b38a55fb-d52d-49a1-a056-2b88c9c9a5f3",
+      "hardwareDecode": "vaapi"
+    },
+    {
+      "name": "decoder replacement",
+      "attempt": 2,
+      "seconds": 3.0667080930434167,
+      "failedOccurrence": "b38a55fb-d52d-49a1-a056-2b88c9c9a5f3",
+      "presentedOccurrence": "bfcc5fb1-b592-40c3-adb6-794b1dd9a742",
+      "hardwareDecode": "vaapi"
+    },
+    {
+      "name": "decoder replacement",
+      "attempt": 3,
+      "seconds": 5.016256081988104,
+      "failedOccurrence": "bfcc5fb1-b592-40c3-adb6-794b1dd9a742",
+      "presentedOccurrence": "5f2c4811-9c75-424a-ba7a-49a3e2d6a739",
+      "hardwareDecode": "vaapi"
+    },
+    {
+      "name": "fourth failure remains terminal with responsive host",
+      "state": {
+        "attempt": 3,
+        "exhausted": true,
+        "failedOccurrence": "5f2c4811-9c75-424a-ba7a-49a3e2d6a739",
+        "lastError": "Media worker exited: 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "name": "explicit refresh recovers after exhausted budget",
+      "occurrence": "7eaad9cb-d6ec-41ce-a08b-123c0c74881d"
+    }
+  ],
+  "startedAt": 1794930413.156836,
+  "result": "passed",
+  "finishedAt": 1794930429.1443973
+}

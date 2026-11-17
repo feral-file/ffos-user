@@ -1,0 +1,108 @@
+{
+  "cef": {
+    "version": "156.0.30+g6028375+chromium-156.0.8078.96",
+    "platform": "linux64",
+    "archive": "cef_binary_156.0.30+g6028375+chromium-156.0.8078.96_linux64_minimal.tar.bz2",
+    "sha256": "356db99d653698aa9ba78b22965032b4fa5b23ba079ffdbaa5d28a8530f04011",
+    "upstreamSha1": "0b4c2189e3b93033bbef13add1a86f66849c1e62",
+    "url": "https://cef-builds.spotifycdn.com/cef_binary_156.0.30+g6028375+chromium-156.0.8078.96_linux64_minimal.tar.bz2",
+    "file": "cef.tar.bz2"
+  },
+  "nlohmann_json": {
+    "version": "3.12.0",
+    "url": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp",
+    "sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63",
+    "file": "json.hpp"
+  },
+  "mpv": {
+    "version": "0.42.0",
+    "commit": "b0841e8c4d156b8403dc1876c4cbd9011eb583f3",
+    "url": "https://codeload.github.com/mpv-player/mpv/tar.gz/refs/tags/v0.42.0",
+    "sha256": "bcfebbfa2b65a6d88dc97ea18117831072373e38b5785a2afb874ed4df5070dd",
+    "file": "mpv-0.42.0.tar.gz"
+  },
+  "libplacebo": {
+    "version": "7.387.0",
+    "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/refs/tags/v7.387.0",
+    "sha256": "f9e62d3774a9c4cfd198ec3abaa88294aaade2e31c04d5ab02bcf4abc98b1df5",
+    "file": "libplacebo-7.387.0.tar.gz"
+  },
+  "glad": {
+    "commit": "73db193f853e2ee079bf3ca8a64aa2eaf6459043",
+    "sha256": "33dbeae44d8315ece57e14eba4b1b4a02ac5406d1c4f49cd20048c91522a6b9a",
+    "file": "glad.tar.gz",
+    "url": "https://codeload.github.com/Dav1dde/glad/tar.gz/73db193f853e2ee079bf3ca8a64aa2eaf6459043"
+  },
+  "fast_float": {
+    "commit": "97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+    "sha256": "2b132274539286e41f37857cac22aa8441d21bd86d55de825a3342b149f66801",
+    "file": "fast_float.tar.gz",
+    "url": "https://codeload.github.com/fastfloat/fast_float/tar.gz/97b54ca9e75f5303507699d27c6b4f4efe4641a1"
+  },
+  "vulkan_headers": {
+    "commit": "74d8a6cb930c68ef617b202c3ff3c59d919e086b",
+    "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/74d8a6cb930c68ef617b202c3ff3c59d919e086b",
+    "file": "vulkan-headers.tar.gz",
+    "sha256": "75967a8288ff16044a86d1af462b96d2e75c435937efb75f2bb4102ab0382f29"
+  },
+  "model_viewer": {
+    "version": "4.3.1",
+    "url": "https://registry.npmjs.org/@google/model-viewer/-/model-viewer-4.3.1.tgz",
+    "file": "model-viewer-4.3.1.tgz",
+    "sha256": "33bb64ac99b83e40dfbfc39f896ecbdc301264fad198a91f37e1847c7ec6c644",
+    "bundleSha256": "283b0672384614b4847636c306fc93fe4b1fcadc76d668b4e47f0ca76bcf033b"
+  },
+  "ffmpeg": {
+    "version": "8.1.2",
+    "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n8.1.2",
+    "file": "ffmpeg-8.1.2.tar.gz",
+    "sha256": "9fd092511605bbebafe095ea6d38d9e40f34d12f7386e1258372df8be0576eb7"
+  },
+  "renderer_draco_decoder_js": {
+    "version": "1.5.6",
+    "file": "draco_decoder.js",
+    "url": "https://www.gstatic.com/draco/versioned/decoders/1.5.6/draco_decoder.js",
+    "sha256": "30e4d486fa020737af10e3c56197693e5b904bdc05b8bfa5d7b06751dec6da04",
+    "rendererPath": "draco/draco_decoder.js"
+  },
+  "renderer_draco_wasm_wrapper_js": {
+    "version": "1.5.6",
+    "file": "draco_wasm_wrapper.js",
+    "url": "https://www.gstatic.com/draco/versioned/decoders/1.5.6/draco_wasm_wrapper.js",
+    "sha256": "e8049906ef3f8f75d3456c22a3f31bfdfe5b5b5bd09ccdec613b9e9a49d554d8",
+    "rendererPath": "draco/draco_wasm_wrapper.js"
+  },
+  "renderer_draco_decoder_wasm": {
+    "version": "1.5.6",
+    "file": "draco_decoder.wasm",
+    "url": "https://www.gstatic.com/draco/versioned/decoders/1.5.6/draco_decoder.wasm",
+    "sha256": "c55a594e8ffd18426d36b27fea9618af3df5e173640a3e56d46f09d76f0574f2",
+    "rendererPath": "draco/draco_decoder.wasm"
+  },
+  "renderer_basis_transcoder_js": {
+    "version": "2021-04-15-ba1c3e4",
+    "file": "basis_transcoder.js",
+    "url": "https://www.gstatic.com/basis-universal/versioned/2021-04-15-ba1c3e4/basis_transcoder.js",
+    "sha256": "48a0ef319a28bf0224ee88ded34f74eaf97c175bba9eb18b47fb9720510ad6c4",
+    "rendererPath": "basis/basis_transcoder.js"
+  },
+  "renderer_basis_transcoder_wasm": {
+    "version": "2021-04-15-ba1c3e4",
+    "file": "basis_transcoder.wasm",
+    "url": "https://www.gstatic.com/basis-universal/versioned/2021-04-15-ba1c3e4/basis_transcoder.wasm",
+    "sha256": "79ae97d781e10a566659c689b7bb1de91726453f55f9f5e3bcc07a4e3904070f",
+    "rendererPath": "basis/basis_transcoder.wasm"
+  },
+  "renderer_draco_LICENSE": {
+    "version": "1.5.6",
+    "file": "draco-LICENSE",
+    "url": "https://raw.githubusercontent.com/google/draco/1.5.6/LICENSE",
+    "sha256": "d3709b0fb4b8a94bbb1d02b8a2e484f258b0d9c5c5a01f940391f3fe662cd1a4"
+  },
+  "renderer_basis_LICENSE": {
+    "version": "2021-04-15-ba1c3e4",
+    "file": "basis-LICENSE",
+    "url": "https://raw.githubusercontent.com/BinomialLLC/basis_universal/ba1c3e4/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  }
+}

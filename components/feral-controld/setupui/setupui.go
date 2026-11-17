@@ -1,252 +1,143 @@
-// Package setupui pushes best-effort on-screen narration of device setup
-// progress to ff-player (the kiosk Chromium app) over CDP.
-//
-// Narration is fire-and-forget by design. The phone-side captive portal is the
-// real provisioning channel; the on-screen story is a courtesy for a bystander
-// watching the panel. Chromium may be slow to load, crashed, or entirely absent
-// (headless device) during provisioning, so every push here MUST tolerate the
-// player not being reachable: pushes never block the caller, never return a
-// fatal error, and never panic. A dead or absent screen must never gate or
-// crash the provisioning state machine.
+// Package setupui owns setup narration intent. Provisioning never waits for
+// the display: the shared overlay controller delivers on its bounded worker.
+// Native host snapshots, separately, describe the observed overlay.
 package setupui
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
+	"context"
 	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 )
 
-// DefaultContractPath is the on-device location of the player capability
-// manifest. It mirrors mintpairing's contract path; both narration surfaces are
-// gated by the same file.
-const DefaultContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
-
-const setupDisplayCommand = "setupDisplay"
-
-// Setup narration states. These match the player-side contract exactly. The
-// player accepts unknown state strings with {ok:true} and renders nothing, so
-// adding a future state here is safe even against an older player.
 const (
-	stateSoftAPQR   = "softap_qr"
-	stateJoining    = "joining"
-	stateJoinFailed = "join_failed"
-	stateUpdating   = "updating"
-	stateClaimQR    = "claim_qr"
-	stateReady      = "ready"
-	stateHidden     = "hidden"
-
-	// stateScanning is an extension state narrating the pre-AP Wi-Fi scan (the
-	// device is looking for nearby networks before advertising its setup
-	// hotspot). Like stateFactoryReset below it is deliberately NOT in the
-	// required validation set that validateSetupDisplayContract checks: the
-	// shipping player manifest lists it today, but the requirement is kept
-	// loose so an older manifest that predates it — which accepts it as a
-	// no-op ({ok:true}, renders nothing) — still passes the gate and keeps
-	// full narration support.
-	stateScanning = "scanning"
-
-	// stateFinalizing is an extension state covering the gap between a
-	// successful Wi-Fi join and the claim QR: relayer topic wait plus the
-	// pre-claim OTA version check (and its retries). Without it the screen is
-	// black for those seconds with no hint that setup is still progressing.
-	stateFinalizing = "finalizing"
-
-	// stateFactoryReset is an extension state used by the in-process factory-reset
-	// flow. It is deliberately NOT in the required set that
-	// validateSetupDisplayContract checks: the shipping player manifest lists
-	// it today (ff-player added the renderer), but requiring it in the gate
-	// would fail validation and disable ALL setup narration against any
-	// fielded player whose manifest predates it — those older manifests
-	// accept it as a no-op ({ok:true}, renders nothing). This is the
-	// contract-level extensibility path in action: the required set names
-	// only the states every fielded manifest is guaranteed to list; states
-	// that shipped later, or states still to come, stay optional forever.
+	stateSoftAPQR     = "softap_qr"
+	stateJoining      = "joining"
+	stateJoinFailed   = "join_failed"
+	stateUpdating     = "updating"
+	stateClaimQR      = "claim_qr"
+	stateReady        = "ready"
+	stateHidden       = "hidden"
+	stateScanning     = "scanning"
+	stateFinalizing   = "finalizing"
 	stateFactoryReset = "factory_reset"
-
-	// stateConnecting is an extension state narrating provisioned-device
-	// connectivity recovery (the M-0/M-1 boot/offline hedge): the device has
-	// saved credentials but its link or internet access is not confirmed yet.
-	// The player's panel carries a neutral "Connecting to the network" title —
-	// unlike join_failed, whose asserting "Couldn't connect" title this
-	// narration used to borrow, flashing a false failure on every normal
-	// reboot in the ~1s between CDP connect and the first online
-	// confirmation. Like the other extension states it is NOT in the required
-	// validation set; but unlike them this narration does not accept the
-	// renders-nothing no-op on older manifests — it is the only thing between
-	// a relocated (offline-forever) device and a silent black screen, so the
-	// send downgrades it to join_failed instead (see resolveExtensionState).
-	stateConnecting = "connecting"
-
-	// stateSetupError is an extension state narrating a PERSISTENT provisioning
-	// failure the machine cannot resolve on its own (the §4.6 escalation
-	// latches: the setup AP repeatedly failing to raise, or its teardown
-	// repeatedly failing). `reason` carries the prose, matching the connecting
-	// convention. Like connecting it must not silently no-op on an older
-	// manifest — it exists precisely so a stuck device stops showing a lying
-	// "scanning" screen forever — so the send downgrades it to join_failed via
-	// the shared fallback table (see sendFallbacks): degraded title, never a
-	// dark or lying screen.
-	stateSetupError = "setup_error"
+	stateConnecting   = "connecting"
+	stateSetupError   = "setup_error"
+	StateClaimQR      = stateClaimQR
+	StateFinalizing   = stateFinalizing
+	StateUpdating     = stateUpdating
+	StateFactoryReset = stateFactoryReset
 )
 
-// defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
-// worker's park while a playersession.Session recovery navigation is pending
-// (see parkForNavigation). The timeout mirrors defaultReadyPollTimeout's
-// precedent: bounded so a page that never installs its handler cannot park
-// narration for the process — see the NavigationPending doc for why an
-// unconditional park would reintroduce the SoftAP-QR-goes-dark failure.
-const (
-	defaultNavigationParkPollInterval = 100 * time.Millisecond
-	defaultNavigationParkTimeout      = 15 * time.Second
-)
-
-// NavigationSession is the narrow slice of playersession.Session the
-// narration worker consults to avoid racing a recovery navigation —
-// consumer-owned, mirroring the CDPSender idiom. *playersession.Session
-// satisfies it. NavigationTargetGeneration is needed alongside
-// StageReady/NavigationPending/Generation — see parkForNavigation's doc for
-// why.
-type NavigationSession interface {
-	NavigationPending() bool
-	StageReady(st playersession.Stage) bool
-	Generation() uint64
-	// NavigationTargetGeneration reports the generation ID the in-flight
-	// navigation bumped to, or 0 when no navigation is in flight past its
-	// own bump. See playersession.Session.NavigationTargetGeneration's doc.
-	NavigationTargetGeneration() uint64
+// Sender is the product boundary, independent of artwork/page lifecycle.
+// SetOverlay must bound its I/O and must never log the credential fields.
+type Sender interface {
+	SetOverlay(context.Context, string, string, map[string]any) error
+}
+type Watcher interface {
+	Watch(context.Context, func(playerlink.SnapshotDelivery)) error
 }
 
-// support tracks the one-shot manifest capability decision for the process
-// lifetime. Once resolved it never flips: an older player that predates the
-// setupDisplay contract yields a permanent no-narration fallback.
-type support int
-
-const (
-	supportUnknown support = iota
-	supportYes
-	supportNo
-)
-
-// CDPSender is the narrow slice of the CDP client this package needs. Owning a
-// single-method interface here keeps the seam injectable for tests without
-// pulling in the full CDP surface. cdp.CDP satisfies it.
-type CDPSender interface {
-	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
-}
-
-// Service renders setup narration to the player. Its typed Show* methods are
-// safe to call from any goroutine and return immediately; the actual CDP push
-// happens on a background worker.
 type Service struct {
-	cdp          CDPSender
-	contractPath string
-	// warnedUnreadable rate-limits the contract-unreadable Warn to once per
-	// process; the re-check itself happens on every push (see
-	// narrationSupported).
-	warnedUnreadable bool
-	logger           *zap.Logger
-
-	// session, when set, is the playersession.Session the worker parks
-	// narration sends against (see parkForNavigation). Nil in every existing
-	// test and in any wiring that predates the session — the worker then
-	// never parks, so existing behavior is exactly preserved. Immutable after
-	// construction, same read-lock-free contract as the poll bounds above.
-	session NavigationSession
-	// navigationParkPollInterval / navigationParkTimeout override the park
-	// bounds (zero means the defaults); same test-only, pre-worker-spawn
-	// contract as the poll bounds above.
-	navigationParkPollInterval time.Duration
-	navigationParkTimeout      time.Duration
-
-	mu      sync.Mutex
-	support support
-	// extSupport holds, per EXTENSION state (every state outside
-	// requiredStates, not only the downgradeable sendFallbacks keys), the
-	// LAST manifest verdict derived from a successfully read manifest: can
-	// the running player render it, or must the send apply the state's
-	// fallback — and, for a state with no fallback, does anything reach the
-	// screen at all (what CurrentNarrationState reads it for)? Resolved on
-	// the WORKER at send time, never at
-	// Show-time — see resolveExtensionState for why the retained intent must
-	// stay neutral. Unlike support, these are deliberately NOT process-lifetime
-	// latches: the player bundle (and its manifest) is OTA-replaced without a
-	// controld restart, so a latched verdict goes stale in both directions —
-	// an old-manifest supportNo would keep downgrading on an upgraded player
-	// until restart, and an unreadable-manifest "undecided" after a bundle
-	// downgrade would send a renders-nothing state to an old player. Every
-	// resolution re-reads the manifest (these pushes are rare — boot hedge,
-	// offline episode edges, escalation latches — so one small file read each
-	// is nothing); this map only bridges read/decode-failure windows (boot
-	// ordering, OTA mid-replace, a torn write) with the last real evidence.
-	// Absent key = supportUnknown = no successful read yet.
-	extSupport map[string]support
-	// ctrl owns the screen overlay. Every SHOWN narration is recorded as its
-	// current overlay, so Resync can just replay it — but a plain Hide()
-	// clears ctrl's current overlay to nothing, which is indistinguishable
-	// from "nothing has been shown" or "a different owner has since taken the
-	// screen". hiddenIntent below is what Resync needs that ctrl alone
-	// cannot tell it (round 5 review, F2).
-	ctrl *overlay.Controller
-	// narrated is set once this process has sent any narration. The boot sweep
-	// hides a stale overlay only while it is false, since an overlay this
-	// process painted is not stale.
-	narrated bool
-	// hiddenIntent is set once a hide this service decided (hideIf, via
-	// pushIf's plain Hide() path or HideIfShowing) actually commits, and
-	// cleared the next time a show commits (see showOwned). A hide's CDP send
-	// can fail exactly like a show's, but unlike a show there is nothing left
-	// in ctrl.Current() for Resync to find and replay — ctrl's current
-	// overlay is simply nil either way, whether the clear never reached the
-	// player or reached it fine. hiddenIntent is what lets Resync replay a
-	// failed clear on reconnect anyway, the same way it already replays a
-	// failed show: unconditionally, since a hide's delivery outcome is never
-	// observed by setupui (it must never block the caller to find out).
+	sender Sender
+	logger *zap.Logger
+	ctrl   *overlay.Controller
+	mu     sync.Mutex
+	// Written in the controller's commit hook, in decision order.
+	narrated     bool
 	hiddenIntent bool
+	// Last host observation; never inferred from an accepted send or intent.
+	observed string
 }
 
-// New builds a narration Service. A blank contractPath falls back to
-// DefaultContractPath. logger may be nil (narration then stays silent about its
-// own failures, which is acceptable for a best-effort surface).
-func New(sender CDPSender, contractPath string, logger *zap.Logger) *Service {
-	if strings.TrimSpace(contractPath) == "" {
-		contractPath = DefaultContractPath
-	}
+func New(sender Sender, logger *zap.Logger) *Service {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	s := &Service{
-		cdp:          sender,
-		contractPath: contractPath,
-		logger:       logger,
-	}
-	// A private controller until SetController shares one with mintpairing.
+	s := &Service{sender: sender, logger: logger}
 	s.ctrl = overlay.New(setupPainter{s: s})
 	return s
 }
 
-// SetSession wires the playersession.Session the worker consults to avoid
-// racing a recovery navigation (see NavigationSession and parkForNavigation).
-// Call once at wiring time, before the first push spawns a worker — the field
-// is read lock-free on that goroutine. Passing nil (or never calling this) is
-// safe and preserves pre-session behavior exactly: the worker never parks.
-func (s *Service) SetSession(session NavigationSession) {
-	s.session = session
+// Run observes host state and replays current intent after each reconnect.
+// A snapshot callback only updates memory/queues work; it never performs I/O.
+// Renderer navigation/crashes do not reconnect this host-owned channel.
+func (s *Service) Run(ctx context.Context, watcher Watcher) {
+	delay := time.Second
+	for ctx.Err() == nil {
+		started := time.Now()
+		err := watcher.Watch(ctx, func(delivery playerlink.SnapshotDelivery) {
+			s.Observe(delivery.Snapshot)
+			if delivery.Initial {
+				s.Resync()
+			}
+		})
+		s.mu.Lock()
+		s.observed = ""
+		s.mu.Unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		s.logger.Info("Setup display observation disconnected", zap.Error(err))
+		if time.Since(started) >= time.Minute {
+			delay = time.Second
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		delay = min(delay*2, 30*time.Second)
+	}
 }
 
-// ShowSoftAPQR narrates the soft-AP onboarding step: the phone should join the
-// device's setup Wi-Fi. ssid is required; psk (the WPA2 passphrase) and
-// portalURL (the direct on-link HTTP fallback) are optional and omitted from
-// the payload when blank.
+func (s *Service) Observe(snapshot playerlink.Snapshot) {
+	state := ""
+	if snapshot.Overlay != nil && snapshot.Overlay.Owner == "setup" && snapshot.Overlay.State != stateHidden {
+		state = snapshot.Overlay.State
+	}
+	s.mu.Lock()
+	s.observed = state
+	s.mu.Unlock()
+}
+
+func (s *Service) CurrentNarrationState() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.observed, s.observed != ""
+}
+
+// The native protocol requires connecting support. The old bundle-version
+// hide fallback has no place in this coordinated runtime/controld release.
+func (s *Service) ShowConnectingOrHide(message string) { s.ShowConnecting(message) }
+
+func (s *Service) trySend(ctx context.Context, req map[string]any) error {
+	state := stringField(req, "state")
+	fields := make(map[string]any, len(req))
+	for k, v := range req {
+		if k != "state" {
+			fields[k] = v
+		}
+	}
+	err := s.sender.SetOverlay(ctx, "setup", state, fields)
+	if err != nil {
+		s.logger.Info("Setup narration delivery failed", zap.String("state", state), zap.Error(err))
+	}
+	return err
+}
+
+func stringField(req map[string]any, key string) string {
+	value, _ := req[key].(string)
+	return value
+}
+
 func (s *Service) ShowSoftAPQR(ssid string, psk string, portalURL string) {
 	req := map[string]any{
 		"state": stateSoftAPQR,
@@ -261,14 +152,6 @@ func (s *Service) ShowSoftAPQR(ssid string, psk string, portalURL string) {
 	s.push(req)
 }
 
-// ShowSoftAPPortalQR narrates the attached phase of the soft-AP step: a phone
-// has joined the setup Wi-Fi (the portal saw its first request), so the panel
-// should swap the join QR for one carrying the portal address the phone's
-// still-open camera can scan straight into its browser. Same state and
-// fields as ShowSoftAPQR plus `client_attached: true`; a player that predates
-// the field ignores it and keeps the join QR up (the pre-#3515 screen), so no
-// send-time downgrade is needed. portalURL is optional here too — without it
-// the player has no address to encode and stays on the join QR by design.
 func (s *Service) ShowSoftAPPortalQR(ssid string, psk string, portalURL string) {
 	req := map[string]any{
 		"state":           stateSoftAPQR,
@@ -284,11 +167,6 @@ func (s *Service) ShowSoftAPPortalQR(ssid string, psk string, portalURL string) 
 	s.push(req)
 }
 
-// ShowSoftAPQRRetry narrates the join QR coming back after a failed join:
-// same payload as ShowSoftAPQR plus `reason`, the failure's user-facing
-// message, which the player shows under the title so the screen says why
-// the code is back (the preceding join_failed paint lives a millisecond).
-// Players that predate the field ignore it and paint the plain join QR.
 func (s *Service) ShowSoftAPQRRetry(ssid string, psk string, portalURL string, reason string) {
 	req := map[string]any{
 		"state":  stateSoftAPQR,
@@ -304,21 +182,14 @@ func (s *Service) ShowSoftAPQRRetry(ssid string, psk string, portalURL string, r
 	s.push(req)
 }
 
-// ShowScanning narrates the pre-AP Wi-Fi scan: the device is searching for
-// nearby networks and will advertise its setup hotspot once the scan
-// completes. Extension state; older players render nothing (see
-// stateScanning).
 func (s *Service) ShowScanning() {
 	s.push(map[string]any{"state": stateScanning})
 }
 
-// ShowJoining narrates that the device is attempting to join the chosen Wi-Fi.
 func (s *Service) ShowJoining() {
 	s.push(map[string]any{"state": stateJoining})
 }
 
-// ShowJoinFailed narrates a failed Wi-Fi join. reason is optional context and
-// is omitted from the payload when blank.
 func (s *Service) ShowJoinFailed(reason string) {
 	req := map[string]any{"state": stateJoinFailed}
 	if strings.TrimSpace(reason) != "" {
@@ -327,17 +198,6 @@ func (s *Service) ShowJoinFailed(reason string) {
 	s.push(req)
 }
 
-// ShowConnecting narrates provisioned-device connectivity recovery: the boot
-// offline hedge and the joined-but-internet-unverified legs (M-0/M-1).
-// message is the provisioning machine's evidence-scoped prose and is omitted
-// from the payload when blank. The pushed intent always carries the neutral
-// stateConnecting; on a player manifest that provably predates the state the
-// SEND downgrades it to join_failed (see resolveExtensionState) — a
-// failure-asserting title beats no narration, because these edges exist
-// precisely so a watching user is never left with an unexplained black
-// screen. Resolving at send time, not here, keeps manifest disk I/O off the
-// caller (the provisioning state machine's OnStateChange path — pushes must
-// never block it) and keeps the downgrade out of the retained intent.
 func (s *Service) ShowConnecting(message string) {
 	req := map[string]any{"state": stateConnecting}
 	if strings.TrimSpace(message) != "" {
@@ -346,232 +206,6 @@ func (s *Service) ShowConnecting(message string) {
 	s.push(req)
 }
 
-// sendFallback describes the send-time downgrade for one extension state on a
-// manifest that provably lacks it. The value is a UNION by design
-// (docs/network-recovery-ux.md §4.6): most entries substitute a fallback
-// STATE, but an entry may instead fall back to the hide OPERATION
-// (state=hidden) — for pushes whose false-title downgrade would be worse than
-// clearing the screen. The hide member exists now so the table shape admits
-// both; its first consumer is the recurring ap-recheck push (stage 3), whose
-// per-cycle cadence on claimed frames must never flash a false "Couldn't
-// connect" title over exhibition artwork.
-type sendFallback struct {
-	state string
-	hide  bool
-}
-
-// sendFallbacks names the extension states that must NOT silently no-op on an
-// older manifest, and what each degrades to. States absent from this table
-// (scanning, finalizing, factory_reset) accept the renders-nothing no-op and
-// need no fallback.
-var sendFallbacks = map[string]sendFallback{
-	stateConnecting: {state: stateJoinFailed},
-	stateSetupError: {state: stateJoinFailed},
-}
-
-// requiredStates names the setupDisplay states EVERY manifest that passes the
-// gate is guaranteed to list (validateSetupDisplayManifest enforces exactly
-// this set). Every other state is an extension state: a manifest that
-// predates one accepts it with {ok:true} and renders NOTHING (see the state
-// constants' extensibility note), so for those — and only those — the running
-// player's actual support has to be resolved from the manifest before anything
-// may claim the state is on the screen. Shared by the validator and by
-// isExtensionState so the two readings of "required" cannot drift apart.
-var requiredStates = []string{
-	stateSoftAPQR, stateJoining, stateJoinFailed, stateUpdating,
-	stateClaimQR, stateReady, stateHidden,
-}
-
-// isExtensionState reports whether state is outside requiredStates, i.e.
-// whether a fielded manifest may legitimately not list it. The empty string
-// reads as an extension state, which is the conservative answer: no manifest
-// lists it, so nothing renders for it.
-func isExtensionState(state string) bool {
-	for _, required := range requiredStates {
-		if state == required {
-			return false
-		}
-	}
-	return true
-}
-
-// resolvedState applies the send-time downgrade table to one intent state,
-// given the manifest verdict for it. It is the ONE place the table's outcome
-// is decided, so once a delivery has resolved, the send path
-// (resolveExtensionState) and the status report (CurrentNarrationState) agree
-// on what the player has on screen — the skew they drifted into was a
-// persistent false `overlay` on checkStatus/player_status after an ap-recheck
-// hide, not a sampling race. Returns the state the player renders, or
-// stateHidden when the downgrade clears the screen instead.
-//
-// "Once resolved" is the real limit of that agreement, and is deliberate: a
-// Show* call commits its decision to the controller synchronously, while the
-// manifest verdict this function is given is written later, on the delivery
-// worker. Between the two, a report reads the previous verdict (or none) for a
-// state whose support has just changed — the same narrow, self-correcting,
-// no-I/O class as the four `ctrl.Current()` races the branch already accepts,
-// and self-correcting for the same reason: the next poll re-reads a verdict
-// the worker has by then written.
-//
-// marked/hideMarked are the fallbackHideKey annotation as read off the intent
-// (present-as-bool, and its value); unsupported is POSITIVE evidence that the
-// running player predates state — the send path derives it from a fresh
-// manifest read, the report path from the last cached verdict (see
-// cachedStateUnsupported for why those two sources are deliberately
-// different).
-//
-// A state with no fallback and no hide marker is returned UNCHANGED even when
-// unsupported: the send must still go out (the player no-ops it, and guessing
-// a hide would clear an overlay a newer player would have rendered). It is the
-// report path's job to omit it — see CurrentNarrationState.
-func resolvedState(state string, marked, hideMarked, unsupported bool) string {
-	if !unsupported {
-		return state
-	}
-	if marked && hideMarked {
-		// The per-push hide override (see fallbackHideKey) wins over the
-		// state table's fallback.
-		return stateHidden
-	}
-	if fb, inTable := sendFallbacks[state]; inTable {
-		if fb.hide {
-			return stateHidden
-		}
-		return fb.state
-	}
-	return state
-}
-
-// resolveExtensionState maps a queued extension-state intent to what the
-// RUNNING player can render, at send time rather than Show-time. The stored
-// intent (last / the pending queue) always keeps the neutral state: resolving
-// any earlier would freeze a downgrade verdict taken while the manifest was
-// unreadable into last, and a later Resync would replay a false join_failed —
-// the exact flash stateConnecting exists to remove. Copy-on-write so the
-// retained maps are never mutated. Runs on the worker goroutine (trySend),
-// which also keeps the manifest read off the provisioning state machine's
-// goroutine. Returns req unchanged for every required state.
-//
-// It resolves EVERY extension state, not only the two in sendFallbacks. For
-// scanning/finalizing/factory_reset the resolution cannot change the wire
-// payload (they have no fallback, so resolvedState returns them unchanged),
-// but it is what records their manifest verdict in extSupport — the cache
-// CurrentNarrationState needs in order not to advertise an overlay for a
-// state the running player silently no-ops. Resolving only the downgradeable
-// pair left the other three permanently supportUnknown, which read as
-// "supported" everywhere (round 2 review, F1).
-func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
-	state := stringField(req, "state")
-	hideMarked, marked := req[fallbackHideKey].(bool)
-	if !isExtensionState(state) && !marked {
-		// A required state is listed by every manifest that passes the gate,
-		// so there is nothing to resolve and the common path — `updating`'s
-		// per-percent pushes across a whole OTA among it — never pays for the
-		// manifest read.
-		return req
-	}
-	resolved := resolvedState(state, marked, hideMarked, s.stateUnsupported(state))
-	if resolved == stateHidden {
-		return map[string]any{"state": stateHidden}
-	}
-	// Copy-on-write: the retained intent keeps the neutral state AND the
-	// marker (a later Resync re-resolves); the wire copy carries neither the
-	// marker nor, when unsupported, the original state.
-	out := make(map[string]any, len(req))
-	for k, v := range req {
-		if k == fallbackHideKey {
-			continue
-		}
-		out[k] = v
-	}
-	out["state"] = resolved
-	return out
-}
-
-// stateUnsupported reports POSITIVE evidence that the running player predates
-// the given extension state: a successfully DECODED manifest whose state list
-// lacks it. Re-read on every resolution — never latched — because the bundle
-// and manifest are OTA-replaced under a running controld (see the extSupport
-// field for both staleness directions a latch causes). Only a decoded
-// manifest ever updates the verdict; EVERY read/decode failure (boot
-// ordering, OTA mid-replace, a partially written file) falls back to the last
-// verdict derived from a real manifest, because a failure proves nothing
-// about the player — treating a torn mid-OTA write as "unsupported" would
-// repaint the false join_failed title on a player that renders the state
-// fine, the exact flash the fallback machinery exists to remove. Before any
-// successful read the fallback reports false — keep the neutral state, since
-// downgrading on anything short of positive evidence would trade a truthful
-// title for a false one, and that un-downgraded push is skipped by
-// narrationSupported's own unreadable branch anyway (the next delivery or
-// Resync replay re-resolves).
-//
-// LOCKING: the manifest read and decode run OUTSIDE s.mu — every Show*/Hide
-// caller (the provisioning notifier's OnStateChange path) takes that mutex
-// in pushIf, and pushes must never block behind disk I/O (a hung read on a
-// degraded filesystem would otherwise stall the online Hide that ends the
-// narration). Safe without the lock because resolution only ever runs on the
-// single narration worker goroutine (the `running` guard); s.mu is taken
-// only around the cached-verdict map so it stays consistently guarded
-// alongside the Service's other mutable state.
-func (s *Service) stateUnsupported(target string) bool {
-	manifest, err := readPlayerContractManifest(s.contractPath)
-	if err == nil {
-		// A manifest that decodes but is not a real setupDisplay v1 contract
-		// (e.g. `{"contracts":{}}` from a transitional or foreign bundle) is
-		// no more capability evidence than a torn write — scanning its empty
-		// state list would flip the verdict to "unsupported" and repaint a
-		// false failure title on a player that renders the state fine.
-		err = validateSetupDisplayManifest(manifest)
-	}
-	if err != nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.extSupport[target] == supportNo
-	}
-	supported := false
-	for _, state := range manifest.Contracts["setupDisplay"].States {
-		if state == target {
-			supported = true
-			break
-		}
-	}
-	verdict := supportYes
-	if !supported {
-		verdict = supportNo
-	}
-	s.mu.Lock()
-	if s.extSupport == nil {
-		s.extSupport = make(map[string]support)
-	}
-	changed := s.extSupport[target] != verdict
-	s.extSupport[target] = verdict
-	s.mu.Unlock()
-	if changed {
-		// Logged on verdict CHANGES only (not per push): the flip is the
-		// bundle-swap trace an operator needs, and steady-state pushes stay
-		// quiet. Info, not Warn — expected on fielded players until the
-		// bundle updates, and the downgrade keeps the narration functional.
-		if supported {
-			s.logger.Info("Player manifest lists the narration state; using it",
-				zap.String("state", target), zap.String("path", s.contractPath))
-		} else {
-			s.logger.Info("Player manifest predates the narration state; downgrading at send time",
-				zap.String("state", target), zap.String("path", s.contractPath))
-		}
-	}
-	return !supported
-}
-
-// ShowConnectingIfShowing pushes the connecting narration ONLY when the
-// current narration intent is one of states — the conditional sibling of
-// HideIfShowing, on the same pushIf critical section, so a flow can replace
-// the narration IT painted without overwriting a concurrent narrator's. The
-// canonical caller is the executor's claim flow at topic-wait expiry: its 60s
-// wait is the longest window for another narrator to take the screen (a link
-// drop raises the setup AP and paints softap_qr, which must not be
-// overwritten), so an unconditional paint there loses exactly the race the
-// call site's comment documents. Same send-time downgrade semantics as
-// ShowConnecting.
 func (s *Service) ShowConnectingIfShowing(message string, states ...string) {
 	req := map[string]any{"state": stateConnecting}
 	if strings.TrimSpace(message) != "" {
@@ -588,34 +222,6 @@ func (s *Service) ShowConnectingIfShowing(message string, states ...string) {
 	})
 }
 
-// fallbackHideKey marks a queued connecting push whose manifest downgrade is a
-// HIDE rather than the state table's join_failed fallback. It is an internal
-// queue annotation, never wire payload: resolveExtensionState strips it from
-// every send. It exists for RECURRING pushes — the provisioning recheck
-// blink's ap-recheck narration, whose unbounded cadence on claimed frames
-// would otherwise flash a false "Couldn't connect" title over exhibition
-// artwork dozens of times a day for a whole delivery-skew window. The hide
-// clears the stale QR (constraint 4(a)), asserts nothing false, and the
-// re-raise repaints softap_qr minutes later.
-const fallbackHideKey = "_fallback_hide"
-
-// ShowConnectingOrHide is ShowConnecting with the hide downgrade: on a
-// manifest that provably lacks `connecting`, the send becomes a Hide instead
-// of the one-shot pushes' join_failed fallback (see fallbackHideKey).
-func (s *Service) ShowConnectingOrHide(message string) {
-	req := map[string]any{"state": stateConnecting, fallbackHideKey: true}
-	if strings.TrimSpace(message) != "" {
-		req["reason"] = message
-	}
-	s.push(req)
-}
-
-// ShowSetupError narrates a persistent provisioning failure the machine cannot
-// resolve on its own (the escalation latches: repeated setup-AP raise or
-// teardown failures). reason carries the full user-facing prose, matching the
-// connecting convention. Send-time downgrade to join_failed on manifests that
-// predate the state (see sendFallbacks) — degraded title, never a dark or
-// lying screen.
 func (s *Service) ShowSetupError(reason string) {
 	req := map[string]any{"state": stateSetupError}
 	if strings.TrimSpace(reason) != "" {
@@ -624,8 +230,6 @@ func (s *Service) ShowSetupError(reason string) {
 	s.push(req)
 }
 
-// ShowUpdating narrates an in-progress OTA update. progress is a percent
-// (0-100).
 func (s *Service) ShowUpdating(progress int) {
 	s.push(map[string]any{
 		"state":    stateUpdating,
@@ -633,26 +237,14 @@ func (s *Service) ShowUpdating(progress int) {
 	})
 }
 
-// ShowFinalizing narrates the post-join finalization window (topic wait +
-// pre-claim version check) so the user sees progress instead of a black
-// screen. Extension state; older players render nothing (see stateFinalizing).
 func (s *Service) ShowFinalizing() {
 	s.push(map[string]any{"state": stateFinalizing})
 }
 
-// ShowClaimQR narrates the final claim step, rendering url as a QR code. The
-// caller constructs the device_connect URL; this package passes it through
-// verbatim as the required url field. deviceName, when non-blank, is the
-// mDNS-advertised name (e.g. "FF1-8EVTK3RE") the player weaves into the
-// "open the app on the same Wi-Fi and it finds this frame automatically"
-// guidance — the QR itself is the backup path.
 func (s *Service) ShowClaimQR(url string, deviceName string) {
 	s.showClaimQR(url, deviceName, overlay.Owner)
 }
 
-// ShowClaimQRAutomatic paints the claim QR on a timer's behalf (the auto-claim
-// loop). It is accepted only on an empty screen, so it never replaces an
-// overlay the owner asked for, such as a browser-pairing code.
 func (s *Service) ShowClaimQRAutomatic(url string, deviceName string) {
 	s.showClaimQR(url, deviceName, overlay.Automatic)
 }
@@ -668,30 +260,6 @@ func (s *Service) showClaimQR(url string, deviceName string, pr overlay.Priority
 	s.showOwned(req, pr, nil)
 }
 
-// RefreshClaimQRName rewrites only the device_name of the claim-QR narration
-// when claim_qr is the current intent; any other intent (or none) is left
-// untouched and resolve is never called. It exists because the claim QR is
-// painted once per online/topic transition and then sits until the unit is
-// claimed, while a rename can land at any time over the LAN hub — without
-// this the guidance text would name the old label until an unrelated
-// repaint, while mDNS already advertised the new one. The url is carried
-// over from the cached intent rather than re-derived: the rename path has no
-// claim context, and the QR itself did not change.
-//
-// resolve is a callback rather than a value so the caller's fallback read
-// (the serial from /etc/hostname) happens only when there is a claim QR to
-// refresh — a rename on a claimed unit, or with another narrator up, costs
-// no disk read. It runs outside s.mu so a slow read never stalls another
-// narrator's push; the final pushIf re-checks the intent, so a narrator that
-// took the screen in between is never overwritten (same conditional-push
-// semantics as HideIfShowing).
-//
-// The url is taken from the intent at commit time, inside pushIf's critical
-// section, never from the pre-resolve snapshot: a topic (re)assignment
-// re-paints claim_qr with a NEW device-connect url from its own goroutine,
-// and a rename racing it across the unlocked resolve gap would otherwise
-// commit the old url back over it — a QR the app cannot claim with, and
-// nothing repaints until the next unrelated transition.
 func (s *Service) RefreshClaimQRName(resolve func() string) {
 	cur, has := s.ctrl.Current()
 	if !has || setupState(cur) != stateClaimQR {
@@ -710,12 +278,6 @@ func (s *Service) RefreshClaimQRName(resolve func() string) {
 	})
 }
 
-// RefreshClaimQRURL rewrites the url of the claim-QR narration while claim_qr
-// is the current intent, keeping its device_name. build runs only then, so a
-// caller whose url carries a fresh single-use credential (the control
-// invitation, feral-file#3551) mints one only for a QR that is on screen.
-// Same conditional-commit discipline as RefreshClaimQRName: a narrator that
-// took the screen meanwhile is never overwritten.
 func (s *Service) RefreshClaimQRURL(build func() string) {
 	cur, has := s.ctrl.Current()
 	if !has || setupState(cur) != stateClaimQR {
@@ -737,67 +299,23 @@ func (s *Service) RefreshClaimQRURL(build func() string) {
 	})
 }
 
-// ClaimQRShowing reports whether the claim QR is the current narration
-// intent.
 func (s *Service) ClaimQRShowing() bool {
 	cur, has := s.ctrl.Current()
 	return has && setupState(cur) == stateClaimQR
 }
 
-// ShowReady narrates that setup completed successfully.
 func (s *Service) ShowReady() {
 	s.push(map[string]any{"state": stateReady})
 }
 
-// ShowFactoryReset narrates that an in-process factory reset is underway, before
-// the device reboots into the factory snapshot. Like every push here it is
-// best-effort: it must never gate or delay the reset itself. It uses the
-// extension state stateFactoryReset, which is safe to send to players that do
-// not yet render it (see the constant's note).
 func (s *Service) ShowFactoryReset() {
 	s.push(map[string]any{"state": stateFactoryReset})
 }
 
-// Hide clears any setup narration overlay, returning the player to its default
-// display.
 func (s *Service) Hide() {
 	s.push(map[string]any{"state": stateHidden})
 }
 
-// SweepStaleOverlay hides the on-screen overlay ONLY if this process has not
-// narrated anything yet. It exists for boot reconciliation: narration intent
-// is in-memory, so after a daemon restart the player may still render the
-// PREVIOUS life's overlay (e.g. a claim QR painted before a crash on a device
-// that has since been claimed) — but an overlay THIS process painted is, by
-// definition, not stale. narrated==false is exactly the complement of what
-// Resync can repair: any current overlay gets re-shown on the next CDP
-// (re)connect — even one whose original send failed, since a send failure
-// triggers the reconnect that fires Resync — so the sweep covers precisely
-// the one state Resync cannot, no more.
-//
-// The hide is an Automatic Show of the hidden state (not a bypass, unlike the
-// pre-controller version of this function): it goes through the controller's
-// own decision lock, so a concurrent narrator (the startup OTA gate's
-// ShowUpdating, a factory reset) can never have its live narration erased by
-// the sweep. If the narrator's Owner show wins the lock first, the sweep sees
-// it as current and the Automatic sweep is rejected; if the sweep wins first,
-// the narrator's later Owner show simply replaces it, same as any override. A
-// caller-side Narrating() probe followed by a direct Hide() would reintroduce
-// exactly the check-then-act race the controller's lock exists to remove.
-//
-// That rejection is NOT automatic from priority alone. Every setupui push —
-// whatever flow it belongs to — shares this one *Service as its controller
-// listener, and the controller's same-listener exemption (added so
-// ShowClaimQRAutomatic may replace its own earlier ShowFinalizing) would
-// otherwise read the narrator's Owner show as "this same listener's own
-// earlier overlay" and let the sweep's Automatic show through anyway. The
-// explicit condition below closes exactly that hole: it requires nothing be
-// current at all, not merely nothing from a different listener, so any live
-// setup narration — regardless of which flow committed it, and regardless of
-// whether s.narrated has been flipped yet — still blocks the sweep (round 4
-// review, F2). A current overlay that belongs to mintpairing is unaffected
-// either way: the controller's own listener check rejects that case on its
-// own, independent of this condition.
 func (s *Service) SweepStaleOverlay() {
 	s.mu.Lock()
 	narrated := s.narrated
@@ -811,16 +329,6 @@ func (s *Service) SweepStaleOverlay() {
 	})
 }
 
-// HideIfShowing hides only when the current narration intent is one of
-// states, so a flow can clear the narration IT painted without erasing a
-// concurrent narrator's. The state comparison and the hide run under the
-// overlay controller's own decision lock (see HideIf), so a racing
-// ShowUpdating/ShowFactoryReset either commits first (this hide then reads a
-// state not in states and no-ops) or commits after (simply replacing the
-// cleared screen, same as any other override). The canonical caller is the
-// auto-claim flow clearing its own finalizing
-// overlay after discovering mid-flow that the device settled — the exact
-// moment another narrator may have taken the screen.
 func (s *Service) HideIfShowing(states ...string) {
 	s.hideIf(func(cur overlay.Overlay, has bool) bool {
 		if !has || !isSetup(cur) {
@@ -836,151 +344,11 @@ func (s *Service) HideIfShowing(states ...string) {
 	})
 }
 
-// StateClaimQR is exported for HideIfShowing callers that take the claim QR
-// down when it is no longer claimable: the first owner enrolled with the
-// control invitation it carried (feral-file#3551 §5.1).
-const StateClaimQR = stateClaimQR
-
-// StateFinalizing is exported for HideIfShowing callers that need to name the
-// narration they own (the auto-claim flow's post-join gap overlay).
-const StateFinalizing = stateFinalizing
-
-// StateUpdating is exported for HideIfShowing callers that need to name the
-// OTA update narration (the narrator-policy dispatch's settled-device
-// permanent-failure path and the post-ladder reboot watchdog — design doc
-// §6 — both clear "updating" without erasing a concurrent narrator's
-// overlay).
-const StateUpdating = stateUpdating
-
-// StateFactoryReset is exported for HideIfShowing callers that need to name the
-// factory-reset narration. Its caller is devicectl's stuck-reset watchdog (and
-// the failed-unit-start path): the reset panel promises an imminent reboot, so
-// when that reboot provably did not happen it must come down rather than lie
-// forever — cleared conditionally so a narrator that took the screen meanwhile
-// is not erased.
-const StateFactoryReset = stateFactoryReset
-
-// Narrating reports whether the last intended narration state is a visible
-// overlay — something has been shown and it was not subsequently hidden. It
-// reflects INTENT (the last push), not delivery: a push whose CDP send failed
-// still counts, which is the conservative reading for callers deciding whether
-// a destructive page operation would erase someone's narration.
 func (s *Service) Narrating() bool {
 	cur, has := s.ctrl.Current()
 	return has && isSetup(cur) && setupState(cur) != stateHidden
 }
 
-// cachedStateUnsupported reports the LAST manifest verdict for state WITHOUT
-// touching the disk: the read-only, non-blocking half of stateUnsupported, for
-// callers that are not the narration worker. Absent key (supportUnknown, no
-// successful manifest read yet) reports false, the same no-positive-evidence
-// default stateUnsupported uses — downgrading a report on anything short of
-// positive evidence would claim the screen is clear when it is not.
-//
-// It deliberately does NOT re-read the manifest the way stateUnsupported
-// does: that read is documented as safe only on the single narration worker
-// goroutine (the `running` guard), and a status probe must never block behind
-// disk I/O on a degraded filesystem nor race the worker's verdict write. The
-// cached verdict is the one the last delivery actually resolved against,
-// which is exactly what "what is on the screen now" means.
-func (s *Service) cachedStateUnsupported(state string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.extSupport[state] == supportNo
-}
-
-// narrationDisabled reports the process-lifetime "this player has no
-// setupDisplay contract at all" latch (see narrationSupported). While it
-// holds, every setup push is skipped before it reaches the player, so the
-// retained intent in the controller describes a screen nobody painted.
-// supportUnknown is NOT disabled: no positive evidence yet, same default as
-// everywhere else in this file.
-func (s *Service) narrationDisabled() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.support == supportNo
-}
-
-// CurrentNarrationState reports the narration state currently on the player
-// (the general sibling of mintpairing.Service.DisplayActive/OverlayStatus,
-// same overlay.Controller.Current() source): "", false when nothing from
-// this listener is on screen, else the state string — "claim_qr" among
-// others (see the state constants above) — and true. Every setupui overlay,
-// the claim QR included, is painted by a CDP evaluation, never a page
-// navigation, so the Chromium page URL never reflects any of them; the
-// app's prior signal for the claim QR specifically (`displayURL`'s
-// `step=qr` query parameter) assumed a navigation and has not actually
-// matched this overlay-based painting path. This method is the first
-// authoritative signal for any setupui state, general on purpose (issue
-// #381's owner direction): a status surface reporting only "is it the claim
-// QR" would have to grow a new method for the next state a caller needs,
-// when the controller already has one answer for "what is current" that
-// serves them all.
-//
-// It reports the RESOLVED DISPLAY state, not the raw intent Narrating()
-// returns — the one deliberate difference between the two, and the reason
-// this is not simply Narrating() plus a string. The retained intent must stay
-// neutral for Resync replay (see resolveExtensionState), so on a player whose
-// manifest predates a state the intent and the screen genuinely differ:
-//
-//   - the ap-recheck push (ShowConnectingOrHide, fallbackHideKey) delivers a
-//     HIDE, leaving artwork on screen while the intent still reads
-//     "connecting" — reported as nothing showing, not as an overlay;
-//   - a table fallback (connecting/setup_error -> join_failed) paints the
-//     FALLBACK state, so that is what is reported, not the intent;
-//   - an extension state with no fallback (scanning/finalizing/factory_reset)
-//     on a manifest that predates it is accepted with {ok:true} and renders
-//     NOTHING, so the screen is unchanged and there is no overlay to report;
-//   - a retained setup:hidden intent (ReplayHide's Kind, which Narrating()
-//     screens out by the same reasoning) is nothing showing, never an
-//     overlay whose state is literally "hidden";
-//   - narration disabled outright for the process means no setup overlay
-//     ever reached the screen at all.
-//
-// Narrating() keeps the intent reading on purpose: its callers decide whether
-// a destructive page operation would erase someone's narration, where the
-// conservative answer is the pushed intent. A status surface answering "what
-// is the viewer looking at" needs the opposite, so the resolution lives here.
-// See resolvedState for the one window in which the two can still disagree.
-func (s *Service) CurrentNarrationState() (string, bool) {
-	cur, has := s.ctrl.Current()
-	if !has || !isSetup(cur) || s.narrationDisabled() {
-		return "", false
-	}
-	intent := setupState(cur)
-	hideMarked, marked := payloadOf(cur)[fallbackHideKey].(bool)
-	unsupported := s.cachedStateUnsupported(intent)
-	state := resolvedState(intent, marked, hideMarked, unsupported)
-	if state == stateHidden || state == "" {
-		return "", false
-	}
-	if state == intent && unsupported {
-		// No fallback existed for an unsupported state, so the send went out
-		// as-is and the player no-opped it. state != intent is always a
-		// REQUIRED fallback state (join_failed), which every gated manifest
-		// lists — so it never needs a second verdict read.
-		return "", false
-	}
-	return state, true
-}
-
-// Resync re-shows the current overlay. It is the "CDP became available"
-// trigger: wire it to the CDP client's on-connect callback so a reconnecting
-// or freshly-loaded player catches up to the current setup state. It is a
-// no-op if nothing has been shown yet.
-//
-// Replay (not a Current()-then-Show round trip, which this used before round
-// 5 review's F3) re-reads and re-checks ownership under the controller's own
-// single lock acquisition, so there is no gap in which a newer Owner show
-// from elsewhere — a browser-pairing request — can take the screen between
-// reading what is current and resending it. The old round trip had exactly
-// that gap: an unconditional Owner ShowIf of a stale snapshot would clobber
-// whatever had taken over in between, ending that session.
-//
-// When nothing is current, that is either because nothing has been shown yet
-// (hiddenIntent is false; no-op, same as before) or because this service's
-// own last hide committed (hiddenIntent is true) — see hiddenIntent's doc for
-// why that case still needs a replay here.
 func (s *Service) Resync() {
 	if s.ctrl.Replay(s) {
 		return
@@ -1002,21 +370,10 @@ func (s *Service) Resync() {
 	_ = s.ctrl.ReplayHide(overlay.Overlay{Kind: setupKind(stateHidden)})
 }
 
-// push shows req. It returns immediately; the CDP send never happens on the
-// caller's goroutine (see the overlay package doc on decision versus
-// delivery). Retry policy is deliberately "retry on next change", not a hot
-// loop: a failed send is not re-attempted on its own.
 func (s *Service) push(req map[string]any) {
 	s.pushIf(req, nil)
 }
 
-// pushIf shows req, or — when req is the hidden state, the one plain Hide()
-// path — clears the screen. Both run under the overlay controller's own
-// decision lock (see ShowIf/HideIf); a plain hide clears only setup narration
-// the controller shows, never a browser-pairing code or any other owner's
-// overlay. ok, when non-nil, is the condition a conditional caller
-// (ShowConnectingIfShowing, RefreshClaimQRName) checks against the current
-// narration before showing.
 func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) {
 	if stringField(req, "state") == stateHidden {
 		s.hideIf(func(cur overlay.Overlay, has bool) bool {
@@ -1025,373 +382,4 @@ func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) 
 		return
 	}
 	s.showOwned(req, overlay.Owner, ok)
-}
-
-// parkForNavigation blocks the overlay controller's delivery worker — never a
-// caller of Show/Hide, which never block (see the overlay package doc) —
-// while a playersession.Session recovery navigation is pending, so a
-// narration send cannot race the page underneath it. It is a no-op when no
-// session is wired (SetSession never called), which is every existing test
-// and any pre-session build. The park
-// exits on whichever comes FIRST: the navigation's TARGET generation reaching
-// StageHandler; NavigationPending clearing; or the bounded park timeout —
-// on either of the latter two the item is still delivered best-effort right
-// after this returns, exactly as today. Without a bounded exit a page that
-// never installs its handler would park narration indefinitely, reintroducing
-// the SoftAP-QR-goes-dark failure the positive-only barrier cache (NV1)
-// removed.
-//
-// Uses NavigationTargetGeneration, NOT a
-// Generation()-snapshot-at-entry comparison: that older
-// approach broke when the park was entered AFTER the bump already happened
-// (a real, common timing — parkForNavigation runs once per queued item, and
-// NavigationPending stays true for the navigation's entire ~20s verifyCap
-// window while awaitRouteSettled keeps polling an idle "/" wall) — the
-// snapshot IS already the new generation in that case, so
-// "Generation() != entrySnapshot" can never become true and the park stalled
-// for its full timeout on every send entered post-bump. NavigationTargetGeneration
-// instead identifies the SPECIFIC generation the in-flight navigation
-// produced, independent of when this call happened to start: pre-bump it
-// reads 0 (never exits via this path, preserving the original M2 intent of
-// never trusting a stale pre-bump StageReady positive), and once the bump
-// happens it holds that generation's ID until the navigation finishes,
-// letting a post-bump-entered park exit the moment that SPECIFIC generation
-// is handler-ready rather than waiting out the whole navigation.
-func (s *Service) parkForNavigation() {
-	if s.session == nil || !s.session.NavigationPending() {
-		return
-	}
-	interval := s.navigationParkPollInterval
-	if interval <= 0 {
-		interval = defaultNavigationParkPollInterval
-	}
-	timeout := s.navigationParkTimeout
-	if timeout <= 0 {
-		timeout = defaultNavigationParkTimeout
-	}
-	deadline := time.Now().Add(timeout)
-	for s.session.NavigationPending() {
-		if target := s.session.NavigationTargetGeneration(); target != 0 && target == s.session.Generation() && s.session.StageReady(playersession.StageHandler) {
-			return
-		}
-		if time.Now().After(deadline) {
-			s.logger.Info("Narration park timed out waiting on a pending navigation; delivering best-effort")
-			return
-		}
-		time.Sleep(interval)
-	}
-}
-
-// trySend performs one best-effort CDP push. All failures are logged and
-// swallowed; nothing here is fatal to provisioning.
-func (s *Service) trySend(req map[string]any) {
-	if !s.narrationSupported() {
-		return
-	}
-	// Send-time capability resolution for the downgradeable extension states
-	// (a no-op for every other state) — must stay AFTER narrationSupported, so
-	// the downgrade decision only ever runs when a manifest is present.
-	req = s.resolveExtensionState(req)
-
-	payload, err := json.Marshal(map[string]any{
-		"command": setupDisplayCommand,
-		"request": req,
-	})
-	if err != nil {
-		// A non-serializable request is a programming error, but narration must
-		// still not be fatal; log and move on.
-		s.logger.Debug("Failed to marshal setup narration payload", zap.Error(err), zap.Any("request", req))
-		return
-	}
-
-	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
-		"returnByValue": true,
-	})
-	if err != nil {
-		// Expected while Chromium is still loading or has crashed during setup —
-		// but Info, not Debug: narration sends use NoLogSend (the payload embeds
-		// the AP PSK), so this line is the ONLY production trace of a state that
-		// never reached the screen.
-		s.logger.Info("Setup narration push failed", zap.Error(err), zap.String("state", stringField(req, "state")))
-		return
-	}
-	if err := validateSetupDisplayResult(result); err != nil {
-		// The player actively rejected the state: a contract violation, not a
-		// timing hiccup.
-		s.logger.Warn("Setup narration push rejected", zap.Error(err), zap.String("state", stringField(req, "state")))
-		return
-	}
-	// Positive confirmation the state reached the screen (NoLogSend hides the
-	// payload, so this is the only production trace). updating stays quiet: its
-	// per-percent pushes would flood the log across an OTA.
-	if state := stringField(req, "state"); state != stateUpdating {
-		s.logger.Info("Setup narration pushed", zap.String("state", state))
-	}
-}
-
-// narrationSupported resolves, once, whether the player advertises setupDisplay
-// support. The decision is cached for the process lifetime: an older player
-// yields a permanent no-narration fallback so narration-disabled is
-// indistinguishable from narration-working from the state machine's side.
-//
-// LOCKING: the manifest read runs OUTSIDE s.mu, mirroring stateUnsupported,
-// and the UN-latched first read fires exactly on the boot narration path (the
-// process's first push), so a hung read on a degraded filesystem under the
-// mutex would stall the online Hide that ends the boot narration. Safe
-// without the lock because trySend — this function's only caller — runs only
-// on the shared overlay.Controller's own single delivery worker goroutine
-// (see setupPainter's doc), not on whichever goroutine called Show/Hide/
-// pushIf; the latch and warnedUnreadable stay mutex-guarded.
-func (s *Service) narrationSupported() bool {
-	s.mu.Lock()
-	cached := s.support
-	s.mu.Unlock()
-	switch cached {
-	case supportYes:
-		return true
-	case supportNo:
-		return false
-	}
-	err := validateSetupDisplayContract(s.contractPath)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err != nil {
-		if errors.Is(err, errContractUnreadable) {
-			// Do NOT latch supportNo on a read failure: the very first push
-			// fires within seconds of boot (provisioning starts before CDP),
-			// and the player bundle/rootfs may not be readable at that exact
-			// instant — or an OTA may be mid-replace of the bundle. Latching
-			// would permanently kill narration for the process. Stay
-			// undecided: this push is skipped and the next one re-checks. A
-			// genuinely absent manifest keeps narration off through this same
-			// path, at the cost of one file read per push attempt.
-			if !s.warnedUnreadable {
-				s.warnedUnreadable = true
-				s.logger.Warn("Setup narration deferred: player contract unreadable; re-checking on the next push",
-					zap.Error(err), zap.String("path", s.contractPath))
-			}
-			return false
-		}
-		s.support = supportNo
-		// Logged exactly once, at Warn: expected on players that predate the
-		// setupDisplay contract, but on a SoftAP-era device it means NO setup
-		// narration (no QR, no join feedback) — that must be findable in
-		// production logs, which run at Info.
-		s.logger.Warn("Setup narration disabled: player contract lacks setupDisplay support",
-			zap.Error(err), zap.String("path", s.contractPath))
-		return false
-	}
-	s.support = supportYes
-	return true
-}
-
-func validateSetupDisplayResult(result any) error {
-	response, err := normalizeEvaluationResult(result)
-	if err != nil {
-		return err
-	}
-	ok, hasOK := response["ok"].(bool)
-	if !hasOK {
-		return fmt.Errorf("setup display response missing ok: %v", response)
-	}
-	if !ok {
-		return fmt.Errorf("setup display rejected request: %v", response)
-	}
-	return nil
-}
-
-// normalizeEvaluationResult unwraps the nested Runtime.evaluate envelope down to
-// the player's {ok:...} application response. It mirrors the tolerant unwrapping
-// used by the mint-pairing display path so both narration surfaces accept the
-// same result shapes.
-func normalizeEvaluationResult(result any) (map[string]any, error) {
-	resultMap, ok := result.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("setup display returned unsupported result type %T", result)
-	}
-	if _, hasException := resultMap["exceptionDetails"]; hasException {
-		return nil, fmt.Errorf("setup display evaluation raised exception: %v", resultMap["exceptionDetails"])
-	}
-	if _, hasOK := resultMap["ok"]; hasOK {
-		return resultMap, nil
-	}
-	if message, ok := resultMap["message"]; ok {
-		return normalizeEvaluationResult(message)
-	}
-	if value, ok := resultMap["value"]; ok {
-		return normalizeEvaluationValue(value)
-	}
-
-	rawResult, hasResult := resultMap["result"]
-	if !hasResult {
-		return resultMap, nil
-	}
-	rawResultMap, ok := rawResult.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("setup display returned malformed Runtime.evaluate result: %v", resultMap)
-	}
-	if _, hasException := rawResultMap["exceptionDetails"]; hasException {
-		return nil, fmt.Errorf("setup display evaluation raised exception: %v", rawResultMap["exceptionDetails"])
-	}
-	if nested, ok := rawResultMap["result"]; ok {
-		return normalizeEvaluationResult(nested)
-	}
-	if value, ok := rawResultMap["value"]; ok {
-		return normalizeEvaluationValue(value)
-	}
-	return nil, fmt.Errorf("setup display returned unsupported Runtime.evaluate result: %v", rawResultMap)
-}
-
-func normalizeEvaluationValue(value any) (map[string]any, error) {
-	if raw, ok := value.(string); ok {
-		var decoded map[string]any
-		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-			return nil, fmt.Errorf("decode setup display response: %w", err)
-		}
-		return decoded, nil
-	}
-	return normalizeEvaluationResult(value)
-}
-
-type playerContractManifest struct {
-	Contracts map[string]playerDisplayContract `json:"contracts"`
-}
-
-type playerDisplayContract struct {
-	Version          int                            `json:"version"`
-	RequestKey       string                         `json:"requestKey"`
-	States           []string                       `json:"states"`
-	AcceptedResponse playerContractAcceptedResponse `json:"acceptedResponse"`
-}
-
-type playerContractAcceptedResponse struct {
-	OK bool `json:"ok"`
-}
-
-// ErrPlayerContractUnreadable marks a validation failure caused by failing to
-// READ or DECODE the player contract manifest, as opposed to a successfully
-// decoded manifest that lacks the contract being checked. The two must not be
-// conflated: unreadable may be transient (boot ordering, an OTA mid-replace
-// of the player bundle — a torn write is byte-garbage, not evidence) and
-// must be re-checked on the next attempt, never latched; a manifest that
-// DECODED but lacks the contract means the connected player's build
-// genuinely does not support it. Exported so
-// other packages' capability fuses can apply the identical distinction —
-// devicectl's boot-recovery classification (design doc §5) checks
-// errors.Is(err, setupui.ErrPlayerContractUnreadable) against
-// ValidatePlayerStatusContract exactly as this package's own
-// narrationSupported does against validateSetupDisplayContract.
-var ErrPlayerContractUnreadable = errors.New("player contract unreadable")
-
-// errContractUnreadable is retained as a private alias so every existing
-// reference below (and every existing test) keeps working unchanged; new
-// code, in this package or elsewhere, should prefer the exported name.
-var errContractUnreadable = ErrPlayerContractUnreadable
-
-// readPlayerContractManifest reads and decodes the player contract manifest
-// at path, wrapping BOTH read and decode failures in
-// ErrPlayerContractUnreadable: undecodable bytes are a torn or partial write
-// (an OTA mid-replace of the bundle), which proves nothing about the player
-// — no shipped build has ever carried invalid JSON, so treating it as
-// "genuinely lacks the contract" would latch capability fuses off a
-// transient state (narrationSupported once killed ALL narration for the
-// process lifetime this way). Genuine absence requires a manifest that
-// DECODED and lacks the contract key. Shared by every contract-specific
-// validator in this file (validateSetupDisplayContract,
-// ValidatePlayerStatusContract) so the unreadable-vs-absent distinction is
-// defined exactly once.
-func readPlayerContractManifest(path string) (playerContractManifest, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return playerContractManifest{}, fmt.Errorf("player contract path is empty")
-	}
-	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
-	if err != nil {
-		return playerContractManifest{}, fmt.Errorf("%w: %w", ErrPlayerContractUnreadable, err)
-	}
-	var manifest playerContractManifest
-	if err := json.Unmarshal(raw, &manifest); err != nil {
-		return playerContractManifest{}, fmt.Errorf("%w: decode player contract: %w", ErrPlayerContractUnreadable, err)
-	}
-	return manifest, nil
-}
-
-// PlayerStatusContractVersion is the version ValidatePlayerStatusContract
-// requires for contracts.playerStatus (design doc §5.3).
-const PlayerStatusContractVersion = 1
-
-// ValidatePlayerStatusContract reports whether the player manifest at path
-// advertises contracts.playerStatus {version:1} — the structured status probe
-// (window.__ffosPlayerStatus) devicectl's boot-recovery classification and
-// the NavigateHome error-page/route gates depend on. Sibling of
-// validateSetupDisplayContract, sharing its exact unreadable-vs-absent
-// distinction via ErrPlayerContractUnreadable. Exported here — rather than in
-// a new shared package — because devicectl already imports this package for
-// narration, so it can call this directly with no new import-cycle risk:
-// setupui imports nothing back from devicectl.
-func ValidatePlayerStatusContract(path string) error {
-	manifest, err := readPlayerContractManifest(path)
-	if err != nil {
-		return err
-	}
-	contract, ok := manifest.Contracts["playerStatus"]
-	if !ok {
-		return fmt.Errorf("missing contracts.playerStatus")
-	}
-	if contract.Version != PlayerStatusContractVersion {
-		return fmt.Errorf("contracts.playerStatus.version must be %d", PlayerStatusContractVersion)
-	}
-	return nil
-}
-
-// validateSetupDisplayContract reports whether the player manifest at path
-// advertises the setupDisplay contract this Service speaks. It mirrors
-// mintpairing's contract validation mechanism (read the manifest from the
-// filesystem, not over HTTP).
-func validateSetupDisplayContract(path string) error {
-	manifest, err := readPlayerContractManifest(path)
-	if err != nil {
-		return err
-	}
-	return validateSetupDisplayManifest(manifest)
-}
-
-// validateSetupDisplayManifest is the manifest-level half of
-// validateSetupDisplayContract, split out so the connecting capability
-// resolution can apply the SAME "is this a real setupDisplay v1 contract"
-// test to an already-decoded manifest: a manifest that decodes but does not
-// speak the contract (e.g. a bare `{"contracts":{}}` from a transitional or
-// foreign bundle) is not capability evidence about any individual state.
-func validateSetupDisplayManifest(manifest playerContractManifest) error {
-	contract, ok := manifest.Contracts["setupDisplay"]
-	if !ok {
-		return fmt.Errorf("missing contracts.setupDisplay")
-	}
-	if contract.Version != 1 {
-		return fmt.Errorf("contracts.setupDisplay.version must be 1")
-	}
-	if contract.RequestKey != "request" {
-		return fmt.Errorf(`contracts.setupDisplay.requestKey must be "request"`)
-	}
-	states := make(map[string]bool, len(contract.States))
-	for _, state := range contract.States {
-		states[state] = true
-	}
-	for _, required := range requiredStates {
-		if !states[required] {
-			return fmt.Errorf("contracts.setupDisplay.states missing %q", required)
-		}
-	}
-	if !contract.AcceptedResponse.OK {
-		return fmt.Errorf("contracts.setupDisplay.acceptedResponse.ok must be true")
-	}
-	return nil
-}
-
-func stringField(req map[string]any, key string) string {
-	if v, ok := req[key].(string); ok {
-		return v
-	}
-	return ""
 }

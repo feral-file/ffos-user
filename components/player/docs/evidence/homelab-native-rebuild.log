@@ -1,0 +1,247 @@
+Nov 17 18:36:19 homelab systemd[928]: Started [systemd-run] /bin/bash -c "cmake --build build -j 3".
+Nov 17 18:36:25 homelab bash[1650365]: [1/4] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+Nov 17 18:36:25 homelab bash[1650365]: [2/4] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+Nov 17 18:36:25 homelab bash[1650365]: [3/4] Linking CXX executable ff-media-worker
+Nov 17 18:36:26 homelab bash[1650365]: [4/4] Linking CXX executable ff-player-native
+Nov 17 18:36:26 homelab systemd[928]: ff-native-media-rebuild.service: Consumed 13.665s CPU time over 7.152s wall clock time, 1013.2M memory peak.
+Nov 17 18:42:39 homelab systemd[928]: Started [systemd-run] /bin/bash -c "set -e; cmake --build build -j 3; LD_LIBRARY_PATH=/home/feralfile/ff-player-native-build/build-media/prefix/lib ctest --test-dir build --output-on-failure".
+Nov 17 18:42:45 homelab bash[1662583]: [1/11] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+Nov 17 18:42:45 homelab bash[1662583]: [2/11] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+Nov 17 18:42:48 homelab bash[1662583]: [3/11] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+Nov 17 18:42:48 homelab bash[1662583]: [4/11] Linking CXX static library libff_core.a
+Nov 17 18:42:48 homelab bash[1662583]: [5/11] Linking CXX executable ff-player-core
+Nov 17 18:42:48 homelab bash[1662583]: [6/11] Linking CXX executable core-tests
+Nov 17 18:42:48 homelab bash[1662583]: [7/11] Linking CXX executable media-ipc-tests
+Nov 17 18:42:49 homelab bash[1662583]: [8/11] Linking CXX executable ff-media-worker
+Nov 17 18:42:51 homelab bash[1662583]: [9/11] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+Nov 17 18:42:51 homelab bash[1662583]: [10/11] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+Nov 17 18:42:52 homelab bash[1662583]: [11/11] Linking CXX executable ff-player-native
+Nov 17 18:42:52 homelab bash[1662583]: FAILED: [code=1] ff-player-native
+Nov 17 18:42:52 homelab bash[1662583]: : && /usr/bin/c++ -O2 -g -DNDEBUG -Wl,--dependency-file=CMakeFiles/ff-player-native.dir/link.d CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o CMakeFiles/ff-player-native.dir/src/presentation.cpp.o CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o CMakeFiles/ff-player-native.dir/src/media_client.cpp.o -o ff-player-native  -Wl,-rpath,/home/feralfile/ff-player-native-build/vendor/cef/Release:  libff_core.a  libff_media_ipc.a  cef-wrapper/libcef_dll_wrapper.a  /home/feralfile/ff-player-native-build/vendor/cef/Release/libcef.so  -ldl  libff_core.a  /usr/lib/libsqlite3.so  /usr/lib/libSDL2.so  /usr/lib/libEGL.so  /usr/lib/libGLESv2.so  /usr/lib/libdrm.so  /usr/lib/libpangocairo-1.0.so  /usr/lib/libpango-1.0.so  /usr/lib/libcairo.so  /usr/lib/libharfbuzz.so  /usr/lib/libgobject-2.0.so  /usr/lib/libglib-2.0.so  /usr/lib/libqrencode.so && :
+Nov 17 18:42:52 homelab bash[1662583]: /usr/bin/ld: CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o: in function `main':
+Nov 17 18:42:52 homelab bash[1662583]: /home/feralfile/ff-player-native-build/src/cef_main.cpp:31:(.text.startup+0x936): undefined reference to `ff::Server::Server(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, ff::Protocol&, std::function<long ()>)'
+Nov 17 18:42:52 homelab bash[1662583]: collect2: error: ld returned 1 exit status
+Nov 17 18:42:52 homelab bash[1662583]: ninja: build stopped: subcommand failed.
+Nov 17 18:42:52 homelab systemd[928]: ff-native-media-rebuild.service: Main process exited, code=exited, status=1/FAILURE
+Nov 17 18:42:52 homelab systemd[928]: ff-native-media-rebuild.service: Failed with result 'exit-code'.
+Nov 17 18:42:52 homelab systemd[928]: ff-native-media-rebuild.service: Consumed 35.228s CPU time over 13.414s wall clock time, 1.5G memory peak.
+Nov 17 18:46:05 homelab systemd[928]: Started [systemd-run] /bin/bash -c "set -e; cmake --build build -j 3; LD_LIBRARY_PATH=/home/feralfile/ff-player-native-build/build-media/prefix/lib ctest --test-dir build --output-on-failure".
+Nov 17 18:46:05 homelab bash[1668996]: [0/1] Re-running CMake...
+Nov 17 18:46:05 homelab bash[1668997]: -- Configuring done (0.0s)
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:46:05 homelab bash[1668997]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:46:05 homelab bash[1668997]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:46:05 homelab bash[1668997]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:46:05 homelab bash[1668997]:   instead.
+Nov 17 18:46:05 homelab bash[1668997]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:46:05 homelab bash[1668997]: -- Generating done (0.0s)
+Nov 17 18:46:05 homelab bash[1668997]: -- Build files have been written to: /home/feralfile/ff-player-native-build/build
+Nov 17 18:46:09 homelab bash[1668996]: [1/28] Building CXX object CMakeFiles/ff_core.dir/src/store.cpp.o
+Nov 17 18:46:10 homelab bash[1668996]: [2/28] Building CXX object CMakeFiles/ff_core.dir/src/json.cpp.o
+Nov 17 18:46:14 homelab bash[1668996]: [3/28] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+Nov 17 18:46:14 homelab bash[1668996]: [4/28] Building CXX object CMakeFiles/ff_core.dir/src/server.cpp.o
+Nov 17 18:46:15 homelab bash[1668996]: [5/28] Building CXX object CMakeFiles/ff_core.dir/src/protocol.cpp.o
+Nov 17 18:46:16 homelab bash[1668996]: [6/28] Building CXX object CMakeFiles/ff_core.dir/src/media_kind.cpp.o
+Nov 17 18:46:16 homelab bash[1668996]: [7/28] Linking CXX static library libff_core.a
+Nov 17 18:46:17 homelab bash[1668996]: [8/28] Building CXX object CMakeFiles/ff_media_ipc.dir/src/media_ipc.cpp.o
+Nov 17 18:46:18 homelab bash[1668996]: [9/28] Building CXX object CMakeFiles/ff-player-core.dir/src/core_main.cpp.o
+Nov 17 18:46:18 homelab bash[1668996]: [10/28] Linking CXX static library libff_media_ipc.a
+Nov 17 18:46:21 homelab bash[1668996]: [11/28] Building CXX object CMakeFiles/media-ipc-tests.dir/tests/media_ipc_test.cpp.o
+Nov 17 18:46:21 homelab bash[1668996]: [12/28] Building CXX object CMakeFiles/server-tests.dir/tests/server_test.cpp.o
+Nov 17 18:46:22 homelab bash[1668996]: [13/28] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+Nov 17 18:46:24 homelab bash[1668996]: [14/28] Building CXX object CMakeFiles/core-tests.dir/tests/core_test.cpp.o
+Nov 17 18:46:27 homelab bash[1668996]: [15/28] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+Nov 17 18:46:28 homelab bash[1668996]: [16/28] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+Nov 17 18:46:30 homelab bash[1668996]: [17/28] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+Nov 17 18:46:32 homelab bash[1668996]: [18/28] Building CXX object CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o
+Nov 17 18:46:33 homelab bash[1668996]: [19/28] Linking CXX executable ff-player-core
+Nov 17 18:46:33 homelab bash[1668996]: [20/28] Linking CXX executable core-tests
+Nov 17 18:46:33 homelab bash[1668996]: [21/28] Linking CXX executable server-tests
+Nov 17 18:46:33 homelab bash[1668996]: [22/28] Linking CXX executable media-ipc-tests
+Nov 17 18:46:33 homelab bash[1668996]: [23/28] Linking CXX executable ff-media-worker
+Nov 17 18:46:34 homelab bash[1668996]: [24/28] Linking CXX executable media-decode-tests
+Nov 17 18:46:34 homelab bash[1668996]: [25/28] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation.cpp.o
+Nov 17 18:46:37 homelab bash[1668996]: [26/28] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+Nov 17 18:46:37 homelab bash[1668996]: [27/28] Linking CXX executable ff-player-native
+Nov 17 18:46:37 homelab bash[1668993]: Test project /home/feralfile/ff-player-native-build/build
+Nov 17 18:46:37 homelab bash[1668993]:     Start 1: core
+Nov 17 18:46:38 homelab bash[1668993]: 1/4 Test #1: core .............................   Passed    1.01 sec
+Nov 17 18:46:38 homelab bash[1668993]:     Start 2: server
+Nov 17 18:46:38 homelab bash[1668993]: 2/4 Test #2: server ...........................   Passed    0.00 sec
+Nov 17 18:46:38 homelab bash[1668993]:     Start 3: media-ipc
+Nov 17 18:46:38 homelab bash[1668993]: 3/4 Test #3: media-ipc ........................   Passed    0.00 sec
+Nov 17 18:46:38 homelab bash[1668993]:     Start 4: media-decode
+Nov 17 18:46:41 homelab bash[1668993]: 4/4 Test #4: media-decode .....................   Passed    2.60 sec
+Nov 17 18:46:41 homelab bash[1668993]: 100% tests passed out of 4
+Nov 17 18:46:41 homelab bash[1668993]: Total Test time (real) =   3.62 sec
+Nov 17 18:46:41 homelab systemd[928]: ff-native-media-rebuild.service: Consumed 1min 30.487s CPU time over 36.203s wall clock time, 1.5G memory peak.
+Nov 17 18:47:49 homelab systemd[928]: Started [systemd-run] /bin/bash -c "set -e; cmake --build build -j 3; LD_LIBRARY_PATH=/home/feralfile/ff-player-native-build/build-media/prefix/lib ctest --test-dir build --output-on-failure".
+Nov 17 18:47:49 homelab bash[1672142]: [0/1] Re-running CMake...
+Nov 17 18:47:49 homelab bash[1672143]: -- Configuring done (0.0s)
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: CMake Warning (author) at CMakeLists.txt:11 (target_link_libraries):
+Nov 17 18:47:49 homelab bash[1672143]:   The library that is being linked to, SQLite::SQLite3, is marked as being
+Nov 17 18:47:49 homelab bash[1672143]:   deprecated by the owner.  The message provided by the developer is:
+Nov 17 18:47:49 homelab bash[1672143]:   The target name SQLite::SQLite3 is deprecated.  Please use SQLite3::SQLite3
+Nov 17 18:47:49 homelab bash[1672143]:   instead.
+Nov 17 18:47:49 homelab bash[1672143]: This warning is for project developers.  Use -Wno-author to suppress it.
+Nov 17 18:47:49 homelab bash[1672143]: -- Generating done (0.0s)
+Nov 17 18:47:49 homelab bash[1672143]: -- Build files have been written to: /home/feralfile/ff-player-native-build/build
+Nov 17 18:47:53 homelab bash[1672142]: [1/28] Building CXX object CMakeFiles/ff_core.dir/src/store.cpp.o
+Nov 17 18:47:54 homelab bash[1672142]: [2/28] Building CXX object CMakeFiles/ff_core.dir/src/json.cpp.o
+Nov 17 18:47:57 homelab bash[1672142]: [3/28] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+Nov 17 18:47:58 homelab bash[1672142]: [4/28] Building CXX object CMakeFiles/ff_core.dir/src/server.cpp.o
+Nov 17 18:47:59 homelab bash[1672142]: [5/28] Building CXX object CMakeFiles/ff_core.dir/src/protocol.cpp.o
+Nov 17 18:47:59 homelab bash[1672142]: [6/28] Building CXX object CMakeFiles/ff_core.dir/src/media_kind.cpp.o
+Nov 17 18:48:00 homelab bash[1672142]: [7/28] Linking CXX static library libff_core.a
+Nov 17 18:48:01 homelab bash[1672142]: [8/28] Building CXX object CMakeFiles/ff_media_ipc.dir/src/media_ipc.cpp.o
+Nov 17 18:48:01 homelab bash[1672142]: [9/28] Building CXX object CMakeFiles/ff-player-core.dir/src/core_main.cpp.o
+Nov 17 18:48:01 homelab bash[1672142]: [10/28] Linking CXX static library libff_media_ipc.a
+Nov 17 18:48:04 homelab bash[1672142]: [11/28] Building CXX object CMakeFiles/server-tests.dir/tests/server_test.cpp.o
+Nov 17 18:48:04 homelab bash[1672142]: [12/28] Building CXX object CMakeFiles/media-ipc-tests.dir/tests/media_ipc_test.cpp.o
+Nov 17 18:48:05 homelab bash[1672142]: [13/28] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+Nov 17 18:48:07 homelab bash[1672142]: [14/28] Building CXX object CMakeFiles/core-tests.dir/tests/core_test.cpp.o
+Nov 17 18:48:10 homelab bash[1672142]: [15/28] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+Nov 17 18:48:11 homelab bash[1672142]: [16/28] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+Nov 17 18:48:13 homelab bash[1672142]: [17/28] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+Nov 17 18:48:15 homelab bash[1672142]: [18/28] Building CXX object CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o
+Nov 17 18:48:15 homelab bash[1672142]: [19/28] Linking CXX executable ff-player-core
+Nov 17 18:48:15 homelab bash[1672142]: [20/28] Linking CXX executable core-tests
+Nov 17 18:48:15 homelab bash[1672142]: [21/28] Linking CXX executable server-tests
+Nov 17 18:48:16 homelab bash[1672142]: [22/28] Linking CXX executable media-ipc-tests
+Nov 17 18:48:16 homelab bash[1672142]: [23/28] Linking CXX executable ff-media-worker
+Nov 17 18:48:16 homelab bash[1672142]: [24/28] Linking CXX executable media-decode-tests
+Nov 17 18:48:17 homelab bash[1672142]: [25/28] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation.cpp.o
+Nov 17 18:48:19 homelab bash[1672142]: [26/28] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+Nov 17 18:48:19 homelab bash[1672142]: [27/28] Linking CXX executable ff-player-native
+Nov 17 18:48:19 homelab bash[1672139]: Test project /home/feralfile/ff-player-native-build/build
+Nov 17 18:48:19 homelab bash[1672139]:     Start 1: core
+Nov 17 18:48:20 homelab bash[1672139]: 1/4 Test #1: core .............................   Passed    1.01 sec
+Nov 17 18:48:20 homelab bash[1672139]:     Start 2: server
+Nov 17 18:48:20 homelab bash[1672139]: 2/4 Test #2: server ...........................   Passed    0.00 sec
+Nov 17 18:48:20 homelab bash[1672139]:     Start 3: media-ipc
+Nov 17 18:48:20 homelab bash[1672139]: 3/4 Test #3: media-ipc ........................   Passed    0.00 sec
+Nov 17 18:48:20 homelab bash[1672139]:     Start 4: media-decode
+Nov 17 18:48:23 homelab bash[1672139]: 4/4 Test #4: media-decode .....................   Passed    2.58 sec
+Nov 17 18:48:23 homelab bash[1672139]: 100% tests passed out of 4
+Nov 17 18:48:23 homelab bash[1672139]: Total Test time (real) =   3.59 sec
+Nov 17 18:48:23 homelab systemd[928]: ff-native-media-rebuild.service: Consumed 1min 24.671s CPU time over 33.904s wall clock time, 1.5G memory peak.

@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native input verification</title>
+<style>html,body {margin:0;height:100%;background:#17202a;color:white;font:24px monospace} textarea {position:absolute;left:80px;top:80px;width:700px;height:180px;font:32px monospace} pre {position:absolute;left:80px;top:300px} #pointer {position:absolute;width:12px;height:12px;background:#ff00ff;pointer-events:none}</style>
+<textarea id="text" autofocus aria-label="Input verification"></textarea>
+<pre id="readout">Waiting for native input</pre><div id="pointer"></div>
+<script>
+window.inputEvents=[];
+for(const type of ['mousemove','mousedown','mouseup','click','dblclick','wheel','keydown','keyup','input']){
+ document.addEventListener(type,event=>{
+  const record={type,x:event.clientX,y:event.clientY,buttons:event.buttons,button:event.button,detail:event.detail,
+   code:event.code,key:event.key,shift:event.shiftKey,ctrl:event.ctrlKey,alt:event.altKey,meta:event.metaKey,
+   repeat:event.repeat,deltaX:event.deltaX,deltaY:event.deltaY,value:document.querySelector('#text').value};
+  window.inputEvents.push(record);window.inputEvents=window.inputEvents.slice(-100);
+  document.querySelector('#readout').textContent=JSON.stringify(record,null,2);
+  if(type==='mousemove'){const pointer=document.querySelector('#pointer');pointer.style.left=event.clientX+'px';pointer.style.top=event.clientY+'px';}
+ },true);
+}
+</script>

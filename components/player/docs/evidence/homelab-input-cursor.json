@@ -1,0 +1,33 @@
+{
+  "source": "Cage grim capture, not physical panel",
+  "size": [
+    1920,
+    1920
+  ],
+  "commandOutputPixels": [
+    400,
+    500
+  ],
+  "artworkMargin": 40,
+  "expectedArtworkCoordinates": [
+    360,
+    460
+  ],
+  "pixels": {
+    "(400, 500)": [
+      255,
+      255,
+      255
+    ],
+    "(398, 498)": [
+      255,
+      255,
+      255
+    ],
+    "(408, 508)": [
+      255,
+      0,
+      255
+    ]
+  }
+}

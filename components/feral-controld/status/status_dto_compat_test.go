@@ -7,16 +7,15 @@ import (
 
 	"go.uber.org/zap"
 
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/ffplayerfixtures"
 )
 
-// decodeFFPlayerFixture simulates the cdp client's decode of a
-// Runtime.evaluate result that is itself a JSON string — see
-// ffplayerfixtures' package doc.
+// These literal old-player replies pin the controller DTO compatibility of
+// notification filtering. The fake source decodes fixtures only; production
+// status reads native snapshots and has no CDP transport.
 func decodeFFPlayerFixture(t *testing.T, raw string) map[string]interface{} {
 	t.Helper()
 	var decoded map[string]interface{}
@@ -26,15 +25,10 @@ func decodeFFPlayerFixture(t *testing.T, raw string) map[string]interface{} {
 	return decoded
 }
 
-// TestFFPlayerCompat_StampTransport drives the LITERAL checkStatus replies
-// the shipped ff-player produces (ffplayerfixtures.CheckStatusReply*)
-// through the real FetchPlayerStatus decode AND the stamp-observer plumbing
-// pollPlayerStatus drives — the exact boundary
-// playersession.Session.ObserveStatusStamp depends on to distinguish an old
-// player (source unavailable, never bump) from a new player's present-but-
-// possibly-empty stamp (docs/player-session-recovery.md §2.1's three-way
-// contract).
-func TestFFPlayerCompat_StampTransport(t *testing.T) {
+// Retain optional legacy stamp handling until the remaining document-session
+// consumers have moved to native instance identity. It is never emitted by the
+// native status source and is stripped at the external notification boundary.
+func TestControllerStatusDTO_OptionalLegacyStamp(t *testing.T) {
 	cases := []struct {
 		name         string
 		raw          string
@@ -65,14 +59,14 @@ func TestFFPlayerCompat_StampTransport(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockCDP := &fakeCDP{
-				pageNavigationURL: constants.WEBAPP_URL,
-				noLogSendResult:   decodeFFPlayerFixture(t, tc.raw),
+			mockPlayer := &fakePlayer{
+
+				reply: decodeFFPlayerFixture(t, tc.raw),
 			}
 
 			// --- FetchPlayerStatus: the Stamp *string field itself -----
 			p := &poller{
-				cdp:    mockCDP,
+				player: mockPlayer,
 				json:   wrapper.NewJSON(),
 				logger: zap.NewNop(),
 			}
@@ -100,7 +94,7 @@ func TestFFPlayerCompat_StampTransport(t *testing.T) {
 			var observedPresent bool
 			var observedCalls int
 			p2 := &poller{
-				cdp:                     mockCDP,
+				player:                  mockPlayer,
 				relayer:                 mockRelayer,
 				ws:                      mockWS,
 				json:                    wrapper.NewJSON(),
@@ -128,21 +122,21 @@ func TestFFPlayerCompat_StampTransport(t *testing.T) {
 	}
 }
 
-// TestFFPlayerCompat_StampStrippedFromNotificationPayload pins that the
+// TestControllerStatusDTO_StampStrippedFromNotificationPayload pins that the
 // stamp field the fixtures above carry — an internal generation-tracking
 // implementation detail — never leaks onto the relayer/websocket-facing
 // player_status notification, using the SAME literal reply shape a real
 // player produces.
-func TestFFPlayerCompat_StampStrippedFromNotificationPayload(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-		noLogSendResult:   decodeFFPlayerFixture(t, ffplayerfixtures.CheckStatusReplyStampPresentValue),
+func TestControllerStatusDTO_StampStrippedFromNotificationPayload(t *testing.T) {
+	mockPlayer := &fakePlayer{
+
+		reply: decodeFFPlayerFixture(t, ffplayerfixtures.CheckStatusReplyStampPresentValue),
 	}
 	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
 	mockWS := &fakeWS{}
 
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),

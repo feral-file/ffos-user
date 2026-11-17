@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
@@ -32,13 +31,17 @@ type versionCache struct {
 	mu        sync.RWMutex
 }
 
+type PresentationSource interface {
+	PresentationURL(context.Context) (string, error)
+}
+
 type deviceStatus struct {
 	json       wrapper.JSON
 	os         wrapper.OS
 	exec       wrapper.Exec
 	httpClient wrapper.HTTPClient
 	io         wrapper.IO
-	cdp        cdp.CDP
+	player     PresentationSource
 	cache      *versionCache
 
 	// lastOutage, when wired (SetLastOutageSource), serves the netlog
@@ -66,7 +69,7 @@ func NewDeviceStatus(
 	exec wrapper.Exec,
 	httpClient wrapper.HTTPClient,
 	io wrapper.IO,
-	cdpClient cdp.CDP,
+	player PresentationSource,
 ) DeviceStatus {
 	return &deviceStatus{
 		json:       json,
@@ -74,7 +77,7 @@ func NewDeviceStatus(
 		exec:       exec,
 		httpClient: httpClient,
 		io:         io,
-		cdp:        cdpClient,
+		player:     player,
 		cache:      &versionCache{},
 	}
 }
@@ -166,7 +169,7 @@ type DeviceStatusResponse struct {
 	MACInfo             map[string]string `json:"macInfo,omitempty"`
 	Volume              *int              `json:"volume,omitempty"`
 	IsMuted             *bool             `json:"isMuted,omitempty"`
-	DisplayURL          *string           `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
+	DisplayURL          *string           `json:"displayURL,omitempty"` // Device UI URI, with legacy step=qr hint; omitted if host unavailable.
 	// DeviceName is the owner's label for this unit, empty when nobody has set
 	// one. Deliberately no omitempty, for the same reason as Contract above:
 	// its PRESENCE is the capability signal a controller gates its rename
@@ -220,13 +223,13 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var sleepScheduleStatus *sleepschedule.Status
 	var deviceName string
 
-	// Chrome UI document URL. This is the same target listing the poller uses, but
-	// keeping it here preserves the response shape for direct CMD_DEVICE_STATUS calls.
+	// Report the native device UI URI, never an artwork source/credential.
+	// Device status remains available while the player is absent or recovering.
 	g.Go(func() error {
-		if d.cdp == nil {
+		if d.player == nil {
 			return nil
 		}
-		u, err := d.cdp.PageNavigationURL(ctx)
+		u, err := d.player.PresentationURL(ctx)
 		if err != nil {
 			// Non-fatal: device status remains useful without this field.
 			return nil

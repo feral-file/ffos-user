@@ -1,0 +1,29 @@
+name: Build Native Player
+on:
+  push:
+    branches: [develop, 'codex/**']
+    paths: ['components/player/**', '.github/workflows/build-player.yaml']
+  pull_request:
+    paths: ['components/player/**', '.github/workflows/build-player.yaml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-player-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Linux toolchain image
+        run: docker build -t ff-native-build components/player
+      - name: Build and test complete CEF and native media runtime
+        run: |
+          docker run --rm -v "$PWD/components/player:/src" ff-native-build sh tools/ci-build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ff-player-native-linux-x86_64
+          path: components/player/build-ci/ff-player-native-linux.tar.gz
+          if-no-files-found: error

@@ -1,0 +1,7 @@
+{
+  "startedAt": "2026-11-17T14:12:15.680Z",
+  "checks": [],
+  "result": "failed",
+  "error": "Error: Artwork decoding or resource loading failed",
+  "finishedAt": "2026-11-17T14:12:16.071Z"
+}

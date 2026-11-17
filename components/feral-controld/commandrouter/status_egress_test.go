@@ -78,7 +78,7 @@ func TestCheckStatusShowingKeyEgress(t *testing.T) {
 							encoded, err = json.Marshal(payload.Message)
 							return err
 						})
-						med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+						med := mediator.New(ctx, remote, bus, router, executor, nil, codec, logger)
 						med.Start()
 						command := "checkStatus"
 						require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))
@@ -210,7 +210,7 @@ func TestCheckStatusOverlayEgress(t *testing.T) {
 							encoded, err = json.Marshal(payload.Message)
 							return err
 						})
-						med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+						med := mediator.New(ctx, remote, bus, router, executor, nil, codec, logger)
 						med.Start()
 						command := "checkStatus"
 						require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))
@@ -293,7 +293,7 @@ func TestCheckStatusOverlayEgress_SetupOwner(t *testing.T) {
 							encoded, err = json.Marshal(payload.Message)
 							return err
 						})
-						med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+						med := mediator.New(ctx, remote, bus, router, executor, nil, codec, logger)
 						med.Start()
 						command := "checkStatus"
 						require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))
@@ -370,7 +370,7 @@ func TestCheckStatusOutcomesEgress(t *testing.T) {
 						encoded, err = json.Marshal(payload.Message)
 						return err
 					})
-					med := mediator.New(ctx, remote, bus, player, router, executor, nil, codec, logger)
+					med := mediator.New(ctx, remote, bus, router, executor, nil, codec, logger)
 					med.Start()
 					command := "checkStatus"
 					require.NoError(t, receive(ctx, relayer.Payload{MessageID: "controller-request", Message: relayer.Message{Command: &command}}))

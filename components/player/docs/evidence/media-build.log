@@ -1,0 +1,651 @@
+The Meson build system
+Version: 1.3.2
+Source dir: /src/vendor/libplacebo-7.387.0
+Build dir: /src/build-media/placebo
+Build type: native build
+Project name: libplacebo
+Project version: 7.387.0
+C compiler for the host machine: cc (gcc 13.3.0 "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0")
+C linker for the host machine: cc ld.bfd 2.42
+C++ compiler for the host machine: c++ (gcc 13.3.0 "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0")
+C++ linker for the host machine: c++ ld.bfd 2.42
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Compiler for C supports arguments -Wincompatible-pointer-types: YES 
+Compiler for C supports arguments -Wc23-extensions: NO 
+Compiler for C supports link arguments -Wl,--exclude-libs=ALL: YES 
+Library m found: YES
+Program python3 found: YES (/usr/bin/python3)
+Run-time dependency threads found: YES
+Header "pthread.h" has symbol "pthread_condattr_setclock" with dependency threads: YES 
+Found pkg-config: YES (/usr/bin/pkg-config) 1.8.1
+Found CMake: /usr/bin/cmake (3.28.3)
+Run-time dependency libunwind found: NO (tried pkgconfig and cmake)
+Library execinfo found: NO
+Checking for function "backtrace_symbols" with dependency -lexecinfo: YES 
+Check usable header "dbghelp.h" : NO 
+Fetching value of define "__MINGW32__" : (undefined) 
+Dependency shaderc skipped: feature shaderc disabled
+Check usable header "d3d11.h" : NO 
+Check usable header "d3d11_4.h" : NO 
+Check usable header "dxgi1_6.h" : NO 
+Run-time dependency spirv-cross-c-shared found: NO (tried pkgconfig and cmake)
+Library version found: NO
+Library dl found: YES
+Run-time dependency vulkan found: NO (tried pkgconfig and system)
+Header "vulkan/vulkan_core.h" has symbol "VK_VERSION_1_4" with dependency vulkan: YES 
+Run-time dependency lcms2 found: YES 2.14
+Run-time dependency dovi found: NO (tried pkgconfig and cmake)
+Run-time dependency libxxhash found: YES 0.8.2
+Configuring config.h using configuration
+Configuring config_internal.h using configuration
+WARNING: Library target 'placebo' has 'name_prefix' set. Compilers may not find it from its '-lplacebo' linker flag in the 'libplacebo.pc' pkg-config file.
+WARNING: Library target 'placebo' has 'name_prefix' set. Compilers may not find it from its '-lplacebo' linker flag in the 'libplacebo-uninstalled.pc' pkg-config file.
+Build targets in project: 16
+
+libplacebo 7.387.0
+
+  Optional features
+    d3d11          : NO
+    dovi           : YES
+    gl-proc-addr   : YES
+    glslang        : NO
+    lcms           : YES
+    libdovi        : NO
+    opengl         : YES
+    shaderc        : NO
+    vk-proc-addr   : NO
+    vulkan         : NO
+    xxhash         : YES
+
+  User defined options
+    default_library: shared
+    libdir         : lib
+    prefix         : /opt/ff-media
+    wrap_mode      : nodownload
+    demos          : false
+    glslang        : disabled
+    shaderc        : disabled
+    tests          : false
+    vulkan         : disabled
+
+Found ninja-1.11.1 at /usr/bin/ninja
+ninja: Entering directory `/src/build-media/placebo'
+[1/63] Generating src/shaders.c with a custom command (wrapped by meson to set env)
+[2/63] Generating src/shaders/custom.c with a custom command (wrapped by meson to set env)
+[3/63] Generating src/renderer.c with a custom command (wrapped by meson to set env)
+[4/63] Generating src/shaders/colorspace.c with a custom command (wrapped by meson to set env)
+[5/63] Generating src/shaders/custom_mpv.c with a custom command (wrapped by meson to set env)
+[6/63] Generating src/shaders/deinterlacing.c with a custom command (wrapped by meson to set env)
+[7/63] Generating src/shaders/dithering.c with a custom command (wrapped by meson to set env)
+[8/63] Generating src/shaders/film_grain.c with a custom command (wrapped by meson to set env)
+[9/63] Generating src/shaders/film_grain_av1.c with a custom command (wrapped by meson to set env)
+[10/63] Generating src/shaders/film_grain_h274.c with a custom command (wrapped by meson to set env)
+[11/63] Generating src/shaders/icc.c with a custom command (wrapped by meson to set env)
+[12/63] Generating src/shaders/lut.c with a custom command (wrapped by meson to set env)
+[13/63] Generating src/version.h with a custom command
+[14/63] Generating src/shaders/sampling.c with a custom command (wrapped by meson to set env)
+[15/63] Generating src/opengl/include/glad/gl.h with a custom command (wrapped by meson to set env)
+[17.11.2026 10:57:27][INFO	][glad   	]: getting 'gl' specification from remote location
+[17.11.2026 10:57:27][DEBUG	][glad.files	]: intercepted attempt to retrieve resource: 'https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/main/xml/gl.xml'
+[17.11.2026 10:57:27][INFO	][glad   	]: getting 'egl' specification from remote location
+[17.11.2026 10:57:27][DEBUG	][glad.files	]: intercepted attempt to retrieve resource: 'https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/main/api/egl.xml'
+[17.11.2026 10:57:27][INFO	][glad   	]: generating gl:core/gl=None
+[17.11.2026 10:57:27][INFO	][glad   	]: no explicit version given for api gl, using Version(major=4, minor=6)
+[17.11.2026 10:57:27][INFO	][glad   	]: generating gles2:None/gl=None
+[17.11.2026 10:57:27][INFO	][glad   	]: no explicit version given for api gles2, using Version(major=3, minor=2)
+[17.11.2026 10:57:27][INFO	][glad   	]: merging [FeatureSet(name=gl, info=[gl:core=4.6], extensions=23), FeatureSet(name=gles2, info=[gles2=3.2], extensions=10)]
+[17.11.2026 10:57:27][INFO	][glad   	]: merged into FeatureSet(name=gl, info=[gl:core=4.6, gles2=3.2], extensions=30)
+[17.11.2026 10:57:27][INFO	][glad   	]: generating feature set FeatureSet(name=gl, info=[gl:core=4.6, gles2=3.2], extensions=30)
+[17.11.2026 10:57:27][DEBUG	][glad.files	]: intercepted attempt to retrieve resource: 'https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/main/api/KHR/khrplatform.h'
+[17.11.2026 10:57:27][INFO	][glad   	]: generating egl:None/egl=None
+[17.11.2026 10:57:27][INFO	][glad   	]: no explicit version given for api egl, using Version(major=1, minor=5)
+[17.11.2026 10:57:27][INFO	][glad   	]: merging [FeatureSet(name=egl, info=[egl=1.5], extensions=7)]
+[17.11.2026 10:57:27][INFO	][glad   	]: merged into FeatureSet(name=egl, info=[egl=1.5], extensions=7)
+[17.11.2026 10:57:27][INFO	][glad   	]: generating feature set FeatureSet(name=egl, info=[egl=1.5], extensions=7)
+[17.11.2026 10:57:27][DEBUG	][glad.files	]: intercepted attempt to retrieve resource: 'https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/main/api/EGL/eglplatform.h'
+[16/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_custom.c.o
+[17/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders.c.o
+[18/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_colorspace.c.o
+[19/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_deinterlacing.c.o
+[20/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_custom_mpv.c.o
+[21/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_dithering.c.o
+[22/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_film_grain.c.o
+[23/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._renderer.c.o
+[24/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_film_grain_h274.c.o
+[25/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_film_grain_av1.c.o
+[26/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_icc.c.o
+[27/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_lut.c.o
+[28/63] Compiling C object src/libplacebo.so.387.p/cache.c.o
+[29/63] Compiling C object src/libplacebo.so.387.p/common.c.o
+[30/63] Compiling C object src/libplacebo.so.387.p/meson-generated_.._shaders_sampling.c.o
+[31/63] Compiling C object src/libplacebo.so.387.p/colorspace.c.o
+[32/63] Compiling C object src/libplacebo.so.387.p/dither.c.o
+[33/63] Compiling C object src/libplacebo.so.387.p/compositor.c.o
+[34/63] Compiling C object src/libplacebo.so.387.p/dummy.c.o
+[35/63] Compiling C++ object src/libplacebo.so.387.p/convert.cc.o
+[36/63] Compiling C object src/libplacebo.so.387.p/dispatch.c.o
+[37/63] Compiling C object src/libplacebo.so.387.p/filters.c.o
+[38/63] Compiling C object src/libplacebo.so.387.p/glsl_spirv.c.o
+[39/63] Compiling C object src/libplacebo.so.387.p/format.c.o
+[40/63] Compiling C object src/libplacebo.so.387.p/gamut_mapping.c.o
+[41/63] Compiling C object src/libplacebo.so.387.p/log.c.o
+[42/63] Compiling C object src/libplacebo.so.387.p/gpu.c.o
+[43/63] Compiling C object src/libplacebo.so.387.p/gpu_utils.c.o
+[44/63] Compiling C object src/libplacebo.so.387.p/pl_alloc.c.o
+[45/63] Compiling C object src/libplacebo.so.387.p/options.c.o
+[46/63] Compiling C object src/libplacebo.so.387.p/pl_string.c.o
+[47/63] Compiling C object src/libplacebo.so.387.p/swapchain.c.o
+[48/63] Compiling C object src/libplacebo.so.387.p/utils_dolbyvision.c.o
+[49/63] Compiling C object src/libplacebo.so.387.p/scene.c.o
+[50/63] Compiling C object src/libplacebo.so.387.p/tone_mapping.c.o
+[51/63] Compiling C object src/libplacebo.so.387.p/utils_upload.c.o
+[52/63] Compiling C object src/libplacebo.so.387.p/utils_frame_queue.c.o
+[53/63] Compiling C object src/libplacebo.so.387.p/opengl_context.c.o
+[54/63] Compiling C object src/libplacebo.so.387.p/opengl_formats.c.o
+[55/63] Compiling C object src/libplacebo.so.387.p/opengl_loader_egl.c.o
+[56/63] Compiling C object src/libplacebo.so.387.p/opengl_loader_gl.c.o
+[57/63] Compiling C object src/libplacebo.so.387.p/opengl_gpu_tex.c.o
+[58/63] Compiling C object src/libplacebo.so.387.p/opengl_gpu.c.o
+[59/63] Compiling C object src/libplacebo.so.387.p/opengl_swapchain.c.o
+[60/63] Compiling C object src/libplacebo.so.387.p/opengl_gpu_pass.c.o
+[61/63] Compiling C object src/libplacebo.so.387.p/vulkan_stubs.c.o
+[62/63] Compiling C object src/libplacebo.so.387.p/opengl_utils.c.o
+[63/63] Linking target src/libplacebo.so.387
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /src/build-media/placebo -j 4
+ninja: Entering directory `/src/build-media/placebo'
+[1/3] Generating src/version.h with a custom command
+Installing src/libplacebo.so.387 to /opt/ff-media/lib
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/cache.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/colorspace.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/common.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/compositor.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/d3d11.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/dispatch.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/dither.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/dummy.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/filters.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/gamut_mapping.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/gpu.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/log.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/opengl.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/options.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/renderer.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/colorspace.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/custom.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/deinterlacing.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/dithering.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/film_grain.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/icc.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/lut.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders/sampling.h to /opt/ff-media/include/libplacebo/shaders
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/shaders.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/swapchain.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/tone_mapping.h to /opt/ff-media/include/libplacebo
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/dav1d.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/dav1d_internal.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/dolbyvision.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/frame_queue.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/libav.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/libav_internal.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/utils/upload.h to /opt/ff-media/include/libplacebo/utils
+Installing /src/vendor/libplacebo-7.387.0/src/include/libplacebo/vulkan.h to /opt/ff-media/include/libplacebo
+Installing /src/build-media/placebo/src/./include/libplacebo/config.h to /opt/ff-media/include/libplacebo
+Installing /src/build-media/placebo/meson-private/libplacebo.pc to /opt/ff-media/lib/pkgconfig
+Installing symlink pointing to libplacebo.so.387 to /opt/ff-media/lib/libplacebo.so
+The Meson build system
+Version: 1.3.2
+Source dir: /src/vendor/mpv-0.42.0
+Build dir: /src/build-media/mpv
+Build type: native build
+Project name: mpv
+Project version: 0.42.0
+C compiler for the host machine: cc (gcc 13.3.0 "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0")
+C linker for the host machine: cc ld.bfd 2.42
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Program python3 found: YES (/usr/bin/python3)
+Found pkg-config: YES (/usr/bin/pkg-config) 1.8.1
+Run-time dependency libavcodec found: YES 60.31.102
+Run-time dependency libavfilter found: YES 9.12.100
+Run-time dependency libavformat found: YES 60.16.100
+Run-time dependency libavutil found: YES 58.29.100
+Run-time dependency libswresample found: YES 4.12.100
+Run-time dependency libswscale found: YES 7.5.100
+Run-time dependency libplacebo found: YES 7.387.0
+Run-time dependency libass found: YES 0.17.1
+Compiler for C supports arguments -Wdisabled-optimization: YES 
+Compiler for C supports arguments -Wempty-body: YES 
+Compiler for C supports arguments -Wformat: YES 
+Compiler for C supports arguments -Wimplicit-fallthrough: YES 
+Compiler for C supports arguments -Woverflow: YES 
+Compiler for C supports arguments -Wparentheses: YES 
+Compiler for C supports arguments -Wpointer-arith: YES 
+Compiler for C supports arguments -Wshadow: YES 
+Compiler for C supports arguments -Wundef: YES 
+Compiler for C supports arguments -Wvla: YES 
+Compiler for C supports arguments -Wno-cast-function-type: YES 
+Compiler for C supports arguments -Wno-format-zero-length: YES 
+Compiler for C supports arguments -Wno-missing-field-initializers: YES 
+Compiler for C supports arguments -Wno-sign-compare: YES 
+Compiler for C supports arguments -Wno-switch: YES 
+Compiler for C supports arguments -Wno-unused-parameter: YES 
+Compiler for C supports arguments -fno-math-errno: YES 
+Compiler for C supports arguments -fno-signed-zeros: YES 
+Compiler for C supports arguments -fno-trapping-math: YES 
+Compiler for C supports arguments -Wmissing-prototypes: YES 
+Compiler for C supports arguments -Wstrict-prototypes: YES 
+Compiler for C supports arguments -Werror=implicit-function-declaration: YES 
+Compiler for C supports arguments -Wno-pointer-sign: YES 
+Compiler for C supports arguments -Wformat -Werror=format-security: YES 
+Compiler for C supports link arguments -Wl,--nxcompat,--no-seh,--dynamicbase: NO 
+Compiler for C supports link arguments -Wl,-z,noexecstack: YES 
+Run-time dependency dl found: YES
+Found CMake: /usr/bin/cmake (3.28.3)
+Run-time dependency subrandr found: NO (tried pkgconfig and cmake)
+Library atomic found: YES
+Compiler for C supports link arguments -rdynamic: YES 
+Run-time dependency threads found: YES
+Header "pthread.h" has symbol "pthread_condattr_setclock" with dependency threads: YES 
+Run-time dependency appleframeworks found: NO (tried framework)
+Checking for function "fork" : YES 
+Checking for function "ppoll" : YES 
+Checking for function "memrchr" : YES 
+Checking for function "pipe2" : YES 
+Header "sched.h" has symbol "clone" : YES 
+Header "unistd.h" has symbol "RFSPAWN" : NO 
+Library windowsapp skipped: feature uwp disabled
+Checking for function "glob" : YES 
+Header "sys/vt.h" has symbol "VT_GETMODE" : YES 
+Header "dev/wscons/wsdisplay_usl_io.h" has symbol "VT_GETMODE" : NO 
+Checking for function "pthread_setname_np" with dependency threads: YES 
+Checking for function "fstatfs" : NO 
+Checking for function "fstatfs" : YES 
+Compiler for C supports function attribute vector_size: YES 
+Program /src/vendor/mpv-0.42.0/TOOLS/docutils-wrapper.py found: YES (/src/vendor/mpv-0.42.0/TOOLS/docutils-wrapper.py)
+Program /src/vendor/mpv-0.42.0/TOOLS/file2string.py found: YES (/src/vendor/mpv-0.42.0/TOOLS/file2string.py)
+Program /src/vendor/mpv-0.42.0/TOOLS/matroska.py found: YES (/src/vendor/mpv-0.42.0/TOOLS/matroska.py)
+Program /src/vendor/mpv-0.42.0/TOOLS/gen-mpv-desktop.py found: YES (/src/vendor/mpv-0.42.0/TOOLS/gen-mpv-desktop.py)
+Program git found: YES (/usr/bin/git)
+Run-time dependency libcurl found: NO (tried pkgconfig and cmake)
+Dependency libcdio skipped: feature cdda disabled
+Dependency libcdio_paranoia skipped: feature cdda disabled
+Has header "linux/dvb/frontend.h" skipped: feature dvbin disabled
+Dependency dvdread skipped: feature dvda disabled
+Dependency dvdnav skipped: feature dvdnav disabled
+Run-time dependency iconv found: YES
+Dependency mujs skipped: feature javascript disabled
+Run-time dependency lcms2 found: YES 2.14
+Dependency libarchive skipped: feature libarchive disabled
+Dependency libavdevice skipped: feature libavdevice disabled
+Dependency libbluray skipped: feature libbluray disabled
+Library m found: YES
+Library rt found: YES
+Run-time dependency rubberband found: NO (tried pkgconfig and cmake)
+Run-time dependency sdl2 found: YES 2.30.0
+Run-time dependency uchardet found: NO (tried pkgconfig and cmake)
+Run-time dependency vapoursynth-script found: NO (tried pkgconfig and cmake)
+Run-time dependency vapoursynth found: NO (tried pkgconfig and cmake)
+Run-time dependency xfixes found: YES 6.0.0
+Run-time dependency x11 found: YES 1.8.7
+Run-time dependency zimg found: NO (tried pkgconfig and cmake)
+Run-time dependency zlib found: YES 1.3
+Run-time dependency alsa found: YES 1.2.11
+Dependency appleframeworks (modules: Foundation, AudioToolbox) skipped: feature audiounit disabled
+Header "AudioToolbox/AudioToolbox.h" has symbol "kAudioUnitSubType_RemoteIO" skipped: feature audiounit disabled
+Run-time dependency appleframeworks found: NO (tried framework)
+Run-time dependency appleframeworks found: NO (tried framework)
+Dependency jack skipped: feature jack disabled
+Dependency openal skipped: feature openal disabled
+Header "aaudio/AAudio.h" has symbol "AAudioStream" skipped: feature aaudio disabled
+Library OpenSLES found: NO
+Header "sys/soundcard.h" has symbol "SNDCTL_DSP_HALT" skipped: feature oss-audio disabled
+Run-time dependency libpipewire-0.3 found: NO (tried pkgconfig and cmake)
+Run-time dependency libpulse found: YES 16.1
+Run-time dependency sndio found: YES 1.9.0
+Header "audioclient.h" has symbol "IAudioClient" skipped: feature wasapi disabled
+Dependency caca skipped: feature caca disabled
+Has header "d3d9.h" skipped: feature direct3d disabled
+Run-time dependency libdrm found: YES 2.4.125
+Run-time dependency libdisplay-info found: NO (tried pkgconfig and cmake)
+Dependency gbm skipped: feature gbm disabled
+Run-time dependency libjpeg found: NO (tried pkgconfig and cmake)
+Dependency shaderc skipped: feature shaderc disabled
+Run-time dependency libsixel found: NO (tried pkgconfig and cmake)
+Checking for function "shm_open" : YES 
+Dependency spirv-cross-c-shared skipped: feature spirv-cross disabled
+Dependency wayland-client found: NO found 1.22.0 but need: '>= 1.23.0'
+Run-time dependency wayland-client found: NO (tried pkgconfig and cmake)
+Dependency wayland-cursor found: NO found 1.22.0 but need: '>= 1.23.0'
+Run-time dependency wayland-cursor found: NO (tried pkgconfig and cmake)
+Run-time dependency wayland-protocols found: NO (tried pkgconfig and cmake)
+Run-time dependency xkbcommon found: YES 1.6.0
+Run-time dependency wayland-client found: YES 1.22.0
+Has header "linux/input-event-codes.h" with dependency wayland-client: YES 
+Program wayland-scanner found: NO found 1.22.0 but need: '>= 1.23.0' (/usr/bin/wayland-scanner)
+Dependency x11 skipped: feature x11 disabled
+Dependency xscrnsaver skipped: feature x11 disabled
+Dependency xext skipped: feature x11 disabled
+Dependency xpresent skipped: feature x11 disabled
+Dependency xrandr skipped: feature x11 disabled
+Dependency xv skipped: feature xv disabled
+Library EGL skipped: feature egl-angle-lib disabled
+Run-time dependency egl found: YES 1.5
+Library EGL skipped: feature egl-android disabled
+Dependency wayland-egl skipped: feature egl-wayland disabled
+Dependency vulkan skipped: feature vulkan disabled
+Checking for function "vkCreateDisplayPlaneSurfaceKHR" with dependency vulkan: NO 
+Run-time dependency ffnvcodec found: NO (tried pkgconfig and cmake)
+Has header "AMF/core/Factory.h" skipped: feature amf disabled
+Header "OpenGLES/ES3/glext.h" has symbol "GL_RGB32F" skipped: feature ios-gl disabled
+Run-time dependency libva found: YES 1.20.0
+Dependency libva-drm skipped: feature vaapi-drm disabled
+Dependency libva-wayland skipped: feature vaapi-wayland disabled
+Dependency libva-x11 skipped: feature vaapi-x11 disabled
+Dependency libva-win32 skipped: feature vaapi-win32 disabled
+Dependency vdpau skipped: feature vdpau disabled
+Dependency appleframeworks (modules: CoreVideo) skipped: feature videotoolbox-pl disabled
+Program xcrun skipped: feature swift-build disabled
+Program rst2man rst2man.py found: NO
+Program rst2html rst2html.py skipped: feature html-build disabled
+Program rst2pdf skipped: feature pdf-build disabled
+Configuring config.h using configuration
+Message: List of enabled features: alsa clone debug dmabuf-interop-gl egl ffmpeg gl glibc-thread-name glob glob-posix iconv lcms2 libass libdl libplacebo linux-fstatfs memrchr pipe2 posix posix-shm ppoll pthread-condattr-setclock pulse sndio sndio-1-9 vector vt.h x11-clipboard zlib
+Fetching value of define "MPV_CLIENT_API_VERSION" : (((2) << 16) | (6) | 0UL) 
+Compiler for C supports link arguments -Wl,-Bsymbolic: YES 
+Build targets in project: 27
+
+mpv 0.42.0
+
+    cocoa      : NO
+    curl       : NO
+    d3d11      : NO
+    drm        : NO
+    javascript : NO
+    libmpv     : YES
+    lua        : NO
+    opengl     : YES
+    vulkan     : NO
+    wayland    : NO
+    x11        : NO
+
+  User defined options
+    libdir     : lib
+    prefix     : /opt/ff-media
+    wrap_mode  : nodownload
+    build-date : false
+    cplayer    : false
+    cplugins   : disabled
+    dvda       : disabled
+    dvdnav     : disabled
+    gpl        : false
+    javascript : disabled
+    libarchive : disabled
+    libavdevice: disabled
+    libbluray  : disabled
+    libmpv     : true
+    lua        : disabled
+    vulkan     : disabled
+
+Found ninja-1.11.1 at /usr/bin/ninja
+ninja: Entering directory `/src/build-media/mpv'
+[1/246] Generating etc/mpv-icon-8bit-16x16.png with a custom command
+[2/246] Generating ebml_defs.inc with a custom command
+[3/246] Generating ebml_types.h with a custom command
+[4/246] Generating etc/mpv-icon-8bit-32x32.png with a custom command
+[5/246] Generating etc/mpv-icon-8bit-64x64.png with a custom command
+[6/246] Generating etc/mpv-icon-8bit-128x128.png with a custom command
+[7/246] Generating etc/input.conf with a custom command
+[8/246] Generating etc/builtin.conf with a custom command
+[9/246] Generating etc/menu.conf with a custom command
+[10/246] Generating common/version.h with a custom command (wrapped by meson because command contains newlines)
+[11/246] Generating player/javascript/defaults.js with a custom command
+[12/246] Generating player/lua/defaults.lua with a custom command
+[13/246] Generating player/lua/assdraw.lua with a custom command
+[14/246] Generating player/lua/options.lua with a custom command
+[15/246] Generating player/lua/osc.lua with a custom command
+[16/246] Generating player/lua/ytdl_hook.lua with a custom command
+[17/246] Generating player/lua/stats.lua with a custom command
+[18/246] Generating player/lua/console.lua with a custom command
+[19/246] Generating player/lua/auto_profiles.lua with a custom command
+[20/246] Generating player/lua/input.lua with a custom command
+[21/246] Generating player/lua/fzy.lua with a custom command
+[22/246] Generating player/lua/select.lua with a custom command
+[23/246] Generating player/lua/positioning.lua with a custom command
+[24/246] Generating player/lua/commands.lua with a custom command
+[25/246] Generating player/lua/context_menu.lua with a custom command
+[26/246] Generating sub/osd_font.otf with a custom command
+[27/246] Compiling C object libmpv.so.2.6.0.p/audio_chmap_avchannel.c.o
+[28/246] Compiling C object libmpv.so.2.6.0.p/audio_chmap_sel.c.o
+[29/246] Compiling C object libmpv.so.2.6.0.p/audio_chmap.c.o
+[30/246] Compiling C object libmpv.so.2.6.0.p/audio_aframe.c.o
+[31/246] Compiling C object libmpv.so.2.6.0.p/audio_decode_ad_dsd.c.o
+[32/246] Compiling C object libmpv.so.2.6.0.p/audio_decode_ad_lavc.c.o
+[33/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_drop.c.o
+[34/246] Compiling C object libmpv.so.2.6.0.p/audio_decode_ad_spdif.c.o
+[35/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_format.c.o
+[36/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_lavfi_tempo.c.o
+[37/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_lavcac3enc.c.o
+[38/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_scaletempo.c.o
+[39/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_scaletempo2.c.o
+[40/246] Compiling C object libmpv.so.2.6.0.p/audio_fmt-conversion.c.o
+[41/246] Compiling C object libmpv.so.2.6.0.p/audio_filter_af_scaletempo2_internals.c.o
+[42/246] Compiling C object libmpv.so.2.6.0.p/audio_format.c.o
+[43/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao.c.o
+[44/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao_lavc.c.o
+[45/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao_null.c.o
+[46/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao_pcm.c.o
+[47/246] Compiling C object libmpv.so.2.6.0.p/audio_out_buffer.c.o
+[48/246] Compiling C object libmpv.so.2.6.0.p/common_av_log.c.o
+[49/246] Compiling C object libmpv.so.2.6.0.p/common_codecs.c.o
+[50/246] Compiling C object libmpv.so.2.6.0.p/common_av_common.c.o
+[51/246] Compiling C object libmpv.so.2.6.0.p/common_common.c.o
+[52/246] Compiling C object libmpv.so.2.6.0.p/common_playlist.c.o
+[53/246] Compiling C object libmpv.so.2.6.0.p/common_encode_lavc.c.o
+[54/246] Compiling C object libmpv.so.2.6.0.p/common_msg.c.o
+[55/246] Compiling C object libmpv.so.2.6.0.p/common_version.c.o
+[56/246] Compiling C object libmpv.so.2.6.0.p/common_recorder.c.o
+[57/246] Compiling C object libmpv.so.2.6.0.p/common_tags.c.o
+[58/246] Compiling C object libmpv.so.2.6.0.p/common_stats.c.o
+[59/246] Compiling C object libmpv.so.2.6.0.p/demux_codec_tags.c.o
+[60/246] Compiling C object libmpv.so.2.6.0.p/demux_cue.c.o
+[61/246] Compiling C object libmpv.so.2.6.0.p/demux_cache.c.o
+[62/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_cue.c.o
+[63/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_edl.c.o
+[64/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_disc.c.o
+[65/246] Compiling C object libmpv.so.2.6.0.p/demux_demux.c.o
+[66/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_lavf.c.o
+[67/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_mf.c.o
+[68/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_mkv_timeline.c.o
+[69/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_mpv.c.o
+[70/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_null.c.o
+[71/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_mkv.c.o
+[72/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_raw.c.o
+[73/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_playlist.c.o
+[74/246] Compiling C object libmpv.so.2.6.0.p/demux_demux_timeline.c.o
+[75/246] Compiling C object libmpv.so.2.6.0.p/demux_dovi_split.c.o
+[76/246] Compiling C object libmpv.so.2.6.0.p/demux_packet_pool.c.o
+[77/246] Compiling C object libmpv.so.2.6.0.p/demux_ebml.c.o
+[78/246] Compiling C object libmpv.so.2.6.0.p/demux_packet.c.o
+[79/246] Compiling C object libmpv.so.2.6.0.p/demux_timeline.c.o
+[80/246] Compiling C object libmpv.so.2.6.0.p/filters_f_async_queue.c.o
+[81/246] Compiling C object libmpv.so.2.6.0.p/filters_f_autoconvert.c.o
+[82/246] Compiling C object libmpv.so.2.6.0.p/filters_f_auto_filters.c.o
+[83/246] Compiling C object libmpv.so.2.6.0.p/filters_f_demux_in.c.o
+[84/246] Compiling C object libmpv.so.2.6.0.p/filters_f_decoder_wrapper.c.o
+[85/246] Compiling C object libmpv.so.2.6.0.p/filters_f_enhancement_pair.c.o
+[86/246] Compiling C object libmpv.so.2.6.0.p/filters_f_hwtransfer.c.o
+[87/246] Compiling C object libmpv.so.2.6.0.p/filters_f_output_chain.c.o
+[88/246] Compiling C object libmpv.so.2.6.0.p/filters_f_swscale.c.o
+[89/246] Compiling C object libmpv.so.2.6.0.p/filters_f_swresample.c.o
+[90/246] Compiling C object libmpv.so.2.6.0.p/filters_f_lavfi.c.o
+[91/246] Compiling C object libmpv.so.2.6.0.p/filters_f_utils.c.o
+[92/246] Compiling C object libmpv.so.2.6.0.p/filters_frame.c.o
+[93/246] Compiling C object libmpv.so.2.6.0.p/filters_user_filters.c.o
+[94/246] Compiling C object libmpv.so.2.6.0.p/filters_filter.c.o
+[95/246] Compiling C object libmpv.so.2.6.0.p/input_dnd.c.o
+[96/246] Compiling C object libmpv.so.2.6.0.p/input_event.c.o
+[97/246] Compiling C object libmpv.so.2.6.0.p/input_cmd.c.o
+[98/246] Compiling C object libmpv.so.2.6.0.p/input_ipc.c.o
+[99/246] Compiling C object libmpv.so.2.6.0.p/input_keycodes.c.o
+[100/246] Compiling C object libmpv.so.2.6.0.p/input_input.c.o
+[101/246] Compiling C object libmpv.so.2.6.0.p/misc_bstr.c.o
+[102/246] Compiling C object libmpv.so.2.6.0.p/misc_codepoint_width.c.o
+[103/246] Compiling C object libmpv.so.2.6.0.p/misc_charset_conv.c.o
+[104/246] Compiling C object libmpv.so.2.6.0.p/misc_dispatch.c.o
+[105/246] Compiling C object libmpv.so.2.6.0.p/misc_hash.c.o
+[106/246] Compiling C object libmpv.so.2.6.0.p/misc_io_utils.c.o
+[107/246] Compiling C object libmpv.so.2.6.0.p/misc_natural_sort.c.o
+[108/246] Compiling C object libmpv.so.2.6.0.p/misc_json.c.o
+[109/246] Compiling C object libmpv.so.2.6.0.p/misc_language.c.o
+[110/246] Compiling C object libmpv.so.2.6.0.p/misc_node.c.o
+[111/246] Compiling C object libmpv.so.2.6.0.p/misc_random.c.o
+[112/246] Compiling C object libmpv.so.2.6.0.p/misc_path_utils.c.o
+[113/246] Compiling C object libmpv.so.2.6.0.p/misc_rendezvous.c.o
+[114/246] Compiling C object libmpv.so.2.6.0.p/misc_thread_pool.c.o
+[115/246] Compiling C object libmpv.so.2.6.0.p/misc_thread_tools.c.o
+[116/246] Compiling C object libmpv.so.2.6.0.p/options_m_config_core.c.o
+[117/246] Compiling C object libmpv.so.2.6.0.p/options_m_config_frontend.c.o
+[118/246] Compiling C object libmpv.so.2.6.0.p/options_options.c.o
+[119/246] Compiling C object libmpv.so.2.6.0.p/options_m_property.c.o
+[120/246] Compiling C object libmpv.so.2.6.0.p/options_parse_commandline.c.o
+[121/246] Compiling C object libmpv.so.2.6.0.p/options_parse_configfile.c.o
+[122/246] Compiling C object libmpv.so.2.6.0.p/options_path.c.o
+[123/246] Compiling C object libmpv.so.2.6.0.p/options_m_option.c.o
+[124/246] Compiling C object libmpv.so.2.6.0.p/player_audio.c.o
+[125/246] Compiling C object libmpv.so.2.6.0.p/player_client.c.o
+[126/246] Compiling C object libmpv.so.2.6.0.p/player_configfiles.c.o
+[127/246] Compiling C object libmpv.so.2.6.0.p/player_discnav.c.o
+[128/246] Compiling C object libmpv.so.2.6.0.p/player_external_files.c.o
+[129/246] Compiling C object libmpv.so.2.6.0.p/player_main.c.o
+[130/246] Compiling C object libmpv.so.2.6.0.p/player_loadfile.c.o
+[131/246] Compiling C object libmpv.so.2.6.0.p/player_command.c.o
+[132/246] Compiling C object libmpv.so.2.6.0.p/player_misc.c.o
+[133/246] Compiling C object libmpv.so.2.6.0.p/player_osd.c.o
+[134/246] Compiling C object libmpv.so.2.6.0.p/player_scripting.c.o
+[135/246] Compiling C object libmpv.so.2.6.0.p/player_screenshot.c.o
+[136/246] Compiling C object libmpv.so.2.6.0.p/player_sub.c.o
+[137/246] Compiling C object libmpv.so.2.6.0.p/player_playloop.c.o
+[138/246] Compiling C object libmpv.so.2.6.0.p/player_clipboard_clipboard-vo.c.o
+[139/246] Compiling C object libmpv.so.2.6.0.p/stream_cookies.c.o
+[140/246] Compiling C object libmpv.so.2.6.0.p/player_clipboard_clipboard.c.o
+[141/246] Compiling C object libmpv.so.2.6.0.p/player_video.c.o
+[142/246] Compiling C object libmpv.so.2.6.0.p/stream_network.c.o
+[143/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_aes_ctr.c.o
+[144/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_avdevice.c.o
+[145/246] Compiling C object libmpv.so.2.6.0.p/stream_stream.c.o
+[146/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_edl.c.o
+[147/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_cb.c.o
+[148/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_concat.c.o
+[149/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_file.c.o
+[150/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_mf.c.o
+[151/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_memory.c.o
+[152/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_lavf.c.o
+[153/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_null.c.o
+[154/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_mpv.c.o
+[155/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_slice.c.o
+[156/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_bstr.c.o
+[157/246] Compiling C object libmpv.so.2.6.0.p/stream_stream_env.c.o
+[158/246] Compiling C object libmpv.so.2.6.0.p/sub_ass_mp.c.o
+[159/246] Compiling C object libmpv.so.2.6.0.p/sub_dec_sub.c.o
+[160/246] Compiling C object libmpv.so.2.6.0.p/sub_draw_bmp.c.o
+[161/246] Compiling C object libmpv.so.2.6.0.p/sub_filter_sdh.c.o
+[162/246] Compiling C object libmpv.so.2.6.0.p/sub_img_convert.c.o
+[163/246] Compiling C object libmpv.so.2.6.0.p/sub_lavc_conv.c.o
+[164/246] Compiling C object libmpv.so.2.6.0.p/sub_packer.c.o
+[165/246] Compiling C object libmpv.so.2.6.0.p/sub_osd.c.o
+[166/246] Compiling C object libmpv.so.2.6.0.p/sub_osd_libass.c.o
+[167/246] Compiling C object libmpv.so.2.6.0.p/video_csputils.c.o
+[168/246] Compiling C object libmpv.so.2.6.0.p/sub_sd_lavc.c.o
+[169/246] Compiling C object libmpv.so.2.6.0.p/sub_sd_ass.c.o
+[170/246] Compiling C object libmpv.so.2.6.0.p/video_decode_vd_lavc.c.o
+[171/246] Compiling C object libmpv.so.2.6.0.p/video_filter_vf_sub.c.o
+[172/246] Compiling C object libmpv.so.2.6.0.p/video_filter_refqueue.c.o
+[173/246] Compiling C object libmpv.so.2.6.0.p/video_fmt-conversion.c.o
+[174/246] Compiling C object libmpv.so.2.6.0.p/video_filter_vf_format.c.o
+[175/246] Compiling C object libmpv.so.2.6.0.p/video_image_loader.c.o
+[176/246] Compiling C object libmpv.so.2.6.0.p/video_hwdec.c.o
+[177/246] Compiling C object libmpv.so.2.6.0.p/video_image_writer.c.o
+[178/246] Compiling C object libmpv.so.2.6.0.p/video_img_format.c.o
+[179/246] Compiling C object libmpv.so.2.6.0.p/video_mp_image_pool.c.o
+[180/246] Compiling C object libmpv.so.2.6.0.p/video_out_aspect.c.o
+[181/246] Compiling C object libmpv.so.2.6.0.p/video_out_bitmap_packer.c.o
+[182/246] Compiling C object libmpv.so.2.6.0.p/video_mp_image.c.o
+[183/246] Compiling C object libmpv.so.2.6.0.p/video_out_dither.c.o
+[184/246] Compiling C object libmpv.so.2.6.0.p/video_out_dr_helper.c.o
+[185/246] Compiling C object libmpv.so.2.6.0.p/video_out_filter_kernels.c.o
+[186/246] Compiling C object libmpv.so.2.6.0.p/video_out_terminal_swapchain.c.o
+[187/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_context.c.o
+[188/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_error_diffusion.c.o
+[189/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_hwdec.c.o
+[190/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_lcms.c.o
+[191/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_libmpv_gpu.c.o
+[192/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_osd.c.o
+[193/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_ra.c.o
+[194/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_spirv.c.o
+[195/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_shader_cache.c.o
+[196/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_user_shaders.c.o
+[197/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_utils.c.o
+[198/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_video_shaders.c.o
+[199/246] Compiling C object libmpv.so.2.6.0.p/video_out_libmpv_sw.c.o
+[200/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo.c.o
+[201/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_video.c.o
+[202/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_gpu.c.o
+[203/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_image.c.o
+[204/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_null.c.o
+[205/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_libmpv.c.o
+[206/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_lavc.c.o
+[207/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_tct.c.o
+[208/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_kitty.c.o
+[209/246] Compiling C object libmpv.so.2.6.0.p/video_out_win_state.c.o
+[210/246] Compiling C object libmpv.so.2.6.0.p/video_sws_utils.c.o
+[211/246] Compiling C object libmpv.so.2.6.0.p/video_repack.c.o
+[212/246] Compiling C object libmpv.so.2.6.0.p/video_out_placebo_utils.c.o
+[213/246] Compiling C object libmpv.so.2.6.0.p/video_out_placebo_ra_pl.c.o
+[214/246] Compiling C object libmpv.so.2.6.0.p/osdep_io.c.o
+[215/246] Compiling C object libmpv.so.2.6.0.p/video_out_gpu_next_context.c.o
+[216/246] Compiling C object libmpv.so.2.6.0.p/osdep_subprocess.c.o
+[217/246] Compiling C object libmpv.so.2.6.0.p/osdep_timer.c.o
+[218/246] Compiling C object libmpv.so.2.6.0.p/ta_ta_talloc.c.o
+[219/246] Compiling C object libmpv.so.2.6.0.p/ta_ta.c.o
+[220/246] Compiling C object libmpv.so.2.6.0.p/video_out_vo_gpu_next.c.o
+[221/246] Compiling C object libmpv.so.2.6.0.p/ta_ta_utils.c.o
+[222/246] Compiling C object libmpv.so.2.6.0.p/osdep_threads-posix.c.o
+[223/246] Compiling C object libmpv.so.2.6.0.p/osdep_subprocess-posix.c.o
+[224/246] Compiling C object libmpv.so.2.6.0.p/osdep_poll_wrapper.c.o
+[225/246] Compiling C object libmpv.so.2.6.0.p/input_ipc-unix.c.o
+[226/246] Compiling C object libmpv.so.2.6.0.p/osdep_terminal-unix.c.o
+[227/246] Compiling C object libmpv.so.2.6.0.p/sub_filter_regex.c.o
+[228/246] Compiling C object libmpv.so.2.6.0.p/osdep_language-posix.c.o
+[229/246] Compiling C object libmpv.so.2.6.0.p/osdep_als-linux.c.o
+[230/246] Compiling C object libmpv.so.2.6.0.p/osdep_path-unix.c.o
+[231/246] Compiling C object libmpv.so.2.6.0.p/osdep_timer-linux.c.o
+[232/246] Compiling C object libmpv.so.2.6.0.p/player_clipboard_clipboard-x11.c.o
+[233/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao_sndio.c.o
+[234/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao_alsa.c.o
+[235/246] Compiling C object libmpv.so.2.6.0.p/audio_out_ao_pulse.c.o
+[236/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_egl_helpers.c.o
+[237/246] Compiling C object libmpv.so.2.6.0.p/video_filter_vf_gpu_egl.c.o
+[238/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_common.c.o
+[239/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_context.c.o
+[240/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_formats.c.o
+[241/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_libmpv_gl.c.o
+[242/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_utils.c.o
+[243/246] Compiling C object libmpv.so.2.6.0.p/video_filter_vf_gpu.c.o
+[244/246] Compiling C object libmpv.so.2.6.0.p/video_out_opengl_ra_gl.c.o
+[245/246] Compiling C object libmpv.so.2.6.0.p/video_out_hwdec_dmabuf_interop_gl.c.o
+[246/246] Linking target libmpv.so.2.6.0
+INFO: autodetecting backend as ninja
+INFO: calculating backend command to run: /usr/bin/ninja -C /src/build-media/mpv -j 4
+ninja: Entering directory `/src/build-media/mpv'
+[1/3] Generating common/version.h with a custom command (wrapped by meson because command contains newlines)
+Installing libmpv.so.2.6.0 to /opt/ff-media/lib
+Installing /src/vendor/mpv-0.42.0/include/mpv/client.h to /opt/ff-media/include/mpv
+Installing /src/vendor/mpv-0.42.0/include/mpv/render.h to /opt/ff-media/include/mpv
+Installing /src/vendor/mpv-0.42.0/include/mpv/render_d3d11.h to /opt/ff-media/include/mpv
+Installing /src/vendor/mpv-0.42.0/include/mpv/render_gl.h to /opt/ff-media/include/mpv
+Installing /src/vendor/mpv-0.42.0/include/mpv/stream_cb.h to /opt/ff-media/include/mpv
+Installing /src/build-media/mpv/meson-private/mpv.pc to /opt/ff-media/lib/pkgconfig
+Installing symlink pointing to libmpv.so.2.6.0 to /opt/ff-media/lib/libmpv.so.2
+Installing symlink pointing to libmpv.so.2 to /opt/ff-media/lib/libmpv.so

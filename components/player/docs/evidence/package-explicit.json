@@ -1,0 +1,13 @@
+{
+  "version": "0.1.0.dev20261117.2",
+  "sourceSHA256": "872dd6f3b653667ba73f5438008031580f256380c868c64ad3b42c03c4383292",
+  "sourceDateEpoch": 1794873600,
+  "state": "built and installed; device smoke rejected vaapi-copy",
+  "linuxCTestGroups": 7,
+  "installedFiles": 297,
+  "alteredFiles": 0,
+  "sandboxOwner": "root:root",
+  "sandboxMode": "4755",
+  "failure": "Explicit feature selection omitted wayland/vaapi-wayland; renderer used vaapi-copy. Not qualified.",
+  "nextCandidate": "0.1.0.dev20261117.3"
+}

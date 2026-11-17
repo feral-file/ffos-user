@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
@@ -1277,12 +1278,12 @@ type setupNarrator interface {
 	ShowConnectingIfShowing(message string, states ...string)
 }
 
-// setupUI lazily builds the setup-narration surface from the executor's CDP
-// seam. Built once; tests may pre-set e.setupNarrator to a spy.
+// setupUI is a defensive fallback for standalone executors. Production injects
+// the shared native narrator before any setup operation; tests may supply a spy.
 func (e *executor) setupUI() setupNarrator {
 	e.setupNarratorOnce.Do(func() {
 		if e.setupNarrator == nil {
-			e.setupNarrator = setupui.New(e.cdp, "", e.logger)
+			e.setupNarrator = setupui.New(playerlink.New(playerlink.SocketPath()), e.logger)
 		}
 	})
 	return e.setupNarrator

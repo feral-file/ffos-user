@@ -1,0 +1,1976 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:feral-file:player-protocol:1",
+  "title": "Feral File native player local protocol v1",
+  "description": "Framing, UTF-8 byte/depth limits, duplicate-key rejection, deadlines, live identity and transition rules are specified in README.md and enforced by peers. JSON Schema integer accepts integral decimal lexemes; the wire additionally requires integer JSON lexemes for integer fields.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/event"
+    }
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "hello",
+            "state.get",
+            "health.get",
+            "state.subscribe",
+            "policy.get",
+            "history.list",
+            "playback.refresh",
+            "playback.stop",
+            "playback.cancel",
+            "history.resolve",
+            "playback.replace",
+            "playback.update",
+            "playback.select",
+            "playback.pause",
+            "playback.sleep",
+            "playback.mode",
+            "media.seek",
+            "settings.set",
+            "policy.set",
+            "connectivity.set",
+            "overlay.set",
+            "input.dispatch",
+            "schedule.set",
+            "boot.set"
+          ]
+        },
+        "params": {
+          "type": "object"
+        },
+        "instance": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "ifRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "deadlineMs": {
+          "type": "integer"
+        },
+        "key": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "method"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "not": {
+                  "const": "hello"
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "deadlineMs"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "not": {
+                  "enum": [
+                    "hello",
+                    "state.get",
+                    "health.get",
+                    "state.subscribe",
+                    "policy.get",
+                    "history.list",
+                    "history.resolve"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "instance",
+              "generation",
+              "key"
+            ]
+          }
+        }
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "const": "hello"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "client": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "versions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  }
+                }
+              },
+              "required": [
+                "client",
+                "versions"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "state.get"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "health.get"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "state.subscribe"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "policy.get"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "history.list"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.refresh"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.stop"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.cancel"
+            },
+            "params": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "history.resolve"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "recordId": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "recordId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.replace"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "playlist": {
+                  "$ref": "#/$defs/playlist"
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                },
+                "context": {
+                  "enum": [
+                    "curated",
+                    "personal"
+                  ]
+                },
+                "playlistUrl": {
+                  "type": "string",
+                  "maxLength": 16384,
+                  "description": "Wire limit is 16384 UTF-8 bytes, additionally enforced by peers."
+                }
+              },
+              "required": [
+                "playlist"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.update"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "maxItems": 4096,
+                  "items": {
+                    "$ref": "#/$defs/item"
+                  }
+                },
+                "context": {
+                  "enum": [
+                    "curated",
+                    "personal"
+                  ]
+                },
+                "retireBlockedCurrent": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "items"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.select"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                }
+              },
+              "required": [
+                "index"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.pause"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "paused": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "paused"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.sleep"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "sleeping": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "sleeping"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "playback.mode"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "loop": {
+                  "enum": [
+                    "none",
+                    "playlist",
+                    "one"
+                  ]
+                },
+                "shuffle": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "media.seek"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "occurrence": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "seconds": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 86400000
+                }
+              },
+              "required": [
+                "occurrence",
+                "seconds"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "settings.set"
+            },
+            "params": {
+              "$ref": "#/$defs/settings"
+            }
+          },
+          "required": []
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "policy.set"
+            },
+            "params": {
+              "$ref": "#/$defs/policy"
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "connectivity.set"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "online": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "online"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "overlay.set"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "owner": {
+                  "enum": [
+                    "setup",
+                    "pairing",
+                    "recovery"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "fields": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "required": [
+                "owner",
+                "state"
+              ],
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "owner": {
+                        "const": "setup"
+                      }
+                    }
+                  },
+                  "then": {
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "softap_qr",
+                          "joining",
+                          "join_failed",
+                          "updating",
+                          "claim_qr",
+                          "ready",
+                          "hidden",
+                          "scanning",
+                          "finalizing",
+                          "factory_reset",
+                          "connecting",
+                          "setup_error"
+                        ]
+                      },
+                      "fields": {
+                        "type": "object",
+                        "properties": {
+                          "reason": {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "description": "Wire limit is 2048 UTF-8 bytes, additionally enforced by peers."
+                          },
+                          "ssid": {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "description": "Wire limit is 2048 UTF-8 bytes, additionally enforced by peers."
+                          },
+                          "password": {
+                            "type": "string",
+                            "maxLength": 128,
+                            "description": "Wire limit is 128 UTF-8 bytes, additionally enforced by peers."
+                          },
+                          "portal_url": {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "description": "Wire limit is 2048 UTF-8 bytes, additionally enforced by peers."
+                          },
+                          "url": {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "description": "Wire limit is 2048 UTF-8 bytes, additionally enforced by peers."
+                          },
+                          "device_name": {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "description": "Wire limit is 2048 UTF-8 bytes, additionally enforced by peers."
+                          },
+                          "client_attached": {
+                            "type": "boolean"
+                          },
+                          "progress": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [],
+                        "additionalProperties": false
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "input.dispatch"
+            },
+            "params": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "move"
+                    },
+                    "occurrence": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    },
+                    "x": {
+                      "type": "number",
+                      "minimum": -16384,
+                      "maximum": 16384
+                    },
+                    "y": {
+                      "type": "number",
+                      "minimum": -16384,
+                      "maximum": 16384
+                    },
+                    "dx": {
+                      "type": "number",
+                      "minimum": -16384,
+                      "maximum": 16384
+                    },
+                    "dy": {
+                      "type": "number",
+                      "minimum": -16384,
+                      "maximum": 16384
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "occurrence"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "button"
+                    },
+                    "occurrence": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    },
+                    "button": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3
+                    },
+                    "clicks": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3
+                    },
+                    "down": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "occurrence",
+                    "down"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "wheel"
+                    },
+                    "occurrence": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    },
+                    "dx": {
+                      "type": "integer",
+                      "minimum": -32768,
+                      "maximum": 32768
+                    },
+                    "dy": {
+                      "type": "integer",
+                      "minimum": -32768,
+                      "maximum": 32768
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "occurrence"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "key"
+                    },
+                    "occurrence": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    },
+                    "usage": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 255
+                    },
+                    "down": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "occurrence",
+                    "usage",
+                    "down"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "text"
+                    },
+                    "occurrence": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "occurrence",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "releaseAll"
+                    },
+                    "occurrence": {
+                      "type": "string",
+                      "maxLength": 64,
+                      "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "occurrence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "schedule.set"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "playlist": {
+                  "$ref": "#/$defs/playlist"
+                },
+                "context": {
+                  "enum": [
+                    "curated",
+                    "personal"
+                  ]
+                },
+                "atMs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "clear": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "clear": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "clear"
+                    ]
+                  },
+                  "else": {
+                    "required": [
+                      "playlist",
+                      "atMs"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "boot.set"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "playlist": {
+                  "$ref": "#/$defs/playlist"
+                },
+                "context": {
+                  "enum": [
+                    "curated",
+                    "personal"
+                  ]
+                },
+                "atMs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "clear": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "clear": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "clear"
+                    ]
+                  },
+                  "else": {
+                    "required": [
+                      "playlist"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "params"
+          ]
+        }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {},
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "result"
+          ],
+          "not": {
+            "required": [
+              "error"
+            ]
+          }
+        },
+        {
+          "required": [
+            "error"
+          ],
+          "not": {
+            "required": [
+              "result"
+            ]
+          }
+        }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "event": {
+          "const": "state"
+        },
+        "previous": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshot"
+        }
+      },
+      "required": [
+        "v",
+        "event",
+        "previous",
+        "cursor",
+        "snapshot"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "host": {
+          "enum": [
+            "responsive"
+          ]
+        },
+        "renderer": {
+          "enum": [
+            "absent",
+            "loading",
+            "committed",
+            "presented",
+            "failed"
+          ]
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/occurrence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "presented": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/occurrence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "playlist": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/playlist"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "playlistUrl": {
+          "type": "string"
+        },
+        "presentedPlaylist": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/playlist"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "presentedPlaylistUrl": {
+          "type": "string"
+        },
+        "stopped": {
+          "type": "boolean"
+        },
+        "sleeping": {
+          "type": "boolean"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "mediaPaused": {
+          "type": "boolean"
+        },
+        "loop": {
+          "enum": [
+            "none",
+            "playlist",
+            "one"
+          ]
+        },
+        "shuffle": {
+          "type": "boolean"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "context": {
+          "enum": [
+            "curated",
+            "personal"
+          ]
+        },
+        "settings": {
+          "$ref": "#/$defs/settings"
+        },
+        "overlay": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "media": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schedule": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduleOutcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/scheduleOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "$ref": "#/$defs/recovery"
+        },
+        "pendingUpdate": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "itemCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                }
+              },
+              "required": [
+                "id",
+                "itemCount"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updateOutcome": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "outcome": {
+                  "enum": [
+                    "deferred",
+                    "applied",
+                    "failed"
+                  ]
+                },
+                "contentBlocked": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "outcome",
+                "contentBlocked"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "presentationFailure": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "occurrence": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "occurrence",
+                "generation",
+                "error"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storage": {
+          "type": "object",
+          "properties": {
+            "health": {
+              "enum": [
+                "available",
+                "write_failed"
+              ]
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "health",
+            "error"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "instance",
+        "generation",
+        "revision",
+        "host",
+        "renderer",
+        "selected",
+        "presented",
+        "playlist",
+        "presentedPlaylist",
+        "settings",
+        "storage"
+      ],
+      "additionalProperties": true
+    },
+    "occurrence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "item": {
+          "$ref": "#/$defs/item"
+        },
+        "display": {
+          "$ref": "#/$defs/display"
+        },
+        "stage": {
+          "enum": [
+            "loading",
+            "committed",
+            "presented",
+            "failed"
+          ]
+        },
+        "error": {
+          "type": "string"
+        },
+        "navigationCommitted": {
+          "type": "boolean"
+        },
+        "context": {
+          "enum": [
+            "curated",
+            "personal"
+          ]
+        },
+        "exhibition": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "curator": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        }
+      },
+      "required": [
+        "id",
+        "generation",
+        "index",
+        "item",
+        "display",
+        "stage",
+        "navigationCommitted"
+      ],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "scaling": {
+          "enum": [
+            "fit",
+            "fill",
+            "stretch",
+            "auto"
+          ]
+        },
+        "framing": {
+          "enum": [
+            "artwork",
+            "fit",
+            "fill"
+          ]
+        },
+        "tombstone": {
+          "enum": [
+            "on",
+            "off",
+            "timed"
+          ]
+        },
+        "transitionMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "durationSeconds": {
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 86400000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "margin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "background": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "rotation": {
+          "enum": [
+            0,
+            90,
+            180,
+            270
+          ]
+        },
+        "volume": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "muted": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "showMatureContent": {
+          "type": "boolean"
+        },
+        "strictPersonal": {
+          "type": "boolean"
+        },
+        "blockUnratedCurated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "showMatureContent",
+        "strictPersonal",
+        "blockUnratedCurated"
+      ],
+      "additionalProperties": false
+    },
+    "display": {
+      "type": "object",
+      "properties": {
+        "scaling": {
+          "enum": [
+            "fit",
+            "fill",
+            "stretch",
+            "auto"
+          ]
+        },
+        "margin": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 16384
+            },
+            {
+              "type": "string",
+              "maxLength": 16,
+              "pattern": "%$",
+              "description": "Finite percentage 0..100, parsed and range-checked by the host."
+            }
+          ]
+        },
+        "background": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers."
+        },
+        "autoPlay": {
+          "type": "boolean"
+        },
+        "loop": {
+          "type": "boolean"
+        },
+        "userOverrides": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "playlist": {
+      "type": "object",
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "curator": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "dpVersion": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "slug": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "created": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "defaults": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "description": "DP-1 document, at most 1 MiB encoded."
+    },
+    "item": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "maxLength": 16384,
+          "description": "Wire limit is 16384 UTF-8 bytes, additionally enforced by peers.",
+          "pattern": "^(https?://|data:|ipfs://|onchfs://)"
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "slug": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "license": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "ref": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "refHash": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+        },
+        "mimeType": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Wire limit is 256 UTF-8 bytes, additionally enforced by peers."
+        },
+        "duration": {
+          "type": "number",
+          "minimum": 0
+        },
+        "contentRating": {
+          "type": "string"
+        },
+        "contentReasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "display": {
+          "$ref": "#/$defs/display"
+        },
+        "inlineManifest": {
+          "type": "object"
+        },
+        "resolvedManifest": {
+          "type": "object"
+        },
+        "override": {
+          "type": "object"
+        },
+        "metadata": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "description": "DP-1 document with extensions preserved; admission limit 64 KiB per item."
+    },
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "enum": [
+            "accepted",
+            "applied"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "occurrence": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updateId": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "hello": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "instance": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "maxFrameBytes": {
+          "const": 4194304
+        },
+        "receiptWindow": {
+          "const": 1024
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshot"
+        }
+      },
+      "required": [
+        "version",
+        "instance",
+        "maxFrameBytes",
+        "receiptWindow",
+        "capabilities",
+        "snapshot"
+      ],
+      "additionalProperties": false
+    },
+    "subscription": {
+      "type": "object",
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      },
+      "required": [
+        "snapshot",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "recordId": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "playedAtMs": {
+          "type": "integer"
+        },
+        "item": {
+          "$ref": "#/$defs/item"
+        },
+        "context": {
+          "enum": [
+            "curated",
+            "personal"
+          ]
+        },
+        "defaults": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "recordId",
+        "playedAtMs",
+        "item",
+        "context"
+      ],
+      "additionalProperties": true
+    },
+    "history": {
+      "type": "object",
+      "properties": {
+        "records": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/record"
+          }
+        },
+        "incomplete": {
+          "type": "boolean"
+        },
+        "activeOccurrence": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "records",
+        "incomplete",
+        "activeOccurrence"
+      ],
+      "additionalProperties": false
+    },
+    "scheduleOutcome": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "atMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "executedAtMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "instance": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "outcome": {
+          "enum": [
+            "applied",
+            "failed"
+          ]
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "atMs",
+        "executedAtMs",
+        "instance",
+        "generation",
+        "outcome"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          }
+        }
+      ]
+    },
+    "recovery": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "limit": {
+          "const": 3
+        },
+        "pending": {
+          "type": "boolean"
+        },
+        "exhausted": {
+          "type": "boolean"
+        },
+        "lastError": {
+          "type": "string"
+        },
+        "failedOccurrence": {
+          "type": "string"
+        },
+        "retryDelayMs": {
+          "enum": [
+            0,
+            1000,
+            2000,
+            4000
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "limit",
+        "pending",
+        "exhausted",
+        "lastError",
+        "failedOccurrence",
+        "retryDelayMs"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

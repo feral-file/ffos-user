@@ -1,0 +1,61 @@
+ok  	github.com/feral-file/ffos-user/components/feral-controld	2.893s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/cdp	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/cdphealth	(cached)
+?   	github.com/feral-file/ffos-user/components/feral-controld/cmd/media-health-bench	[no test files]
+?   	github.com/feral-file/ffos-user/components/feral-controld/cmd/portal-demo	[no test files]
+ok  	github.com/feral-file/ffos-user/components/feral-controld/commandrouter	1.761s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/commands	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/config	(cached)
+?   	github.com/feral-file/ffos-user/components/feral-controld/constant	[no test files]
+ok  	github.com/feral-file/ffos-user/components/feral-controld/contentpath	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/contentpolicy	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/control	(cached)
+?   	github.com/feral-file/ffos-user/components/feral-controld/control/cmd/genfixtures	[no test files]
+?   	github.com/feral-file/ffos-user/components/feral-controld/control/internal/fixturegen	[no test files]
+ok  	github.com/feral-file/ffos-user/components/feral-controld/controlgate	2.094s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/dbus	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/ddc	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/devicectl	2.211s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/devicename	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/dp1	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/drm	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/ff-indexer	(cached)
+?   	github.com/feral-file/ffos-user/components/feral-controld/ffplayerfixtures	[no test files]
+ok  	github.com/feral-file/ffos-user/components/feral-controld/helper	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/hub	6.832s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/logger	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/mdns	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/mediahealth	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/mediator	0.708s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/mintpairing	(cached)
+?   	github.com/feral-file/ffos-user/components/feral-controld/mocks	[no test files]
+ok  	github.com/feral-file/ffos-user/components/feral-controld/netlog	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/netmetrics	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/offlinecache	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/onchfs	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/oom-recovery	0.554s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/otagate	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/overlay	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/playerlink	0.310s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/playerresponse	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/playersession	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher	8.455s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/playlistschedule	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/portal	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/provisioning	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/qrdisplay	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/relayer	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/relaywire	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/screenshot	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/seriesplayback	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/setupui	1.527s
+ok  	github.com/feral-file/ffos-user/components/feral-controld/sigverify	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/sleepschedule	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/softap	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/state	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/status	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/uarewrite	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/watchdog	(cached) [no tests to run]
+ok  	github.com/feral-file/ffos-user/components/feral-controld/wifictl	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/wrapper	(cached)
+ok  	github.com/feral-file/ffos-user/components/feral-controld/ws	(cached)

@@ -1,0 +1,120 @@
+Nov 17 19:40:24 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-player-native-test/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-player-native-test/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 19:40:24 homelab env[1768840]: [1768840:1768931:1117/194024.978076:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:24 homelab env[1768840]: [1768840:1768931:1117/194024.979082:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:24 homelab env[1768840]: [1768840:1768931:1117/194024.979161:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:24 homelab env[1768840]: [1768840:1768931:1117/194024.979911:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768958]: [1768958:1768958:1117/194025.050022:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.065147:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/b5d5e5f1-1a2d-4688-a0b9-bead5d99ecf2
+Nov 17 19:40:25 homelab ff-player-native[1768840]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 19:40:25 homelab env[1768840]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.178351:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.178453:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.178505:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.178547:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.178619:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.180757:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.180836:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.185146:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.185437:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.185516:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.186561:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.187732:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.187781:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.187832:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.190530:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768931:1117/194025.190624:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 19:40:25 homelab env[1768840]: [1768840:1768840:1117/194025.191858:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 19:50:24 homelab systemd[928]: ff-native-runtime-test.service: Service reached runtime time limit. Stopping.
+Nov 17 19:50:24 homelab env[1768840]: presentation_metrics {"copyMilliseconds":34.285878000000004,"cpuCopies":0,"gpuCopies":26,"swaps":35928}
+Nov 17 19:50:24 homelab systemd[928]: ff-native-runtime-test.service: Killing process 1768919 (ff-player-nativ) with signal SIGKILL.
+Nov 17 19:50:24 homelab systemd[928]: ff-native-runtime-test.service: Killing process 1768920 (ff-player-nativ) with signal SIGKILL.
+Nov 17 19:50:24 homelab systemd[928]: ff-native-runtime-test.service: Failed with result 'timeout'.
+Nov 17 19:50:24 homelab systemd[928]: ff-native-runtime-test.service: Consumed 31.727s CPU time over 10min 207ms wall clock time, 385.5M memory peak.
+Nov 17 20:08:29 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-player-native-test/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-player-native-test/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.492981:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.493551:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.493610:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.494722:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819339]: [1819339:1819339:1117/200829.563600:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.569922:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/05dbb75c-10d0-47a9-8d3d-74c258b4bccc
+Nov 17 20:08:29 homelab ff-player-native[1819282]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 20:08:29 homelab env[1819282]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.702774:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.702865:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.702874:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.702942:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.703037:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.704977:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.705040:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.709162:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.709420:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.709484:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.710151:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.711163:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.711302:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.711373:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.714180:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819308:1117/200829.714253:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:08:29 homelab env[1819282]: [1819282:1819282:1117/200829.715013:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:08:29 homelab env[1819613]: Failed to get home directory.
+Nov 17 20:08:29 homelab env[1819613]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: Hardware does not support image size 4096x4096 (constraints: width 64-4096 height 64-4080).
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: no frame!
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: Hardware does not support image size 4096x4096 (constraints: width 64-4096 height 64-4080).
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: no frame!
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: Hardware does not support image size 4096x4096 (constraints: width 64-4096 height 64-4080).
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: Failed setup for format vaapi: hwaccel initialisation returned error.
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: no frame!
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: Hardware does not support image size 4096x4096 (constraints: width 64-4096 height 64-4080).
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: Failed setup for format vaapi: hwaccel initialisation returned error.
+Nov 17 20:08:35 homelab env[1819786]: mpv ffmpeg/video: h264: no frame!
+Nov 17 20:08:36 homelab env[1819849]: Failed to get home directory.
+Nov 17 20:08:36 homelab env[1819849]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:08:41 homelab env[1820156]: Failed to get home directory.
+Nov 17 20:08:41 homelab env[1820156]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:08:41 homelab env[1820193]: Failed to get home directory.
+Nov 17 20:08:41 homelab env[1820193]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:08:42 homelab env[1820229]: Failed to get home directory.
+Nov 17 20:08:42 homelab env[1820229]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:08:42 homelab env[1820280]: Failed to get home directory.
+Nov 17 20:08:42 homelab env[1820280]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:08:44 homelab env[1820312]: Failed to get home directory.
+Nov 17 20:08:44 homelab env[1820312]: Failed to load cookie file from cookie: No such file or directory
+Nov 17 20:14:14 homelab systemd[928]: Stopping [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-player-native-test/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-player-native-test/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224...
+Nov 17 20:14:14 homelab env[1819282]: presentation_metrics {"copyMilliseconds":295.619387,"cpuCopies":0,"gpuCopies":224,"swaps":20686}
+Nov 17 20:14:14 homelab systemd[928]: ff-native-runtime-test.service: Killing process 1819294 (ff-player-nativ) with signal SIGKILL.
+Nov 17 20:14:14 homelab systemd[928]: ff-native-runtime-test.service: Killing process 1819295 (ff-player-nativ) with signal SIGKILL.
+Nov 17 20:14:14 homelab systemd[928]: ff-native-runtime-test.service: Killing process 1819300 (n/a) with signal SIGKILL.
+Nov 17 20:14:14 homelab systemd[928]: Stopped [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-player-native-test/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-player-native-test/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 20:14:14 homelab systemd[928]: ff-native-runtime-test.service: Consumed 22.071s CPU time over 5min 45.379s wall clock time, 553.1M memory peak.
+Nov 17 20:55:31 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /usr/bin/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.672314:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.673180:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.673250:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.674270:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060539]: [2060539:2060539:1117/205531.741680:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.755218:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/a94e0461-01a1-46c6-9100-9a6cbd499d72
+Nov 17 20:55:31 homelab ff-player-native[2060490]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 20:55:31 homelab env[2060490]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.869963:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.870062:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.870065:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.870158:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.870243:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.873418:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.873497:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.875890:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.876118:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.876373:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.877113:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.877899:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.877959:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.878032:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.880020:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060512:1117/205531.880114:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 20:55:31 homelab env[2060490]: [2060490:2060490:1117/205531.881814:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 20:55:41 homelab env[2061171]: Failed to get home directory.
+Nov 17 20:55:41 homelab env[2061171]: Failed to load cookie file from cookie: No such file or directory

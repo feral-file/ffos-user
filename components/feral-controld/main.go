@@ -45,6 +45,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
@@ -816,7 +817,7 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 }
 
 // sleepInvalidateReconciler / playlistRecomputeReconciler /
-// statusForceRefreshReconciler / setupUIResyncReconciler build the
+// statusForceRefreshReconciler builds the
 // session.RegisterReconciler closures initializeApp wires (design doc §4).
 // Defined at FILE scope, not as inline closures inside initializeApp, for the
 // same reason externalLinkProbe lives in provisioning_wiring.go:
@@ -839,12 +840,6 @@ func playlistRecomputeReconciler(scheduler playlistschedule.Scheduler) func(cont
 func statusForceRefreshReconciler(poller status.Poller) func(context.Context) {
 	return func(context.Context) {
 		poller.ForceRefresh()
-	}
-}
-
-func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
-	return func(context.Context) {
-		ui.Resync()
 	}
 }
 
@@ -1041,8 +1036,12 @@ func initializeApp(
 		return godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
 	})
 
+	// Native player shares one ordered command lane across consumers.
+	nativePlayer := playerlink.New(playerlink.SocketPath())
+	go func() { <-context.Done(); _ = nativePlayer.Close() }()
+
 	// DeviceStatus
-	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io, cdp)
+	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io, nativePlayer)
 
 	// DDC panel
 	ddcPanel := ddc.New(exec, clock, logger)
@@ -1067,8 +1066,8 @@ func initializeApp(
 	controlWire.setTransports(relayerEndpoint != "")
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
 
-	// StatusPoller
-	poller := status.NewPoller(cdp, notifyRelayer, notifyWS, deviceStatus, ddcPanel, json, logger)
+	// Native host status does not depend on an artist document or CDP target.
+	poller := status.NewPoller(&status.NativePlayer{Source: nativePlayer}, notifyRelayer, notifyWS, deviceStatus, ddcPanel, json, logger)
 
 	// Watchdog
 	watchdog := watchdog.New(logger)
@@ -1574,7 +1573,7 @@ func initializeApp(
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
 
 	// Mediator
-	mediator := mediator.New(context, relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
+	mediator := mediator.New(context, relayer, dbusClient, cmdHandler, executor, playlistRefresher, json, logger)
 
 	// An online edge also restarts the v2 carrier's redial backoff (see
 	// mediator.SetRelayV2Waker). Wired whenever this device carries v2,
@@ -1664,7 +1663,7 @@ func initializeApp(
 	// excludes the device's own hotspot by NM profile name, so a raised (or
 	// half-torn-down) setup AP never counts as an uplink. Narration flows through
 	// a setupui.Service.
-	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
+	setupNarrator := setupui.New(nativePlayer, logger)
 	// One overlay controller for both owners of the screen. Each kind is routed
 	// to its owner's transport by prefix, and both owners share the record of
 	// what is showing. Wired before anything narrates.
@@ -1740,7 +1739,7 @@ func initializeApp(
 		session.RegisterReconciler("media-health-cursor", mediaHealthCursorReconciler(mediaHealthSvc))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
-	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
+	go setupNarrator.Run(context, nativePlayer)
 	// Guarded on kioskReplay, not on the refresher. This is not an
 	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
 	// which re-resolves the playlist over the network and re-sends
@@ -1766,11 +1765,9 @@ func initializeApp(
 	// Deferred round re-enters early instead of waiting out its backoff
 	// timer (which stays the PRIMARY trigger either way).
 	session.RegisterReconciler("boot-recovery-retry", bootRecoveryRetryReconciler(executor, logger))
-	// setupui integration (§4 disposition table): the narration worker
-	// parks sends while a recovery navigation is pending, and setupui
-	// registers its own Narrating() as an overlay owner so NavigateHome never
-	// erases live narration.
-	setupNarrator.SetSession(session)
+	// Native setup narration survives artwork navigation. Keep this suppression
+	// while the remaining legacy recovery consumers are migrated; it must not
+	// cause a page navigation to compete with device-owned setup.
 	session.RegisterOverlayOwner("setupui", setupNarrator.Narrating)
 	// mintpairing/qrdisplay: a live mint-pairing display (pairing code or
 	// request-received) is an overlay owner too, for the same reason. It also
@@ -1778,11 +1775,9 @@ func initializeApp(
 	// mirroring setupui's park discipline above.
 	session.RegisterOverlayOwner("mintpairing", mintPairing.DisplayActive)
 	mintPairing.SetSession(session)
-	// mediator connectivity ownership (§4): SetSession registers the
-	// "connectivity" reconciler internally, so it runs last among the five
-	// above, and routes the edge-triggered pushes from connectivity_change
-	// through the session's handler-readiness discipline too.
-	mediator.SetSession(session)
+	// Host connectivity is independent of CDP/page generations and reconnects
+	// with the native process. Remaining legacy consumers are migrated separately.
+	mediator.SetConnectivityPlayer(nativePlayer)
 	// Generation re-check seams (§4): a moved generation across an
 	// in-flight setSleepMode send or CDP command reply means the ack may not
 	// describe the current document.

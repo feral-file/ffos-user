@@ -893,10 +893,8 @@ func TestReplayScopeResyncReconciler(t *testing.T) {
 // connect force-refreshes status, so without this the regression would be
 // uncovered on both sides of the move.
 //
-// There is deliberately no sibling TestSetupUIResyncReconciler: the other
-// moved producer, setupUIResyncReconciler, takes a concrete *setupui.Service
-// rather than a consumer-owned interface, so there is no seam to assert
-// against without narrowing that parameter first.
+// Setup narration instead observes native host snapshots; its reconnect
+// replay is covered in setupui.
 func TestStatusForceRefreshReconciler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

@@ -1,0 +1,21 @@
+{
+  "purpose": "Isolated previous-stable to current-pinned security-update rehearsal; baseline is never installed or used for network artworks",
+  "baseline": {
+    "version": "156.0.28+g57389f0+chromium-156.0.8078.88",
+    "url": "https://cef-builds.spotifycdn.com/cef_binary_156.0.28+g57389f0+chromium-156.0.8078.88_linux64_minimal.tar.bz2",
+    "upstreamSha1": "6bd0b932a37503fb0206ac77bf628ebd0496f120",
+    "sha256": "7b53123d0628fce62c755c090b0ae52b454431d98b53b8d99fb505757f48f43a"
+  },
+  "updated": {
+    "version": "156.0.30+g6028375+chromium-156.0.8078.96",
+    "sha256": "356db99d653698aa9ba78b22965032b4fa5b23ba079ffdbaa5d28a8530f04011"
+  },
+  "upstreamReleaseNotes": "https://chromereleases.googleblog.com/2026/11/extended-stable-update-for-desktop_0910980127.html",
+  "enginePatches": [],
+  "hostCompatibilityToRecheck": [
+    "CEF 3912: main entrypoint NO_STACK_PROTECTOR",
+    "CEF 4354: AMD_DEBUG=nodcc remains an unretired workaround",
+    "DMA-BUF callback-local lifetime and nonblocking producer readiness",
+    "Pinned renderer dependencies and sandbox resources"
+  ]
+}

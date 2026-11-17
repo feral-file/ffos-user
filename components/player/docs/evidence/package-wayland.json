@@ -1,0 +1,8 @@
+{
+  "version": "0.1.0.dev20261117.3",
+  "sourceSHA256": "ad1a9c0cae7018f0bc052905a451a123c2e1e53651e36aab93ddc27dad8d94f0",
+  "sourceDateEpoch": 1794873600,
+  "sourceFiles": 80,
+  "state": "clean build passed; installation test pending",
+  "linuxCTestGroups": 8
+}
