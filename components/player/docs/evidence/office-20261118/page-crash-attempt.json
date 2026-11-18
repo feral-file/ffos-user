@@ -1,0 +1,8 @@
+{
+  "startedAt": "2026-11-18T03:55:06.194Z",
+  "physicalOutputVerified": false,
+  "crashes": [],
+  "result": "failed",
+  "error": "Error: Native state did not reach expected failure/recovery phase",
+  "finishedAt": "2026-11-18T03:55:45.973Z"
+}

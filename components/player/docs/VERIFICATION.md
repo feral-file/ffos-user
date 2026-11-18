@@ -479,3 +479,30 @@ The preceding 4K benchmark revision 37028ec4 passed clean Linux CI 44231894052.
 
 The final fresh-context controls review found no material findings
 (`Verdict: accept`) after the error-reply correction.
+
+
+## 2026-11-18: refresh independent of artwork and page recovery
+
+`refreshArtwork` now uses native `playback.refresh`. Deleted the router's
+Chromium cache purge, page-navigation escalation and session dependency.
+Empty/stopped/sleeping selection returns `no_artwork` without state changes.
+Twelve local and fourteen device Linux CTest groups passed; Go tests/vet/lint
+passed. The isolated Go control suite also passed with refresh preserving the
+cast generation/index and creating a new occurrence.
+
+A source-probe failure first demonstrated control after exhausted loading
+retries (`controller-recovery.json`); this was not a renderer crash. A separate
+`Page.crash` diagnostic did not terminate within the test window and was not
+counted as a pass. Deterministic SIGKILL injection then killed only renderer PIDs
+reported by the test browser and independently checked against its systemd
+cgroup, using pidfds to avoid PID reuse. Four renderer terminations left the
+same host instance/generation responsive, with bounded retries then exhaustion.
+The real Go refresh command created a new occurrence and the host composed the
+fixture again. Evidence: `controller-renderer-kill.json`. This is renderer-process
+recovery, not browser/GPU survival or physical-panel verification. The temporary
+test services were stopped and the installed preview restored to “24”, awake.
+
+The refresh completion review found no material findings (`Verdict: accept`).
+The additional idle/sleep/stopped no-mutation tests passed in the twelve-group
+local suite. The installed preview reports responsive/presented, title “24”,
+VA-API decode and sleeping=false after the update.

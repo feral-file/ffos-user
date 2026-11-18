@@ -115,3 +115,16 @@ loop/shuffle, same-URL selection, stale showing rejection, composed margin/color
 preview, malformed host parameter rejection and duration override reset. This
 is not full-daemon activation: casting, session/watchdog and the other gaps
 above still block replacement of ordinary phone control.
+
+
+## Artwork refresh cutover
+
+`refreshArtwork` now calls `playback.refresh` with the current instance and
+generation. The host creates a fresh occurrence and resets bounded renderer
+recovery while keeping the playlist/generation. Empty, stopped or sleeping
+selection returns `no_artwork` and does not wake the display. The command does
+not depend on a live artwork JavaScript context. The former global Chromium
+cache purge and `NavigateHomeInline` escalation, its router/session wiring and
+its CDP-only tests are deleted. A fresh isolated artwork request context supplies
+the reload; whole-process recovery stays external. An unavailable host returns
+a structured failure instead of claiming a recovery it did not perform.

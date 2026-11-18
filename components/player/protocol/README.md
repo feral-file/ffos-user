@@ -94,7 +94,7 @@ Current codes include `invalid_json`, `invalid_params`, `unknown_method`,
 `not_negotiated`, `version_mismatch`, `deadline_exceeded`, `stale_instance`,
 `stale_generation`, `stale_revision`, `stale_occurrence`, `idempotency_conflict`,
 `content_blocked`, `playlist_invalid`, `input_busy`, `input_blocked`,
-`unavailable`, `unsupported`, `storage_unavailable` and `storage_limit`.
+`unavailable`, `unsupported`, `no_artwork`, `storage_unavailable` and `storage_limit`.
 Unknown codes must be treated as failures, preserving the message for diagnostics.
 
 ## Duplicates, cancellation and limits
@@ -139,7 +139,7 @@ replay promise.
 | `playback.replace` | `{playlist,index?,context?,playlistUrl?}`; validate/persist a new cast before selection. Context defaults to curated; no allowed item rejects and retains the current cast; an empty list clears it. |
 | `playback.update` | `{items,context?,retireBlockedCurrent?}`; source refresh of the current cast; requires `playback.update.v1`. Receipt includes `updateId`; see refresh semantics below. |
 | `playback.select` | `{index}`; select an allowed item as a new occurrence |
-| `playback.refresh` | `{}`; reload the selected work as a new occurrence |
+| `playback.refresh` | `{}`; reload the selected work as a new occurrence, resetting its recovery budget. No active selection returns `no_artwork` without changing durable state. |
 | `playback.stop`, `playback.cancel` | `{}`; durable stop, release input and presentation |
 | `playback.pause` | `{paused}`; pause/resume progression and native media; explicit resume releases an autoPlay hold |
 | `playback.sleep` | `{sleeping}`; durable sleep intent; suspend presentation, restore selection on wake |

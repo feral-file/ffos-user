@@ -53,7 +53,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - `commandrouter` is the command dispatch layer. It has a 3-way routing split:
   1. Commands where `Type.DeviceCtlCommand()` is true → `devicectl` executor (device control actions).
   2. `CMD_DISPLAY_PLAYLIST` → `dp1` (playlist resolution) then CDP (`window.handleCDPRequest(...)`).
-  3. Six playback/presentation controls (`moveToArtwork`, `setShuffle`, `setLoop`, `updateDefaultDuration`, `updateArtFraming`, `updateDisplaySettings`) → typed native host operations, with snapshot/occurrence fences and no CDP fallback. Remaining player commands still use CDP during migration; see `docs/native-player-migration.md`.
+  3. Seven playback/presentation controls (`refreshArtwork`, `moveToArtwork`, `setShuffle`, `setLoop`, `updateDefaultDuration`, `updateArtFraming`, `updateDisplaySettings`) → typed native host operations, with snapshot/occurrence fences and no CDP fallback. Remaining player commands still use CDP during migration; see `docs/native-player-migration.md`.
   Mint pairing is the intentional pre-CDP special case: `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, and `mintPairingApprovalDecision` are routed by `commandrouter` into `mintpairing` so controld can own broker channels, approval notifications, and relayer session creation without exposing browser tokens to Chromium.
   Offline artwork caching is the same kind of pre-CDP special case:
   `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,

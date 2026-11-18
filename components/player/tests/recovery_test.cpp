@@ -11,6 +11,12 @@ int main(){
   std::filesystem::create_directory(directory);
   try{
     ff::Store store((directory/"state.sqlite").string());ff::Playback p(store);
+    auto expect_no_artwork=[&]{
+      auto before=p.snapshot();bool refused=false;
+      try{p.command("playback.refresh",ff::Json::object());}catch(const ff::Error& e){refused=e.code=="no_artwork";}
+      check(refused&&p.snapshot()==before,"Refresh without artwork must reject without changing state");
+    };
+    expect_no_artwork();
     p.tick(0,0);p.command("playback.replace",{{"playlist",playlist()}});
     auto covered=p.desired()->id;p.committed(covered);p.frame_ready(covered);
     p.command("overlay.set",{{"owner","setup"},{"state","joining"}});p.tick(120000,120000);
@@ -80,6 +86,8 @@ int main(){
     p.command("playback.pause",{{"paused",false}});check(!p.media_paused(),"Resume must release autoplay hold");
     p.failed(p.desired()->id,"Temporary decoder failure");p.tick(now+201000,now+201000);
     check(!p.media_paused(),"Automatic recovery must preserve explicit resume of autoplay-disabled media");
+    p.command("playback.sleep",{{"sleeping",true}});expect_no_artwork();
+    p.command("playback.sleep",{{"sleeping",false}});p.command("playback.stop",ff::Json::object());expect_no_artwork();
     std::filesystem::remove_all(directory);std::cout<<"Bounded renderer recovery checks passed\n";
   }catch(const std::exception& error){std::filesystem::remove_all(directory);std::cerr<<error.what()<<'\n';return 1;}
 }

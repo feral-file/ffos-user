@@ -23,7 +23,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
@@ -92,23 +91,7 @@ type handler struct {
 	// nil-guard pattern.
 	overlaySource func() *status.Overlay
 
-	// recoverySession, when set (SetRecoverySession), is the
-	// playersession.Session the refreshArtwork recovery escalation (§3)
-	// drives via NavigateHomeInline — the caller here holds no external lock
-	// while calling it (the escalation is outside every WithPlayerPush closure
-	// and gate.go has no mutex), which is exactly Inline's synchronous-reply
-	// contract. nil (tests, a build wired before Phase 2b) makes the
-	// escalation a no-op, degrading to the pre-existing error return.
-	//
-	// The "no external lock" premise now has ONE thing holding it up that is
-	// not obvious from the escalation site: Process does take the
-	// kioskReplay playback lock, but only on the CMD_DISPLAY_PLAYLIST branch
-	// (heldPlaybackLock), while this escalation is CMD_REFRESH_ARTWORK-only,
-	// so the two never overlap. Extending the escalation to displayPlaylist
-	// would deadlock on that non-reentrant lock — re-check this before doing
-	// so, rather than trusting the sentence above.
-	recoverySession RecoverySession
-	contentPolicy   *contentpolicy.Store
+	contentPolicy *contentpolicy.Store
 	// policyRefresher re-sends the current playlist after an accepted policy
 	// change. nil (tests, a build wired before the seam) degrades to the old
 	// behavior: the change applies to the next cast or periodic refresh.
@@ -161,7 +144,7 @@ func SetContentPolicy(h Handler, policy *contentpolicy.Store, logger *zap.Logger
 }
 
 // PolicyRefresher is the narrow slice of the playlist refresher the policy path
-// needs: re-send what is on screen. Consumer-owned, like RecoverySession.
+// needs: re-send what is on screen. Consumer-owned; playlist resolution remains outside the player.
 type PolicyRefresher interface{ ForceRefresh() }
 
 // SetPolicyRefresher wires the re-send used after a policy change, if h
@@ -312,41 +295,9 @@ func (h *handler) syncContentPolicyLocked() error {
 	return nil
 }
 
-// RecoverySession is the narrow slice of playersession.Session the relayer's
-// refreshArtwork recovery path needs. Consumer-owned, mirroring
-// setupui.NavigationSession and devicectl.BootRecoverySession;
-// *playersession.Session satisfies it.
-type RecoverySession interface {
-	NavigateHomeInline(opts playersession.NavOptions) error
-}
-
-// ErrGenerationRace marks sendCDPRequest's generation re-check failure:
-// the send itself succeeded, but the page generation moved while the
-// reply was in flight, so the reply cannot be trusted as describing the
-// current document. errors.Is-able so the refreshArtwork recovery
-// escalation below can EXCLUDE it: a healthy page racing an unrelated
-// generation change (a connectivity reconciler bump, a stamp-mismatch
-// bump, ...) is not evidence the page is broken, and escalating it into
-// NavigateHomeInline({PurgeCache:true}) would be a visible, unwarranted
-// restart. The caller retries instead, per the re-check's stated purpose.
+// ErrGenerationRace remains for the not-yet-migrated CDP cast consumers.
+// Native commands use host instance/generation preconditions instead.
 var ErrGenerationRace = errors.New("commandrouter: command reply raced a page generation change")
-
-// SetRecoverySession injects the session the refreshArtwork recovery
-// escalation drives against, if h supports it (the concrete *handler built
-// by New — NOT the storm-protection gate wrapper, mirroring
-// SetSessionGeneration's contract).
-func SetRecoverySession(h Handler, sess RecoverySession, logger *zap.Logger) {
-	setter, ok := h.(interface{ setRecoverySession(RecoverySession) })
-	if !ok {
-		logger.Warn("Command handler does not support recovery session wiring")
-		return
-	}
-	setter.setRecoverySession(sess)
-}
-
-func (h *handler) setRecoverySession(sess RecoverySession) {
-	h.recoverySession = sess
-}
 
 // SetSessionGeneration injects the generation-getter seam onto h, if h
 // supports it (the concrete *handler built by New — NOT the storm-protection
@@ -1495,13 +1446,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			h.kioskReplay.MarkPlaybackChanged()
 		}
 
-		if commandType == commands.CMD_REFRESH_ARTWORK {
-			_, err = h.cdp.Send("Network.clearBrowserCache", map[string]interface{}{})
-			if err != nil {
-				h.logger.Warn("Failed to clear Chromium browser cache before artwork refresh", zap.Error(err))
-			}
-		}
-
 		// publishVerdict records what this cast did to the screen in the
 		// active-verdict slot (#307). It MUST run inside the same player-push
 		// critical section as the send it describes: WithPlayerPush orders
@@ -1714,56 +1658,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 		if err != nil {
-			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
-			// above already calls scheduler.Restore before returning from the
-			// WithPlayerPush closure, so there is nothing left to undo by the
-			// time control reaches this point. That is also load-bearing, not
-			// just a redundancy removal — a restore here would run outside
-			// pushMu, violating the scheduler's documented pushMu-before-mu lock
-			// ordering (Restore must run under the same push lock as the failed
-			// send it is undoing).
-			//
-			// refreshArtwork's evaluate needs a live player page
-			// (window.handleCDPRequest), but a refresh is most needed exactly
-			// when the page is broken — e.g. Chromium serving stale cached
-			// chunks after a player bundle swap (#234), where the app never
-			// boots. The cache was already cleared above; the recovery
-			// primitive is navigate-to-entry (design doc §3), never
-			// reload-in-place — the static export is flat files only, so a
-			// client-route reload 404s. NavigateHomeInline runs its own gates
-			// (sleep/error-page/overlay) synchronously and reports a
-			// SYNCHRONOUS error, which is exactly what this caller needs: it
-			// holds no external lock (this escalation is outside every
-			// WithPlayerPush closure, gate.go has no mutex, and the kioskReplay
-			// playback lock is taken only on the displayPlaylist branch — see
-			// recoverySession's field doc), so Inline's bounded wait cannot
-			// deadlock it. Only when the escalation itself fails (or no
-			// session is wired) is the command truly dead.
-			if commandType != commands.CMD_REFRESH_ARTWORK {
-				return nil, err
-			}
-			// A generation-race failure means the send itself worked but
-			// raced an unrelated page change — not evidence of a broken page.
-			// Escalating it into a destructive navigate would visibly restart
-			// a healthy page for no reason; the caller retries instead.
-			if errors.Is(err, ErrGenerationRace) {
-				return nil, err
-			}
-			if h.recoverySession == nil {
-				return nil, err
-			}
-			if navErr := h.recoverySession.NavigateHomeInline(playersession.NavOptions{PurgeCache: true}); navErr != nil {
-				return nil, err
-			}
-			h.logger.Warn("refreshArtwork: player page unresponsive; recovered with cache clear + navigate", zap.Error(err))
-			err = nil
-			// "navigate" replaces the old "recovered":"reload" value — the
-			// relayer/app consumer only reads `ok` from this reply (verified:
-			// no in-repo consumer parses `recovered`), so this is a diagnostic
-			// label, not a wire contract change.
-			result = map[string]interface{}{
-				"message": map[string]interface{}{"ok": true, "recovered": "navigate"},
-			}
+			// Cast failures restore their scheduler snapshot inside the push
+			// lock above. Do not retry a mutation or navigate a browser here.
+			return nil, err
 		}
 
 		// Report the signature verdict on the accepted reply (both the

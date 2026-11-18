@@ -51,6 +51,7 @@ func TestNativeControlTranslation(t *testing.T) {
 		name, method string
 		args, want   map[string]any
 	}{
+		{"refreshArtwork", "playback.refresh", nil, map[string]any{}},
 		{"moveToArtwork", "playback.select", map[string]any{"index": float64(1)}, map[string]any{"index": float64(1)}},
 		{"setShuffle", "playback.mode", map[string]any{"enabled": true}, map[string]any{"shuffle": true}},
 		{"setLoop", "playback.mode", map[string]any{"mode": "one"}, map[string]any{"loop": "one"}},
@@ -200,7 +201,16 @@ func TestNativeControlsDevice(t *testing.T) {
 	state, err = client.Snapshot(ctx)
 	require.NoError(t, err)
 	require.Nil(t, state.Settings.DurationSeconds)
-	t.Log("saved settings, loop/shuffle, same-URL occurrence selection, stale preview rejection, composed preview, invalid host parameter and duration reset passed")
+	prior := state.Presented.ID
+	generation := state.Generation
+	require.Equal(t, true, send("refreshArtwork", nil)["ok"])
+	require.Eventually(t, func() bool {
+		state, err = client.Snapshot(ctx)
+		return err == nil && state.Presented != nil && state.Presented.ID != prior
+	}, 15*time.Second, 100*time.Millisecond)
+	require.Equal(t, generation, state.Generation)
+	require.Equal(t, 1, state.Presented.Index)
+	t.Log("saved settings, loop/shuffle, same-URL occurrence selection, stale preview rejection, composed preview, invalid host parameter, duration reset and refresh passed")
 }
 
 func TestNativeControlSnapshotFailureRepliesWithoutMutation(t *testing.T) {
@@ -224,4 +234,58 @@ func TestNativeControlSnapshotFailureRepliesWithoutMutation(t *testing.T) {
 			require.Zero(t, p.calls)
 		})
 	}
+}
+
+func TestNativeRefreshWithoutArtwork(t *testing.T) {
+	ts := setup(t)
+	p := &controlPlayer{state: controlSnapshot()}
+	p.state.Selected = nil
+	p.state.Presented = nil
+	commandrouter.SetNativeControls(ts.handler, p)
+	got, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_REFRESH_ARTWORK})
+	require.NoError(t, err)
+	require.Equal(t, "no_artwork", got.(map[string]any)["message"].(map[string]any)["code"])
+	require.Zero(t, p.calls)
+}
+
+func TestNativeRefreshFailedDevice(t *testing.T) {
+	path := os.Getenv("FF_NATIVE_CONTROLS_TEST_SOCKET")
+	if path == "" {
+		t.Skip("isolated failed-renderer fixture required")
+	}
+	client := playerlink.New(path)
+	defer func() { _ = client.Close() }()
+	ctx := context.Background()
+	before, err := client.Snapshot(ctx)
+	require.NoError(t, err)
+	var playlist struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(before.Playlist, &playlist))
+	require.Equal(t, "controld-refresh-test", playlist.ID)
+	require.NotNil(t, before.Selected)
+	require.Equal(t, "failed", before.Selected.Stage)
+	require.NotNil(t, before.Recovery)
+	require.True(t, before.Recovery.Exhausted)
+	ts := setup(t)
+	commandrouter.SetNativeControls(ts.handler, client)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+	got, err := ts.handler.Process(ctx, commands.Command{Type: commands.CMD_REFRESH_ARTWORK})
+	require.NoError(t, err)
+	reply := got.(map[string]any)["message"].(map[string]any)
+	require.Equal(t, true, reply["ok"])
+	require.Equal(t, "accepted", reply["outcome"])
+	after, err := client.Snapshot(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, after.Selected)
+	require.NotEqual(t, before.Selected.ID, after.Selected.ID)
+	require.Equal(t, before.Instance, after.Instance)
+	require.Equal(t, before.Generation, after.Generation)
+	require.Equal(t, 0, after.Recovery.Attempt)
+	require.False(t, after.Recovery.Exhausted)
+	require.Eventually(t, func() bool {
+		after, err = client.Snapshot(ctx)
+		return err == nil && after.Presented != nil && after.Presented.ID != before.Selected.ID
+	}, 15*time.Second, 100*time.Millisecond)
+	t.Log("refresh accepted after four renderer crashes; host instance/generation preserved and fresh occurrence composed")
 }

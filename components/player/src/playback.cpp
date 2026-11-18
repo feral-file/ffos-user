@@ -349,7 +349,7 @@ Json Playback::command(std::string_view method, const Json& p) {
     require(index >= 0 && index < static_cast<int>(next["playlist"]["items"].size()), "invalid_params", "Index out of bounds");
     require(allowed(next["playlist"]["items"][index], next), "content_blocked", "Selected work is blocked");
     next["index"] = index; next["stopped"] = false; reselection = true;
-  } else if (method == "playback.refresh") { fields(p, {}); reselection = true; }
+  } else if (method == "playback.refresh") { fields(p, {}); require(selected_.has_value(), "no_artwork", "No active artwork to refresh"); reselection = true; }
   else if (method == "playback.stop" || method == "playback.cancel") { fields(p, {}); next["stopped"] = true; next["pendingUpdate"]=nullptr; next["updateOutcome"]=nullptr; reselection = generation = true; }
   else if (method == "playback.sleep") { fields(p, {"sleeping"}); next["sleeping"] = boolean(p, "sleeping"); reselection = true; }
   else if (method == "playback.pause") { fields(p, {"paused"}); next["paused"] = boolean(p, "paused"); }

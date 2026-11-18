@@ -29,7 +29,7 @@ func SetNativeControls(h Handler, player NativeControlPlayer) {
 
 func nativeControl(command commands.Type) bool {
 	switch command {
-	case "moveToArtwork", "setShuffle", "setLoop", "updateArtFraming", "updateDisplaySettings", "updateDefaultDuration":
+	case commands.CMD_REFRESH_ARTWORK, "moveToArtwork", "setShuffle", "setLoop", "updateArtFraming", "updateDisplaySettings", "updateDefaultDuration":
 		return true
 	}
 	return false
@@ -48,6 +48,11 @@ func nativeControlOperation(command commands.Command, state playerlink.Snapshot)
 	method := ""
 	var keys []string
 	switch command.Type {
+	case commands.CMD_REFRESH_ARTWORK:
+		method = "playback.refresh"
+		if state.Selected == nil {
+			return "", nil, &playerlink.RemoteError{Code: "no_artwork", Message: "No active artwork to refresh"}
+		}
 	case "moveToArtwork":
 		keys = []string{"index"}
 		method = "playback.select"

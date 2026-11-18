@@ -1788,9 +1788,6 @@ func initializeApp(
 	// describe the current document.
 	devicectl.SetSessionGeneration(executor, session.Generation, logger)
 	commandrouter.SetSessionGeneration(rawCmdHandler, session.Generation, logger)
-	// commandrouter's refreshArtwork dead-page recovery escalates to
-	// NavigateHomeInline instead of Page.reload (design doc §3).
-	commandrouter.SetRecoverySession(rawCmdHandler, session, logger)
 	// Status-poller stamp carrier (§2.1 source 3): every checkStatus
 	// round-trip reports its observed document stamp so the session can
 	// detect a document replaced without going through NavigateHome

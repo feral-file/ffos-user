@@ -26,7 +26,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -40,20 +39,6 @@ func newRoutableExecutor(ctrl *gomock.Controller) *mocks.MockExecutor {
 	m := mocks.NewMockExecutor(ctrl)
 	m.EXPECT().ResetStaged().Return(false).AnyTimes()
 	return m
-}
-
-// fakeRecoverySession is a directly-controllable commandrouter.RecoverySession
-// double: err, when set, is what NavigateHomeInline returns.
-type fakeRecoverySession struct {
-	calls int
-	opts  playersession.NavOptions
-	err   error
-}
-
-func (f *fakeRecoverySession) NavigateHomeInline(opts playersession.NavOptions) error {
-	f.calls++
-	f.opts = opts
-	return f.err
 }
 
 type testSetup struct {
@@ -1054,35 +1039,6 @@ func firstCastItem(t *testing.T, expression string) map[string]interface{} {
 	return payload.Request.DP1Call.Items[0]
 }
 
-func TestCommandHandler_Process_RefreshArtwork(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(playerOkResponse(), nil).
-		Times(1)
-
-	ts.mockStatusPoller.EXPECT().
-		ForceRefresh().
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-}
-
 func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -1413,51 +1369,6 @@ func TestCommandHandler_SendCDPRequest_GenerationMovedDuringSend_LoudError(t *te
 	assert.ErrorIs(t, err, commandrouter.ErrGenerationRace)
 }
 
-// TestCommandHandler_Process_RefreshArtwork_GenerationRace_NoEscalation pins
-// M5: a generation-race failure on refreshArtwork's own send must NOT
-// escalate into NavigateHomeInline — the send itself succeeded and merely
-// raced an UNRELATED page-generation change (a connectivity reconciler
-// bump, a stamp-mismatch bump, ...), which is not evidence the page is
-// broken. Escalating it would visibly restart a healthy page for no reason;
-// the ErrGenerationRace error must instead reach the relayer so the caller
-// retries.
-func TestCommandHandler_Process_RefreshArtwork_GenerationRace_NoEscalation(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	sess := &fakeRecoverySession{}
-	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
-	gen := uint64(1)
-	commandrouter.SetSessionGeneration(ts.handler, func() uint64 { return gen }, ts.logger)
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	// The evaluate itself SUCCEEDS, but the generation moves while it is in
-	// flight — a healthy page racing an unrelated bump, not a dead page.
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
-			gen = 2
-			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
-		}).
-		Times(1)
-	// No ForceRefresh: Process returns the error before reaching it.
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	require.Error(t, err)
-	assert.Nil(t, result)
-	assert.ErrorIs(t, err, commandrouter.ErrGenerationRace)
-	assert.Equal(t, 0, sess.calls, "a generation-race failure must never escalate to NavigateHomeInline")
-}
-
 // TestSetSessionGeneration_GatedHandlerIsNoOp guards the documented caveat:
 // wiring it against the storm-protection gate (not the raw handler
 // commandrouter.New returns) must degrade to a harmless no-op, never a panic,
@@ -1670,122 +1581,6 @@ func TestCommandHandler_Metrics_NonPlaybackCommand_NoMetrics(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Equal(t, beforeAttempts, status.PlaybackStartTotal(), "non-playback command should not increment attempt counter")
-}
-
-// refreshArtwork must survive a dead player page: the evaluate path needs
-// window.handleCDPRequest, which is exactly what's missing when Chromium is
-// serving a stale/broken bundle (#234) — the situation a refresh exists to
-// fix. Cache clear + a session NavigateHomeInline (navigate-to-entry, never
-// reload-in-place — design doc §5) is the recovery.
-func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaNavigate(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	sess := &fakeRecoverySession{}
-	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	// Page evaluate fails — no live player app.
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(nil, errors.New("evaluate failed: handleCDPRequest is not defined")).
-		Times(1)
-
-	ts.mockStatusPoller.EXPECT().
-		ForceRefresh().
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.NoError(t, err)
-	assert.True(t, isPlayerResponseOkForTest(result))
-	assert.Equal(t, 1, sess.calls, "the dead evaluate must escalate to exactly one NavigateHomeInline")
-	assert.True(t, sess.opts.PurgeCache, "the recovery navigation must purge the cache")
-}
-
-// When both the evaluate and the navigate escalation fail, the command must
-// report the original failure — a dead CDP connection is not recoverable
-// here.
-func TestCommandHandler_Process_RefreshArtwork_NavigateAlsoFails(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	sess := &fakeRecoverySession{err: errors.New("no CDP connection")}
-	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	evalErr := errors.New("evaluate failed")
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(nil, evalErr).
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.Error(t, err)
-	assert.Equal(t, evalErr, err)
-	assert.Nil(t, result)
-	assert.Equal(t, 1, sess.calls)
-}
-
-// With no session wired (a build wired before Phase 2b, or a test double),
-// the escalation must degrade to the original failure rather than panicking.
-func TestCommandHandler_Process_RefreshArtwork_NoSessionWiredReportsOriginalFailure(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	evalErr := errors.New("evaluate failed")
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(nil, evalErr).
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.Error(t, err)
-	assert.Equal(t, evalErr, err)
-	assert.Nil(t, result)
-}
-
-// Non-refresh commands must NOT get the reload fallback — a failed
-// displayPlaylist evaluate is a real failure the caller needs to see.
-func isPlayerResponseOkForTest(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	msg, ok := m["message"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	okVal, _ := msg["ok"].(bool)
-	return okVal
 }
 
 // --- staged factory reset (the command-surface guard) ------------------------
