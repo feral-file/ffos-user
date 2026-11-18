@@ -363,10 +363,9 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleScreenshot captures Chromium's rendered page. It observes the
-// renderer, not the compositor, HDMI path, or physical panel. width and height
-// are optional bounding-box dimensions; Chromium scales the full viewport
-// uniformly so the result is never cropped or stretched.
+// handleScreenshot returns the bounded capture supplied by the kiosk backend.
+// Native capture includes the compositor's artwork and device UI. It does not
+// prove physical panel output; authorization and invitation-race guards apply.
 func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET method is required", http.StatusMethodNotAllowed)

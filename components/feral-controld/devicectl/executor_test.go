@@ -71,8 +71,7 @@ func setup(t *testing.T) *testSetup {
 	panelDDC := ddc.New(mockExec, mockClock, logger)
 
 	// Create executor with mocks
-	executor := devicectl.New(
-		mockCDP,
+	executor := devicectl.New(mocks.CommandSender{CDP: mockCDP},
 		mockDeviceStatus,
 		mockStatus,
 		panelDDC,
@@ -1854,8 +1853,7 @@ func TestExecutor_NewHandler(t *testing.T) {
 	mockMath := mocks.NewMockMath(ctrl)
 	panelDDC := mocks.NewMockPanelDDC(ctrl)
 
-	handler := devicectl.New(
-		mockCDP,
+	handler := devicectl.New(mocks.CommandSender{CDP: mockCDP},
 		mockDeviceStatus,
 		mockStatus,
 		panelDDC,

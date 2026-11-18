@@ -352,3 +352,35 @@ is transient; controld replays current intent on host reconnect. It remains
 independent of artwork navigation, renderer health, and playback persistence.
 The receipt means the host accepted the overlay state. Neither a receipt nor
 a snapshot proves correct physical output.
+
+## Coordinated cast, scheduling and health
+
+`playback.replace` accepts `playlistUrl`, `index`, `boot` and
+`onlyIfNoPlaylist`. Boot intent and current cast commit atomically. Conditional
+fallback checks current state at the serialized commit boundary, after fetching.
+Controld compiles DP1 `displayAt` into parallel `activationTimes` (Unix milliseconds
+or null for evergreen). The host alone runs the clock: newest due cohort plus
+evergreen items. Future-only casts retain current artwork but cancel superseded
+schedules and pending updates. Scheduled casts accept the same fields with
+`atMs`; refresh uses `playback.update`, preserving unchanged occurrences.
+Refresher fences are captured before fetching and reject an outgoing presentation
+from another generation. An unchanged sleep/awake replay never reloads artwork.
+
+The host records the Linux boot ID. First migration retains current imported
+intent; same-boot process recovery restores current playback. A later OS boot
+applies boot intent once. Blocked boot content records failure, keeping the host
+usable. A storage failure never silently becomes empty state.
+
+`health.set` accepts one or both booleans `thermal` and `serviceFailure`, with
+normal mutation fences, deadline and key. These are trusted local watchdog
+signals, never renderer observations. Snapshot `protection` reports both levels.
+Thermal hold releases artwork backends while preserving durable intent and native
+cooling UI. Clearing it restores selection. Service failure shows native status
+without navigation. Signals are transient; watchdog reaffirms them after restart.
+The service UID is the trust boundary; client names are not credentials.
+
+Screenshots use controld's separate bounded `grim` subprocess lane, not command
+IPC. Existing screenshot authorization/invitation guards remain: the raw HTTP
+endpoint is unavailable on enrolled devices. Authorized local diagnostics may
+call the capture backend. Artwork-only health classification remains unavailable
+until a native composition-aware classifier exists.

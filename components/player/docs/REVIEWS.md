@@ -251,3 +251,19 @@ added null-active and unrecorded-active regression tests. Fresh-context
 public/mobile and replay callers, independently passed commandrouter/playerlink
 tests and diff checks, and inspected the FF1 read-only evidence. Verdict: accept,
 no material findings. Normal cast/session/watchdog activation remains incomplete.
+
+## Ordinary casting/session/watchdog cutover — 2026-11-18
+
+Human owner: Anh. Fresh-context `review_native_cutover` returned revise: blocked
+boot intent could crash startup, and source refresh could bind outgoing metadata
+to a new generation. Both fixed with regression coverage. `review_phone_cutover_final`
+found a future-only plan retaining an older schedule; fixed pending ownership
+clearing and regression, then reported accept for inspected source (rebuild was
+still pending then and subsequently passed). `review_cutover_installed` found
+cohort progression erasing a later accepted schedule and source-bundle omission
+of fonts/color license. Both fixed; reviewer independently reproduced the corrected
+schedule behavior and checked schema/tests. It returned accept after durable
+ownership documentation was updated. CI interoperability now runs in the same
+build container to avoid a newer-libc artifact running on the older runner.
+These verdicts are observations, not human release approval. Hardware timings
+and captures are retained; full acceptance gaps remain in CUTOVER.md.

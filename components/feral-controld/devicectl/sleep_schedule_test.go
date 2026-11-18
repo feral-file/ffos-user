@@ -65,11 +65,11 @@ func TestSetSleepSchedule_ReenableClearsStaleManualOverride(t *testing.T) {
 
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		os:     mockOS,
 		json:   mockJSON,
 		clock:  mockClock,
@@ -151,11 +151,11 @@ func TestSetSleepSchedule_SetsDays(t *testing.T) {
 
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		os:     mockOS,
 		json:   wrapper.NewJSON(),
 		clock:  mockClock,
@@ -198,11 +198,11 @@ func TestSetSleepSchedule_DaysAbsentPreservesExisting(t *testing.T) {
 
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		os:     mockOS,
 		json:   wrapper.NewJSON(),
 		clock:  mockClock,

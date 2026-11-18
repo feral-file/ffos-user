@@ -541,3 +541,14 @@ The remaining cast/session/watchdog migration still blocks full-daemon activatio
 The initial history review found Moderate F1 in the active-occurrence flag;
 fixed and covered null/unrecorded occurrences. Fresh-context final review:
 Verdict: accept. No partial controld binary was installed on the device.
+
+## Ordinary kiosk cutover — 2026-11-18
+
+The previous isolated-preview deployment limits are superseded by CUTOVER.md.
+Normal signed FF-CLI casting, ten-work Social Codes selection/capture, native
+input/history, controld reconnect, host KILL/systemd and STOP/watchdog recovery,
+thermal hold and compositor capture were exercised on FF1-SKYZ2E3A. Evidence:
+`evidence/cutover-20261118`. Screen remains awake. No PR/publishing workflow.
+12 core and 15 Linux CEF/media test groups pass; source bundle now includes the
+fonts and third-party license required by tests/install. See CUTOVER.md for the
+remaining offline, trust-publication, performance, image/upgrade and soak gaps.

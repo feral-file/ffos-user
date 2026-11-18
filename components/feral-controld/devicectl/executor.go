@@ -22,7 +22,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
@@ -107,7 +109,8 @@ type Executor interface {
 
 type executor struct {
 	sync.Mutex
-	cdp          cdp.CDP
+	cdp          cdp.CDP // Retired boot-recovery tests only; never wired by the runtime.
+	player       playercontrol.Sender
 	deviceStatus status.DeviceStatus
 	logger       *zap.Logger
 
@@ -558,7 +561,7 @@ type executor struct {
 }
 
 func New(
-	cdp cdp.CDP,
+	player playercontrol.Sender,
 	deviceStatus status.DeviceStatus,
 	statusPoller status.Poller,
 	panelDDC ddc.PanelDDC,
@@ -570,7 +573,7 @@ func New(
 	l *zap.Logger,
 ) Executor {
 	return &executor{
-		cdp:          cdp,
+		player:       player,
 		deviceStatus: deviceStatus,
 		statusPoller: statusPoller,
 		logger:       l,
@@ -970,59 +973,29 @@ func (e *executor) connect(ctx context.Context, args []byte) (interface{}, error
 // before the claim), and a force push would visibly restart it. The player
 // treats the flag as "make sure something is playing" and no-ops otherwise.
 func (e *executor) sendDisplayDefaultPlaylist() error {
-	if e.cdp == nil {
-		return fmt.Errorf("cdp client is not configured")
+	if e.player == nil {
+		return fmt.Errorf("native player unavailable")
 	}
-
-	send := func() (interface{}, error) {
-		command := commands.Command{
-			Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-			Arguments: map[string]any{
-				"onlyIfNoPlaylist": true,
-			},
-		}
-		payload, err := command.JSON()
-		if err != nil {
-			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
-		}
-
-		// This send bypasses commandrouter, so it must do what
-		// commandrouter does before every replacing send: drop the
-		// attested signature verdict. From the moment the send lands the
-		// player may be showing its own default content — bytes controld
-		// never verified — and a status round in that window must omit,
-		// never re-attest, the previous playlist's verdict
-		// (feral-file/ffos-user#307). Inside the push section, before the
-		// send, like every other producer.
-		e.sleepApplyMu.Lock()
-		invalidate := e.verdictInvalidator
-		e.sleepApplyMu.Unlock()
-		if invalidate != nil {
-			invalidate()
-		}
-
-		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
-		}
-		return result, nil
-	}
-
-	e.sleepApplyMu.Lock()
-	withPlayerPush := e.withPlayerPush
-	e.sleepApplyMu.Unlock()
-
+	var result interface{}
 	var err error
-	if withPlayerPush != nil {
-		withPlayerPush(func() {
-			_, err = send()
-		})
+	send := func() {
+		if e.verdictInvalidator != nil {
+			e.verdictInvalidator()
+		}
+		result, err = e.player.Send(context.Background(), commands.Command{Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST, Arguments: map[string]any{"onlyIfNoPlaylist": true}})
+	}
+	if e.withPlayerPush != nil {
+		e.withPlayerPush(send)
+	} else {
+		send()
+	}
+	if err != nil {
 		return err
 	}
-	_, err = send()
-	return err
+	if !playerresponse.OK(result) {
+		return fmt.Errorf("native player rejected default playback")
+	}
+	return nil
 }
 
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {

@@ -157,3 +157,26 @@ whole batch before dispatch. Test ordering, stale targets, cancellation, bounds,
 text/physical-key separation, shared protocol schema and real FF1 input. This
 is one cutover stage; it does not authorize deployment of partial controld or
 leave a permanent CDP input fallback.
+
+
+## Installed native cutover, 2026-11-18
+
+Anh observed that a phone cast did not reach the preview and explicitly requests
+completion and installation on FF1-SKYZ2E3A, followed by real Feral File channel
+casts from ff-cli. Baseline ffos-user 0ba580df, ffos a9f51875; both clean.
+Leave the screen on and push feature branches only; no PR.
+
+Replace the remaining product-control transports together: command router,
+source refresher, setup/pairing, sleep/boot reconciliation and watchdog health.
+No JavaScript command shim or native-to-CDP fallback. Keep authentication,
+source admission, signature verification and cache ownership in controld.
+Host state is authoritative across process restarts; reconnect reconciles only
+controld-owned intent and must not overwrite a newer user cast. Preserve the
+watchdog display/VT/update suppression and bounded fallback/reboot policy.
+Switch the kiosk/session and all binaries together, retaining an explicit backup
+and rollback command. Verify real CLI single-work and channel playlist casts,
+accepted versus presented identities, controld restart, host termination and
+recovery, wake, and external control after failure before leaving the device.
+Run module/script checks, independent review, and record the full-image release
+requirement. Portfolio/offline/performance acceptance remains separately tracked;
+never use navigation alone as visual proof.

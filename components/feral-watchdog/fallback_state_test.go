@@ -101,7 +101,7 @@ func TestChromiumFallbackStateUntrustedReadsZero(t *testing.T) {
 // fallback hold has already run its full CHROMIUM_FALLBACK_HOLD.
 func expiredHoldMonitor(t *testing.T, endpoint string) *ChromiumMonitor {
 	t.Helper()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	monitor.mu.Lock()
@@ -217,7 +217,7 @@ func TestChromiumMonitorPlainRestartHoldsStaleCountUntilConfirmed(t *testing.T) 
 	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	// No fallbackSince, no cdpStuck report yet — a plain cold boot/restart,
@@ -271,7 +271,7 @@ func TestChromiumMonitorNoTimeBasedEscapeForRebootCapEvenAfterLongDelay(t *testi
 	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	// No SetCDPStuck call at all, ever — simulating a feral-controld whose
@@ -325,7 +325,7 @@ func TestChromiumMonitorNoTimeBasedEscapeForRebootCapEvenAfterLongDelay(t *testi
 // not forgive the cap.
 func TestChromiumMonitorHeadlessExitDoesNotForgiveRebootCapWithoutConfirmation(t *testing.T) {
 	path := useFallbackStateFile(t, 1) // a prior boot already used its one fallback-hold reboot
-	monitor := NewChromiumMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -377,7 +377,7 @@ func TestChromiumMonitorCDPStuckRestartDoesNotForgiveRebootCapWithoutConfirmatio
 	installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 

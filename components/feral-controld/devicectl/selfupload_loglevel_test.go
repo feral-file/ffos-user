@@ -47,8 +47,7 @@ func uploadLevelExecutor(t *testing.T) (*executor, *observer.ObservedLogs) {
 	mockExec := mocks.NewMockExec(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 
-	ex := New(
-		mocks.NewMockCDP(ctrl), mocks.NewMockDeviceStatus(ctrl), mocks.NewMockStatusPoller(ctrl),
+	ex := New(mocks.CommandSender{CDP: mocks.NewMockCDP(ctrl)}, mocks.NewMockDeviceStatus(ctrl), mocks.NewMockStatusPoller(ctrl),
 		ddc.New(mockExec, mockClock, logger),
 		wrapper.NewJSON(), mockOS, mockExec, mocks.NewMockMath(ctrl), mockClock, logger,
 	).(*executor)

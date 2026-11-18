@@ -14,7 +14,7 @@ import (
 // DBUS_CONTROLD_EVENT_CDP_STUCK's doc) must reach ChromiumMonitor.SetCDPStuck,
 // and nothing else in the dispatch must choke on an unrelated member.
 func TestMediatorRoutesCDPStuckSignal(t *testing.T) {
-	monitor := NewChromiumMonitor("http://127.0.0.1:0", zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor("http://127.0.0.1:0", zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	mediator := NewMediator(nil, nil, nil, nil, nil, monitor, zap.NewNop())
 
 	_, err := mediator.handleDBusSignal(context.Background(), godbus.DBusPayload{
@@ -52,7 +52,7 @@ func TestMediatorRoutesCDPStuckSignal(t *testing.T) {
 // panicking the dispatch goroutine — matching the existing sysmetrics/sysevent
 // cases' own validation shape.
 func TestMediatorCDPStuckSignalMalformedBodyIsIgnored(t *testing.T) {
-	monitor := NewChromiumMonitor("http://127.0.0.1:0", zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor("http://127.0.0.1:0", zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	mediator := NewMediator(nil, nil, nil, nil, nil, monitor, zap.NewNop())
 
 	cases := []godbus.DBusPayload{

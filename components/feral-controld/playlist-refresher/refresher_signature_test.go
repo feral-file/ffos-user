@@ -139,7 +139,7 @@ func TestRefresher_CachedFallback_ClearsSlot(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
-	r := refresher.New(ts.ctx, ts.mockDP1, ts.mockStatusPoller, ts.mockCDP, nil, mockOfflineCache, wrapper.NewJSON(), nil, ts.mockClock, logger)
+	r := refresher.New(ts.ctx, ts.mockDP1, ts.mockStatusPoller, mocks.CommandSender{CDP: ts.mockCDP}, nil, mockOfflineCache, wrapper.NewJSON(), nil, ts.mockClock, logger)
 	active := &sigverify.Active{}
 	refresher.SetSignatureVerification(r, active, logger)
 
@@ -196,13 +196,13 @@ func scheduledRefresher(t *testing.T, ts *testSetup, offlineCache *mocks.MockOff
 	ts.mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
 	).AnyTimes()
-	sched := playlistschedule.New(ts.ctx, ts.mockCDP, ts.mockClock, func() *time.Location { return time.UTC }, logger)
+	sched := playlistschedule.New(ts.ctx, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockClock, func() *time.Location { return time.UTC }, logger)
 	t.Cleanup(sched.Stop)
 	var cache offlinecache.Service
 	if offlineCache != nil {
 		cache = offlineCache
 	}
-	r := refresher.New(ts.ctx, ts.mockDP1, ts.mockStatusPoller, ts.mockCDP, nil, cache, wrapper.NewJSON(), sched, ts.mockClock, logger)
+	r := refresher.New(ts.ctx, ts.mockDP1, ts.mockStatusPoller, mocks.CommandSender{CDP: ts.mockCDP}, nil, cache, wrapper.NewJSON(), sched, ts.mockClock, logger)
 	active := &sigverify.Active{}
 	refresher.SetSignatureVerification(r, active, logger)
 	sched.SetPushObserver(func(p playlistschedule.PushPhase) {
@@ -465,7 +465,7 @@ func TestRefresher_InlineDynamicUsesRetainedVerifiedSource(t *testing.T) {
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 	sched := &fakePlaylistScheduler{}
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), sched, mockClock, logger)
 	active := &sigverify.Active{}
 	refresher.SetSignatureVerification(r, active, logger)
 

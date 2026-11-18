@@ -71,6 +71,52 @@ int main(){
       p.command("policy.set",permissive);
       check(p.desired().has_value()&&!p.visible(),"Relaxed policy must restore retained active intent without inventing presentation");
     }
+
+    {
+      ff::Store store(path);ff::Playback p(store);p.tick(1,1000);
+      p.command("playback.replace",{{"playlist",playlist()}});auto old=p.desired()->id;
+      p.command("schedule.set",{{"playlist",playlist()},{"atMs",1500}});
+      auto planned=playlist();planned["items"][0]["source"]="https://example.org/morning";planned["items"][1]["source"]="https://example.org/evening";
+      p.command("playback.replace",{{"playlist",planned},{"activationTimes",{2000,3000}},{"boot",true}});
+      check(p.desired()->id==old,"Future-only cohort must retain current artwork");
+      check(p.state()["schedule"].is_null(),"Deferred cast must cancel the superseded one-shot schedule");
+      p.tick(2,1500);check(p.desired()->id==old,"Superseded schedule must not erase the new plan");
+      p.command("schedule.set",{{"playlist",playlist()},{"atMs",4000}});
+      p.tick(2,2000);check(p.desired()->item["source"]=="https://example.org/morning","Host must execute timed cohort");
+      check(!p.state()["schedule"].is_null(),"Cohort progression must retain a later accepted scheduled cast");
+      check(p.state()["boot"]["playlist"]==planned,"Boot intent must retain complete source");
+    }
+    {
+      ff::Store store(path);ff::Playback p(store);p.tick(1,3000);
+      check(p.desired()->item["source"]=="https://example.org/evening","Host restart must restore and advance schedule without controld");
+      p.tick(2,4000);check(p.desired()->item["source"]=="https://example.org/a","Later scheduled cast must execute after cohort progression and restart");
+      auto timed=playlist();timed["items"][0]["source"]="https://example.org/morning";timed["items"][1]["source"]="https://example.org/evening";
+      p.command("playback.replace",{{"playlist",timed},{"activationTimes",{2000,3000}}});
+      auto beforeHold=p.state();
+      p.command("health.set",{{"thermal",true}});check(!p.desired()&&!p.visible(),"Thermal hold must release artwork backends");
+      check(p.state()==beforeHold,"Thermal protection must preserve durable playback intent");
+      p.command("health.set",{{"thermal",false}});check(p.desired().has_value(),"Cooling must restore current intent");
+      auto generation=p.generation();auto current=p.desired()->id;
+      p.command("playback.sleep",{{"sleeping",false}});
+      check(p.desired()->id==current,"Replaying awake intent must preserve the artwork occurrence");
+      p.command("playback.replace",{{"playlist",playlist()},{"onlyIfNoPlaylist",true}});
+      check(p.generation()==generation&&p.desired()->id==current,"Conditional fallback must not reset recovered playback");
+      auto full=p.state()["cohortPlan"]["playlist"];
+      auto url="https://example.org/timed-playlist";
+      p.command("playback.replace",{{"playlist",full},{"playlistUrl",url},{"activationTimes",{2000,3000}}});
+      auto retained=p.desired()->id;
+      p.command("playback.update",{{"items",full["items"]},{"activationTimes",{2000,3000}}});
+      check(p.desired()->id==retained&&p.snapshot()["playlistUrl"]==url,"Timed refresh must retain occurrence and original URL");
+      p.command("schedule.set",{{"playlist",full},{"index",1},{"activationTimes",{2000,3000}},{"atMs",3500}});
+      p.tick(2,3500);check(p.desired()->item["source"]=="https://example.org/evening","Scheduled cast must resolve cohort at execution");
+      p.system_boot("first-boot");auto first=p.desired()->id;
+      p.system_boot("first-boot");check(p.desired()->id==first,"Host restart in same OS boot must not recast boot playlist");
+      p.command("policy.set",{{"version",1},{"showMatureContent",false},{"strictPersonal",false},{"blockUnratedCurated",false}});
+      p.command("boot.set",{{"playlist",playlist("mature")}});
+      p.system_boot("second-boot");check(p.snapshot()["scheduleOutcome"]["outcome"]=="failed","Blocked boot intent must leave usable host and explicit failure");
+      p.system_boot("second-boot");
+      p.command("playback.stop",ff::Json::object());p.tick(2,4000);check(!p.desired(),"Stop cancels timed progression");
+    }
     std::filesystem::remove_all(directory);std::cout<<"Scheduling, durable failure and pause recovery checks passed\n";
   }catch(const std::exception& error){std::filesystem::remove_all(directory);std::cerr<<error.what()<<'\n';return 1;}
 }

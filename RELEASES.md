@@ -19,6 +19,29 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.1.0-native.1 — full-image development declaration (not dispatched)
+
+Native cutover changes binaries and user session/unit files. Never ship this as
+a package-only update. The feature branches target develop; Anh owns promotion.
+No PR, promotion or publishing workflow was opened/triggered for this task.
+
+Prepared parameters for a human after native image/portfolio acceptance:
+
+```sh
+gh workflow run build-image-to-cf.yml -R feral-file/ffos --ref codex/native-player \
+  -f version=3.1.0-native.1 -f ffos_user_ref=codex/native-player \
+  -f ff_player_ref=07805905 -f environment=Development \
+  -f pacman_snapshot=latest -f dev_iso=true -f soak-test=false \
+  -f update_min_version=false -f update_required_version=false -f update_recovery_version=false
+```
+
+Pin feature refs to reviewed commits before dispatch. This is coordination
+evidence, not a claim that an image was built. The image pipeline still needs
+native package production wired before this produces a usable native image.
+The legacy ff_player_ref is retained for rollback packaging. See
+`components/player/docs/CUTOVER.md` for acceptance gaps. Human promotion follows
+develop → staging → release; production publishing remains human-operated.
+
 ## 3.0.1 — full-image (paired with the ffos release)
 
 Everything on `develop` since `v3.0.0`. The ffos-user diff touches only

@@ -123,19 +123,15 @@ func main() {
 	// Initialize system command executor
 	commandHandler := NewCommandHandler(log, vmagentClient)
 
-	// Initialize CDP client. Chromium owns the CDP socket lifecycle and can be
-	// temporarily absent during boot, OTA, kiosk restarts, or crash recovery. The
-	// watchdog must keep its own recovery monitors alive in those states instead
-	// of letting systemd restart this process and amplify Sentry noise.
-	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
-	initCDPBestEffort(ctx, cdpClient, log)
-	defer cdpClient.Close()
+	// Native host owns presentation and durable playback.
 
 	// Initialize resource monitors
 	ramHandler := NewMemoryHandler(log, commandHandler)
 	diskHandler := NewDiskHandler(log, commandHandler)
 	gpuHandler := NewGPUHandler(log, commandHandler)
-	cpuHandler := NewCPUHandler(log, cdpClient)
+	cpuHandler := NewCPUHandler(log, func(ctx context.Context, active bool) error {
+		return nativePlayerRequest(ctx, nativePlayerSocket(), map[string]bool{"thermal": active})
+	})
 	defer gpuHandler.GracefulShutdown(ctx)
 
 	// Chromium monitor is constructed before the mediator so the mediator
@@ -169,7 +165,9 @@ func main() {
 	}()
 
 	// Start Systemd monitor
-	systemdMonitor := NewSystemdMonitor(cdpClient, log, commandHandler, vmagentClient)
+	systemdMonitor := NewSystemdMonitor(func(ctx context.Context, failed bool) error {
+		return nativePlayerRequest(ctx, nativePlayerSocket(), map[string]bool{"serviceFailure": failed})
+	}, log, commandHandler, vmagentClient)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

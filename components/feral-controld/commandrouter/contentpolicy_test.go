@@ -69,7 +69,7 @@ func newPolicyHandler(t *testing.T) (commandrouter.Handler, *mocks.MockCDP, *con
 	player := mocks.NewMockCDP(ctrl)
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
-	h := commandrouter.New(ex, player, newPassthroughMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	h := commandrouter.New(ex, mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 	return h, player, store
 }
@@ -83,7 +83,7 @@ func newPolicyHandlerWithPoller(t *testing.T) (commandrouter.Handler, *mocks.Moc
 	poller := mocks.NewMockStatusPoller(ctrl)
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller, nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), poller, nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 	return h, player, poller
 }
@@ -196,7 +196,7 @@ func TestGetContentPolicyRejectsANonEmptyRequest(t *testing.T) {
 func TestGetContentPolicyIsUnavailableWhileTheStoreIsNotDurable(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	player := mocks.NewMockCDP(ctrl)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, contentpolicy.Fallback(filepath.Join(t.TempDir(), "policy.json"), false), zaptest.NewLogger(t))
 
@@ -227,7 +227,7 @@ func TestSetContentPolicyInstallsTheSchedulerProjector(t *testing.T) {
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
 	sched := &capturingScheduler{}
-	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.NewMockCDP(ctrl), newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: mocks.NewMockCDP(ctrl)}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 	require.NotNil(t, sched.projector, "scheduler pushes would escape the content policy")
@@ -352,7 +352,7 @@ func TestSetContentPolicySerializesWithSchedulerPushes(t *testing.T) {
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
 	sched := &barrierScheduler{}
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -432,7 +432,7 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossResolution(t *testing.T) {
 	dp1Mock := newPassthroughMockDP1(ctrl)
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, dp1Mock, poller,
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, dp1Mock, poller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -506,7 +506,7 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossSourcePreflight(t *testing
 	poller := mocks.NewMockStatusPoller(ctrl)
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller,
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), poller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -559,7 +559,7 @@ func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T
 	store.Unlock()
 	require.NoError(t, err)
 
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller,
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), poller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 	commandrouter.SetMediaHealth(h, &stallingProber{during: func() {
@@ -624,7 +624,7 @@ func TestDisplayPlaylistTakesThePolicyLockBeforeThePlaybackLock(t *testing.T) {
 	replay.EXPECT().SyncPlaylist(gomock.Any(), gomock.Any()).Return(1, nil).AnyTimes()
 	replay.EXPECT().MarkPlaybackChanged().AnyTimes()
 
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller,
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), poller,
 		nil, nil, replay, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -657,7 +657,7 @@ func TestSyncContentPolicySerializesWithSchedulerPushes(t *testing.T) {
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
 	sched := &barrierScheduler{}
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -690,7 +690,7 @@ func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
 			store.Unlock()
 			require.NoError(t, err)
 
-			h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller,
+			h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), poller,
 				nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 			commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -787,7 +787,7 @@ func TestSetContentPolicyPersistsNothingWithoutAnAcknowledgement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
 	store, err := contentpolicy.Open(path, false)
 	require.NoError(t, err)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -846,7 +846,7 @@ func TestSetContentPolicyRejectsAPartialAcknowledgement(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "policy.json")
 			store, err := contentpolicy.Open(path, false)
 			require.NoError(t, err)
-			h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+			h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 				mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 			commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -914,7 +914,7 @@ func TestSetContentPolicyRestoresThePlayerWhenTheWriteFails(t *testing.T) {
 	// store starts on defaults either way, which is what the restore must send.
 	broken := contentpolicy.Fallback(path, false)
 
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, broken, zaptest.NewLogger(t))
 
@@ -963,7 +963,7 @@ func TestDisplayPlaylistRechecksSignedURLsAfterTheProjection(t *testing.T) {
 	store.Unlock()
 	require.NoError(t, err)
 
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl), poller,
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl), poller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -1012,7 +1012,7 @@ func TestSchedulerProjectorLeavesALegacyCohortUnprojected(t *testing.T) {
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 	require.NoError(t, err)
 	sched := &capturingScheduler{}
-	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.NewMockCDP(ctrl), newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: mocks.NewMockCDP(ctrl)}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, sched, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 	require.NotNil(t, sched.projector)
@@ -1049,7 +1049,7 @@ func TestSetContentPolicyResendsTheCurrentPlaylistOnlyWhenItCommits(t *testing.T
 		player := mocks.NewMockCDP(ctrl)
 		store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
 		require.NoError(t, err)
-		h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+		h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 			mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 		commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 		refresher := &fakePolicyRefresher{}
@@ -1099,7 +1099,7 @@ func TestResetContentPolicyClearsTheOwnerSettingAndSyncsThePlayer(t *testing.T) 
 	path := filepath.Join(t.TempDir(), "policy.json")
 	store, err := contentpolicy.Open(path, false)
 	require.NoError(t, err)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -1149,7 +1149,7 @@ func TestSetContentPolicyReportsUnavailableWhenDurabilityStaysUnconfirmed(t *tes
 	store, err := contentpolicy.Open(filepath.Join(dir, "policy.json"), false)
 	require.NoError(t, err)
 
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
@@ -1322,7 +1322,7 @@ func TestDisplayPlaylistAppliesTheUnratedGateToAnUnknownRatingString(t *testing.
 	// blockUnratedCurated is the operator gate, set from device config.
 	store, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), true)
 	require.NoError(t, err)
-	h := commandrouter.New(newRoutableExecutor(ctrl), player, newPassthroughMockDP1(ctrl),
+	h := commandrouter.New(newRoutableExecutor(ctrl), mocks.CommandSender{CDP: player}, newPassthroughMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 

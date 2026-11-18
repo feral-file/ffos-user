@@ -8,9 +8,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 )
 
@@ -747,7 +747,7 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 	// re-driven the moment the player becomes reachable. Manual overrides
 	// (sleepNow/wakeNow/setSleepSchedule) go through applySleepTransition and
 	// still surface the CDP error to their caller.
-	if e.cdp != nil && !e.cdp.Initialized() {
+	if e.player == nil || !e.player.Ready(ctx) {
 		e.logger.Debug("Deferring sleep schedule transition: CDP not connected",
 			zap.String("state", string(state)),
 			zap.String("reason", reason))
@@ -888,26 +888,15 @@ func (e *executor) drainCoalescedSleepPowerAlignJobs(job sleepPowerAlignJob) sle
 }
 
 func (e *executor) applyPlayerSleepMode(ctx context.Context, sleepMode bool) error {
-	if e.cdp == nil {
-		return fmt.Errorf("cdp client is not configured")
+	if e.player == nil {
+		return fmt.Errorf("native player unavailable")
 	}
-
-	command := commands.Command{
-		Type: commands.CMD_SET_SLEEP_MODE,
-		Arguments: map[string]any{
-			"sleepMode": sleepMode,
-		},
-	}
-	payload, err := command.JSON()
+	result, err := e.player.Send(ctx, commands.Command{Type: commands.CMD_SET_SLEEP_MODE, Arguments: map[string]any{"sleepMode": sleepMode}})
 	if err != nil {
-		return fmt.Errorf("marshal setSleepMode payload: %w", err)
+		return err
 	}
-
-	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-	})
-	if err != nil {
-		return fmt.Errorf("send setSleepMode command to player: %w", err)
+	if !playerresponse.OK(result) {
+		return fmt.Errorf("native player rejected sleep transition")
 	}
 	return nil
 }

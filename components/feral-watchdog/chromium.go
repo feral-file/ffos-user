@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"sync"
 	"time"
 
@@ -113,7 +111,8 @@ const (
 type ChromiumMonitor struct {
 	mu                 sync.Mutex
 	cdpEndpoint        string
-	client             *http.Client
+	probe              func(context.Context) error
+	nativeProtocol     bool
 	logger             *zap.Logger
 	restartHistory     []time.Time
 	hasEverConnected   bool
@@ -217,6 +216,9 @@ type ChromiumMonitor struct {
 // page-target dial as stuck (ffos-user#356). Safe to call from the mediator's
 // DBus-signal goroutine concurrently with check()'s own goroutine.
 func (m *ChromiumMonitor) SetCDPStuck(stuck bool) {
+	if m.nativeProtocol {
+		return
+	}
 	m.mu.Lock()
 	m.cdpStuck = stuck
 	m.cdpReportReceived = true
@@ -246,16 +248,15 @@ func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *
 		fallbackStatePath: chromiumFallbackStateFile,
 		fallbackReboots:   fallbackReboots,
 		cdpEndpoint:       cdpEndpoint,
-		client: &http.Client{
-			Timeout: CHROMIUM_REQUEST_TIMEOUT,
-		},
-		logger:           logger,
-		restartHistory:   make([]time.Time, 0, CHROMIUM_RESTART_HISTORY_SIZE),
-		hasEverConnected: false,
-		monitorStart:     time.Now(),
-		commandHandler:   commandHandler,
-		drmSysfsRoot:     defaultDRMSysfsRoot,
-		ttyActiveFile:    defaultTTYActiveFile,
+		probe:             func(ctx context.Context) error { return probeNativePlayer(ctx, nativePlayerSocket()) },
+		nativeProtocol:    true,
+		logger:            logger,
+		restartHistory:    make([]time.Time, 0, CHROMIUM_RESTART_HISTORY_SIZE),
+		hasEverConnected:  false,
+		monitorStart:      time.Now(),
+		commandHandler:    commandHandler,
+		drmSysfsRoot:      defaultDRMSysfsRoot,
+		ttyActiveFile:     defaultTTYActiveFile,
 	}
 }
 
@@ -288,51 +289,26 @@ func (m *ChromiumMonitor) Start(ctx context.Context) {
 	}
 }
 
-func (m *ChromiumMonitor) Stop() {
-	if m.client != nil {
-		m.client.CloseIdleConnections()
-	}
-}
+func (m *ChromiumMonitor) Stop() {}
 
-// check performs a single CDP health check
+// check probes the host command loop, independently of artwork health.
 func (m *ChromiumMonitor) check(ctx context.Context) error {
-	versionURL := fmt.Sprintf("%s/json/version", m.cdpEndpoint)
-
-	// Create context with timeout
 	timeoutCtx, cancel := context.WithTimeout(ctx, CHROMIUM_REQUEST_TIMEOUT)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(timeoutCtx, http.MethodGet, versionURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := m.client.Do(req)
-
-	// Check for response and connection errors
-	if err != nil {
+	if err := m.probe(timeoutCtx); err != nil {
 		if m.checkHangState(ctx) {
-			return fmt.Errorf("%w: chromium request failed: %w", errChromiumHeadless, err)
+			return fmt.Errorf("%w: native player: %w", errChromiumHeadless, err)
 		}
-		return fmt.Errorf("chromium request failed: %w", err)
+		return fmt.Errorf("native player: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		if m.checkHangState(ctx) {
-			return fmt.Errorf("%w: chromium returned non-200 status: %d", errChromiumHeadless, resp.StatusCode)
-		}
-		return fmt.Errorf("chromium returned non-200 status: %d", resp.StatusCode)
-	}
-
-	// Read and discard response body to free up connections
-	// Go uses connection pooling, this helps reuse the connection
-	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+	if m.nativeProtocol {
+		// A successful native exchange proves the command loop itself is alive.
+		// The retired page-target CDP report has no authority over this runtime.
+		m.mu.Lock()
+		m.cdpStuck = false
+		m.cdpReportReceived = true
+		m.cdpConfirmedHealthy = true
+		m.mu.Unlock()
 	}
 
 	// First success since (re)start arms post-connect hang detection. Until

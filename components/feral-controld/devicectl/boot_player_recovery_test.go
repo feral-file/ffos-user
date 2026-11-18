@@ -52,7 +52,7 @@ func playerRefusalCoded(reason, code string) interface{} {
 // tests harmlessly outlive the test; none of these tests waits on one) and a
 // no-op logger.
 func settledExecutor(mockCDP *mocks.MockCDP) *executor {
-	e := &executor{logger: zap.NewNop(), cdp: mockCDP, clock: wrapper.NewClock()}
+	e := &executor{logger: zap.NewNop(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}, clock: wrapper.NewClock()}
 	e.pairingConfirmed.Store(true)
 	return e
 }
@@ -224,7 +224,7 @@ func TestBootRecovery_UnclaimedExpiresLatchWithoutTouchingPlayer(t *testing.T) {
 	defer ctrl.Finish()
 	mockCDP := mocks.NewMockCDP(ctrl) // no expectations: must not touch CDP
 
-	e := &executor{logger: zap.NewNop(), cdp: mockCDP, clock: wrapper.NewClock()}
+	e := &executor{logger: zap.NewNop(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}, clock: wrapper.NewClock()}
 
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
 	assert.Equal(t, bootRecExpired, e.bootRecoveryState)

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -53,7 +55,7 @@ func TestShowPairingCode_RejectsMalformedEvaluationResults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ShowPairingCode(context.Background(), &fakeCDP{result: tt.result}, "PAIR-123")
+			err := ShowPairingCode(context.Background(), mocks.CommandSender{CDP: &fakeCDP{result: tt.result}}, "PAIR-123")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -61,7 +63,7 @@ func TestShowPairingCode_RejectsMalformedEvaluationResults(t *testing.T) {
 }
 
 func TestShowPairingCode_RequiresApplicationOK(t *testing.T) {
-	err := ShowPairingCode(context.Background(), &fakeCDP{result: map[string]any{"ok": false, "error": "overlay unavailable"}}, "PAIR-123")
+	err := ShowPairingCode(context.Background(), mocks.CommandSender{CDP: &fakeCDP{result: map[string]any{"ok": false, "error": "overlay unavailable"}}}, "PAIR-123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rejected request")
 }
@@ -71,7 +73,7 @@ func TestShowPairingCode_AcceptsMessageWrappedApplicationOK(t *testing.T) {
 		"message": map[string]any{"ok": true},
 	}
 
-	err := ShowPairingCode(context.Background(), &fakeCDP{result: result}, "PAIR-123")
+	err := ShowPairingCode(context.Background(), mocks.CommandSender{CDP: &fakeCDP{result: result}}, "PAIR-123")
 
 	require.NoError(t, err)
 }
@@ -85,28 +87,28 @@ func TestMintPairingDisplayCommands_EmitPlayerContractStates(t *testing.T) {
 		{
 			name: "pairing code",
 			send: func(c *fakeCDP) error {
-				return ShowPairingCode(context.Background(), c, "PAIR-123")
+				return ShowPairingCode(context.Background(), mocks.CommandSender{CDP: c}, "PAIR-123")
 			},
 			wantState: "pairing_code",
 		},
 		{
 			name: "request received",
 			send: func(c *fakeCDP) error {
-				return ShowRequestReceived(context.Background(), c, "Chrome")
+				return ShowRequestReceived(context.Background(), mocks.CommandSender{CDP: c}, "Chrome")
 			},
 			wantState: "request_received",
 		},
 		{
 			name: "creating token",
 			send: func(c *fakeCDP) error {
-				return ShowCreatingToken(context.Background(), c, "Chrome")
+				return ShowCreatingToken(context.Background(), mocks.CommandSender{CDP: c}, "Chrome")
 			},
 			wantState: "creating_token",
 		},
 		{
 			name: "hidden",
 			send: func(c *fakeCDP) error {
-				return ShowDefaultDisplay(context.Background(), c)
+				return ShowDefaultDisplay(context.Background(), mocks.CommandSender{CDP: c})
 			},
 			wantState: "hidden",
 		},

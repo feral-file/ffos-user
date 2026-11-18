@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
 )
 
 const mintPairingDisplayCommand = "mintPairingDisplay"
@@ -19,57 +20,46 @@ const (
 	mintPairingDisplayHidden          = "hidden"
 )
 
-func ShowPairingCode(ctx context.Context, cdpClient cdp.CDP, pairingCode string) error {
+func ShowPairingCode(ctx context.Context, player playercontrol.Sender, pairingCode string) error {
 	pairingCode = strings.TrimSpace(pairingCode)
 	if pairingCode == "" {
 		return errors.New("pairing code is required")
 	}
-	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+	return sendMintPairingDisplay(ctx, player, map[string]any{
 		"state":       mintPairingDisplayPairingCode,
 		"pairingCode": pairingCode,
 	})
 }
 
-func ShowRequestReceived(ctx context.Context, cdpClient cdp.CDP, browserName string) error {
-	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+func ShowRequestReceived(ctx context.Context, player playercontrol.Sender, browserName string) error {
+	return sendMintPairingDisplay(ctx, player, map[string]any{
 		"state":       mintPairingDisplayRequestReceived,
 		"browserName": strings.TrimSpace(browserName),
 	})
 }
 
-func ShowCreatingToken(ctx context.Context, cdpClient cdp.CDP, browserName string) error {
-	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+func ShowCreatingToken(ctx context.Context, player playercontrol.Sender, browserName string) error {
+	return sendMintPairingDisplay(ctx, player, map[string]any{
 		"state":       mintPairingDisplayCreatingToken,
 		"browserName": strings.TrimSpace(browserName),
 	})
 }
 
-func ShowDefaultDisplay(ctx context.Context, cdpClient cdp.CDP) error {
-	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+func ShowDefaultDisplay(ctx context.Context, player playercontrol.Sender) error {
+	return sendMintPairingDisplay(ctx, player, map[string]any{
 		"state": mintPairingDisplayHidden,
 	})
 }
 
-func sendMintPairingDisplay(ctx context.Context, cdpClient cdp.CDP, request map[string]any) error {
+func sendMintPairingDisplay(ctx context.Context, player playercontrol.Sender, request map[string]any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if cdpClient == nil {
+	if player == nil {
 		return errors.New("cdp client is required")
 	}
 
-	payload, err := json.Marshal(map[string]any{
-		"command": mintPairingDisplayCommand,
-		"request": request,
-	})
-	if err != nil {
-		return err
-	}
-
-	result, err := cdpClient.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
-		"returnByValue": true,
-	})
+	result, err := player.Send(ctx, commands.Command{Type: mintPairingDisplayCommand, Arguments: request})
 	if err != nil {
 		return err
 	}

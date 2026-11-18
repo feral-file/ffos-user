@@ -147,7 +147,7 @@ func newPolicyRefresher(t *testing.T, statusContext string, store *contentpolicy
 
 	r := &refresher{
 		context:       context.Background(),
-		cdp:           mockCDP,
+		player:        mocks.CommandSender{CDP: mockCDP},
 		statusPoller:  mockPoller,
 		dp1:           mockDP1,
 		json:          wrapper.NewJSON(),
@@ -288,7 +288,7 @@ func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy
 
 	r := &refresher{
 		context:       context.Background(),
-		cdp:           mockCDP,
+		player:        mocks.CommandSender{CDP: mockCDP},
 		statusPoller:  mockPoller,
 		dp1:           mockDP1,
 		json:          wrapper.NewJSON(),
@@ -462,7 +462,7 @@ func TestRefreshRetiresABlockedCurrentItemThatLeftTheFeed(t *testing.T) {
 	}
 	r := &refresher{
 		context:       context.Background(),
-		cdp:           mockCDP,
+		player:        mocks.CommandSender{CDP: mockCDP},
 		statusPoller:  mockPoller,
 		dp1:           mockDP1,
 		json:          wrapper.NewJSON(),
@@ -570,7 +570,7 @@ func newUnresolvableSourceRefresher(t *testing.T, rating *contentrating.Rating, 
 
 	r := &refresher{
 		context:       context.Background(),
-		cdp:           mockCDP,
+		player:        mocks.CommandSender{CDP: mockCDP},
 		statusPoller:  mockPoller,
 		dp1:           mockDP1,
 		json:          wrapper.NewJSON(),
@@ -714,7 +714,7 @@ func newRecastStatusRefresher(t *testing.T, recastDocID string, sched playlistsc
 	// needing a call-count assertion.
 	r := &refresher{
 		context:      context.Background(),
-		cdp:          mockCDP,
+		player:       mocks.CommandSender{CDP: mockCDP},
 		statusPoller: mockPoller,
 		dp1:          mockDP1,
 		json:         wrapper.NewJSON(),

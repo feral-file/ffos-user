@@ -209,9 +209,7 @@ func wireBootLifecycleHooks(n *setupNotifier, ex any, stillWithinBootWindow, ota
 	if sg, ok := ex.(startupOTAGateFlow); ok {
 		n.startupGate = sg.MaybeRunStartupOTAGateOnOnline
 	}
-	if pr, ok := ex.(bootPlayerRecoveryFlow); ok {
-		n.playerRecovery = pr.MaybeRecoverPlayerOnBootOnline
-	}
+
 }
 
 // uptimeWithin reports whether the kernel is currently within `window` of

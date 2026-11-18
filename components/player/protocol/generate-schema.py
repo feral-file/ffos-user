@@ -60,8 +60,8 @@ methods={
     'hello':obj({'client':identifier,'versions':{'type':'array','minItems':1,'maxItems':16,'items':number(1,65535,True)}},('client','versions')),
     **{name:empty for name in ('state.get','health.get','state.subscribe','policy.get','history.list','playback.refresh','playback.stop','playback.cancel')},
     'history.resolve':obj({'recordId':identifier},('recordId',)),
-    'playback.replace':obj({'playlist':ref('playlist'),'index':number(0,4096,True),'context':context,'playlistUrl':text(16384)},('playlist',)),
-    'playback.update':obj({'items':{'type':'array','maxItems':4096,'items':ref('item')},'context':context,'retireBlockedCurrent':boolean},('items',)),
+    'playback.replace':obj({'playlist':ref('playlist'),'index':number(0,4096,True),'context':context,'playlistUrl':text(16384),'boot':boolean,'onlyIfNoPlaylist':boolean,'activationTimes':{'type':'array','maxItems':4096,'items':nullable({'type':'integer'})}},('playlist',)),
+    'playback.update':obj({'items':{'type':'array','maxItems':4096,'items':ref('item')},'context':context,'retireBlockedCurrent':boolean,'activationTimes':{'type':'array','maxItems':4096,'items':nullable({'type':'integer'})}},('items',)),
     'playback.select':obj({'index':number(0,4096,True)},('index',)),
     'playback.pause':obj({'paused':boolean},('paused',)),
     'playback.sleep':obj({'sleeping':boolean},('sleeping',)),
@@ -69,6 +69,7 @@ methods={
     'media.seek':obj({'occurrence':identifier,'seconds':number(0,86400000)},('occurrence','seconds')),
     'presentation.set':obj({'occurrence':identifier,'display':obj({'scaling':display['properties']['scaling'],'margin':display['properties']['margin'],'background':settings['properties']['background']})},('occurrence','display')),
     'settings.set':ref('settings'),'policy.set':ref('policy'),
+    'health.set':{**obj({'thermal':boolean,'serviceFailure':boolean}),'minProperties':1},
     'connectivity.set':obj({'online':boolean},('online',)),
     'overlay.set':obj({'owner':enum('setup','pairing','recovery'),'state':identifier,'fields':{'type':'object','additionalProperties':True}},('owner','state')),
     'input.dispatch':{'oneOf':inputs},
@@ -79,7 +80,7 @@ methods['overlay.set']['allOf']=[{'if':{'properties':{'owner':{'const':'setup'}}
  'state':enum('softap_qr','joining','join_failed','updating','claim_qr','ready','hidden','scanning','finalizing','factory_reset','connecting','setup_error'),'fields':setup_fields}}}]
 
 for name in ('schedule.set','boot.set'):
-    properties={'playlist':ref('playlist'),'context':context,'atMs':{'type':'integer','minimum':1},'clear':boolean}
+    properties={'playlist':ref('playlist'),'context':context,'atMs':{'type':'integer','minimum':1},'clear':boolean,'index':number(0,4096,True),'playlistUrl':text(16384),'activationTimes':{'type':'array','maxItems':4096,'items':nullable({'type':'integer'})}}
     value=obj(properties)
     value['allOf']=[{'if':{'properties':{'clear':{'const':True}},'required':['clear']},'else':{'required':['playlist']+(['atMs'] if name=='schedule.set' else [])}}]
     methods[name]=value

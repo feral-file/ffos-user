@@ -2,9 +2,9 @@ name: Build Native Player
 on:
   push:
     branches: [develop, 'codex/**']
-    paths: ['components/player/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
+    paths: ['components/player/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
   pull_request:
-    paths: ['components/player/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
+    paths: ['components/player/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,6 +22,19 @@ jobs:
       - name: Build and test complete CEF and native media runtime
         run: |
           docker run --rm -v "$PWD/components/player:/src" ff-native-build sh tools/ci-build.sh
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: components/feral-controld/go.sum
+      - name: Verify Go and C++ protocol interoperability
+        # The core links against the pinned build image libc. Run Go tests in that
+        # same image, not the older Ubuntu runner's dynamic loader/libraries.
+        run: |
+          docker run --rm -v "$PWD:/workspace" -v "$(go env GOROOT):/opt/go:ro" \
+            -w /workspace/components/feral-controld \
+            -e PATH=/opt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
+            -e FF_NATIVE_CORE=/workspace/components/player/build-ci/ff-player-core \
+            ff-native-build go test ./playerlink ./playercontrol
       - uses: actions/upload-artifact@v4
         with:
           name: ff-player-native-linux-x86_64

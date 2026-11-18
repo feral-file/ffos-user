@@ -32,7 +32,7 @@ void Playback::update_order(Json& next,int index) const {
   next["index"]=index;next["order"]=order;
 }
 
-Json Playback::update_playlist(const Json& p) {
+Json Playback::update_playlist(const Json& p,const Json& plan) {
   fields(p,{"items","context","retireBlockedCurrent"});
   require(!state_["playlist"].is_null(),"invalid_params","No playlist to update");
   require(p.contains("items"),"invalid_params","Missing items");
@@ -48,6 +48,8 @@ Json Playback::update_playlist(const Json& p) {
   const bool unchanged=old_items==items&&state_["context"]==context;
   if(!unchanged){playlist.erase("signature");playlist.erase("signatures");}
   auto next=state_;next["context"]=context;
+ const bool plan_changed=state_.value("cohortPlan",Json(nullptr))!=plan;
+ next["cohortPlan"]=plan;
   auto updated_item=[&](const Occurrence& o)->Json{
     auto exact=match_slot(o.playlist["items"],o.index,items);
     if(exact<0)exact=match_slot(o.playlist["items"],o.index,items,false);
@@ -74,7 +76,8 @@ Json Playback::update_playlist(const Json& p) {
   if(!next["boot"].is_null()){
     const auto& boot=next["boot"]["playlist"];
     if((!playlist.value("id","").empty()&&playlist["id"]==boot.value("id",""))||boot==state_["playlist"]){
-      next["boot"]["playlist"]=playlist;next["boot"]["context"]=context;
+      next["boot"]["playlist"]=plan.is_null()?playlist:plan["playlist"];next["boot"]["context"]=context;
+      if(plan.is_null())next["boot"].erase("activationTimes");else next["boot"]["activationTimes"]=plan["activationTimes"];
     }
   }
   if(defer){
@@ -92,7 +95,7 @@ Json Playback::update_playlist(const Json& p) {
   persist(std::move(next));
   // Identical refreshes cancel a deferred update without remounting, changing
   // mode/order or invalidating current trust bindings.
-  if(!unchanged)++generation_;
+  if(!unchanged||plan_changed)++generation_;
   if(retire_presented||p.value("retireBlockedCurrent",false)){release_input();presented_.reset();}
   auto amend=[&](Occurrence& o){
     int mapped=match_slot(o.playlist["items"],o.index,items);

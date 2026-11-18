@@ -69,3 +69,17 @@ the runtime. Runtime/system dependencies still require a complete distribution
 license/source-offer audit. The new host repository's license declaration has
 not been selected; the private development package must not be represented as
 having a completed public-distribution license audit.
+
+### WebGPU composition on the installed FFOS session
+
+On CEF 156.0.8078.96, ANGLE Vulkan alone let holz navigate and compose a black
+canvas. Chromium reported `SharedImageBackingFactory` missing for a WebGPU swap
+texture. The session now also enables `Vulkan,VulkanFromANGLE` and disables the
+Vulkan presentation surface (the host owns the Wayland surface). The same URL
+then produced visible geometry in a compositor capture. This is an observed
+release/device configuration, not an assumption from upstream defaults.
+[Chromium GPU initialization](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/gpu/fallback.md)
+distinguishes ANGLE/Vulkan initialization from Vulkan compositing; the
+[WebGPU implementation guidance](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)
+lists the Linux interop features. Recheck WebGL, WebGPU, image and media paths
+on each engine/driver update. This change does not establish frame-pacing parity.

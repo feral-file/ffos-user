@@ -1,12 +1,10 @@
 # Native player migration — implementation in progress
 
-This development branch is a coordinated rewrite with the sibling
-`components/player` source tree. **Do not deploy this controld independently.**
-Status, setup narration, input, playback controls and history now use the native
-host, while cast, playlist refresh, session and watchdog consumers are still being
-migrated. There is no
-automatic CDP fallback in the new transport. Activation must wait for the full
-consumer migration and matching FFOS session/package changes.
+Ordinary casts, source refresh, runtime-instance recovery, setup/pairing,
+sleep, input, history and watchdog now use `components/player` over native IPC.
+The coordinated cutover is installed on FF1-SKYZ2E3A for Anh's testing.
+**Do not deploy controld independently of the player and matching session files.**
+There is no CDP fallback. See player/docs/CUTOVER.md for evidence and remaining gaps.
 
 ## Implemented boundary
 
@@ -32,10 +30,10 @@ native snapshots. Publishing the fenced verdict from native cast/schedule
 receipts is part of the remaining command migration; until wired, the field is
 omitted. Acceptance must never manufacture a trusted displayed verdict.
 
-The old document-stamp observer interface remains only for the session consumers
-not yet migrated. Native snapshots never populate that stamp. Remove the
-observer and its DTO compatibility fixtures when the last document-session
-consumer is replaced by host-instance reconciliation.
+The old document-stamp interfaces remain fixture/rollback code. Native state
+never populates them. Runtime-instance reconciliation replaces document sessions;
+no CDP health/OOM loop starts in production. Remove dormant constructors and
+fixture-only helpers with the rollback paths after native release acceptance.
 
 ## Verification so far
 
@@ -72,7 +70,7 @@ update progress and reset instructions. `ready` clears setup without clearing
 another overlay owner. Native PP Mori, QR layout, tombstone timing and the
 bundled animated setup artwork are implemented. Device regression evidence and
 remaining fidelity/activation limits are in `components/player/docs/DEVICE-UI.md`.
-The normal player-control consumers listed above still prevent activation.
+Normal player control is now activated.
 
 ## Input cutover
 
@@ -85,8 +83,7 @@ separate text; the native protocol also supports Unicode text. Reference-width
 deltas preserve existing movement sensitivity using current host geometry.
 All batches are validated before dispatch. The existing 16-offset pressed-drag
 and 16-step zoom limits are retained; ordinary moves are bounded to 128 offsets per request. Oversized input is
-rejected, never silently truncated. No CDP fallback exists. Normal playback routing and
-session/watchdog migration still block activation.
+rejected, never silently truncated. No CDP fallback exists. Normal playback and session/watchdog now use this native boundary.
 
 ## Playback controls and display settings cutover
 
@@ -113,9 +110,7 @@ not be called supported merely because the old browser accepted their envelope.
 
 The real Go adapter passed against the FF1 native host: saved settings,
 loop/shuffle, same-URL selection, stale showing rejection, composed margin/color
-preview, malformed host parameter rejection and duration override reset. This
-is not full-daemon activation: casting, session/watchdog and the other gaps
-above still block replacement of ordinary phone control.
+preview, malformed host parameter rejection and duration override reset. This adapter is now active in the ordinary daemon.
 
 
 ## Artwork refresh cutover

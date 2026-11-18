@@ -33,6 +33,7 @@ class Playback {
  public:
   explicit Playback(Store& store);
   Json command(std::string_view method, const Json& params);
+  void system_boot(const std::string& id);
   Json snapshot() const;
   void tick(int64_t monotonic_ms, int64_t wall_time_ms);
   void committed(const std::string& occurrence);
@@ -51,6 +52,8 @@ class Playback {
   bool media_paused(const std::string& occurrence = {}) const;
   const std::string& instance() const { return instance_; }
   bool online() const { return online_; }
+  bool thermal_hold() const { return thermal_hold_; }
+  bool service_failure() const { return service_failure_; }
   Json overlay() const { return overlay_; }
   const Json& composition() const { return composition_; }
   bool composition_pending() const { return presented_&&!composition_.is_null()&&composition_.value("occurrence","")==presented_->id&&composed_display_revision_!=presented_->display_revision; }
@@ -70,10 +73,12 @@ class Playback {
   std::optional<Occurrence> selected_, presented_;
   Json overlay_ = nullptr;
   bool online_ = false;
+  bool thermal_hold_ = false, service_failure_ = false;
   bool autoplay_hold_ = false;
   bool eos_pending_ = false;
   int64_t now_ = 0, selected_at_ = 0, presented_at_ = 0, pause_at_ = 0;
   bool clock_started_ = false;
+  int64_t wall_now_ = 0;
   std::function<void(const Json&)> input_;
   std::function<void(const std::string&, double)> seek_;
   Json media_status_ = nullptr;
@@ -89,13 +94,14 @@ class Playback {
   unsigned recovery_attempt_ = 0;
   int64_t recovery_at_ = 0;
   std::string recovery_error_, recovery_occurrence_;
+  int prepare_replace(Json& next,const Json& params);
   void clear_recovery();
   void persist(Json next);
   void select(bool recovering = false);
   void advance();
   void execute_schedule(int64_t wall_time_ms);
   void replace(Json& next, const Json& params);
-  Json update_playlist(const Json& params);
+  Json update_playlist(const Json& params,const Json& plan = nullptr);
   bool apply_pending_update();
   void update_order(Json& next, int index) const;
   Json display(const Json& item, const Json& defaults, const Json& adjustment = Json::object()) const;

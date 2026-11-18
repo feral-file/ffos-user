@@ -51,7 +51,11 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
   bool initialized=false;
   try{
     std::filesystem::create_directories(state_path);
-    ff::Store store(state_path+"/state.sqlite");ff::Playback playback(store);ff::Protocol protocol(playback);ff::Server server(socket,protocol);
+    ff::Store store(state_path+"/state.sqlite");ff::Playback playback(store);
+    std::ifstream boot_file("/proc/sys/kernel/random/boot_id");std::string boot_id;std::getline(boot_file,boot_id);
+    ff::require(!boot_id.empty(),"boot_identity","Cannot read Linux boot identity");
+    playback.system_boot(boot_id);
+    ff::Protocol protocol(playback);ff::Server server(socket,protocol);
     CefSettings settings;settings.windowless_rendering_enabled=true;
     CefString(&settings.root_cache_path)=std::filesystem::absolute(state_path+"/cef").string();
     CefString(&settings.log_file)=state_path+"/cef.log";
@@ -100,7 +104,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         playback.tick(now_ms,ff::wall_ms());server.poll();
         // A setup panel over live playback keeps the user's artwork underneath.
         // The bundled background fills an otherwise empty screen only.
-        const bool setup_visible=!playback.overlay().is_null()&&playback.overlay().value("owner","")=="setup"&&!playback.visible();
+        const bool setup_visible=!playback.overlay().is_null()&&playback.overlay().value("owner","")=="setup"&&!playback.visible()&&!playback.thermal_hold();
         if(setup_visible){
           backdrop_fade_at=0;
           if(!backdrop_attempted){

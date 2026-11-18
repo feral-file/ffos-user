@@ -1,0 +1,8 @@
+test-serve-feral-player: SKIPPED real-darkhttpd header validation (darkhttpd or curl not on PATH)
+test-serve-feral-player: OK
+Headless startup and native kiosk contracts passed
+WARN: enable-wake-on-lan: enp2s0 does not advertise magic-packet wake support
+test-enable-wake-on-lan: OK
+test-wifi-reading: OK
+test-agent-iso-build-guard: OK
+test-agent-branch-flow-guard: OK

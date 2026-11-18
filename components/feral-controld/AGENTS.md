@@ -45,6 +45,18 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - Prefer explicit orchestration over reflection-heavy or generic abstractions.
 - Add comments when control flow or state mutation carries operational knowledge that future edits could break.
 
+## Native cutover status (2026-11-18)
+
+The ordinary kiosk is now the native host. `playercontrol.Native` replaces
+product CDP dispatch; `playerlink.Reconciler` observes host instances. The host
+owns durable playback/cohort timers, while controld owns admission, fetching,
+trust and device intent. Do not start the former CDP session, CDP health/OOM
+recovery or kiosk Fetch interception loops. They remain fixture/rollback code,
+not a fallback. Old CDP-specific incident notes below describe the legacy
+architecture and isolated capture only; do not restore product dependencies.
+Offline replay/onchfs bridging remains an explicit acceptance gap. Current
+contracts/evidence are in docs/native-player-migration.md and player/docs/CUTOVER.md.
+
 ## Architecture
 
 ### Shape
@@ -52,8 +64,8 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - `mediator` is the orchestration hub: handles D-Bus signals from `feral-sys-monitord` and relayer messages, routes them to the right side effects. Connectivity delivery now uses `playerlink.ConnectivityPlayer`, with one coalescing worker, a host subscription for reconnects/gaps, and bounded retry cadence. It must not depend on CDP, artwork readiness or page generations; newer connectivity edges still win over late cold probes.
 - `commandrouter` is the command dispatch layer. It has a 3-way routing split:
   1. Commands where `Type.DeviceCtlCommand()` is true → `devicectl` executor (device control actions).
-  2. `CMD_DISPLAY_PLAYLIST` → `dp1` (playlist resolution) then CDP (`window.handleCDPRequest(...)`).
-  3. Seven playback/presentation controls (`refreshArtwork`, `moveToArtwork`, `setShuffle`, `setLoop`, `updateDefaultDuration`, `updateArtFraming`, `updateDisplaySettings`) → typed native host operations, with snapshot/occurrence fences and no CDP fallback. `checkStatus` also reads native host state through the periodic-status mapper, with controld-owned annotations. `getRecentlyPlayed` and internal `history.resolve` read native host history, with a bounded public label projection; replay re-enters the existing cast policy/source pipeline. Remaining player commands still use CDP during migration; see `docs/native-player-migration.md`.
+  2. `CMD_DISPLAY_PLAYLIST` → `dp1` admission/resolution then `playercontrol.Native` typed replace/update/schedule.
+  3. Seven playback/presentation controls (`refreshArtwork`, `moveToArtwork`, `setShuffle`, `setLoop`, `updateDefaultDuration`, `updateArtFraming`, `updateDisplaySettings`) → typed native host operations, with snapshot/occurrence fences and no CDP fallback. `checkStatus` also reads native host state through the periodic-status mapper, with controld-owned annotations. `getRecentlyPlayed` and internal `history.resolve` read native host history, with a bounded public label projection; replay re-enters the existing cast policy/source pipeline. Other player commands use `playercontrol.Native`; unsupported operations fail explicitly.
   Mint pairing is the intentional pre-CDP special case: `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`, `closeMintPairingSession`, and `mintPairingApprovalDecision` are routed by `commandrouter` into `mintpairing` so controld can own broker channels, approval notifications, and relayer session creation without exposing browser tokens to Chromium.
   Offline artwork caching is the same kind of pre-CDP special case:
   `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
@@ -61,7 +73,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
   `commandrouter` into `offlinecache` (never forwarded to
   `window.handleCDPRequest`) because they queue background work and report
   async progress rather than talking to Chromium directly.
-- `devicectl` input gestures use a dedicated ordered `playerlink` connection. The native host owns pointer position and geometry; no CDP cursor injection or cached browser dimensions remain. Whole gestures are validated before dispatch and bounded to five seconds; cancellation/failure closes the connection to release held state. This is a partial migration, not an independently deployable daemon.
+- `devicectl` input gestures use a dedicated ordered `playerlink` connection. The native host owns pointer position and geometry; no CDP cursor injection or cached browser dimensions remain. Whole gestures are validated before dispatch and bounded to five seconds; cancellation/failure closes the connection to release held state. Ship this daemon only with the matching native host and session files.
 - `devicectl` (executor) implements all device-control commands: connect, showPairingQRCode, keyboard/mouse events, screen rotation, shutdown, reboot, analytics toggle, beta features toggle, device status, update, factory reset, upload logs, volume, SSH access, and panel control over DDC/CI (`ddcPanelControl` / `ddcPanelStatus` for brightness, contrast, volume, mute, and power via `ddcutil` with a simple retry/recovery path).
   - `showPairingQRCode`, `factoryReset`, `updateToLatestVersion`, and `uploadLogs` are handled **in-process** (they formerly emitted D-Bus signals to `feral-setupd`): `showPairingQRCode` runs the pre-claim OTA gate and paints/hides the claim QR via `setupui`; `factoryReset` clears the persisted claim (relayer topic and `ConnectedDevice`), latches `resetStaged` (closes the command surface down to read-only reporting and suppresses the auto-claim flow until the reboot), and starts `set-factory-boot.service`; `updateToLatestVersion` drives `otagate`, fire-and-forget like `uploadLogs` below — it ACKs immediately and runs the gate detached (which may or may not reach an update ladder), because a successful ladder reboots the device and would kill any reply in flight; `uploadLogs` zips and uploads logs via presigned POST + S3 PUT (with an optional `supportBundleID` / `support_bundle_id`).
   - Executor manages three sentinel state files: `/home/feralfile/.state/analytics-toggle-off` (presence = analytics disabled), `/home/feralfile/.state/beta-features-toggle-on` (presence = beta features enabled), `/home/feralfile/.state/saved-volume` (persisted volume level). It also owns the device-name JSON record (`devicename`), written via tmp+rename; it does not live in `controld.state`, which is claim state.

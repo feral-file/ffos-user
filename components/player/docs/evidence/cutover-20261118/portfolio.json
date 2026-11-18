@@ -1,0 +1,212 @@
+[
+  {
+    "index": 0,
+    "title": "Scrampled AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmcLtLzmEpbwgQDW2rVJ1d9hwjFs3vHLTR1v1WCCvknDNS?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 0,
+    "presentedIndex": 0,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Initial startup capture black; visible artwork in a later dwell capture",
+    "capture": "0-after-dwell.png"
+  },
+  {
+    "index": 1,
+    "title": "dada data AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmSCPSiToTUWq2K7JsupsyPVPskSDTPfVAsMUVJcHhqgKh?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 1,
+    "presentedIndex": 1,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "1.png"
+  },
+  {
+    "index": 2,
+    "title": "Transparent Grit AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmQUH4XtLsZzpQ2VUJ1hhRQaRKVN8acJpmY7W6RitceThE?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 2,
+    "presentedIndex": 2,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "2.png"
+  },
+  {
+    "index": 3,
+    "title": "1DE94 AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmRpqNbJDvf6fDfum4xLQNFJVrgU38tMECkT8JjizcBKUt?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 3,
+    "presentedIndex": 3,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "3.png"
+  },
+  {
+    "index": 4,
+    "title": "Arrels AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmXGTYqi6SLV2wA1Wf1gpo5yMRbwKKqdo9XvxsdPYjnbPx?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 4,
+    "presentedIndex": 4,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "4.png"
+  },
+  {
+    "index": 5,
+    "title": "uneasy dream #1",
+    "source": "https://ipfs.feralfile.com/ipfs/QmWVJ8KpYhHrHRBXwL7oyBDW2BAn2AiEykhnx21Yb1Gpwv?edition_number=1&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 5,
+    "presentedIndex": 5,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "5.png"
+  },
+  {
+    "index": 6,
+    "title": "can I go where you go? AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmYfmpgxy67HgLNCPrLFo9jktEHsx9vfsJbjvSfZX4HMaR?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 6,
+    "presentedIndex": 6,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "6.png"
+  },
+  {
+    "index": 7,
+    "title": "Lamia AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmXcWqxUjoJWwoSqo4iqF1spNHd9zMKneT41gCTAXCrEGi?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 7,
+    "presentedIndex": 7,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "7.png"
+  },
+  {
+    "index": 8,
+    "title": "enchanting luxuriance #1",
+    "source": "https://ipfs.feralfile.com/ipfs/QmXNTPUHPTyvoodpRj93wRr1okzJEqzjQuK1yyKpqubMZY?edition_number=1&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 8,
+    "presentedIndex": 8,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "8.png"
+  },
+  {
+    "index": 9,
+    "title": "Shimmer AP",
+    "source": "https://ipfs.feralfile.com/ipfs/QmYia6LpBUpSkPioL5r14CqiFLZZJDf2MM9wo1es9Xn9k2?edition_number=0&blockchain=bitmark",
+    "accepted": true,
+    "renderer": "presented",
+    "selectedIndex": 9,
+    "presentedIndex": 9,
+    "error": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "visualObservation": "Visible artwork in inspected compositor capture; not physical display or reference-fidelity proof",
+    "capture": "9.png"
+  }
+]

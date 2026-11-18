@@ -284,7 +284,7 @@ func TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID(t *testing
 	ts := setup(t)
 	defer ts.teardown()
 	core, logs := observer.New(zap.InfoLevel)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, nil, nil, ts.mockJSON, zap.New(core))
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, nil, nil, ts.mockJSON, zap.New(core))
 	wireVerification(ts)
 
 	hugeID := strings.Repeat("x", 1<<20)
@@ -362,7 +362,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 	defer ts.teardown()
 
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
 	active := wireVerification(ts)
 
 	playlistURL := "https://feed.example/p.json"
@@ -412,8 +412,8 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover(t *
 		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	active := &sigverify.Active{}
 	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
 	sched.SetPushObserver(func(p playlistschedule.PushPhase) {
@@ -477,9 +477,9 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, logger)
 	defer sched.Stop()
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	active := &sigverify.Active{}
 	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
 	sched.SetPushObserver(func(p playlistschedule.PushPhase) {
@@ -592,8 +592,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock(t *testi
 		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	active := &sigverify.Active{}
 	commandrouter.SetSignatureVerification(handler, commandrouter.SignatureVerificationOptions{Active: active}, logger)
 

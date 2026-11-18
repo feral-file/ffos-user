@@ -1,7 +1,6 @@
 [Unit]
-Description=Chromium Kiosk Mode
-After=system-ready.target feral-player.service
-Requires=feral-player.service
+Description=Feral File Native Player (Cage/Wayland)
+After=system-ready.target
 
 [Service]
 Type=simple
@@ -18,6 +17,9 @@ StandardOutput=append:/home/feralfile/.logs/chromium.log
 StandardError=append:/home/feralfile/.logs/chromium.log
 Restart=always
 RestartSec=5
+KillMode=mixed
+TimeoutStopSec=10
+TasksMax=512
 
 [Install]
 WantedBy=default.target

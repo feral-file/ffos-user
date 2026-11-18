@@ -22,11 +22,11 @@ import (
 	minter "github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go"
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -212,7 +212,7 @@ type service struct {
 	joiner         brokerJoiner
 	sessionCreator sessionCreator
 	relayer        relayer.Relayer
-	cdp            cdp.CDP
+	cdp            playercontrol.Sender
 	json           wrapper.JSON
 	logger         *zap.Logger
 
@@ -680,7 +680,7 @@ type approvalRPCError struct {
 func New(
 	opts Options,
 	relayerClient relayer.Relayer,
-	cdpClient cdp.CDP,
+	cdpClient playercontrol.Sender,
 	httpClient wrapper.HTTPClient,
 	relayerAPIKey string,
 	json wrapper.JSON,
@@ -698,7 +698,7 @@ func newService(
 	broker brokerStarter,
 	sessionCreator sessionCreator,
 	relayerClient relayer.Relayer,
-	cdpClient cdp.CDP,
+	cdpClient playercontrol.Sender,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Service {
@@ -3569,4 +3569,23 @@ func relayerHTTPBaseString(endpoint string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimRight(u.String(), "/")
+}
+
+// ResyncNative replays only the currently owned live pairing overlay after a
+// host instance restart. It neither creates a new session nor overrides setup.
+func ResyncNative(value Service) {
+	s, ok := value.(*service)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	var listener overlay.Listener
+	if s.active != nil {
+		listener = s.active.listener
+	}
+	controller := s.ctrl
+	s.mu.Unlock()
+	if controller != nil && listener != nil {
+		controller.Replay(listener)
+	}
 }

@@ -16,11 +16,12 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
@@ -115,7 +116,7 @@ type refresher struct {
 	mu sync.RWMutex
 
 	context      context.Context
-	cdp          cdp.CDP
+	player       playercontrol.Sender
 	statusPoller status.Poller
 	dp1          dp1.DP1
 	// kioskReplay may be nil (feature disabled / not yet wired via
@@ -158,7 +159,7 @@ type refresher struct {
 	// only if the generation is unchanged across the send: a bump in between
 	// means the accepted reply came from a page that is gone (the bump hook
 	// already cleared the slot), and the new generation's reconciliation
-	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
+	// establishes a fresh verdict. Mirrors commandrouter.sendPlayerCommand.
 	sessionGeneration func() uint64
 
 	// mediaHealthHints, when set (SetMediaHealthHints), supplies the
@@ -421,7 +422,7 @@ func New(
 	ctx context.Context,
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
-	cdp cdp.CDP,
+	player playercontrol.Sender,
 	kioskReplay offlinecache.KioskReplay,
 	offlineCache offlinecache.Service,
 	jsonWrapper wrapper.JSON,
@@ -431,7 +432,7 @@ func New(
 ) Refresher {
 	return &refresher{
 		context:      ctx,
-		cdp:          cdp,
+		player:       player,
 		statusPoller: statusPoller,
 		dp1:          dp1,
 		kioskReplay:  kioskReplay,
@@ -589,7 +590,7 @@ func (r *refresher) Stop() {
 // logProcessFailure logs one failed refresh pass. CDP absence is the normal
 // headless/mid-reconnect state, so the periodic retry remains quiet.
 func (r *refresher) logProcessFailure(err error) {
-	if errors.Is(err, errCDPNotReady) || errors.Is(err, cdp.ErrCDPConnectionNotInitialized) {
+	if errors.Is(err, errCDPNotReady) {
 		return
 	}
 	r.logger.Error("Failed to process playing playlist", zap.Error(err))
@@ -616,8 +617,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	// that intentionally is not running. The connection can still drop between
 	// this check and the sends, which is why logProcessFailure also matches
 	// cdp.ErrCDPConnectionNotInitialized.
-	if !r.cdp.Initialized() {
+	if r.player == nil || !r.player.Ready(r.context) {
 		return errCDPNotReady
+	}
+
+	var nativeFence *playerlink.Preconditions
+	if owner, ok := r.player.(interface {
+		Fence(context.Context) (*playerlink.Preconditions, error)
+	}); ok {
+		nativeFence, err = owner.Fence(r.context)
+		if err != nil {
+			return err
+		}
 	}
 
 	var authorityToken uint64
@@ -688,6 +699,10 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		}
 		if playerStatus == nil {
 			r.logger.Warn("Player status is nil")
+			return nil
+		}
+
+		if !nativeRefreshMatches(playerStatus, nativeFence) {
 			return nil
 		}
 
@@ -787,7 +802,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	}
 
 	if staticInline != nil {
-		return r.refreshStaticInline(staticInline, staticInlineContext, contextUnknown, playerStatus, authorityToken)
+		return r.refreshStaticInline(staticInline, staticInlineContext, contextUnknown, playerStatus, authorityToken, nativeFence)
 	}
 
 	var playlist *dp1.Playlist
@@ -831,7 +846,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		// same predicate the successful path uses. A blank wall until the
 		// source returns is the accepted trade; a blocked work on the wall is
 		// not.
-		r.retireBlockedCurrentWithoutASource(schedulerSource)
+		r.retireBlockedCurrentWithoutASource(schedulerSource, nativeFence)
 		return r.handleRefreshError(err, kind, schedulerSource)
 	}
 
@@ -966,7 +981,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			if len(playlist.Items) == 0 {
 				if retireBlockedCurrent {
 					command.Arguments["dp1_call"] = playlist
-					result, sendCDPErr := r.sendCDPRequest(command)
+					result, sendCDPErr := r.sendPlayerCommand(command, nativeFence)
 					sendErr = sendCDPErr
 					if sendErr == nil && !playerresponse.OK(result) {
 						sendErr = errPlayerRejectedRefresh
@@ -1040,7 +1055,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 			}
 		}
 		generationBefore := r.currentGeneration()
-		result, sendCDPErr := r.sendCDPRequest(command)
+		result, sendCDPErr := r.sendPlayerCommand(command, nativeFence)
 		sendErr = sendCDPErr
 		// Transport success with ok:false (or a malformed body) must still
 		// fail the refresh pass: otherwise the startup loop treats the reject
@@ -1122,7 +1137,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 // removed are simply not there to restore. That needs the daemon to retain the
 // original document, the same retained-state change deferred for scheduled
 // playlists.
-func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus, authorityToken uint64) error {
+func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus, authorityToken uint64, fences ...*playerlink.Preconditions) error {
 	// Both no-send exits below scope replay from what the PLAYER reports, not
 	// from the expanded playlist this pass resolved: nothing is sent on either,
 	// so a scope built from the expansion would describe items the kiosk will
@@ -1161,7 +1176,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 		r.logger.Warn("Inline playlist is all blocked by the content policy; retiring current content")
 	}
 
-	if !r.cdp.Initialized() {
+	if r.player == nil || !r.player.Ready(r.context) {
 		return errCDPNotReady
 	}
 	command := commands.Command{
@@ -1193,7 +1208,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 			defer r.kioskReplay.UnlockPlayback()
 			r.syncReplayScopeLocked(&out)
 		}
-		result, sendCDPErr := r.sendCDPRequest(command)
+		result, sendCDPErr := r.sendPlayerCommand(command, fences...)
 		if sendCDPErr != nil {
 			sendErr = sendCDPErr
 			return
@@ -1234,7 +1249,7 @@ func (r *refresher) syncStaticInlineScope(playlist *dp1.Playlist) error {
 // Sends under the player-push barrier with the authority re-check, like every
 // other send on this path, so a cast that landed while the resolution was
 // failing is not overwritten by this retirement.
-func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.Source) {
+func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.Source, fences ...*playerlink.Preconditions) {
 	if r.contentPolicy == nil || source.ContentContext == "" {
 		return
 	}
@@ -1244,6 +1259,9 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 	}
 	playerStatus, statusErr := r.statusPoller.FetchPlayerStatus(r.context)
 	if statusErr != nil || playerStatus == nil {
+		return
+	}
+	if len(fences) > 0 && !nativeRefreshMatches(playerStatus, fences[0]) {
 		return
 	}
 	item, ok := currentPlayerItem(playerStatus)
@@ -1257,7 +1275,7 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 	if allowed {
 		return
 	}
-	if !r.cdp.Initialized() {
+	if r.player == nil || !r.player.Ready(r.context) {
 		return
 	}
 
@@ -1280,7 +1298,7 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 				"retireBlockedCurrent": true,
 			},
 		}
-		if _, sendErr := r.sendCDPRequest(command); sendErr != nil {
+		if _, sendErr := r.sendPlayerCommand(command, fences...); sendErr != nil {
 			r.logger.Warn("Failed to retire the blocked on-screen item", zap.Error(sendErr))
 		}
 	}
@@ -2250,19 +2268,27 @@ func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func
 	return playlist, nil
 }
 
-// sendCDPRequest marshals payload and sends to CDP
-func (r *refresher) sendCDPRequest(command commands.Command) (interface{}, error) {
-	p, err := command.JSON()
-	if err != nil {
-		return nil, err
+// sendPlayerCommand dispatches resolved refresh intent through the native adapter.
+func (r *refresher) sendPlayerCommand(command commands.Command, fences ...*playerlink.Preconditions) (interface{}, error) {
+	if r.player == nil {
+		return nil, errCDPNotReady
 	}
-
-	result, err := r.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
-	})
-	if err != nil {
-		return nil, err
+	ctx := r.context
+	if len(fences) > 0 && fences[0] != nil {
+		ctx = playercontrol.WithFence(ctx, fences[0])
 	}
+	return r.player.Send(ctx, command)
+}
 
-	return result, nil
+// Status describes what is actually presented, whereas command generations
+// name the desired cast. Never refresh outgoing A under incoming B's fence.
+func nativeRefreshMatches(s *status.PlayerStatus, fence *playerlink.Preconditions) bool {
+	if fence == nil {
+		return true
+	}
+	if s == nil || s.Runtime == nil {
+		return false
+	}
+	r := s.Runtime
+	return r.Instance == fence.Instance && r.Generation == fence.Generation && r.Presented != nil && r.Presented.Generation == fence.Generation
 }

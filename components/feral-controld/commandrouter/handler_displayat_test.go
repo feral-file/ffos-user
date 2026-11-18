@@ -45,10 +45,10 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return loc
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -116,8 +116,8 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 		func(c context.Context, _ time.Duration) error { <-c.Done(); return c.Err() },
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 	playlistURL := "https://example.com/future.json"
 	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")}},
@@ -169,8 +169,8 @@ func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUnt
 	mockKioskReplay.EXPECT().LockPlayback().Times(1)
 	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
 	playlistURL := "https://example.com/future.json"
 	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL, gomock.Any()).Return(&dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "future", Source: "https://example.com/future.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")}},
@@ -221,8 +221,8 @@ func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSe
 	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return loc }, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return loc }, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, mockKioskReplay, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -289,10 +289,10 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testi
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/plain.json"
 	full := &dp1.Playlist{
@@ -353,10 +353,10 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/plain.json"
 	full := &dp1.Playlist{
@@ -466,11 +466,11 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 		},
 	).AnyTimes()
 
-	inner := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	inner := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
 	track := &trackingScheduler{inner: inner}
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -516,10 +516,10 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return loc
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
@@ -589,11 +589,11 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_DoesNotClearDisplayAtCach
 		},
 	).AnyTimes()
 
-	inner := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	inner := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
 	track := &trackingScheduler{inner: inner}
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -648,11 +648,11 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t
 		},
 	).AnyTimes()
 
-	inner := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	inner := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
 	track := &trackingScheduler{inner: inner}
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, track, mockJSON, logger)
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -732,10 +732,10 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_WaitsForInFlightRecompute
 	).AnyTimes()
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	_ = sched.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -812,10 +812,10 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "Old",
@@ -876,10 +876,10 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, logger)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "Old",

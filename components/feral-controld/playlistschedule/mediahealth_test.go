@@ -46,7 +46,7 @@ func TestPush_CarriesMediaHealthHintsForTheCohort(t *testing.T) {
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	var asked []dp1playlist.PlaylistItem

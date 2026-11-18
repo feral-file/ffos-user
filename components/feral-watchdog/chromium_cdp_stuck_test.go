@@ -19,7 +19,7 @@ func TestChromiumMonitorCDPStuckRestartsEvenWhenHealthy(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -49,7 +49,7 @@ func TestChromiumMonitorCDPStuckSuppressedWhileHeadless(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -77,7 +77,7 @@ func TestChromiumMonitorCDPStuckClearedAfterRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -132,7 +132,7 @@ func TestChromiumMonitorCDPStuckActsOnFreshGateReadsNotStaleLatches(t *testing.T
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -173,7 +173,7 @@ func TestChromiumMonitorCDPStuckActsOnFreshGateReadsNotStaleLatches(t *testing.T
 func TestChromiumMonitorCDPStuckClearedOnHeadlessReconnectViaFailure(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -210,7 +210,7 @@ func TestChromiumMonitorCDPStuckClearedOnFallbackRecovery(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -248,7 +248,7 @@ func TestChromiumMonitorCDPStuckClearedOnFallbackRecovery(t *testing.T) {
 func TestChromiumMonitorCDPStuckDoesNotBypassPreConnectGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -290,7 +290,7 @@ func TestChromiumMonitorCDPStuckSuccessDuringUpdateDoesNotSpamOrRestart(t *testi
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
 	core, logs := observer.New(zapcore.InfoLevel)
-	monitor := NewChromiumMonitor(endpoint, zap.New(core), NewCommandHandler(zap.New(core), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.New(core), NewCommandHandler(zap.New(core), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -333,7 +333,7 @@ func TestChromiumMonitorCDPStuckDoesNotEraseRebootCapOnSuccess(t *testing.T) {
 	statePath := useFallbackStateFile(t, 1) // this boot already used its one fallback-hold reboot
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -423,7 +423,7 @@ func TestChromiumMonitorCDPStuckLatchedPreConnectDoesNotRestartOnFirstSuccess(t 
 	countFile := installCountingSystemctl(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -459,7 +459,7 @@ func TestChromiumMonitorCDPStuckLatchedPreConnectDoesNotRestartOnFirstSuccess(t 
 // first answer. That first answer must not be met with a kiosk restart.
 func TestChromiumMonitorCDPStuckReaffirmedDuringHotplugGraceDoesNotRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
-	monitor := NewChromiumMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 

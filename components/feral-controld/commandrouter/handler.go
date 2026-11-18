@@ -13,7 +13,6 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpolicy"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
@@ -22,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/seriesplayback"
@@ -38,7 +38,7 @@ type Handler interface {
 type handler struct {
 	nativeControls NativeControlPlayer
 	executor       devicectl.Executor
-	cdp            cdp.CDP
+	player         playercontrol.Sender
 	dp1            dp1.DP1
 	json           wrapper.JSON
 	statusPoller   status.Poller
@@ -285,7 +285,7 @@ func SyncContentPolicy(h Handler) error {
 // content-policy store lock and, when a scheduler exists, the player-push lock.
 func (h *handler) syncContentPolicyLocked() error {
 	p := h.contentPolicy.CurrentLocked()
-	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
+	result, err := h.sendContentPolicy(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": p})
 	if err != nil {
 		return err
 	}
@@ -394,7 +394,7 @@ func (h *handler) currentGeneration() uint64 {
 
 func New(
 	executor devicectl.Executor,
-	cdp cdp.CDP,
+	player playercontrol.Sender,
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
@@ -406,7 +406,7 @@ func New(
 ) Handler {
 	return &handler{
 		executor:     executor,
-		cdp:          cdp,
+		player:       player,
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
@@ -480,6 +480,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		h.logger.Warn("Rejecting command outside the controller's tier",
 			zap.String("command", commandType.String()), zap.String("role", string(p.Role)))
 		return nil, ErrPermissionDenied
+	}
+
+	if commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
+		if owner, ok := h.player.(interface{ OwnsSchedule() bool }); ok && owner.OwnsSchedule() {
+			return h.player.Send(ctx, command)
+		}
 	}
 
 	if nativeControl(commandType) {
@@ -1577,7 +1583,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				command.Arguments["dp1_call"] = playlist
 				h.attachMediaHealthHints(command.Arguments, playlist)
 				invalidateVerdictBeforeSend()
-				result, err = h.sendCDPRequest(command)
+				result, err = h.sendPlayerCommand(ctx, command)
 				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
 				} else {
@@ -1601,7 +1607,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
 				invalidateVerdictBeforeSend()
-				result, err = h.sendCDPRequest(command)
+				result, err = h.sendPlayerCommand(ctx, command)
 				if err == nil && playerresponse.OK(result) {
 					clearVerdictForDefaultPlayback()
 				}
@@ -1623,7 +1629,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if commandType == commands.CMD_DISPLAY_PLAYLIST || commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
 				invalidateVerdictBeforeSend()
 			}
-			result, err = h.sendCDPRequest(command)
+			result, err = h.sendPlayerCommand(ctx, command)
 			if err == nil && playerresponse.OK(result) {
 				// No scheduler ⇒ no push lock to be inside of; publishing
 				// right after the send is the tightest ordering available.
@@ -1709,7 +1715,7 @@ func (h *handler) handleContentPolicy(command commands.Command) (interface{}, er
 	if !h.contentPolicy.DurableLocked() {
 		return policyFailure("contentPolicyUnavailable"), nil
 	}
-	result, err := h.sendContentPolicyCDP(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
+	result, err := h.sendContentPolicy(commands.CMD_GET_CONTENT_POLICY, map[string]interface{}{})
 	if err != nil || !policyAckMatches(result, policy) {
 		return policyFailure(policyFailureCode(result, err)), nil
 	}
@@ -1729,7 +1735,7 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 	// written, so neither is possible and there is no second persisted state to
 	// reconcile.
 	candidate := h.contentPolicy.CandidateLocked(show, strict)
-	result, err := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": candidate})
+	result, err := h.sendContentPolicy(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": candidate})
 	if err != nil || !policyAckMatches(result, candidate) {
 		return policyFailure(policyFailureCode(result, err))
 	}
@@ -1776,7 +1782,7 @@ func (h *handler) applyContentPolicyLocked(show, strict bool) interface{} {
 	}
 	if err != nil {
 		previous := h.contentPolicy.CurrentLocked()
-		rollback, rollbackErr := h.sendContentPolicyCDP(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": previous})
+		rollback, rollbackErr := h.sendContentPolicy(commands.CMD_SET_CONTENT_POLICY, map[string]interface{}{"contentPolicy": previous})
 		if rollbackErr != nil || !policyAckMatches(rollback, previous) {
 			// Could not confirm the restore; the player may still be on the
 			// rejected values until the next reconnect sync. Say unavailable
@@ -1865,25 +1871,15 @@ func policyFailureCode(result interface{}, sendErr error) string {
 	return "contentPolicyUnavailable"
 }
 
-func (h *handler) sendContentPolicyCDP(commandType commands.Type, request map[string]interface{}) (interface{}, error) {
-	cmd := commands.Command{Type: commandType, Arguments: request}
-	b, err := cmd.JSON()
-	if err != nil {
-		return nil, err
+func (h *handler) sendContentPolicy(commandType commands.Type, request map[string]interface{}) (interface{}, error) {
+	return h.sendPlayerCommand(context.Background(), commands.Command{Type: commandType, Arguments: request})
+}
+
+func (h *handler) sendPlayerCommand(ctx context.Context, command commands.Command) (interface{}, error) {
+	if h.player == nil {
+		return controlFailure("unavailable", "Native player is unavailable")
 	}
-	genBefore := h.currentGeneration()
-	result, err := h.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression":    fmt.Sprintf("window.handleCDPRequest(%s)", b),
-		"awaitPromise":  true,
-		"returnByValue": true,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if genAfter := h.currentGeneration(); genAfter != genBefore {
-		return nil, fmt.Errorf("content policy acknowledgement raced player generation change: %w", ErrGenerationRace)
-	}
-	return result, nil
+	return h.player.Send(ctx, command)
 }
 
 func policyAckMatches(result interface{}, want contentpolicy.Policy) bool {
@@ -2187,36 +2183,4 @@ func (h *handler) wakeForControllerCast(ctx context.Context, commandType command
 		return fmt.Errorf("wake the player for %s: %w", commandType, err)
 	}
 	return nil
-}
-
-// sendCDPRequest marshals payload and sends to CDP
-func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) {
-	p, err := command.JSON()
-	if err != nil {
-		h.logger.Error("Failed to marshal payload", zap.Error(err))
-		return nil, err
-	}
-
-	genBefore := h.currentGeneration()
-	result, err := h.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
-	})
-	if err != nil {
-		h.logger.Error("Failed to send CDP request", zap.Error(err))
-		return nil, err
-	}
-
-	// Generation re-check (design doc §4): unlike devicectl's sleep apply,
-	// a command reply answered by a document that is no longer current is not
-	// something the relayer/hub caller can safely trust as "delivered" — a
-	// cast or control command silently landing on (or being silently
-	// swallowed by) a torn-down page must surface loudly rather than report
-	// success, so the caller retries instead of believing a phantom ACK.
-	if genAfter := h.currentGeneration(); genAfter != genBefore {
-		h.logger.Warn("CDP request reply raced a page generation change; reporting failure",
-			zap.Uint64("generation_before", genBefore), zap.Uint64("generation_after", genAfter))
-		return nil, fmt.Errorf("command reply raced a page navigation (generation changed from %d to %d); retry: %w", genBefore, genAfter, ErrGenerationRace)
-	}
-
-	return result, nil
 }

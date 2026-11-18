@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+
 	minter "github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -564,7 +566,7 @@ func TestRevokeTopicSessions_RetiredRelayerIsNothingToRevoke(t *testing.T) {
 	_, err := creator.ListEphemeralSessionIDs(context.Background(), "topic-1")
 	require.ErrorIs(t, err, errRelayerSessionsRetired)
 
-	s := newService(Options{}, nil, creator, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	s := newService(Options{}, nil, creator, nil, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop()).(*service)
 	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
 	require.NoError(t, err)
 	assert.Zero(t, revoked)
@@ -686,8 +688,7 @@ func TestHandleStartPairingSession_ValidatesPlayerContractBeforeBrokerStart(t *t
 				},
 				starter,
 				nil,
-				nil,
-				cdpClient,
+				nil, mocks.CommandSender{CDP: cdpClient},
 				wrapper.NewJSON(),
 				zap.NewNop(),
 			).(*service)
@@ -717,8 +718,7 @@ func TestHandleStartPairingSession_AcceptsValidPlayerContract(t *testing.T) {
 		},
 		starter,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -742,8 +742,7 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForBrokerStartFailure(t *t
 		Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
 		&fakeBrokerStarter{err: errors.New("broker down")},
 		nil,
-		nil,
-		&fakeCDP{},
+		nil, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -762,8 +761,7 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testi
 		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		&fakeCDP{err: errors.New("cdp down")},
+		nil, mocks.CommandSender{CDP: &fakeCDP{err: errors.New("cdp down")}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -809,8 +807,7 @@ func TestHandleStartPairingSession_NeverLeaksABenignRejectionError(t *testing.T)
 		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		&fakeCDP{},
+		nil, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -854,8 +851,7 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailu
 		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		&fakeCDP{appResponse: map[string]any{"ok": false, "error": "overlay unavailable"}},
+		nil, mocks.CommandSender{CDP: &fakeCDP{appResponse: map[string]any{"ok": false, "error": "overlay unavailable"}}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -877,8 +873,7 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForActiveRedisplayFailure(
 		Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		&fakeCDP{err: errors.New("cdp down")},
+		nil, mocks.CommandSender{CDP: &fakeCDP{err: errors.New("cdp down")}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -916,8 +911,7 @@ func TestHandleClosePairingSession_CancelsActivePairingAndClosesChannel(t *testi
 		},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -970,8 +964,7 @@ func TestDisplayActive_TracksLiveOverlayOwnership(t *testing.T) {
 		},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1018,8 +1011,7 @@ func TestOverlayStatus_ReportsPairingCodeChannelAndExpiry(t *testing.T) {
 		},
 		&fakeBrokerStarter{channel: ch},
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1061,8 +1053,7 @@ func TestOverlayStatus_OmitsPairingCodeOutsidePairingCodeState(t *testing.T) {
 		Options{},
 		nil,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1097,8 +1088,7 @@ func TestOverlayStatus_OmitsPairingCodeInCreatingTokenState(t *testing.T) {
 		Options{},
 		nil,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1123,8 +1113,7 @@ func TestHandleClosePairingSession_ReturnsNotStartedWithoutActivePairing(t *test
 		Options{Enabled: true},
 		nil,
 		nil,
-		nil,
-		&fakeCDP{},
+		nil, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1162,8 +1151,7 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 		},
 		starter,
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1239,8 +1227,7 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterControllerRejection(t *te
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1323,8 +1310,7 @@ func TestHandleStartPairingSession_ApprovalRequestDisclosesEffectiveTTL(t *testi
 				},
 				&fakeBrokerStarter{channel: ch},
 				fakeSessionCreator{},
-				relayerClient,
-				&fakeCDP{},
+				relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 				wrapper.NewJSON(),
 				zap.NewNop(),
 			).(*service)
@@ -1372,8 +1358,7 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1430,8 +1415,7 @@ func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *
 		},
 		starter,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1514,8 +1498,7 @@ func TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow(t
 		},
 		starter,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1570,8 +1553,7 @@ func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacemen
 		},
 		&fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}},
 		fakeSessionCreator{},
-		&fakeRelayer{sent: make(chan relayer.Response, 4)},
-		cdpClient,
+		&fakeRelayer{sent: make(chan relayer.Response, 4)}, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1646,8 +1628,7 @@ func TestHandleStartPairingSession_RestartDuringDelayedTerminalHideLeavesNewDisp
 		},
 		&fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}},
 		fakeSessionCreator{},
-		&fakeRelayer{sent: make(chan relayer.Response, 4)},
-		cdpClient,
+		&fakeRelayer{sent: make(chan relayer.Response, 4)}, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1739,8 +1720,7 @@ func TestShowPairingCode_ReplacementCommitsEvenWhenItsDeliveryFails(t *testing.T
 		Options{},
 		nil,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1786,8 +1766,7 @@ func TestHideSession_ConcurrentShowsNeverDesyncFromTheControllersCurrentOwner(t 
 		Options{},
 		nil,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -1883,7 +1862,7 @@ func TestShowPairingCode_ParksWhileNavigationPending(t *testing.T) {
 	active := &activePairing{channelID: "ch", pairingCode: "PAIR-1"}
 	cdpClient := &fakeCDP{}
 	s := newTestService()
-	s.cdp = cdpClient
+	s.cdp = mocks.CommandSender{CDP: cdpClient}
 	nav := &fakeMintNavigationSession{pending: true}
 	s.SetSession(nav)
 	s.navigationParkPollInterval = 5 * time.Millisecond
@@ -1919,7 +1898,7 @@ func TestShowPairingCode_ExitsParkWhenTargetGenerationReady(t *testing.T) {
 	active := &activePairing{channelID: "ch", pairingCode: "PAIR-1"}
 	cdpClient := &fakeCDP{}
 	s := newTestService()
-	s.cdp = cdpClient
+	s.cdp = mocks.CommandSender{CDP: cdpClient}
 	nav := &fakeMintNavigationSession{pending: true, ready: true} // gen 0, target 0 (pre-bump), already "ready"
 	s.SetSession(nav)
 	s.navigationParkPollInterval = 5 * time.Millisecond
@@ -1957,7 +1936,7 @@ func TestShowPairingCode_ExitsParkPromptlyWhenEnteredPostBump(t *testing.T) {
 	active := &activePairing{channelID: "ch", pairingCode: "PAIR-1"}
 	cdpClient := &fakeCDP{}
 	s := newTestService()
-	s.cdp = cdpClient
+	s.cdp = mocks.CommandSender{CDP: cdpClient}
 	nav := &fakeMintNavigationSession{pending: true, gen: 1, target: 1, ready: true}
 	s.SetSession(nav)
 	s.navigationParkPollInterval = 5 * time.Millisecond
@@ -2002,8 +1981,7 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2054,8 +2032,7 @@ func TestStop_BudgetFitsControldForcedShutdown(t *testing.T) {
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		&fakeCDP{},
+		relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2102,8 +2079,7 @@ func TestStop_DoesNotWaitForDisplayRestore(t *testing.T) {
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2159,8 +2135,7 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterSessionCreateFailure(t *t
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{err: errors.New("relayer down")},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2209,8 +2184,7 @@ func TestCompleteDecision_SendsSessionCreateFailureAfterContextCancellation(t *t
 			started: creatorStarted,
 			release: make(chan struct{}),
 		},
-		relayerClient,
-		&fakeCDP{},
+		relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2275,8 +2249,7 @@ func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2320,8 +2293,7 @@ func TestCompleteDecision_RevokesTheSessionWhenTheTopicChangesAfterCreation(t *t
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2376,8 +2348,7 @@ func TestWaitForInFlightCreates_BlocksUntilThePostCreateGuardHasRun(t *testing.T
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		&fakeRelayer{sent: make(chan relayer.Response, 2)},
-		nil,
+		&fakeRelayer{sent: make(chan relayer.Response, 2)}, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2445,8 +2416,7 @@ func TestCompleteDecision_ResetBetweenAdmissionAndTheGuardCheckIsWaitedFor(t *te
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		&fakeRelayer{sent: make(chan relayer.Response, 2)},
-		nil,
+		&fakeRelayer{sent: make(chan relayer.Response, 2)}, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2522,8 +2492,7 @@ func TestRevokeTopicSessions_RevokesEveryListedSession(t *testing.T) {
 		Options{Enabled: true},
 		nil,
 		creator,
-		nil,
-		nil,
+		nil, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2547,8 +2516,7 @@ func TestRevokeTopicSessions_KeepsGoingAfterAFailure(t *testing.T) {
 		Options{Enabled: true},
 		nil,
 		creator,
-		nil,
-		nil,
+		nil, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2571,8 +2539,7 @@ func TestRevokeTopicSessions_SweepsEvenWhenMintPairingIsDisabled(t *testing.T) {
 		Options{},
 		nil,
 		creator,
-		nil,
-		nil,
+		nil, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2591,8 +2558,7 @@ func TestRevokeTopicSessions_IsANoOpWithoutATopic(t *testing.T) {
 		Options{Enabled: true},
 		nil,
 		creator,
-		nil,
-		nil,
+		nil, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2661,8 +2627,7 @@ func TestCompleteDecision_RejectsAMintForAClaimThatWasReplacedByTheSameTopic(t *
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2727,8 +2692,7 @@ func TestCompleteDecision_RevokesASessionTheResetSweepCouldNotSee(t *testing.T) 
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2787,8 +2751,7 @@ func TestCompleteDecision_RevokesASessionMintedAcrossAFactoryReset(t *testing.T)
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2838,8 +2801,7 @@ func TestCompleteDecision_RevokesWhenTheTopicMovesWhileTheSessionIsDelivered(t *
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.New(core),
 	).(*service)
@@ -2885,8 +2847,7 @@ func TestCompleteDecision_KeepsTheSessionWhenTheTopicIsUnchanged(t *testing.T) {
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2923,8 +2884,7 @@ func TestCompleteDecision_RevokesWhenTheBrokerRefusedTheMessage(t *testing.T) {
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -2974,8 +2934,7 @@ func TestCompleteDecision_LeavesTheSessionInPlaceWhenDeliveryIsIndeterminate(t *
 				Options{RelayerBaseURL: "https://relayer.example"},
 				nil,
 				creator,
-				relayerClient,
-				nil,
+				relayerClient, mocks.CommandSender{CDP: nil},
 				wrapper.NewJSON(),
 				zap.New(core),
 			).(*service)
@@ -3042,8 +3001,7 @@ func TestCompleteDecision_RevokeFailureIsLoggedAndChangesNothing(t *testing.T) {
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.New(core),
 	).(*service)
@@ -3081,8 +3039,7 @@ func TestCompleteDecision_KeepPairedDeliversAPersistentSessionWithNoExpiry(t *te
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3133,8 +3090,7 @@ func TestCompleteDecision_KeepPairedFallsBackWhenTheRequesterCannotHoldAPersiste
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.New(core),
 	).(*service)
@@ -3189,8 +3145,7 @@ func TestCompleteDecision_ReportsTheDeliveredLifetimeNotTheRequestedOne(t *testi
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3277,8 +3232,7 @@ func TestCompleteDecision_WithoutKeepPairedDeliversAnExpiringSession(t *testing.
 		Options{RelayerBaseURL: "https://relayer.example"},
 		nil,
 		creator,
-		relayerClient,
-		nil,
+		relayerClient, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3347,8 +3301,7 @@ func TestWaitForBrowserAndApproval_DropsARequestArrivingAfterTheClaimIsGone(t *t
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3431,8 +3384,7 @@ func TestHandleStartPairingSession_ResetDuringTheBrokerCallLeavesNothingBehind(t
 		},
 		starter,
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3487,8 +3439,7 @@ func TestCloseActivePairing_ClosesASessionPublishedWhileItWaited(t *testing.T) {
 		Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
 		nil,
 		fakeSessionCreator{},
-		&fakeRelayer{sent: make(chan relayer.Response, 2)},
-		&fakeCDP{},
+		&fakeRelayer{sent: make(chan relayer.Response, 2)}, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3552,8 +3503,7 @@ func TestHandleStartPairingSession_DropsASessionWhoseClaimWentWhileTheCodeWasDis
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3650,8 +3600,7 @@ func TestHandleStartPairingSession_DropsAChannelWhoseClaimMovedWhileStarting(t *
 		},
 		starter,
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3697,8 +3646,7 @@ func TestCloseActivePairing_EndsTheWorkerAndStopsLaterRequests(t *testing.T) {
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3767,8 +3715,7 @@ func TestWaitForBrowserAndApproval_RejectsIfTopicChangesAfterApproval(t *testing
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{started: creatorStarted, release: creatorRelease},
-		relayerClient,
-		&fakeCDP{},
+		relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3858,8 +3805,7 @@ func TestWaitForBrowserAndApproval_AcceptedDecisionBeforeExpiryWinsAfterSessionD
 		},
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{delay: 220 * time.Millisecond},
-		relayerClient,
-		&fakeCDP{},
+		relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -3901,8 +3847,7 @@ func newTestService() *service {
 		Options{ApprovalTimeout: time.Minute, PollInterval: time.Millisecond},
 		nil,
 		nil,
-		nil,
-		nil,
+		nil, mocks.CommandSender{CDP: nil},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -4599,8 +4544,7 @@ func newJoinTestService(t *testing.T, joiner *fakeBrokerJoiner, starter brokerSt
 		},
 		starter,
 		fakeSessionCreator{},
-		relayerClient,
-		cdpClient,
+		relayerClient, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -4781,12 +4725,12 @@ func TestHandleJoinPairingChannel_RejectsMalformedArguments(t *testing.T) {
 func TestHandleJoinPairingChannel_PreconditionErrors(t *testing.T) {
 	defer state.ResetForTesting()
 
-	disabled := newService(Options{}, nil, nil, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	disabled := newService(Options{}, nil, nil, nil, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop()).(*service)
 	result, err := disabled.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
 	require.NoError(t, err)
 	assertCommandError(t, result, "disabled", false)
 
-	noJoiner := newService(Options{Enabled: true, BrokerBaseURL: "https://broker.example"}, nil, nil, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	noJoiner := newService(Options{Enabled: true, BrokerBaseURL: "https://broker.example"}, nil, nil, nil, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop()).(*service)
 	result, err = noJoiner.HandleJoinPairingChannel(context.Background(), map[string]any{"shortCode": "123456"})
 	require.NoError(t, err)
 	assertCommandError(t, result, "invalid_config", false)
@@ -5628,8 +5572,7 @@ func TestShowPairingCode_LiveFalseAtDecisionIsErrSessionEnded(t *testing.T) {
 		Options{},
 		nil,
 		nil,
-		nil,
-		&fakeCDP{},
+		nil, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)

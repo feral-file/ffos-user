@@ -45,8 +45,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -174,7 +174,7 @@ type app struct {
 	// recompute, status force-refresh, setup narration resync, connectivity
 	// re-seed) is registered as a reconciler on it instead, at composition
 	// time in initializeApp. Nil in the test app.
-	Session *playersession.Session
+	Session *playerlink.Reconciler
 }
 
 func main() {
@@ -599,94 +599,11 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
 
-	// Begin establishing CDP in the background. On a headless device Chromium's DevTools
-	// endpoint (127.0.0.1:9222) may be absent at boot and appear later (monitor plugged in)
-	// or drop and return (kiosk restart), so CDP must never gate daemon readiness. The
-	// supervisor retries until connected and reconnects on drops. READY (below) may now
-	// precede CDP-connected — that is intended.
-	//
-	// On every (re)connect the player web app has just (re)loaded with default (awake)
-	// state, so any player-side state controld drove before the restart no longer holds.
-	// Session.OnConnect bumps the page generation (design doc §2.1 source 1); every
-	// off-lane producer that used to run its own ad-hoc resync here (sleep invalidation,
-	// playlist recompute, status force-refresh, setup-narration resync, connectivity
-	// re-seed) is registered as a reconciler on the session instead (see initializeApp),
-	// so it runs once the new document's command handler is actually installed rather than
-	// racing a page that has not hydrated yet.
-	// Report-only CDP health signal for feral-watchdog (ffos-user#356); see
-	// package cdphealth's doc. Started alongside CDP itself so it observes
-	// from the very first connect attempt, not just steady-state drops.
-	if app.CDPHealthMonitor != nil {
-		go app.CDPHealthMonitor.Start(ctx)
+	// Native state is restored before the socket appears. Only device-owned
+	// intent is reconciled when that runtime instance changes.
+	if app.Session != nil {
+		go app.Session.Run(ctx)
 	}
-
-	app.CDP.Start(ctx, func() {
-		if app.Session != nil {
-			app.Session.OnConnect()
-		}
-		// The boot player recovery state machine (design doc §5,
-		// devicectl/boot_recovery.go) has two connect-edge entry points:
-		// MaybeRecoverPlayerOnBootOnline arms it on the first WAN-confirmed
-		// online transition (wired into the provisioning notifier, may run
-		// before DevTools ever attaches) and attempts inline; this call,
-		// CompletePendingBootPlayerRecovery, completes an Armed/Deferred
-		// machine still parked waiting for THIS first DevTools connection —
-		// a no-op on every connect with nothing parked. Own goroutine, AFTER
-		// the generation bump above, for the same reason the provisioning
-		// notifier hooks get one: its CDP sends must not stall the connect
-		// loop's other resync work.
-		if pr, ok := app.Executor.(bootPlayerRecoveryFlow); ok {
-			go pr.CompletePendingBootPlayerRecovery()
-		}
-
-		// Re-attach offline-cache replay interception on every (re)connect —
-		// this covers plain kiosk restarts AND OOM-recovery restarts alike,
-		// since both funnel through this same reconnect loop (see
-		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil whenever
-		// the offline cache is switched off (offlineCache.enabled unset or
-		// false), which is the default — see the Bootstrap call below.
-		//
-		// This ONE producer stays inline rather than becoming a reconciler
-		// like the resyncs named above, because it is the only one that needs
-		// no page JS: it arms Fetch interception on offlinecache's own CDP
-		// socket, and it must be armed as early as possible so the reloaded
-		// document's asset requests are intercepted rather than escaping to
-		// the live network. Its COMPANION half — re-applying the previously
-		// enabled item scope, which does need a hydrated page to resolve what
-		// is playing — is the "replay-scope-resync" reconciler instead; see
-		// replayScopeResyncReconciler for why splitting them is load-bearing.
-		//
-		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
-		// dials a page session synchronously (bounded, but seconds under a sick
-		// kiosk) on this connect-loop goroutine, and ordering it first would
-		// gate that deliberately-async recovery behind this dial.
-		if app.KioskReplay != nil {
-			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
-				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
-			}
-		}
-
-		// Re-arm the User-Agent rewrite on the same reconnect boundary and
-		// for the same reason: every kiosk restart mints a new target, so a
-		// session armed once at startup would silently stop intercepting
-		// after the first restart. Failure is logged, not fatal — the
-		// daemon's other duties must survive an unavailable kiosk.
-		if app.UARewrite != nil {
-			if err := app.UARewrite.AttachOnReconnect(ctx); err != nil {
-				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
-			}
-		}
-
-		// The media-health navigation observer owns a kiosk session too,
-		// and loses it on the same restarts. Passive (Network events only),
-		// so a failure here costs observations, never playback.
-		if app.MediaHealthObserver != nil {
-			if err := app.MediaHealthObserver.AttachOnReconnect(ctx); err != nil {
-				app.Logger.Warn("Failed to attach the media-health navigation observer to the kiosk", zap.Error(err))
-			}
-		}
-	})
-	defer app.CDP.Close()
 
 	// The rewrite interceptor owns a SEPARATE websocket to the kiosk plus the
 	// read-pump goroutine draining it, neither of which app.CDP.Close above
@@ -731,7 +648,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	// Check for unhandled chromium OOM kills and recover if needed.
 	// The recoverer handles file I/O, polling, and command dispatch internally.
-	app.OOMRecoverer.Start(ctx)
+	// Native persistence restores playback; systemd/watchdog own process recovery.
 
 	<-ctx.Done()
 
@@ -957,7 +874,6 @@ func forceRefreshAfterPolicySync(store *contentpolicy.Store, refresher policyRef
 
 func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
 	return func(context.Context) {
-		devicectl.RetryBootRecovery(executor, logger)
 	}
 }
 
@@ -967,7 +883,6 @@ func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger
 func onAwakeHook(scheduler playlistschedule.Scheduler, executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
 	return func(ctx context.Context) {
 		scheduler.RecomputeNow(ctx)
-		devicectl.RetryBootRecovery(executor, logger)
 	}
 }
 
@@ -1022,7 +937,7 @@ func initializeApp(
 	// One kiosk screenshot capturer: the hub's /api/screenshot and the media
 	// health wall capture share its single flight, so they never capture at
 	// once.
-	kioskCapturer := screenshot.NewKiosk(cdpEndpoint, httpClient, webSocketDialer)
+	kioskCapturer := screenshot.NewNative()
 
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
@@ -1038,6 +953,7 @@ func initializeApp(
 
 	// Native player shares one ordered command lane across consumers.
 	nativePlayer := playerlink.New(playerlink.SocketPath())
+	nativeCommands := &playercontrol.Native{Player: nativePlayer, Logger: logger}
 	go func() { <-context.Done(); _ = nativePlayer.Close() }()
 
 	// DeviceStatus
@@ -1074,7 +990,7 @@ func initializeApp(
 
 	// Executor
 	executor := devicectl.New(
-		cdp,
+		nativeCommands,
 		deviceStatus,
 		poller,
 		ddcPanel,
@@ -1110,9 +1026,9 @@ func initializeApp(
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
 	// only the refreshable source identity; after a controld-only restart the
 	// source must be fetched again before scheduled cutovers resume.
-	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
+	playlistScheduler := playlistschedule.NewWithStore(context, nativeCommands, clock, nil,
 		playlistschedule.NewFileStore(os, json), logger)
-	devicectl.SetWithPlayerPush(executor, playlistScheduler.WithPlayerPush, logger)
+	// Claim fallback enters the router, which owns the cast serialization lock.
 	// onAwake composes the displayAt recompute with the boot recovery
 	// early-re-entry accelerator (design doc §5.1: the sleep tracker's
 	// onAwake is one of the two accelerators, alongside a generation bump,
@@ -1133,17 +1049,15 @@ func initializeApp(
 	// are wired to it below, once their own components exist. The asleep
 	// gate is devicectl's four-value sleep tracker (design doc §7): built
 	// AFTER executor so PlayerSleepGate can read its live tracker state.
-	session := playersession.New(context, cdp, clock, devicectl.PlayerSleepGate(executor), logger)
+	session := &playerlink.Reconciler{Source: nativePlayer, Logger: logger}
 	// Boot recovery's escalation primitive (design doc §5: "Escalations
 	// call session.NavigateHome").
-	devicectl.SetBootRecoverySession(executor, session, logger)
 	// Roots the backoff timer's sleep on the daemon-lifetime ctx
 	// so shutdown cancels a pending sleep instead of leaking the goroutine.
-	devicectl.SetBootRecoveryDaemonContext(executor, context, logger)
 
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
-	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
+	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, nativeCommands, httpClient, relayerAPIKey, json, logger)
 	// Display grants for Play 0.5 sites need the control authority and the
 	// v2 endpoint the site will cast through; with either missing every 0.5
 	// request is refused display_grant_unavailable (spec §5.7).
@@ -1324,7 +1238,8 @@ func initializeApp(
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
-	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	rawCmdHandler := commandrouter.New(executor, nativeCommands, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	wireNativeDefault(nativeCommands, rawCmdHandler)
 	commandrouter.SetNativeControls(rawCmdHandler, nativePlayer)
 	blockUnratedCurated := config.Get().ContentPolicyTuning(logger).BlockUnratedCurated
 	policyStore, policyErr := contentpolicy.Open(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
@@ -1390,7 +1305,7 @@ func initializeApp(
 	// from the kiosk's DevTools endpoint for the app's lifetime.
 	kioskUA := newKioskUserAgent(cdpEndpoint, logger)
 	go kioskUA.Run(context)
-	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, nil, logger)
 	var mediaHealthObserver *offlinecache.KioskNavigationObserver
 	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
 		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
@@ -1506,7 +1421,7 @@ func initializeApp(
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
-	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	playlistRefresher := playlist_refresher.New(context, dp1, poller, nativeCommands, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 	if mediaHealthSvc != nil {
 		playlist_refresher.SetMediaHealthHints(playlistRefresher, mediaHealthSvc.HintArgument, logger)
 	}
@@ -1735,15 +1650,13 @@ func initializeApp(
 		// it gets the same pre-send invalidation by its own seam.
 		devicectl.SetVerdictInvalidator(executor, activeVerdict.ClearCurrent, logger)
 	}
-	if playlistScheduler != nil {
-		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
-	}
 	if mediaHealthSvc != nil {
 		// A new player page restarts the outcome ring's numbering; forget
 		// the cursor so nothing in the fresh ring is mistaken for seen.
 		session.RegisterReconciler("media-health-cursor", mediaHealthCursorReconciler(mediaHealthSvc))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
+	session.RegisterReconciler("pairing", nativePairingReconciler(mintPairing))
 	go setupNarrator.Run(context, nativePlayer)
 	// Guarded on kioskReplay, not on the refresher. This is not an
 	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
@@ -1769,17 +1682,13 @@ func initializeApp(
 	// bump) is a signal the page or player state likely changed, so a
 	// Deferred round re-enters early instead of waiting out its backoff
 	// timer (which stays the PRIMARY trigger either way).
-	session.RegisterReconciler("boot-recovery-retry", bootRecoveryRetryReconciler(executor, logger))
 	// Native setup narration survives artwork navigation. Keep this suppression
 	// while the remaining legacy recovery consumers are migrated; it must not
 	// cause a page navigation to compete with device-owned setup.
-	session.RegisterOverlayOwner("setupui", setupNarrator.Narrating)
 	// mintpairing/qrdisplay: a live mint-pairing display (pairing code or
 	// request-received) is an overlay owner too, for the same reason. It also
 	// parks its own display sends while a recovery navigation is pending,
 	// mirroring setupui's park discipline above.
-	session.RegisterOverlayOwner("mintpairing", mintPairing.DisplayActive)
-	mintPairing.SetSession(session)
 	// Host connectivity is independent of CDP/page generations and reconnects
 	// with the native process. Remaining legacy consumers are migrated separately.
 	mediator.SetConnectivityPlayer(nativePlayer)
@@ -1792,7 +1701,6 @@ func initializeApp(
 	// round-trip reports its observed document stamp so the session can
 	// detect a document replaced without going through NavigateHome
 	// (feral-watchdog's recovery navigate, a player-initiated reload).
-	poller.SetStampObserver(session.ObserveStatusStamp)
 
 	softAP := softap.NewNetworkManager(exec, logger, "", nil)
 	wifiCtl := wifictl.New(exec, clock, logger, "")

@@ -209,7 +209,9 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
     auto key="panel:"+overlay.dump()+std::to_string(width_)+":"+std::to_string(height_);
     if(key!=ui_key_)upload_ui(render_panel(overlay,width_,height_),key);
     quad(ui_,{0,0,width_,height_});
-  } else if (playback.desired() && playback.desired()->stage == "failed") ui("Artwork could not be displayed\n"+playback.desired()->error,"",true);
+  } else if (playback.thermal_hold()) ui("Cooling down\nPlayback will resume when the device cools.","",true);
+  else if(playback.service_failure()) ui("Device service unavailable\nReconnecting device controls.","",false);
+  else if (playback.desired() && playback.desired()->stage == "failed") ui("Artwork could not be displayed\n"+playback.desired()->error,"",true);
   else if (playback.desired() && playback.desired()->stage != "presented" && !playback.recovery_error().empty())
     ui("Retrying artwork\n"+playback.recovery_error(),"",!artwork);
   else if (!playback.presentation_failure().is_null())

@@ -1,0 +1,362 @@
+Nov 18 12:24:28 FF1-SKYZ2E3A systemd[874]: Started [systemd-run] /bin/bash /tmp/ff-native-build-install.sh.
+Nov 18 12:24:40 FF1-SKYZ2E3A bash[1082993]: [1/18] Building CXX object CMakeFiles/scheduling-tests.dir/tests/scheduling_test.cpp.o
+Nov 18 12:24:50 FF1-SKYZ2E3A bash[1082993]: [2/18] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+Nov 18 12:24:50 FF1-SKYZ2E3A bash[1082993]: [3/18] Linking CXX static library libff_core.a
+Nov 18 12:24:51 FF1-SKYZ2E3A bash[1082993]: [4/18] Linking CXX executable ff-player-import
+Nov 18 12:24:51 FF1-SKYZ2E3A bash[1082993]: [5/18] Linking CXX executable ff-player-core
+Nov 18 12:24:51 FF1-SKYZ2E3A bash[1082993]: [6/18] Linking CXX executable core-tests
+Nov 18 12:24:51 FF1-SKYZ2E3A bash[1082993]: [7/18] Linking CXX executable server-tests
+Nov 18 12:24:51 FF1-SKYZ2E3A bash[1082993]: [8/18] Linking CXX executable input-tests
+Nov 18 12:24:52 FF1-SKYZ2E3A bash[1082993]: [9/18] Linking CXX executable scheduling-tests
+Nov 18 12:24:52 FF1-SKYZ2E3A bash[1082993]: [10/18] Linking CXX executable recovery-tests
+Nov 18 12:24:52 FF1-SKYZ2E3A bash[1082993]: [11/18] Linking CXX executable modes-tests
+Nov 18 12:24:52 FF1-SKYZ2E3A bash[1082993]: [12/18] Linking CXX executable playlist-update-tests
+Nov 18 12:24:53 FF1-SKYZ2E3A bash[1082993]: [13/18] Linking CXX executable overlay-tests
+Nov 18 12:24:53 FF1-SKYZ2E3A bash[1082993]: [14/18] Linking CXX executable display-tests
+Nov 18 12:24:53 FF1-SKYZ2E3A bash[1082993]: [15/18] Linking CXX executable media-ipc-tests
+Nov 18 12:24:53 FF1-SKYZ2E3A bash[1082993]: [16/18] Linking CXX executable device-ui-tests
+Nov 18 12:24:53 FF1-SKYZ2E3A bash[1082993]: [17/18] Linking CXX executable ff-media-worker
+Nov 18 12:24:54 FF1-SKYZ2E3A bash[1082993]: [18/18] Linking CXX executable ff-player-native
+Nov 18 12:24:54 FF1-SKYZ2E3A bash[1083292]: Test project /home/feralfile/ff-native-debug/build
+Nov 18 12:24:54 FF1-SKYZ2E3A bash[1083292]:       Start  1: frame-clock
+Nov 18 12:24:54 FF1-SKYZ2E3A bash[1083292]:  1/15 Test  #1: frame-clock ......................   Passed    0.00 sec
+Nov 18 12:24:54 FF1-SKYZ2E3A bash[1083292]:       Start  2: matched-summary
+Nov 18 12:24:55 FF1-SKYZ2E3A bash[1083292]:  2/15 Test  #2: matched-summary ..................   Passed    0.50 sec
+Nov 18 12:24:55 FF1-SKYZ2E3A bash[1083292]:       Start  3: migration
+Nov 18 12:24:55 FF1-SKYZ2E3A bash[1083292]:  3/15 Test  #3: migration ........................   Passed    0.19 sec
+Nov 18 12:24:55 FF1-SKYZ2E3A bash[1083292]:       Start  4: core
+Nov 18 12:24:57 FF1-SKYZ2E3A bash[1083292]:  4/15 Test  #4: core .............................   Passed    2.02 sec
+Nov 18 12:24:57 FF1-SKYZ2E3A bash[1083292]:       Start  5: server
+Nov 18 12:24:57 FF1-SKYZ2E3A bash[1083292]:  5/15 Test  #5: server ...........................   Passed    0.01 sec
+Nov 18 12:24:57 FF1-SKYZ2E3A bash[1083292]:       Start  6: input
+Nov 18 12:24:57 FF1-SKYZ2E3A bash[1083292]:  6/15 Test  #6: input ............................   Passed    0.00 sec
+Nov 18 12:24:57 FF1-SKYZ2E3A bash[1083292]:       Start  7: scheduling
+Nov 18 12:24:58 FF1-SKYZ2E3A bash[1083292]:  7/15 Test  #7: scheduling .......................   Passed    1.02 sec
+Nov 18 12:24:58 FF1-SKYZ2E3A bash[1083292]:       Start  8: recovery
+Nov 18 12:24:58 FF1-SKYZ2E3A bash[1083292]:  8/15 Test  #8: recovery .........................   Passed    0.01 sec
+Nov 18 12:24:58 FF1-SKYZ2E3A bash[1083292]:       Start  9: modes
+Nov 18 12:24:58 FF1-SKYZ2E3A bash[1083292]:  9/15 Test  #9: modes ............................   Passed    0.01 sec
+Nov 18 12:24:58 FF1-SKYZ2E3A bash[1083292]:       Start 10: playlist-update
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]: 10/15 Test #10: playlist-update ..................   Passed    1.02 sec
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]:       Start 11: overlay
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]: 11/15 Test #11: overlay ..........................   Passed    0.01 sec
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]:       Start 12: display
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]: 12/15 Test #12: display ..........................   Passed    0.01 sec
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]:       Start 13: media-ipc
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]: 13/15 Test #13: media-ipc ........................   Passed    0.00 sec
+Nov 18 12:24:59 FF1-SKYZ2E3A bash[1083292]:       Start 14: media-decode
+Nov 18 12:25:02 FF1-SKYZ2E3A bash[1083292]: 14/15 Test #14: media-decode .....................   Passed    2.64 sec
+Nov 18 12:25:02 FF1-SKYZ2E3A bash[1083292]:       Start 15: device-ui
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083292]: 15/15 Test #15: device-ui ........................   Passed    2.05 sec
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083292]: 100% tests passed out of 15
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083292]: Total Test time (real) =   9.50 sec
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Install configuration: "RelWithDebInfo"
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Installing: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/ff-player-import
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Installing: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/ff-media-worker
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Set non-toolchain portion of runtime path of "/home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/ff-media-worker" to "$ORIGIN"
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/ff-media-launch
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavcodec.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavcodec.so.62
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavcodec.so.62.28.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavdevice.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavdevice.so.62
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavdevice.so.62.3.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavfilter.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavfilter.so.11
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavfilter.so.11.14.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavformat.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavformat.so.62
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavformat.so.62.12.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavutil.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavutil.so.60
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libavutil.so.60.26.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libmpv.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libmpv.so.2
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libmpv.so.2.6.0
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libplacebo.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libplacebo.so.387
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libswresample.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libswresample.so.6
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libswresample.so.6.3.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libswscale.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libswscale.so.9
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/media/libswscale.so.9.5.102
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/mpv-LGPL.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/mpv-Copyright.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/libplacebo.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/FFmpeg-LGPL.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/wayland-presentation-time.xml
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Installing: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/ff-player-native
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Set non-toolchain portion of runtime path of "/home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/ff-player-native" to "$ORIGIN"
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/chrome-sandbox
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/libcef.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/libvk_swiftshader.so
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/libvulkan.so.1
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/v8_context_snapshot.bin
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/vk_swiftshader_icd.json
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/chrome_100_percent.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/chrome_200_percent.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/icudtl.dat
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/af.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/af_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/af_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/af_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/am.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/am_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/am_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/am_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ar.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ar_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ar_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ar_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bg.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bg_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bg_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bg_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bn.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bn_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bn_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/bn_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ca.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ca_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ca_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ca_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/cs.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/cs_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/cs_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/cs_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/da.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/da_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/da_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/da_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/de.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/de_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/de_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/de_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/el.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/el_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/el_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/el_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-GB.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-GB_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-GB_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-GB_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-US.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-US_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-US_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/en-US_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es-419.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es-419_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es-419_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es-419_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/es_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/et.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/et_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/et_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/et_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fa.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fa_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fa_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fa_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fi.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fi_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fi_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fi_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fil.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fil_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fil_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fil_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fr.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fr_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fr_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/fr_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/gu.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/gu_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/gu_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/gu_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/he.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/he_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/he_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/he_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hi.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hi_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hi_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hi_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hr.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hr_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hr_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hr_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hu.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hu_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hu_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/hu_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/id.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/id_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/id_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/id_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/it.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/it_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/it_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/it_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ja.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ja_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ja_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ja_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/kn.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/kn_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/kn_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/kn_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ko.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ko_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ko_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ko_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lt.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lt_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lt_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lt_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lv.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lv_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lv_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/lv_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ml.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ml_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ml_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ml_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/mr.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/mr_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/mr_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/mr_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ms.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ms_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ms_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ms_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nb.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nb_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nb_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nb_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nl.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nl_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nl_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/nl_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pl.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pl_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pl_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pl_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-BR.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-BR_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-BR_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-BR_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-PT.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-PT_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-PT_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/pt-PT_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ro.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ro_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ro_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ro_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ru.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ru_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ru_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ru_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sk.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sk_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sk_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sk_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sl.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sl_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sl_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sl_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sr.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sr_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sr_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sr_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sv.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sv_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sv_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sv_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sw.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sw_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sw_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/sw_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ta.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ta_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ta_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ta_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/te.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/te_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/te_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/te_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/th.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/th_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/th_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/th_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/tr.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/tr_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/tr_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/tr_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/uk.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/uk_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/uk_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/uk_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ur.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ur_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ur_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/ur_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/vi.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/vi_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/vi_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/vi_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-CN.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-CN_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-CN_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-CN_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-TW.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-TW_FEMININE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-TW_MASCULINE.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/locales/zh-TW_NEUTER.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/lib/ff-player-native/resources.pak
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/PPMori-Bold.ttf
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/PPMori-BoldItalic.ttf
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/PPMori-Regular.ttf
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/PPMori-BoldItalic.woff
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/README.md
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/PPMori-Regular.woff
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/fonts/PPMori-Bold.woff
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/renderer.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/index.html
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/model-viewer.min.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/draco
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/draco/draco_decoder.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/draco/draco_decoder.wasm
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/draco/draco_wasm_wrapper.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/basis
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/basis/basis_transcoder.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/basis/basis_transcoder.wasm
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/setup-artwork
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/setup-artwork/artwork-1.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/setup-artwork/index.html
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/setup-artwork/provenance.json
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/setup-artwork/artwork-0.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/renderers/setup-artwork/p5.min.js
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/CEF.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/model-viewer.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/draco-LICENSE
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/basis-LICENSE
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/dependencies.json
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/licenses/ff-player-native/color-name.txt
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/protocol/schema.json
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Installing: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/protocol/README.md
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/tools/migrate-legacy.py
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/tools/legacy-export.mjs
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/tools/playerctl.py
+Nov 18 12:25:04 FF1-SKYZ2E3A bash[1083442]: -- Up-to-date: /home/feralfile/ff-native-cutover-stage/usr/share/ff-player-native/tools/diagnostic-cdp.mjs
+Nov 18 12:25:04 FF1-SKYZ2E3A systemd[874]: ff-native-cutover-schedule-build.service: Consumed 44.196s CPU time over 36.189s wall clock time, 862.6M memory peak.

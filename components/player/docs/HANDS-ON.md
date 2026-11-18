@@ -1,10 +1,43 @@
-# FF1-SKYZ2E3A native preview, 2026-11-18
+# FF1-SKYZ2E3A native cutover, 2026-11-18
 
-The screen is awake and `ff-native-preview.service` runs the native player over
-Cage at 3840×2160/60 Hz. This is an isolated development preview, **not a complete
-replacement of normal phone/ff-cli control**. Those commands still reach the
-original installed player. The remaining command/session/watchdog/offline
-migration is listed in `../../../docs/native-player-migration.md`.
+The ordinary kiosk now runs the native player. Phone and FF-CLI casts enter
+controld's authenticated route and reach the host over the local protocol.
+The preview below is historical; it is stopped. See CUTOVER.md for current
+results, installation paths, rollback and remaining limitations.
+
+## Current installation and rollback
+
+Runtime: `/usr/lib/ff-player-native`; resources: `/usr/share/ff-player-native`.
+State: `/home/feralfile/.state/player/state.sqlite`.
+Socket: `/run/user/1000/ff-player/player.sock`.
+`chromium-kiosk.service` now launches Cage and the native host, preserving its
+name for watchdog/sudoers. Controld/watchdog are independent of renderer health.
+`chromium-ready.target` observes the native socket, not CDP.
+
+Run normal FF-CLI from Anh's ff1-cli checkout (enrolled alias `office`):
+
+```sh
+node dist/index.js display https://feed.feralfile.com/api/v1/playlists/1bbefbc9-0226-439a-921b-12c6cf6a809e -d office
+```
+
+This is Social Codes from the Feral File channel. CLI submits the document
+inline; a blank native playlist URL is expected. Acceptance is not visual proof.
+
+A fresh legacy browser API export was validated/imported before startup. Original
+profile files remain untouched. Rollback over authorized SSH:
+
+```sh
+/home/feralfile/native-rollback-20261118/rollback.sh
+```
+
+That directory contains system.tar, legacy-export.json and hashes. Rollback
+restores original binaries/session, starts the old services and retains native
+state for diagnosis. It does not silently back-port new native preferences or
+history. Old server/CDP readiness paths are rollback-only; remove them after
+portfolio/offline/upgrade acceptance moves rollback to the previous FFOS image.
+No normal playback code depends on them. Leave the display on for Anh's tests.
+
+## Historical preview evidence (superseded deployment)
 
 The preview initially restored the existing work “24” using a one-shot export
 through the old player's browser APIs. The original profile was not modified.
