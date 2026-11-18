@@ -50,6 +50,24 @@ func bootKioskWithSignal(t *testing.T, store offlinecache.Store, offline func() 
 
 	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
 	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
+	mockHTTP, mockDialer, conn := scriptedKiosk(t, ctrl)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	replayer := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed,
+		constants.WEBAPP_URL, wrapper.NewJSON(), logger)
+	kr := offlinecache.NewKioskReplay(replayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), logger)
+	if offline != nil {
+		setOffline(t, kr, offline)
+	}
+	return &bootedKiosk{kr: kr, conn: conn, logs: logs}
+}
+
+// scriptedKiosk returns the HTTP client and dialer whose every dial lands
+// on the one returned DevTools peer.
+func scriptedKiosk(t *testing.T, ctrl *gomock.Controller) (*mocks.MockHTTPClient, *mocks.MockWebSocketDialer, *fakeWSConn) {
+	t.Helper()
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
 	conn := newFakeWSConn()
@@ -63,17 +81,7 @@ func bootKioskWithSignal(t *testing.T, store offlinecache.Store, offline func() 
 	}).AnyTimes()
 	mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).
 		Return(conn, nil, nil).AnyTimes()
-
-	core, logs := observer.New(zapcore.DebugLevel)
-	logger := zap.New(core)
-	replayer := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed,
-		constants.WEBAPP_URL, wrapper.NewJSON(), logger)
-	kr := offlinecache.NewKioskReplay(replayer, store, "http://127.0.0.1:9222",
-		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), logger)
-	if offline != nil {
-		setOffline(t, kr, offline)
-	}
-	return &bootedKiosk{kr: kr, conn: conn, logs: logs}
+	return mockHTTP, mockDialer, conn
 }
 
 func setOffline(t *testing.T, kr offlinecache.KioskReplay, offline func() bool) {
@@ -118,15 +126,20 @@ func (b *bootedKiosk) request(t *testing.T, requestID, url string) map[string]in
 // sources, which is what leaves the scope file behind.
 func rememberScope(t *testing.T, store offlinecache.Store, sources ...string) {
 	t.Helper()
+	require.NoError(t, syncErr(syncingKiosk(t, store).SyncPlaylist(context.Background(), sources)))
+}
+
+// syncingKiosk is a kiosk replay whose every scope change succeeds.
+func syncingKiosk(t *testing.T, store offlinecache.Store) offlinecache.KioskReplay {
+	t.Helper()
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	t.Cleanup(ctrl.Finish)
 	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
 	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	mockReplayer.EXPECT().Disable(gomock.Any()).Return(nil).AnyTimes()
-	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+	return offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		mocks.NewMockHTTPClient(ctrl), mocks.NewMockWebSocketDialer(ctrl),
 		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
-	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), sources)))
 }
 
 // TestKioskReplay_AttachOnReconnect_RestoresRememberedScopeBeforeAnySync is
@@ -312,6 +325,73 @@ func TestKioskReplay_AttachOnReconnect_GivesWayToADisplayInFlight(t *testing.T) 
 	b.kr.LockPlayback()
 	defer b.kr.UnlockPlayback()
 	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_AttachOnReconnect_KeepsASyncThatFinishedBeforeRestore: a
+// display path can sync the freshly attached session and release the
+// playback lock before the restore gets to it. That scope is authoritative
+// (strict here: everything in it is cached), and the restore must not
+// reinstall it as a mixed one, which would pass a miss through under
+// fail_closed.
+func TestKioskReplay_AttachOnReconnect_KeepsASyncThatFinishedBeforeRestore(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	rememberScope(t, store, kept.URL)
+
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+	mockHTTP, mockDialer, conn := scriptedKiosk(t, ctrl)
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+	setOffline(t, kr, func() bool { return true })
+
+	// The sync lands inside Attach: after the session is the replayer's,
+	// before the restore runs. The only scope ever installed is its strict
+	// one; a mixed EnableForPlaylist is an unexpected call and fails here.
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{kept.URL}, false).Return(nil).Times(1)
+	mockReplayer.EXPECT().Attach("", gomock.Any()).Do(func(string, offlinecache.CDPSession) {
+		kr.LockPlayback()
+		defer kr.UnlockPlayback()
+		assert.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{kept.URL})))
+	})
+
+	b := &bootedKiosk{kr: kr, conn: conn}
+	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_SyncPlaylist_RetriesRememberingAfterAFailedWrite: a write
+// can replace the file and still fail (the rename lands, the directory sync
+// does not). The file then holds the new scope while the last one recorded
+// as saved is the old one, so a sync back to the old scope must write again
+// rather than leave the other scope on disk for the next start.
+func TestKioskReplay_SyncPlaylist_RetriesRememberingAfterAFailedWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not bind root")
+	}
+	store, root := newTestStore(t)
+	a := seedItem(t, store, "a", "<html>a</html>")
+	b := seedItem(t, store, "b", "<html>b</html>")
+	kr := syncingKiosk(t, store)
+	scopeOnDisk := func() string {
+		data, err := os.ReadFile(filepath.Join(root, replayScopeFile)) //nolint:gosec // path is inside this test's t.TempDir.
+		require.NoError(t, err)
+		return string(data)
+	}
+
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{a.URL})))
+	require.Contains(t, scopeOnDisk(), offlinecache.SourceKey(a.URL))
+
+	// Write and search but no read: the rename succeeds, opening the
+	// directory to sync it does not.
+	require.NoError(t, os.Chmod(root, 0o300))       //nolint:gosec // G302: a test directory, made unreadable on purpose.
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) }) //nolint:gosec // G302: restores the test directory for cleanup.
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{b.URL})))
+	require.NoError(t, os.Chmod(root, 0o700)) //nolint:gosec // G302: restores the test directory.
+	require.Contains(t, scopeOnDisk(), offlinecache.SourceKey(b.URL), "the failed write did replace the file")
+
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{a.URL})))
+	assert.Contains(t, scopeOnDisk(), offlinecache.SourceKey(a.URL), "the next sync writes its scope again")
 }
 
 // TestBootstrapCore_LazyKioskReplayRestoresRememberedScopeAtStart: with the

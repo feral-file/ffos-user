@@ -40,7 +40,8 @@ import (
 //     the page could have made. The cached sources themselves are served
 //     from the cache, exactly as they are once the playlist's own sync runs.
 //   - It never competes with an authoritative sync: restore runs under the
-//     playback lock and gives way when a display path already holds it.
+//     playback lock, gives way when a display path already holds it, and
+//     arms nothing once a sync has completed on the attached session.
 
 // replayScopeFileName sits at the cache root, beside items/ and blobs/, so
 // it lives and dies with the records it names.
@@ -75,13 +76,16 @@ func (k *kioskReplay) knownOffline() bool {
 	return offline != nil && *offline != nil && (*offline)()
 }
 
-// rememberScope records the scope a successful SyncPlaylist just applied.
+// rememberScope records the scope a successful SyncPlaylist just applied,
+// and counts that sync (syncs).
 // An empty scope removes the file: cleared scope, nothing to restore.
-// Best-effort: a failed write costs only the next boot's head start. Both
+// Best-effort: a failed write costs only the next boot's head start, and
+// forgets the memo so the next sync writes again whatever its scope. Both
 // the write and the removal are synced to disk, file then directory: these
 // devices lose power without warning, and a scope that vanished with the
 // page cache would bring back the very failure this exists to fix.
 func (k *kioskReplay) rememberScope(cachedSources []string) {
+	k.syncs.Add(1)
 	path := k.scopePath()
 	if path == "" {
 		return
@@ -109,7 +113,10 @@ func (k *kioskReplay) rememberScope(cachedSources []string) {
 	}
 	if err != nil {
 		// A *PathError names only the scope file, never a source.
+		// The file may hold either scope now (a rename can land and its
+		// directory sync fail), so the memo no longer describes it.
 		k.logger.Warn("offline cache: failed to remember replay scope for the next start", zap.Error(err))
+		k.scopeSaved = false
 		return
 	}
 	k.scopeSaved, k.savedScope = true, joined
@@ -210,8 +217,9 @@ func (k *kioskReplay) rememberedSources() []string {
 
 // restoreScope re-arms the remembered scope on the session AttachOnReconnect
 // just attached. Failure is logged and left to the next SyncPlaylist, which
-// is where scope came from before this existed.
-func (k *kioskReplay) restoreScope(ctx context.Context) {
+// is where scope came from before this existed. syncsBefore is the sync
+// count from just before that attach (dialAndAttach).
+func (k *kioskReplay) restoreScope(ctx context.Context, syncsBefore uint64) {
 	// An authoritative display path holds the playback lock across its own
 	// scope sync and send; it knows what is on screen and this does not.
 	// Giving way (rather than waiting) also keeps the CDP connect loop from
@@ -220,6 +228,11 @@ func (k *kioskReplay) restoreScope(ctx context.Context) {
 		return
 	}
 	defer k.playbackMu.Unlock()
+	// A sync that finished since the attach left this session its
+	// authoritative scope, strict where it should be; do not relax it.
+	if k.syncs.Load() != syncsBefore {
+		return
+	}
 
 	cached := k.restorableSources()
 	if len(cached) == 0 {

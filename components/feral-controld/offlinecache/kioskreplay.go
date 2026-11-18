@@ -157,6 +157,10 @@ type kioskReplay struct {
 	scopeMu    sync.Mutex
 	scopeSaved bool
 	savedScope string
+	// syncs counts successful SyncPlaylist calls. restoreScope arms only if
+	// none has completed since just before its session was attached: such a
+	// sync already set this session's scope from what is on screen.
+	syncs atomic.Uint64
 	// offline is the no-network signal restoreScope is gated on — see
 	// SetOffline. Nil until wired, which reads as "not known offline".
 	offline atomic.Pointer[func() bool]
@@ -243,15 +247,18 @@ func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
 // onRoot, when non-nil, runs once the top-level target is attached and
 // before child auto-attach: AttachOnReconnect passes restoreScope there so
 // the remembered scope is armed at the earliest point a session exists.
-// SyncPlaylist's re-dial passes nil because it applies its own scope.
-func (k *kioskReplay) dialAndAttach(ctx context.Context, onRoot func(context.Context)) error {
+// It is given the sync count from just before the attach, so it can tell
+// whether a SyncPlaylist has already scoped this session. SyncPlaylist's
+// re-dial passes nil because it applies its own scope.
+func (k *kioskReplay) dialAndAttach(ctx context.Context, onRoot func(ctx context.Context, syncsBefore uint64)) error {
 	session, err := DialPageSession(ctx, k.endpoint, k.httpClient, k.dialer, k.json, k.io, k.logger)
 	if err != nil {
 		return fmt.Errorf("offline cache: dial kiosk CDP session for replay: %w", err)
 	}
+	syncsBefore := k.syncs.Load()
 	k.replayer.Attach("", session)
 	if onRoot != nil {
-		onRoot(ctx)
+		onRoot(ctx, syncsBefore)
 	}
 	if err := enableChildTargetAutoAttach(ctx, session, k.replayer, k.json, k.logger); err != nil {
 		return fmt.Errorf("offline cache: enable kiosk child-target auto-attach: %w", err)
