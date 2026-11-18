@@ -167,7 +167,13 @@ type kioskReplay struct {
 	restored atomic.Uint64
 	// onRestored, when set, is told each time restoreScope has armed the
 	// remembered scope — see SetOnScopeRestored.
-	onRestored atomic.Pointer[func()]
+	onRestored atomic.Pointer[func(context.Context)]
+	// attachMu guards attachCtx/cancelAttach: a context per
+	// AttachOnReconnect, canceled by the next one, that fences work a
+	// restore started (the onRestored callback) to the attach it belongs to.
+	attachMu     sync.Mutex
+	attachCtx    context.Context
+	cancelAttach context.CancelFunc
 	// offline is the no-network signal restoreScope is gated on — see
 	// SetOffline. Nil until wired, which reads as "not known offline".
 	offline atomic.Pointer[func() bool]
@@ -239,6 +245,15 @@ func NewKioskReplay(
 // (SyncPlaylist's redial), and every reconnect after that re-attaches as
 // usual.
 func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
+	// Before anything else, and whether or not this attach goes on to
+	// restore: whatever an earlier attach's restore set going belongs to a
+	// connection that is gone.
+	k.attachMu.Lock()
+	if k.cancelAttach != nil {
+		k.cancelAttach()
+	}
+	k.attachCtx, k.cancelAttach = context.WithCancel(ctx)
+	k.attachMu.Unlock()
 	if k.lazy && !k.armed.Load() && len(k.restorableSources()) == 0 {
 		return nil
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -628,11 +629,113 @@ func TestKioskReplay_DropRestoredScope_NeverRestoredLeavesASyncedScope(t *testin
 // countRestores registers a restored-scope callback and returns its count.
 func countRestores(t *testing.T, kr offlinecache.KioskReplay) *atomic.Int32 {
 	t.Helper()
-	notifier, ok := kr.(interface{ SetOnScopeRestored(func()) })
+	notifier, ok := kr.(interface {
+		SetOnScopeRestored(func(context.Context))
+	})
 	require.True(t, ok, "kiosk replay reports a restored scope")
 	var restores atomic.Int32
-	notifier.SetOnScopeRestored(func() { restores.Add(1) })
+	notifier.SetOnScopeRestored(func(context.Context) { restores.Add(1) })
 	return &restores
+}
+
+// restoreContexts registers a restored-scope callback that keeps each
+// context it is handed, in order.
+func restoreContexts(t *testing.T, kr offlinecache.KioskReplay) func() []context.Context {
+	t.Helper()
+	notifier, ok := kr.(interface {
+		SetOnScopeRestored(func(context.Context))
+	})
+	require.True(t, ok, "kiosk replay reports a restored scope")
+	var mu sync.Mutex
+	var got []context.Context
+	notifier.SetOnScopeRestored(func(ctx context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, ctx)
+	})
+	return func() []context.Context {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]context.Context(nil), got...)
+	}
+}
+
+// twoAttachKiosk is a kiosk replay that can attach twice: a scripted
+// replayer whose every scope change succeeds, so the only call an attach
+// sends its peer is the child auto-attach, and a separate peer per dial.
+// next switches the returned kiosk to the second dial's peer.
+func twoAttachKiosk(t *testing.T, offline func() bool) (b *bootedKiosk, next func()) {
+	t.Helper()
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	rememberScope(t, store, kept.URL)
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	conns := []*fakeWSConn{newFakeWSConn(), newFakeWSConn()}
+	for _, conn := range conns {
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil).DoAndReturn(
+		func(method, url string, _ io.Reader) (*http.Request, error) { return http.NewRequest(method, url, nil) }).Times(2)
+	mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`))}, nil
+	}).Times(2)
+	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
+	gomock.InOrder(
+		mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).Return(conns[0], nil, nil),
+		mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).Return(conns[1], nil, nil),
+	)
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	mockReplayer.EXPECT().Attach("", gomock.Any()).Times(2)
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{kept.URL}, true).Return(nil).AnyTimes()
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+	setOffline(t, kr, offline)
+	b = &bootedKiosk{kr: kr, conn: conns[0]}
+	return b, func() { b.conn = conns[1] }
+}
+
+// TestKioskReplay_AttachOnReconnect_NextAttachEndsTheEarlierRestoresWork is
+// the first sequence in the review finding on ffos-user#469: attach A
+// restores and starts a refresh that is still waiting on the player, the
+// connection drops, attach B restores and starts its own. A's context must
+// be done by then, so only B's refresh can reach B's page.
+func TestKioskReplay_AttachOnReconnect_NextAttachEndsTheEarlierRestoresWork(t *testing.T) {
+	b, next := twoAttachKiosk(t, func() bool { return true })
+	contexts := restoreContexts(t, b.kr)
+
+	b.attach(t, 1)
+	require.Len(t, contexts(), 1)
+	require.NoError(t, contexts()[0].Err(), "A's work is live while A is the current attach")
+
+	next()
+	b.attach(t, 1)
+	got := contexts()
+	require.Len(t, got, 2)
+	assert.ErrorIs(t, got[0].Err(), context.Canceled, "A's work ended when B attached")
+	assert.NoError(t, got[1].Err(), "B's work is live")
+}
+
+// TestKioskReplay_AttachOnReconnect_AttachThatRestoresNothingEndsEarlierWork
+// is the second sequence: internet returns before attach B, so B restores
+// nothing. A's pending refresh must still be ended, or it would reach B.
+func TestKioskReplay_AttachOnReconnect_AttachThatRestoresNothingEndsEarlierWork(t *testing.T) {
+	var online atomic.Bool
+	b, next := twoAttachKiosk(t, func() bool { return !online.Load() })
+	contexts := restoreContexts(t, b.kr)
+
+	b.attach(t, 1)
+	require.Len(t, contexts(), 1)
+
+	online.Store(true)
+	next()
+	b.attach(t, 1)
+	got := contexts()
+	require.Len(t, got, 1, "B restored nothing and started nothing")
+	assert.ErrorIs(t, got[0].Err(), context.Canceled, "A's work ended when B attached")
 }
 
 // TestKioskReplay_AttachOnReconnect_ReportsARestoredScopeOnce: the

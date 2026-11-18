@@ -833,6 +833,14 @@ type restoredScopeDropper interface {
 	DropRestoredScope(ctx context.Context)
 }
 
+// attachContext and restoredScopeNotifier name kiosk replay's optional
+// "remembered scope armed" seam, for the same reason.
+type attachContext = context.Context
+
+type restoredScopeNotifier interface {
+	SetOnScopeRestored(notify func(ctx context.Context))
+}
+
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
 	logger.Info("Getting connectivity status")
 
@@ -1424,9 +1432,11 @@ func initializeApp(
 		// before replay can be armed, and fails; once the remembered scope
 		// is in force, ask the player to load it again rather than leave
 		// the screen black until the player's own retry 15s later.
-		if notifier, ok := kioskReplay.(interface{ SetOnScopeRestored(func()) }); ok {
-			notifier.SetOnScopeRestored(func() {
-				go devicectl.RefreshArtworkAfterReplayRestore(context, executor, logger)
+		// The callback's context ends at the next kiosk attach, so a
+		// refresh still waiting on the player never reaches a later page.
+		if notifier, ok := kioskReplay.(restoredScopeNotifier); ok {
+			notifier.SetOnScopeRestored(func(attachCtx attachContext) {
+				go devicectl.RefreshArtworkAfterReplayRestore(attachCtx, executor, logger)
 			})
 		}
 		if dropper, ok := kioskReplay.(restoredScopeDropper); ok {
