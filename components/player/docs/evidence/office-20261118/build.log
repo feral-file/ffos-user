@@ -1,0 +1,697 @@
+-- The C compiler identification is GNU 16.1.1
+-- The CXX compiler identification is GNU 16.1.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Found SQLite3: /usr/lib/libsqlite3.so (found version "3.53.3")
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Found Python3: /usr/bin/python3.14 (found version "3.14.6") found components: Interpreter
+-- Performing Test COMPILER_SUPPORTS_NO_UNDEFINED_VAR_TEMPLATE
+-- Performing Test COMPILER_SUPPORTS_NO_UNDEFINED_VAR_TEMPLATE - Success
+-- Performing Test COMPILER_SUPPORTS_NO_UNUSED_LOCAL_TYPEDEFS
+-- Performing Test COMPILER_SUPPORTS_NO_UNUSED_LOCAL_TYPEDEFS - Success
+-- Performing Test COMPILER_SUPPORTS_NO_LITERAL_SUFFIX
+-- Performing Test COMPILER_SUPPORTS_NO_LITERAL_SUFFIX - Success
+-- Performing Test COMPILER_SUPPORTS_NO_NARROWING
+-- Performing Test COMPILER_SUPPORTS_NO_NARROWING - Success
+-- Found PkgConfig: /usr/bin/pkg-config (found version "2.5.1")
+-- Checking for modules 'sdl2;egl;glesv2;libdrm;pangocairo;pangoft2;fontconfig;libqrencode;wayland-client'
+--   Found sdl2, version 2.32.70
+--   Found egl, version 1.5
+--   Found glesv2, version 3.2
+--   Found libdrm, version 2.4.134
+--   Found pangocairo, version 1.58.0
+--   Found pangoft2, version 1.58.0
+--   Found fontconfig, version 2.18.1
+--   Found libqrencode, version 4.1.1
+--   Found wayland-client, version 1.25.0
+-- Checking for module 'mpv>=2.6.0'
+--   Found mpv, version 2.6.0
+Bundled model-viewer 4.3.1 matches pinned package; license retained
+Pinned Draco and Basis decoder assets packaged locally
+-- Configuring done (1.3s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/feralfile/ff-native-debug/build
+[1/267] Building CXX object CMakeFiles/ff_core.dir/src/store.cpp.o
+[2/267] Building CXX object CMakeFiles/ff_core.dir/src/json.cpp.o
+[3/267] Building CXX object CMakeFiles/ff_core.dir/src/playlist_update.cpp.o
+[4/267] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+[5/267] Building CXX object CMakeFiles/ff_core.dir/src/protocol.cpp.o
+[6/267] Building CXX object CMakeFiles/ff_core.dir/src/media_kind.cpp.o
+[7/267] Building CXX object CMakeFiles/ff_core.dir/src/server.cpp.o
+[8/267] Building CXX object CMakeFiles/ff_core.dir/src/input.cpp.o
+[9/267] Building CXX object CMakeFiles/ff_core.dir/src/overlay.cpp.o
+[10/267] Building CXX object CMakeFiles/ff_core.dir/src/display.cpp.o
+[11/267] Linking CXX static library libff_core.a
+[12/267] Building CXX object CMakeFiles/ff_media_ipc.dir/src/media_ipc.cpp.o
+[13/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/shutdown_checker.cc.o
+[14/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/transfer_util.cc.o
+[15/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_atomic_flag.cc.o
+[16/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_callback_helpers.cc.o
+[17/267] Building CXX object CMakeFiles/ff_device_ui.dir/src/device_ui.cpp.o
+[18/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_dump_without_crashing.cc.o
+[19/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_callback_internal.cc.o
+[20/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_lock.cc.o
+[21/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_lock_impl.cc.o
+[22/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_ref_counted.cc.o
+[23/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_logging.cc.o
+[24/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_thread_checker_impl.cc.o
+[25/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/base/cef_weak_ptr.cc.o
+[26/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/accessibility_handler_cpptoc.cc.o
+[27/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/app_cpptoc.cc.o
+[28/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/audio_handler_cpptoc.cc.o
+[29/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/base_ref_counted_cpptoc.cc.o
+[30/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/base_scoped_cpptoc.cc.o
+[31/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/browser_process_handler_cpptoc.cc.o
+[32/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/client_cpptoc.cc.o
+[33/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/completion_callback_cpptoc.cc.o
+[34/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/command_handler_cpptoc.cc.o
+[35/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/component_update_callback_cpptoc.cc.o
+[36/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/context_menu_handler_cpptoc.cc.o
+[37/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/cookie_access_filter_cpptoc.cc.o
+[38/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/cookie_visitor_cpptoc.cc.o
+[39/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/delete_cookies_callback_cpptoc.cc.o
+[40/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/dev_tools_message_observer_cpptoc.cc.o
+[41/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/dialog_handler_cpptoc.cc.o
+[42/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/display_handler_cpptoc.cc.o
+[43/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/domvisitor_cpptoc.cc.o
+[44/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/download_handler_cpptoc.cc.o
+[45/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/download_image_callback_cpptoc.cc.o
+[46/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/drag_handler_cpptoc.cc.o
+[47/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/end_tracing_callback_cpptoc.cc.o
+[48/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/find_handler_cpptoc.cc.o
+[49/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/focus_handler_cpptoc.cc.o
+[50/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/frame_handler_cpptoc.cc.o
+[51/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/jsdialog_handler_cpptoc.cc.o
+[52/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/keyboard_handler_cpptoc.cc.o
+[53/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/life_span_handler_cpptoc.cc.o
+[54/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/load_handler_cpptoc.cc.o
+[55/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/media_observer_cpptoc.cc.o
+[56/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/media_route_create_callback_cpptoc.cc.o
+[57/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/media_sink_device_info_callback_cpptoc.cc.o
+[58/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/menu_model_delegate_cpptoc.cc.o
+[59/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/navigation_entry_visitor_cpptoc.cc.o
+[60/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/pdf_print_callback_cpptoc.cc.o
+[61/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/permission_handler_cpptoc.cc.o
+[62/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/preference_observer_cpptoc.cc.o
+[63/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/print_handler_cpptoc.cc.o
+[64/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/read_handler_cpptoc.cc.o
+[65/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/render_process_handler_cpptoc.cc.o
+[66/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/render_handler_cpptoc.cc.o
+[67/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/request_context_handler_cpptoc.cc.o
+[68/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/request_handler_cpptoc.cc.o
+[69/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/resolve_callback_cpptoc.cc.o
+[70/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/resource_bundle_handler_cpptoc.cc.o
+[71/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/resource_handler_cpptoc.cc.o
+[72/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/resource_request_handler_cpptoc.cc.o
+[73/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/response_filter_cpptoc.cc.o
+[74/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/run_file_dialog_callback_cpptoc.cc.o
+[75/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/scheme_handler_factory_cpptoc.cc.o
+[76/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/server_handler_cpptoc.cc.o
+[77/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/set_cookie_callback_cpptoc.cc.o
+[78/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/setting_observer_cpptoc.cc.o
+[79/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/string_visitor_cpptoc.cc.o
+[80/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/task_cpptoc.cc.o
+[81/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/urlrequest_client_cpptoc.cc.o
+[82/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/v8_accessor_cpptoc.cc.o
+[83/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/v8_array_buffer_release_callback_cpptoc.cc.o
+[84/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/v8_handler_cpptoc.cc.o
+[85/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/v8_interceptor_cpptoc.cc.o
+[86/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/write_handler_cpptoc.cc.o
+[87/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/api_version_test_ref_ptr_client_child_cpptoc.cc.o
+[88/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/api_version_test_ref_ptr_client_child_v2_cpptoc.cc.o
+[89/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/api_version_test_ref_ptr_client_cpptoc.cc.o
+[90/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/api_version_test_scoped_client_child_cpptoc.cc.o
+[91/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/api_version_test_scoped_client_child_v2_cpptoc.cc.o
+[92/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/api_version_test_scoped_client_cpptoc.cc.o
+[93/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/test_server_handler_cpptoc.cc.o
+[94/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/translator_test_ref_ptr_client_child_cpptoc.cc.o
+[95/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/translator_test_scoped_client_child_cpptoc.cc.o
+[96/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/translator_test_ref_ptr_client_cpptoc.cc.o
+[97/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/test/translator_test_scoped_client_cpptoc.cc.o
+[98/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/browser_view_delegate_cpptoc.cc.o
+[99/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/button_delegate_cpptoc.cc.o
+[100/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/menu_button_delegate_cpptoc.cc.o
+[101/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/panel_delegate_cpptoc.cc.o
+[102/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/textfield_delegate_cpptoc.cc.o
+[103/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/view_delegate_cpptoc.cc.o
+[104/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/cpptoc/views/window_delegate_cpptoc.cc.o
+[105/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/auth_callback_ctocpp.cc.o
+[106/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/before_download_callback_ctocpp.cc.o
+[107/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/binary_value_ctocpp.cc.o
+[108/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/browser_ctocpp.cc.o
+[109/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/browser_host_ctocpp.cc.o
+[110/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/callback_ctocpp.cc.o
+[111/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/command_line_ctocpp.cc.o
+[112/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/component_ctocpp.cc.o
+[113/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/component_updater_ctocpp.cc.o
+[114/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/context_menu_params_ctocpp.cc.o
+[115/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/cookie_manager_ctocpp.cc.o
+[116/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/dictionary_value_ctocpp.cc.o
+[117/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/domdocument_ctocpp.cc.o
+[118/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/domnode_ctocpp.cc.o
+[119/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/download_item_callback_ctocpp.cc.o
+[120/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/download_item_ctocpp.cc.o
+[121/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/drag_data_ctocpp.cc.o
+[122/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/file_dialog_callback_ctocpp.cc.o
+[123/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/frame_ctocpp.cc.o
+[124/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/image_ctocpp.cc.o
+[125/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/jsdialog_callback_ctocpp.cc.o
+[126/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/list_value_ctocpp.cc.o
+[127/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/media_access_callback_ctocpp.cc.o
+[128/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/media_route_ctocpp.cc.o
+[129/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/media_router_ctocpp.cc.o
+[130/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/media_sink_ctocpp.cc.o
+[131/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/media_source_ctocpp.cc.o
+[132/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/menu_model_ctocpp.cc.o
+[133/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/navigation_entry_ctocpp.cc.o
+[134/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/permission_prompt_callback_ctocpp.cc.o
+[135/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/post_data_ctocpp.cc.o
+[136/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/post_data_element_ctocpp.cc.o
+[137/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/preference_manager_ctocpp.cc.o
+[138/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/preference_registrar_ctocpp.cc.o
+[139/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/print_dialog_callback_ctocpp.cc.o
+[140/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/print_job_callback_ctocpp.cc.o
+[141/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/print_settings_ctocpp.cc.o
+[142/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/process_message_ctocpp.cc.o
+[143/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/registration_ctocpp.cc.o
+[144/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/request_context_ctocpp.cc.o
+[145/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/request_ctocpp.cc.o
+[146/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/resource_bundle_ctocpp.cc.o
+[147/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/resource_read_callback_ctocpp.cc.o
+[148/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/resource_skip_callback_ctocpp.cc.o
+[149/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/response_ctocpp.cc.o
+[150/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/run_context_menu_callback_ctocpp.cc.o
+[151/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/run_quick_menu_callback_ctocpp.cc.o
+[152/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/scheme_registrar_ctocpp.cc.o
+[153/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/select_client_certificate_callback_ctocpp.cc.o
+[154/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/server_ctocpp.cc.o
+[155/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/shared_memory_region_ctocpp.cc.o
+[156/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/shared_process_message_builder_ctocpp.cc.o
+[157/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/sslinfo_ctocpp.cc.o
+[158/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/sslstatus_ctocpp.cc.o
+[159/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/stream_reader_ctocpp.cc.o
+[160/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/stream_writer_ctocpp.cc.o
+[161/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/task_manager_ctocpp.cc.o
+[162/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/task_runner_ctocpp.cc.o
+[163/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/thread_ctocpp.cc.o
+[164/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/unresponsive_process_callback_ctocpp.cc.o
+[165/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/urlrequest_ctocpp.cc.o
+[166/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/v8_backing_store_ctocpp.cc.o
+[167/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/v8_context_ctocpp.cc.o
+[168/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/v8_exception_ctocpp.cc.o
+[169/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/v8_stack_frame_ctocpp.cc.o
+[170/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/v8_stack_trace_ctocpp.cc.o
+[171/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/v8_value_ctocpp.cc.o
+[172/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/value_ctocpp.cc.o
+[173/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/waitable_event_ctocpp.cc.o
+[174/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/x509_cert_principal_ctocpp.cc.o
+[175/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/x509_certificate_ctocpp.cc.o
+[176/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/xml_reader_ctocpp.cc.o
+[177/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/zip_reader_ctocpp.cc.o
+[178/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_ref_ptr_library_child_child_ctocpp.cc.o
+[179/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_ctocpp.cc.o
+[180/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_ref_ptr_library_child_child_v1_ctocpp.cc.o
+[181/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_ref_ptr_library_child_child_v2_ctocpp.cc.o
+[182/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_ref_ptr_library_child_ctocpp.cc.o
+[183/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_ref_ptr_library_ctocpp.cc.o
+[184/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_scoped_library_child_child_ctocpp.cc.o
+[185/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_scoped_library_child_child_v1_ctocpp.cc.o
+[186/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_scoped_library_child_child_v2_ctocpp.cc.o
+[187/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_scoped_library_child_ctocpp.cc.o
+[188/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/api_version_test_scoped_library_ctocpp.cc.o
+[189/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/test_server_connection_ctocpp.cc.o
+[190/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/test_server_ctocpp.cc.o
+[191/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_ref_ptr_library_child_child_ctocpp.cc.o
+[192/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_ref_ptr_library_child_ctocpp.cc.o
+[193/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_ctocpp.cc.o
+[194/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_ref_ptr_library_ctocpp.cc.o
+[195/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_scoped_library_child_child_ctocpp.cc.o
+[196/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_scoped_library_child_ctocpp.cc.o
+[197/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/test/translator_test_scoped_library_ctocpp.cc.o
+[198/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/box_layout_ctocpp.cc.o
+[199/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/browser_view_ctocpp.cc.o
+[200/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/display_ctocpp.cc.o
+[201/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/button_ctocpp.cc.o
+[202/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/fill_layout_ctocpp.cc.o
+[203/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/label_button_ctocpp.cc.o
+[204/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/layout_ctocpp.cc.o
+[205/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/menu_button_pressed_lock_ctocpp.cc.o
+[206/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/menu_button_ctocpp.cc.o
+[207/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/overlay_controller_ctocpp.cc.o
+[208/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/panel_ctocpp.cc.o
+[209/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/scroll_view_ctocpp.cc.o
+[210/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/textfield_ctocpp.cc.o
+[211/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/view_ctocpp.cc.o
+[212/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_byte_read_handler.cc.o
+[213/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_closure_task.cc.o
+[214/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/ctocpp/views/window_ctocpp.cc.o
+[215/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_message_router_utils.cc.o
+[216/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_message_router.cc.o
+[217/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_resource_manager.cc.o
+[218/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_scoped_temp_dir.cc.o
+[219/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_stream_resource_handler.cc.o
+[220/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_xml_object.cc.o
+[221/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/cef_zip_archive.cc.o
+[222/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/libcef_dll_wrapper2.cc.o
+[223/267] Linking CXX static library libff_media_ipc.a
+[224/267] Linking CXX static library libff_device_ui.a
+[225/267] Building CXX object cef-wrapper/CMakeFiles/libcef_dll_wrapper.dir/wrapper/libcef_dll_wrapper.cc.o
+[226/267] Linking CXX static library cef-wrapper/libcef_dll_wrapper.a
+[227/267] Generating presentation-time-client-protocol.h, presentation-time-protocol.c
+[228/267] Building CXX object CMakeFiles/ff-player-core.dir/src/core_main.cpp.o
+[229/267] Building CXX object CMakeFiles/frame-clock-tests.dir/tests/frame_clock_test.cpp.o
+[230/267] Building CXX object CMakeFiles/ff-player-import.dir/src/import_main.cpp.o
+[231/267] Building CXX object CMakeFiles/server-tests.dir/tests/server_test.cpp.o
+[232/267] Building CXX object CMakeFiles/core-tests.dir/tests/core_test.cpp.o
+[233/267] Building CXX object CMakeFiles/input-tests.dir/tests/input_test.cpp.o
+[234/267] Building CXX object CMakeFiles/scheduling-tests.dir/tests/scheduling_test.cpp.o
+[235/267] Building CXX object CMakeFiles/recovery-tests.dir/tests/recovery_test.cpp.o
+[236/267] Building CXX object CMakeFiles/modes-tests.dir/tests/modes_test.cpp.o
+[237/267] Building CXX object CMakeFiles/playlist-update-tests.dir/tests/playlist_update_test.cpp.o
+[238/267] Building CXX object CMakeFiles/overlay-tests.dir/tests/overlay_test.cpp.o
+[239/267] Building CXX object CMakeFiles/media-ipc-tests.dir/tests/media_ipc_test.cpp.o
+[240/267] Building CXX object CMakeFiles/display-tests.dir/tests/display_test.cpp.o
+[241/267] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+[242/267] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+[243/267] Building C object CMakeFiles/ff-player-native.dir/presentation-time-protocol.c.o
+[244/267] Building CXX object CMakeFiles/device-ui-tests.dir/tests/device_ui_test.cpp.o
+[245/267] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation_feedback.cpp.o
+[246/267] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+[247/267] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+[248/267] Building CXX object CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o
+[249/267] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation.cpp.o
+[250/267] Linking CXX executable ff-player-core
+[251/267] Linking CXX executable ff-player-import
+[252/267] Linking CXX executable frame-clock-tests
+[253/267] Linking CXX executable core-tests
+[254/267] Linking CXX executable server-tests
+[255/267] Linking CXX executable input-tests
+[256/267] Linking CXX executable scheduling-tests
+[257/267] Linking CXX executable recovery-tests
+[258/267] Linking CXX executable modes-tests
+[259/267] Linking CXX executable playlist-update-tests
+[260/267] Linking CXX executable overlay-tests
+[261/267] Linking CXX executable display-tests
+[262/267] Linking CXX executable media-ipc-tests
+[263/267] Linking CXX executable ff-media-worker
+FAILED: [code=1] ff-media-worker 
+: && /usr/bin/c++ -O2 -g -DNDEBUG -Wl,--dependency-file=CMakeFiles/ff-media-worker.dir/link.d CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o -o ff-media-worker  -Wl,-rpath,/home/feralfile/ff-native-debug/build-media/prefix/lib:  libff_media_ipc.a  libff_core.a  /usr/lib/libsqlite3.so  /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so  /usr/lib/libSDL2.so  /usr/lib/libEGL.so  /usr/lib/libGLESv2.so  /usr/lib/libdrm.so  /usr/lib/libpangocairo-1.0.so  /usr/lib/libpangoft2-1.0.so  /usr/lib/libpango-1.0.so  /usr/lib/libcairo.so  /usr/lib/libharfbuzz.so  /usr/lib/libgobject-2.0.so  /usr/lib/libglib-2.0.so  /usr/lib/libfontconfig.so  /usr/lib/libfreetype.so  /usr/lib/libqrencode.so  /usr/lib/libwayland-client.so  -lm && :
+/usr/bin/ld: warning: libass.so.9, needed by /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so, not found (try using -rpath or -rpath-link)
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_fonts_dir'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_free_event'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_style_overrides'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_track_set_feature'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_use_margins'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_selective_style_override'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_process_codec_private'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_line_position'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_line_spacing'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_new_track'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_cache_limits'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_configure_prune'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_alloc_style'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_check_readorder'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_fonts'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_process_force_style'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_alloc_event'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_add_font'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_message_cb'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_read_styles'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_library_version'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_render_frame'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_shaper'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_renderer_done'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_hinting'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_step_sub'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_extract_fonts'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_flush_events'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_library_done'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_font_scale'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_free_track'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_process_chunk'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_selective_style_override_enabled'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_storage_size'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_library_init'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_frame_size'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_pixel_aspect'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_set_margins'
+/usr/bin/ld: /home/feralfile/ff-native-debug/build-media/prefix/lib/libmpv.so: undefined reference to `ass_renderer_init'
+collect2: error: ld returned 1 exit status
+[264/267] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+ninja: build stopped: subcommand failed.
+[1/4] Linking CXX executable media-decode-tests
+[2/4] Linking CXX executable ff-media-worker
+[3/4] Linking CXX executable device-ui-tests
+[4/4] Linking CXX executable ff-player-native
+Test project /home/feralfile/ff-native-debug/build
+      Start  1: frame-clock
+ 1/14 Test  #1: frame-clock ......................   Passed    0.00 sec
+      Start  2: migration
+ 2/14 Test  #2: migration ........................   Passed    0.12 sec
+      Start  3: core
+ 3/14 Test  #3: core .............................   Passed    2.02 sec
+      Start  4: server
+ 4/14 Test  #4: server ...........................   Passed    0.01 sec
+      Start  5: input
+ 5/14 Test  #5: input ............................   Passed    0.00 sec
+      Start  6: scheduling
+ 6/14 Test  #6: scheduling .......................   Passed    1.01 sec
+      Start  7: recovery
+ 7/14 Test  #7: recovery .........................   Passed    0.01 sec
+      Start  8: modes
+ 8/14 Test  #8: modes ............................   Passed    0.01 sec
+      Start  9: playlist-update
+ 9/14 Test  #9: playlist-update ..................   Passed    1.01 sec
+      Start 10: overlay
+10/14 Test #10: overlay ..........................   Passed    0.00 sec
+      Start 11: display
+11/14 Test #11: display ..........................   Passed    0.01 sec
+      Start 12: media-ipc
+12/14 Test #12: media-ipc ........................   Passed    0.00 sec
+      Start 13: media-decode
+13/14 Test #13: media-decode .....................   Passed    2.62 sec
+      Start 14: device-ui
+14/14 Test #14: device-ui ........................   Passed    1.45 sec
+
+100% tests passed out of 14
+
+Total Test time (real) =   8.28 sec
+-- Install configuration: "RelWithDebInfo"
+-- Installing: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/ff-player-import
+-- Installing: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/ff-media-worker
+-- Set non-toolchain portion of runtime path of "/home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/ff-media-worker" to "$ORIGIN"
+-- Installing: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/ff-media-launch
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavcodec.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavcodec.so.62
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavcodec.so.62.28.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavdevice.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavdevice.so.62
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavdevice.so.62.3.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavfilter.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavfilter.so.11
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavfilter.so.11.14.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavformat.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavformat.so.62
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavformat.so.62.12.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavutil.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavutil.so.60
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libavutil.so.60.26.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libmpv.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libmpv.so.2
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libmpv.so.2.6.0
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libplacebo.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libplacebo.so.387
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libswresample.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libswresample.so.6
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libswresample.so.6.3.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libswscale.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libswscale.so.9
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/media/libswscale.so.9.5.102
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/mpv-LGPL.txt
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/mpv-Copyright.txt
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/libplacebo.txt
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/FFmpeg-LGPL.txt
+-- Installing: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/wayland-presentation-time.xml
+-- Installing: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/ff-player-native
+-- Set non-toolchain portion of runtime path of "/home/feralfile/ff-native-stage/usr/lib/ff-player-native/ff-player-native" to "$ORIGIN"
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/chrome-sandbox
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/libcef.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/libvk_swiftshader.so
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/libvulkan.so.1
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/v8_context_snapshot.bin
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/vk_swiftshader_icd.json
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/chrome_100_percent.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/chrome_200_percent.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/icudtl.dat
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/af.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/af_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/af_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/af_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/am.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/am_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/am_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/am_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ar.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ar_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ar_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ar_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bg.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bg_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bg_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bg_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bn.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bn_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bn_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/bn_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ca.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ca_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ca_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ca_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/cs.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/cs_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/cs_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/cs_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/da.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/da_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/da_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/da_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/de.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/de_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/de_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/de_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/el.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/el_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/el_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/el_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-GB.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-GB_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-GB_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-GB_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-US.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-US_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-US_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/en-US_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es-419.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es-419_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es-419_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es-419_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/es_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/et.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/et_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/et_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/et_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fa.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fa_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fa_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fa_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fi.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fi_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fi_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fi_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fil.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fil_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fil_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fil_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fr.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fr_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fr_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/fr_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/gu.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/gu_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/gu_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/gu_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/he.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/he_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/he_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/he_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hi.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hi_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hi_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hi_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hr.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hr_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hr_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hr_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hu.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hu_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hu_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/hu_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/id.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/id_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/id_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/id_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/it.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/it_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/it_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/it_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ja.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ja_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ja_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ja_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/kn.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/kn_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/kn_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/kn_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ko.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ko_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ko_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ko_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lt.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lt_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lt_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lt_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lv.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lv_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lv_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/lv_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ml.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ml_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ml_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ml_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/mr.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/mr_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/mr_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/mr_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ms.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ms_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ms_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ms_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nb.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nb_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nb_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nb_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nl.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nl_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nl_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/nl_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pl.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pl_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pl_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pl_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-BR.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-BR_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-BR_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-BR_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-PT.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-PT_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-PT_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/pt-PT_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ro.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ro_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ro_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ro_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ru.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ru_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ru_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ru_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sk.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sk_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sk_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sk_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sl.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sl_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sl_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sl_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sr.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sr_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sr_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sr_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sv.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sv_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sv_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sv_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sw.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sw_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sw_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/sw_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ta.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ta_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ta_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ta_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/te.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/te_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/te_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/te_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/th.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/th_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/th_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/th_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/tr.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/tr_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/tr_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/tr_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/uk.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/uk_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/uk_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/uk_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ur.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ur_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ur_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/ur_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/vi.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/vi_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/vi_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/vi_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-CN.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-CN_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-CN_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-CN_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-TW.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-TW_FEMININE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-TW_MASCULINE.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/locales/zh-TW_NEUTER.pak
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/lib/ff-player-native/resources.pak
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/PPMori-Bold.ttf
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/PPMori-BoldItalic.ttf
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/PPMori-Regular.ttf
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/PPMori-BoldItalic.woff
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/README.md
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/PPMori-Regular.woff
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/fonts/PPMori-Bold.woff
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/renderer.js
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/index.html
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/model-viewer.min.js
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/draco
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/draco/draco_decoder.js
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/draco/draco_decoder.wasm
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/draco/draco_wasm_wrapper.js
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/basis
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/basis/basis_transcoder.wasm
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/basis/basis_transcoder.js
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/setup-artwork
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/setup-artwork/artwork-1.js
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/setup-artwork/index.html
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/setup-artwork/provenance.json
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/setup-artwork/artwork-0.js
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/renderers/setup-artwork/p5.min.js
+-- Up-to-date: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/CEF.txt
+-- Installing: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/model-viewer.txt
+-- Installing: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/draco-LICENSE
+-- Installing: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/basis-LICENSE
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/dependencies.json
+-- Installing: /home/feralfile/ff-native-stage/usr/share/licenses/ff-player-native/color-name.txt
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/protocol/schema.json
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/protocol/README.md
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/tools/migrate-legacy.py
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/tools/legacy-export.mjs
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/tools/playerctl.py
+-- Installing: /home/feralfile/ff-native-stage/usr/share/ff-player-native/tools/diagnostic-cdp.mjs

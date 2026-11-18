@@ -17,7 +17,7 @@ The host spawns one worker for one occurrence through `posix_spawn`, passing a p
 
 The worker renders into an EGL texture and exports its DMA-BUF planes. It completes producer GPU work before sending the descriptors. The host imports the buffer, makes a GPU copy into its owned texture, completes that copy, and acknowledges the sequence before the worker can overwrite it. A separate `presented` acknowledgement follows the host swap; the copy acknowledgement is not presentation evidence. The packet cap is 64 KiB, at most four descriptors, and one frame may be outstanding. Pixel data is never carried over IPC. `glFinish` currently provides conservative synchronization; its pacing cost must be measured before replacing it with explicit native fences.
 
-The worker has no playback database and cannot change the playlist. Decoder exit/hang becomes an occurrence-scoped host failure. Whole-GPU or host failures still require watchdog/systemd. The worker has a 3 GiB address-space limit. The tested bubblewrap launcher hides the home directory, playback state, control sockets and D-Bus; it exposes only runtime libraries, temporary storage, TLS/font data, Wayland/PulseAudio sockets, GPU nodes and read-only GPU sysfs metadata. The test service contains host and children under a 6 GiB cgroup. The final service limit and capture contention still need qualification. A one-second worker heartbeat bounds a stopped worker to a five-second host-side timeout.
+The worker has no playback database and cannot change the playlist. Decoder exit/hang becomes an occurrence-scoped host failure. Whole-GPU or host failures still require watchdog/systemd. The worker has a 3 GiB address-space limit and four FFmpeg decoding threads. The CPU-count default (up to 16) exhausted address space during 4096-square H.264 software fallback on FF1-SKYZ2E3A; four threads passed the same generated fixture without increasing the limit. This bounds reference-frame/thread allocation but can reduce peak software decoding throughput; sustained fallback frame pacing remains unqualified. The tested bubblewrap launcher hides the home directory, playback state, control sockets and D-Bus; it exposes only runtime libraries, temporary storage, TLS/font data, Wayland/PulseAudio sockets, GPU nodes and read-only GPU sysfs metadata. The test service contains host and children under a 6 GiB cgroup. The final service limit and capture contention still need qualification. A one-second worker heartbeat bounds a stopped worker to a five-second host-side timeout.
 
 ## Semantics and fidelity checks
 
@@ -29,3 +29,16 @@ The worker has no playback database and cannot change the playlist. Decoder exit
 - Preserve the FFOS VCN 3.1.1 H.264 cap of 4096×4080. Test 4096×4096 H.264 explicitly; the kernel workaround is independent of which player library uses VA-API.
 
 Software artworks keep their original documents and headers. This backend does not intercept or replace video elements inside arbitrary artist pages. That browser capability must be tested independently and may still require a codec-enabled CEF build.
+
+
+Generate the full device fixture set before running the media suite:
+
+```sh
+python3 tools/make-media-fixtures.py /tmp/ff-native-media-fixtures
+```
+
+Copy that directory's contents alongside `tests/media-h264-aac.mp4` on the
+test device, then serve it with `tools/test-media-server.py`. The generated
+manifest records the installed FFmpeg CLI version, arguments and SHA-256 hashes;
+encoding need not happen on the constrained FF1. The runtime uses the pinned
+private decoder libraries, independently of the fixture encoder.

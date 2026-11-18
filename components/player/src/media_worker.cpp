@@ -56,6 +56,10 @@ class Worker {
     for(auto [key,value]:{std::pair{"config","no"},{"input-default-bindings","no"},
         {"input-vo-keyboard","no"},{"input-terminal","no"},{"terminal","no"},{"osd-level","0"},
         {"vo","libmpv"},{"hwdec","auto-safe"},{"idle","yes"},{"keep-open","no"},{"audio-display","no"},{"force-window","no"},
+        // FFmpeg's CPU-count default retains many full-size reference frames.
+        // Bound fallback decoding before the worker's address-space ceiling,
+        // especially for 4096-square H.264 outside this GPU's VA-API limits.
+        {"vd-lavc-threads","4"},
         {"demuxer-max-bytes","64MiB"},{"demuxer-max-back-bytes","16MiB"},{"cache-on-disk","no"},
         {"tls-verify","yes"},{"network-timeout","15"},{"load-unsafe-playlists","no"},{"sub-auto","no"},{"audio-file-auto","no"},
         {"demuxer-lavf-o","protocol_whitelist=[http,https,tcp,tls,crypto,data]"}})option(player_,key,value);

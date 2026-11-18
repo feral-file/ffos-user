@@ -118,3 +118,14 @@ not success on screen. Backend configuration/frame acknowledgment must precede
 a new composition status. Test stale/same-URL selections, no-op acceptance,
 restart, writer failures, per-axis percentages, actual matte pixels and paused
 media settings. Do not activate partial controls before this contract is wired.
+
+
+Device continuity, 2026-11-18: homelab became unreachable during an uninstalled
+rebuild. Anh explicitly reassigned testing to FF1-SKYZ2E3A, discovered at
+192.168.31.52 (CLI alias office). Signed wakeNow and panel VCP D6=01 confirmed
+awake intent/panel power. This device has 7 GiB RAM and a 3840x2160/60Hz output;
+build scope is limited to 3 GiB, two compiler jobs, and two CPU cores. Retain
+its existing kiosk/services and one-shot live API storage export for rollback.
+A separate native preview state imports that export without touching live
+browser database files. Do not describe this preview as normal phone-control
+activation: the full consumer migration listed above remains required.

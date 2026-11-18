@@ -194,5 +194,20 @@ captured/submitted textures. Fresh-context `review_display_control_final` found
 Moderate F3: overlay-covered configuration updates still promoted that retained
 texture without recording composition. Fixed by holding the last composed
 frame/geometry during covered changes; same-configuration animation continues.
-Its verdict was revise. Final Linux/device verification and review of F3's fix
-remain pending; the previous device passes do not verify these later fixes.
+Its verdict was revise. Fresh-context `review_display_retention` reviewed the
+full updated increment and surrounding code, independently reran 11 macOS CTest
+groups and Go playerlink/status tests, and returned accept with no material
+findings. Final FF1 runtime, GPU pacing/memory and full migration remain outside
+that review's evidence.
+
+
+## FF1-SKYZ2E3A media/device increment, 2026-11-18
+
+Human change owner: Anh. Review surface: local. Fresh-context
+`review_office_media` inspected the full current increment and surrounding media
+path, four-thread bound, fixture generator, and viewport-independent checks.
+Verdict: accept, no material findings. It independently checked whitespace,
+JavaScript syntax and Python parsing; device evidence was inspected, not rerun.
+The stale in-progress verification paragraph was corrected after device runs
+finished. Software fallback startup/import is demonstrated, not sustained
+throughput. Full controller/session/watchdog migration remains incomplete.

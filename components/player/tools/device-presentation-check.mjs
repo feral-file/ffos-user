@@ -16,7 +16,7 @@ async function capture(name) {
  const remote='/home/feralfile/ff-native-evidence/presentation-'+name+'.png',local=path.join(output,name+'.png');
  await run('ssh',[...flags,host,`XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 grim ${remote}`]);
  await run('scp',['-O',...flags,host+':'+remote,local]);
- const {stdout}=await run('python3',['-c','from PIL import Image; import sys,json; im=Image.open(sys.argv[1]).convert("RGB"); print(json.dumps({"pointer":im.getpixel((400,400)),"label":im.getpixel((20,1900)),"size":im.size}))',local]);
+ const {stdout}=await run('python3',['-c','from PIL import Image; import sys,json; im=Image.open(sys.argv[1]).convert("RGB"); print(json.dumps({"pointer":im.getpixel((400,400)),"label":im.getpixel((20,im.height-20)),"size":im.size}))',local]);
  return JSON.parse(stdout);
 }
 const background=[17,34,51],white=[255,255,255];

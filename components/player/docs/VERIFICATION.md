@@ -372,3 +372,29 @@ FF1-SKYZ2E3A (192.168.31.52) instead; SSH and signed wakeNow succeeded, with
 currentState/overrideState awake. Final Linux build/device checks are pending.
 The original installed kiosk/services are preserved. Normal command/session/
 watchdog migration still prevents declaring a complete installed replacement.
+
+
+FF1-SKYZ2E3A continuation: 14 Linux CTest groups passed on source 69fddedd
+with the pinned CEF and private codec libraries. Clean Linux CI 44221971963
+also passed. At 3840x2160/60 Hz, display controls (including review fixes),
+12 setup state checks, three exact compositor QR decodes, static cursor/label
+expiry, five native input checks, EXIF/GIF/alpha pixels and three GLB/decoder/
+interaction checks passed. A one-shot original state export imported into
+`.state/native-office-preview`; no original browser database was changed.
+
+The newly generated 4096-square H.264 fixture exposed a decoder crash after
+VA-API rejected the dimensions. Host and socket survived. This was outside the
+previous core/CI coverage. A four-thread software decode bound passed the same fixture, followed by all
+13 media checks and 14 Linux CTest groups. The 65-second covered-video
+regression also passed. Startup/import is verified; sustained large-video
+fallback throughput, pacing and physical output remain unqualified. The new
+fixture generator records its FFmpeg version, commands and hashes, so this
+regression no longer depends on files generated only on homelab.
+
+
+Transparent Grit at 4K passed two same-URL occurrence cycles with changing Cage
+compositor captures and 127 native control requests (median 130.39 ms, p95
+405.28 ms, maximum 779.07 ms). Capture review shows the work and native
+artist/title/exhibition panel. This is a responsiveness regression, not a
+matched-seed/engine Chrome benchmark or physical scanout evidence. Retained
+evidence is in `evidence/office-20261118`, including a SHA-256 manifest.

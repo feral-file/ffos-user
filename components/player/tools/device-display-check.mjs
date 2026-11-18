@@ -37,8 +37,10 @@ try{
  await assert.rejects(c.call('presentation.set',{occurrence:retired,display:{margin:200}}),e=>e.code==='stale_occurrence');
  evidence.checks.push('same URL replacement resets preview and rejects delayed prior-occurrence write');
  s=await cast('media-h264-aac.mp4',{autoPlay:false,loop:true});
+ s=await waitFor(x=>x.presented?.id===s.presented.id&&x.media?.surfaceWidth>0&&x.media?.surfaceHeight>0);
+ const [width,height]=[s.media.surfaceWidth,s.media.surfaceHeight];
  s=await preview(s,{margin:'10%',background:'#008000',scaling:'fill'});
- s=await waitFor(x=>x.media?.pause===true&&x.media.surfaceWidth===1536&&x.media.surfaceHeight===1536);
+ s=await waitFor(x=>x.media?.pause===true&&x.media.surfaceWidth===width-2*Math.floor(width/10)&&x.media.surfaceHeight===height-2*Math.floor(height/10));
  assert.equal(s.composition.display.scaling,'fill');assert.deepEqual((await capture('paused-video'))[0],[0,128,0]);
  evidence.checks.push('paused video applies resize/scaling/color and emits a new configured frame without resuming');
  s=await preview(s,{margin:'10%'});
