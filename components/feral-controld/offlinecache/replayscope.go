@@ -19,8 +19,15 @@ import (
 // request the kept copy (feral-file/feral-file#3635) — see
 // AttachOnReconnect's doc for why the next SyncPlaylist is too late.
 //
-// Three rules keep it from serving anything the live path would not:
+// Four rules keep it from serving anything the live path would not:
 //
+//   - It is restored only while the device is KNOWN to have no network
+//     (SetOffline). With network present, or with the answer unknown, the
+//     attach arms nothing and scope comes from the next SyncPlaylist, as it
+//     did before this existed. Request matching is by method and URL, so a
+//     scope restored over a page nobody has confirmed could answer another
+//     work's request for a shared script with this capture's old bytes;
+//     with no network there is no live answer for it to displace.
 //   - The file is a hint, the store is the truth. It holds source KEYS
 //     (SourceKey), never URLs, and restore re-reads every record through the
 //     same scopeFor a live sync uses. A cleared item's record is gone, so it
@@ -56,9 +63,24 @@ func (k *kioskReplay) scopePath() string {
 	return filepath.Join(root, replayScopeFileName)
 }
 
+// SetOffline wires the no-network signal restore is gated on. offline must
+// answer from memory (no probe, no I/O: it runs on the CDP connect path)
+// and return true only when the device is known to have no network; unknown
+// is false. Never set, nothing is ever restored. Not on the KioskReplay
+// interface (main.go type-asserts it), so its mocks stay as they are.
+func (k *kioskReplay) SetOffline(offline func() bool) { k.offline.Store(&offline) }
+
+func (k *kioskReplay) knownOffline() bool {
+	offline := k.offline.Load()
+	return offline != nil && *offline != nil && (*offline)()
+}
+
 // rememberScope records the scope a successful SyncPlaylist just applied.
 // An empty scope removes the file: cleared scope, nothing to restore.
-// Best-effort: a failed write costs only the next boot's head start.
+// Best-effort: a failed write costs only the next boot's head start. Both
+// the write and the removal are synced to disk, file then directory: these
+// devices lose power without warning, and a scope that vanished with the
+// page cache would bring back the very failure this exists to fix.
 func (k *kioskReplay) rememberScope(cachedSources []string) {
 	path := k.scopePath()
 	if path == "" {
@@ -79,6 +101,8 @@ func (k *kioskReplay) rememberScope(cachedSources []string) {
 	if len(keys) == 0 {
 		if err = os.Remove(path); errors.Is(err, fs.ErrNotExist) {
 			err = nil
+		} else if err == nil {
+			err = syncDir(filepath.Dir(path))
 		}
 	} else {
 		err = writeReplayScope(path, keys)
@@ -91,8 +115,9 @@ func (k *kioskReplay) rememberScope(cachedSources []string) {
 	k.scopeSaved, k.savedScope = true, joined
 }
 
-// writeReplayScope replaces the file through a temp file and rename, so a
-// crash mid-write leaves the previous scope or none, never a torn one.
+// writeReplayScope replaces the file through a synced temp file, a rename
+// and a directory sync, so a crash or power loss leaves the previous scope
+// or this one, never a torn one.
 func writeReplayScope(path string, keys []string) error {
 	data, err := json.Marshal(replayScopeFile{SourceKeys: keys})
 	if err != nil {
@@ -108,6 +133,11 @@ func writeReplayScope(path string, keys []string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
@@ -116,7 +146,29 @@ func writeReplayScope(path string, keys []string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	return nil
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir fsyncs a directory so a rename or unlink within it is durable.
+func syncDir(path string) error {
+	dir, err := os.Open(path) //nolint:gosec // G304: the cache root, parent of the fixed scope file.
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
+}
+
+// restorableSources is what an attach may re-arm: nothing unless the device
+// is known to have no network, else the remembered sources still cached.
+func (k *kioskReplay) restorableSources() []string {
+	if !k.knownOffline() {
+		return nil
+	}
+	return k.rememberedSources()
 }
 
 // rememberedSources returns the remembered sources replay can still serve
@@ -169,7 +221,7 @@ func (k *kioskReplay) restoreScope(ctx context.Context) {
 	}
 	defer k.playbackMu.Unlock()
 
-	cached := k.rememberedSources()
+	cached := k.restorableSources()
 	if len(cached) == 0 {
 		return
 	}

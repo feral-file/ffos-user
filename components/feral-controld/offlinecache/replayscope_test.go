@@ -36,7 +36,14 @@ type bootedKiosk struct {
 	logs *observer.ObservedLogs
 }
 
+// bootKiosk boots with the device known to have no network, the one case
+// the remembered scope is restored for.
 func bootKiosk(t *testing.T, store offlinecache.Store) *bootedKiosk {
+	t.Helper()
+	return bootKioskWithSignal(t, store, func() bool { return true })
+}
+
+func bootKioskWithSignal(t *testing.T, store offlinecache.Store, offline func() bool) *bootedKiosk {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	t.Cleanup(ctrl.Finish)
@@ -63,7 +70,17 @@ func bootKiosk(t *testing.T, store offlinecache.Store) *bootedKiosk {
 		constants.WEBAPP_URL, wrapper.NewJSON(), logger)
 	kr := offlinecache.NewKioskReplay(replayer, store, "http://127.0.0.1:9222",
 		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), logger)
+	if offline != nil {
+		setOffline(t, kr, offline)
+	}
 	return &bootedKiosk{kr: kr, conn: conn, logs: logs}
+}
+
+func setOffline(t *testing.T, kr offlinecache.KioskReplay, offline func() bool) {
+	t.Helper()
+	sink, ok := kr.(interface{ SetOffline(func() bool) })
+	require.True(t, ok, "kiosk replay takes the no-network signal")
+	sink.SetOffline(offline)
 }
 
 // attach runs AttachOnReconnect against the scripted peer and returns the
@@ -340,6 +357,30 @@ func TestBootstrapCore_LazyKioskReplayRestoresRememberedScopeAtStart(t *testing.
 	// The next start: nothing armed in this process yet.
 	secondDials := 0
 	second := newCore(&secondDials)
+	setOffline(t, second.KioskReplay, func() bool { return true })
 	require.NoError(t, second.KioskReplay.AttachOnReconnect(context.Background()))
 	assert.Equal(t, 1, secondDials, "a remembered scope makes the lazy replay attach at start")
+}
+
+// TestKioskReplay_AttachOnReconnect_NetworkPresentRestoresNothing is the
+// shared-URL sequence: playlist A is remembered with an old capture of a
+// URL that uncached playlist B also requests. With network present the
+// attach must arm nothing, so B's request reaches the live origin exactly
+// as it did before the remembered scope existed; a restored scope would
+// have answered it with A's old bytes.
+func TestKioskReplay_AttachOnReconnect_NetworkPresentRestoresNothing(t *testing.T) {
+	for name, signal := range map[string]func() bool{
+		"online":          func() bool { return false },
+		"no signal wired": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			shared := seedItem(t, store, "playlist-a-shared-script", "old bytes")
+			rememberScope(t, store, shared.URL)
+
+			b := bootKioskWithSignal(t, store, signal)
+			assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1),
+				"Fetch is never enabled, so no request can be answered from the remembered scope")
+		})
+	}
 }

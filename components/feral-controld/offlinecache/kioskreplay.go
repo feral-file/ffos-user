@@ -44,7 +44,8 @@ type KioskReplay interface {
 	// AttachOnReconnect dials a fresh event-driven CDP session to the
 	// kiosk, re-registers Replayer's Fetch.requestPaused handler on the
 	// top-level page target, re-arms the scope the last successful
-	// SyncPlaylist left on disk (see replayscope.go), and enables
+	// SyncPlaylist left on disk when the device is known to have no
+	// network (see replayscope.go), and enables
 	// flat-mode auto-attach so the page's cross-origin child iframe
 	// targets are intercepted too (see kiosktargets.go). Call from
 	// cdp.CDP's onConnect hook.
@@ -156,6 +157,9 @@ type kioskReplay struct {
 	scopeMu    sync.Mutex
 	scopeSaved bool
 	savedScope string
+	// offline is the no-network signal restoreScope is gated on — see
+	// SetOffline. Nil until wired, which reads as "not known offline".
+	offline atomic.Pointer[func() bool]
 }
 
 // NewKioskReplay constructs a KioskReplay. endpoint is the kiosk
@@ -194,10 +198,11 @@ func NewKioskReplay(
 // through the same cdp.CDP reconnect loop), so both the handler
 // registration and the scope must be redone after every reconnect.
 //
-// The scope it re-arms is the one the last successful SyncPlaylist left on
-// disk (restoreScope, replayscope.go), applied as a MIXED scope so a miss
-// passes through. Waiting for the next SyncPlaylist instead — the old
-// behavior — left the kept copy unavailable exactly when it is the only
+// While the device is known to have no network (SetOffline), it also
+// re-arms the scope the last successful SyncPlaylist left on disk
+// (restoreScope, replayscope.go), applied as a MIXED scope so a miss
+// passes through. With network present it arms nothing, as before.
+// Waiting for the next SyncPlaylist instead — the old behavior — left the kept copy unavailable exactly when it is the only
 // copy: after a boot with no network the player restores its last playlist
 // and loads it at once, and the scope sync that follows needs a hydrated
 // page and a refresher pass, so the first load failed and the kept work
@@ -217,13 +222,13 @@ func NewKioskReplay(
 //
 // A lazy kiosk replay (BootstrapCore with the offline cache feature off,
 // where replay exists only for onchfs works) does nothing here until a
-// non-empty scope has been applied once in this process or is remembered
-// from the last one: a device that never shows an onchfs work never holds
+// non-empty scope has been applied once in this process or, with no
+// network, is remembered from the last one: a device that never shows an onchfs work never holds
 // a socket to the kiosk for it. The first such scope dials on demand
 // (SyncPlaylist's redial), and every reconnect after that re-attaches as
 // usual.
 func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
-	if k.lazy && !k.armed.Load() && len(k.rememberedSources()) == 0 {
+	if k.lazy && !k.armed.Load() && len(k.restorableSources()) == 0 {
 		return nil
 	}
 	return k.dialAndAttach(ctx, k.restoreScope)

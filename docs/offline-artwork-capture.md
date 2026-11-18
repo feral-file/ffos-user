@@ -1893,21 +1893,31 @@ offline-safe and never reaches an attacker-controlled host.
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
 
-It also re-arms the **remembered scope** (`replayscope.go`,
-feral-file/feral-file#3635). Every successful `SyncPlaylist` writes the
+While the device is known to have no internet it also re-arms the
+**remembered scope** (`replayscope.go`, feral-file/feral-file#3635). Every successful `SyncPlaylist` writes the
 source keys of the cached sources it armed to `replay-scope.json` at the
 cache root (an empty scope removes the file), and `AttachOnReconnect`
 applies that set as soon as the new session is attached, before anything
 has asked the player what it is showing. Without it, a device booted with
 no network failed the player's first load of its restored playlist: the
 scope sync needs a hydrated page and a refresher pass, so the kept work
-appeared only on a later player retry. Three rules bound it:
+appeared only on a later player retry. Four rules bound it:
 
+- It is restored only while sys-monitord's internet verdict is **known
+  offline** (`internetVerdict` in `main.go`: the startup connectivity read,
+  then every verdict the mediator applies). With internet, or with no
+  answer yet, the attach arms nothing and scope comes from the next
+  `SyncPlaylist`, exactly as before. Request matching is by method and
+  URL, so a scope restored over an unconfirmed page could answer another
+  work's request for a shared script with this capture's old bytes. A unit
+  on a network with no internet restores too: the verdict is reachability,
+  not link.
 - The file is a hint and the store is the truth. It holds source keys,
   never URLs, and restore resolves each through `LoadItem` and the same
   `scopeFor` a live sync uses, so a cleared item is never restored, across
   a reboot too. A missing, corrupt or oversized file restores nothing and
-  never fails the attach.
+  never fails the attach. Writes and removals are fsynced, file then
+  directory, so the scope survives a pulled plug.
 - A restored scope is always **mixed**: a miss passes through even under
   `fail_closed`, because nothing has yet confirmed what the reloaded page
   shows. Cached sources are served from the cache, as they are once the
