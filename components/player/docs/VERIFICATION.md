@@ -518,7 +518,26 @@ checks. A read-only Go check against the awake native preview passed
 (`controller-status.log`). Full Go tests, vet and changed-diff lint passed.
 This does not activate normal casts or the remaining session/watchdog consumers.
 CI 44233238684 for 14de02c8 was superseded/cancelled by the next push, not passed;
-087fa4df's cumulative native build is tracked by run 44234362555.
+087fa4df's cumulative native build passed in run 44234362555. The direct-status
+Go-only change does not trigger the player build workflow; its Go checks ran locally.
 
 The direct-status fresh-context review found no material findings
 (`Verdict: accept`); commandrouter/status race tests also passed.
+
+
+## 2026-11-18: native history adapter
+
+Public history and the internal replay lookup now read native host records.
+Tests cover same-URL occurrence identity, inactive records after restart,
+inline metadata/artist/thumbnail projection, byte limits and source privacy,
+empty/incomplete/unavailable/malformed responses, mismatched lookup identity,
+and replay through the existing content-context/policy/source pipeline.
+Full controld tests, commandrouter/playerlink race tests, vet and changed-diff
+lint passed. A read-only Go check against the awake FF1-SKYZ2E3A preview returned 100 bounded records with
+incomplete=false; lookup returned the requested retained record without
+casting or changing playback. Evidence: `office-pacing-20261118/controller-history.log`.
+The remaining cast/session/watchdog migration still blocks full-daemon activation.
+
+The initial history review found Moderate F1 in the active-occurrence flag;
+fixed and covered null/unrecorded occurrences. Fresh-context final review:
+Verdict: accept. No partial controld binary was installed on the device.

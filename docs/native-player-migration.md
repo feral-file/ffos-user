@@ -2,8 +2,9 @@
 
 This development branch is a coordinated rewrite with the sibling
 `components/player` source tree. **Do not deploy this controld independently.**
-Status and setup narration now use the native host, while the remaining command, playback
-refresh, session and watchdog consumers are still being migrated. There is no
+Status, setup narration, input, playback controls and history now use the native
+host, while cast, playlist refresh, session and watchdog consumers are still being
+migrated. There is no
 automatic CDP fallback in the new transport. Activation must wait for the full
 consumer migration and matching FFOS session/package changes.
 
@@ -140,3 +141,23 @@ legacy signature slot is not consulted. Raw outcome/history rings never cross
 this status boundary. The old untyped document-response forwarding and its
 annotation helpers are removed; both LAN and legacy relayer egress are tested
 with real adapters, including explicit host-unavailable/unknown-mutation replies.
+
+
+## Recently played cutover
+
+`getRecentlyPlayed` reads `history.list` atomically, including the active presented
+occurrence. Retained same-URL entries remain distinct; restart retains the list
+without inventing an active showing. `activeOccurrenceKnown` is true only for
+a presented ID found in retained history, preserving phone polling through
+restart or failed history writes. The controller reply preserves its bounded
+label allowlist, inline-manifest metadata precedence and sanitized thumbnail
+URLs. Full items, defaults, sources and context stay device-local. Empty history,
+incomplete recording, malformed responses and unavailable/unsupported host
+operations remain distinct.
+
+`playRecentlyPlayed` resolves only the opaque record ID through `history.resolve`.
+The resolved item, applicable defaults and recorded content context re-enter the
+normal `displayPlaylist` admission/source pipeline, with no playlist signature
+copied from the original cast. No browser resolver or fallback remains. The
+subsequent cast is still part of the unfinished cast-transport migration; this
+change does not make the daemon deployable by itself.

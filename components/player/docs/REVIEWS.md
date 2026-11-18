@@ -238,3 +238,16 @@ reviewed the full updated increment, traced ownership/fences/cleanup/geometry,
 inspected FF1 evidence and independently passed focused Go tests and diff checks.
 Verdict: accept, no material findings. Full-daemon activation and physical
 scanout remain outside this evidence.
+
+
+## Native history increment, 2026-11-18
+
+Human change owner: Anh. Fresh-context `review_native_history` returned revise
+with Moderate F1: hardcoding activeOccurrenceKnown true stopped the phone's
+polling after restart and could claim a retained showing after a failed history
+write. Fixed the flag to require a presented ID matching retained history;
+added null-active and unrecorded-active regression tests. Fresh-context
+`review_native_history_final` reviewed the complete updated increment and its
+public/mobile and replay callers, independently passed commandrouter/playerlink
+tests and diff checks, and inspected the FF1 read-only evidence. Verdict: accept,
+no material findings. Normal cast/session/watchdog activation remains incomplete.

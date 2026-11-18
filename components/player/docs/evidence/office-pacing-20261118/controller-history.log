@@ -1,0 +1,8 @@
+=== RUN   TestNativeHistoryDevice
+    native_history_test.go:186: native history: 100 bounded records, incomplete=false
+--- PASS: TestNativeHistoryDevice (0.06s)
+=== RUN   TestNativeStatusDevice
+    native_status_test.go:39: native status responsive; occurrence=59f4c7e2-a613-40c8-ab65-498b401c4bc2 composition=18 generation=1
+--- PASS: TestNativeStatusDevice (0.07s)
+PASS
+ok  	github.com/feral-file/ffos-user/components/feral-controld/commandrouter	0.560s

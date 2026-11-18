@@ -24,6 +24,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -137,17 +138,7 @@ func TestPlayRecentlyPlayedPreservesTheRecordedContentContext(t *testing.T) {
 	poller.EXPECT().ForceRefresh().Times(1)
 
 	var displayExpression string
-	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, params map[string]interface{}) (interface{}, error) {
-			require.Contains(t, params["expression"].(string), "resolveRecentlyPlayed")
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok",
-				"contentContext": "personal",
-				"item": map[string]interface{}{
-					"id": "retained", "source": "https://example.test/retained", "contentRating": "mature",
-				},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, h, "rp-7", map[string]any{"id": "retained", "source": "https://example.test/retained", "contentRating": "mature"}, "personal")
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			displayExpression = params["expression"].(string)
@@ -172,14 +163,7 @@ func TestPlayRecentlyPlayedIgnoresAnUnrecognizedRecordedContext(t *testing.T) {
 	poller.EXPECT().ForceRefresh().Times(1)
 
 	var displayExpression string
-	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, _ map[string]interface{}) (interface{}, error) {
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok",
-				"contentContext": "not-a-context",
-				"item":           map[string]interface{}{"id": "retained", "source": "https://example.test/retained"},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, h, "rp-8", map[string]any{"id": "retained", "source": "https://example.test/retained"}, "not-a-context")
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			displayExpression = params["expression"].(string)
@@ -1204,13 +1188,7 @@ func TestPlayRecentlyPlayedBoundsThePlayerAcknowledgement(t *testing.T) {
 	poller.EXPECT().ForceRefresh().Times(1)
 
 	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
-	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, _ map[string]interface{}) (interface{}, error) {
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok",
-				"item": map[string]interface{}{"id": "retained", "source": signed},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, h, "rp-9", map[string]any{"id": "retained", "source": signed}, "curated")
 	// The player echoes the whole request back in its acknowledgement.
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, _ map[string]interface{}) (interface{}, error) {
@@ -1246,18 +1224,11 @@ func TestPlayRecentlyPlayedBoundsThePlayerAcknowledgement(t *testing.T) {
 // failure naming or echoing the record escaped the same boundary the success
 // path is bounded for.
 func TestPlayRecentlyPlayedBoundsAFailedResolve(t *testing.T) {
-	h, player, _ := newPolicyHandler(t)
+	h, _, _ := newPolicyHandler(t)
 	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
 
 	// No second Send: a failed resolve never reaches displayPlaylist.
-	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, _ map[string]interface{}) (interface{}, error) {
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": false, "status": "error",
-				"error": "record source unreachable: " + signed,
-				"item":  map[string]interface{}{"id": "retained", "source": signed},
-			}}, nil
-		}).Times(1)
+	commandrouter.SetNativeControls(h, &historyPlayer{err: &playerlink.RemoteError{Code: "not_found", Message: "record source unreachable: " + signed}})
 
 	result, err := h.Process(context.Background(), commands.Command{
 		Type: commands.CMD_PLAY_RECENTLY_PLAYED, Arguments: map[string]any{"recordId": "rp-5"},
@@ -1283,13 +1254,7 @@ func TestPlayRecentlyPlayedSanitizesADisplayError(t *testing.T) {
 	poller.EXPECT().ForceRefresh().AnyTimes()
 
 	const signed = "https://cdn.example/work.html?token=secret&sig=deadbeef"
-	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, _ map[string]interface{}) (interface{}, error) {
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok",
-				"item": map[string]interface{}{"id": "retained", "source": signed},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, h, "rp-11", map[string]any{"id": "retained", "source": signed}, "curated")
 	// The display attempt fails and names the source it could not load.
 	player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, _ map[string]interface{}) (interface{}, error) {

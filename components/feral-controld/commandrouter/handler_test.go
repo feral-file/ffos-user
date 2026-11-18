@@ -963,7 +963,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 }
 
 // A recent-played replay must not become a side channel to CanvasService. The
-// second CDP call below is the ordinary displayPlaylist command, so it keeps
+// cast below is the ordinary displayPlaylist command, so it keeps
 // the scheduler, offline-replay scope, validation and future policy seam that
 // every other cast uses. The controller-only request contains an opaque id;
 // only the device-internal resolver ever sees the retained source.
@@ -987,17 +987,7 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	var displayExpression string
-	mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
-			expr := params["expression"].(string)
-			assert.Contains(t, expr, "resolveRecentlyPlayed")
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok", "item": map[string]interface{}{
-					"id": "retained-work", "source": "https://example.test/retained", "license": "open",
-				},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, handler, "rp-42", map[string]any{"id": "retained-work", "source": "https://example.test/retained", "license": "open"}, "curated")
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {

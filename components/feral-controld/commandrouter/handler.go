@@ -541,15 +541,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	}
 
 	// The player owns the retained, castable DP-1 item; the public history
-	// query deliberately exposes only its bounded label snapshot. Old players
-	// reply with bare ok:false for this unknown command, which is an explicit
-	// unsupported capability rather than a false empty history.
+	// query deliberately exposes only its bounded label snapshot.
 	if commandType == commands.CMD_GET_RECENTLY_PLAYED {
 		// Takes no arguments, and a non-empty request is rejected rather than
 		// forwarded, for the same reason getContentPolicy rejects one: the
 		// storm gate's dedupe key is type+arguments, so junk arguments let one
 		// LAN caller mint unlimited distinct keys and hold a global command
-		// slot each while the serialized CDP request runs (gate.go).
+		// slot each while the host request runs (gate.go).
 		if len(command.Arguments) != 0 {
 			return map[string]interface{}{
 				"ok":     false,
@@ -557,11 +555,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				"error":  "getRecentlyPlayed takes no arguments",
 			}, nil
 		}
-		result, err := h.sendCDPRequest(command)
-		if err != nil {
-			return nil, err
-		}
-		return boundedRecentlyPlayedReply(recentPlayerReply(result)), nil
+		return h.listNativeHistory(ctx), nil
 	}
 	if commandType == commands.CMD_GET_MEDIA_HEALTH {
 		return h.handleGetMediaHealth(ctx, command)
@@ -601,38 +595,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}, nil
 		}
 		recordID, _ := command.Arguments["recordId"].(string)
-		if recordID == "" {
+		if recordID == "" || len(recordID) > 64 {
 			return map[string]interface{}{
 				"ok":     false,
 				"status": "error",
-				"error":  "recordId is required",
+				"error":  "recordId must contain 1..64 bytes",
 			}, nil
 		}
-		resolved, err := h.sendCDPRequest(commands.Command{
-			Type:      commands.CMD_RESOLVE_RECENTLY_PLAYED,
-			Arguments: map[string]interface{}{"recordId": recordID},
-		})
-		if err != nil {
-			return nil, err
+		record, failure := h.resolveNativeHistory(ctx, recordID)
+		if failure != nil {
+			return failure, nil
 		}
-		message := recentPlayerReply(resolved)
-		if !playerresponse.OK(message) {
-			// Bounded for the same reason the success path is: a failed
-			// resolve can name or echo the retained item it could not replay.
-			resolvedMessage, _ := message["message"].(map[string]interface{})
-			if resolvedMessage == nil {
-				resolvedMessage = map[string]interface{}{"ok": false, "status": "error"}
-			}
-			return map[string]interface{}{"message": boundedFailureReply(resolvedMessage)}, nil
-		}
-		playerMessage, ok := message["message"].(map[string]interface{})
-		if !ok {
-			return map[string]interface{}{"ok": false, "status": "error", "error": "invalid recently played reply"}, nil
-		}
-		item, ok := playerMessage["item"].(map[string]interface{})
-		if !ok {
-			return map[string]interface{}{"ok": false, "status": "error", "error": "recently played record has no item"}, nil
-		}
+		item := record.Item
 		title, _ := item["title"].(string)
 		if title == "" {
 			title = "Recently played"
@@ -646,8 +620,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			"title":     title,
 			"items":     []interface{}{item},
 		}
-		if defaults, ok := playerMessage["defaults"].(map[string]interface{}); ok {
-			dp1Call["defaults"] = defaults
+		if record.Defaults != nil {
+			dp1Call["defaults"] = record.Defaults
 		}
 		// The record carries the context the work actually played under. The
 		// replay must re-enter displayPlaylist with that same context, or a
@@ -656,7 +630,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// work it can never put back. An unrecognized stored value falls back
 		// to the strict curated default rather than failing the replay.
 		replayArgs := map[string]interface{}{"dp1_call": dp1Call}
-		if recorded, ok := playerMessage["contentContext"].(string); ok && recorded != "" {
+		if recorded := record.Context; recorded != "" {
 			if normalized, ctxErr := contentpolicy.NormalizeContext(recorded); ctxErr == nil {
 				replayArgs["contentContext"] = string(normalized)
 			} else {
@@ -1855,9 +1829,8 @@ func policyFailure(code string) interface{} {
 	return map[string]interface{}{"ok": false, "error": code}
 }
 
-// policyFailureCode classifies a player reply the same way recentPlayerReply
-// classifies the history commands, so the app can tell "this device cannot do
-// it" from "this device is temporarily out of sync".
+// policyFailureCode distinguishes a missing legacy policy capability from
+// a temporarily out-of-sync player.
 //
 // sendErr is the transport outcome and is decisive: a send that never reached
 // the player says nothing about its capabilities.
@@ -1943,38 +1916,6 @@ func policyAckMatches(result interface{}, want contentpolicy.Policy) bool {
 		return false
 	}
 	return got == want
-}
-
-// recentPlayerReply normalizes the CDP envelope only enough to classify the
-// history capability. No raw DP-1 item is added to the public list response.
-func recentPlayerReply(result interface{}) map[string]interface{} {
-	response, ok := result.(map[string]interface{})
-	if !ok {
-		return map[string]interface{}{"ok": false, "status": "error", "error": "invalid player reply"}
-	}
-	message, ok := response["message"].(map[string]interface{})
-	if !ok {
-		message = response
-		response = map[string]interface{}{"message": message}
-	}
-	if okValue, _ := message["ok"].(bool); !okValue {
-		if _, hasStatus := message["status"]; !hasStatus {
-			if isBareLegacyFailure(message) {
-				// ff-player before #729 has only the generic unknown-command
-				// reply: ok:false and nothing else.
-				message["status"] = "unsupported"
-				message["error"] = "Recently played is not supported by this player"
-			} else {
-				// A modern player that failed and said why. Give it the
-				// explicit error status and KEEP its own error: calling an
-				// evicted or malformed record "unsupported" would tell the app
-				// the device cannot do this at all, when the right answer is a
-				// real, possibly retryable failure.
-				message["status"] = "error"
-			}
-		}
-	}
-	return response
 }
 
 // boundedReplayAck reduces the recursive displayPlaylist acknowledgement to the
@@ -2108,17 +2049,16 @@ func truncateLabel(s string) string {
 // reply is reachable from the unauthenticated LAN hub. Forwarding the player's
 // object verbatim made that contract true only for as long as the player
 // happened to honor it; a daemon that OWNS the shape cannot be widened by a
-// change on the other side of CDP.
+// change in the player.
 //
-// Failures are left to recentPlayerReply, which has already classified them:
-// only ok:true replies are rebuilt here.
+// Failure replies are reduced to their safe explanatory fields as well.
 func boundedRecentlyPlayedReply(response map[string]interface{}) map[string]interface{} {
 	message, ok := response["message"].(map[string]interface{})
 	if !ok {
 		return map[string]interface{}{"message": map[string]interface{}{"ok": false, "status": "error"}}
 	}
 	if okValue, _ := message["ok"].(bool); !okValue {
-		// Failures are rebuilt too. recentPlayerReply only CLASSIFIES them, so
+		// Failures are rebuilt too. A player reply may contain extra fields, so
 		// a modern player's failure could still carry a retained item, record
 		// or diagnostic field — and that is the same signed-URL exposure the
 		// success path is bounded for, on the same unauthenticated LAN API.
