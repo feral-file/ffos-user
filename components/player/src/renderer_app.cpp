@@ -15,7 +15,7 @@ class Emit : public CefV8Handler {
     auto context=CefV8Context::GetCurrentContext();
     if(!context||!bundled(context->GetFrame())||args.empty()||!args[0]->IsString()){exception="Renderer bridge refused";return true;}
     auto kind=args[0]->GetStringValue().ToString();
-    if(kind!="configure"&&kind!="ready"&&kind!="ended"&&kind!="error"){exception="Unknown renderer observation";return true;}
+    if(kind!="configure"&&kind!="configured"&&kind!="ready"&&kind!="ended"&&kind!="error"){exception="Unknown renderer observation";return true;}
     auto message=CefProcessMessage::Create("renderer."+kind);
     if(args.size()>1&&args[1]->IsString())message->GetArgumentList()->SetString(0,args[1]->GetStringValue().ToString().substr(0,512));
     context->GetFrame()->SendProcessMessage(PID_BROWSER,message);return true;

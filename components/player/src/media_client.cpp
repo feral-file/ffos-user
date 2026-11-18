@@ -31,6 +31,7 @@ MediaClient::MediaClient(Playback& playback,Presentation& presentation,Occurrenc
   try{
     auto bounds=presentation_.bounds(occurrence_.display);
     send_media(socket_,{{"method","initialize"},{"source",occurrence_.item["source"]},{"width",bounds.width},{"height",bounds.height},{"display",occurrence_.display},
+      {"displayRevision",occurrence_.display_revision},
       {"paused",playback_.media_paused(id)},
       {"volume",playback_.state()["settings"].value("volume",1.0)},{"muted",playback_.state()["settings"].value("muted",false)}});
   }catch(...){kill(pid_,SIGKILL);retiring.push_back(pid_);close(socket_);throw;}
@@ -40,7 +41,7 @@ MediaClient::~MediaClient(){
   // Do not wait for decoder teardown on the product event loop. No durable
   // data exists in the worker. SIGKILL also bounds a stuck third-party codec.
   if(pid_>0){kill(pid_,SIGKILL);retiring.push_back(pid_);}
-  presentation_.destroy(surface);
+  presentation_.destroy(frames.capture);presentation_.destroy(frames.shown);
 }
 void MediaClient::poll(){
   reap_media_workers();
@@ -63,7 +64,8 @@ void MediaClient::poll(){
         int width=p.at("width").get<int>(),height=p.at("height").get<int>();
         require(width>0&&height>0&&width<=8192&&height<=8192,"media_protocol","Invalid frame size");
         info.extra.coded_size={width,height};info.extra.visible_rect={0,0,width,height};
-        presentation_.accelerated(surface,info);
+        presentation_.accelerated(frames.capture,info);frames.captured();
+        frames.capture.display_revision=p.at("displayRevision").get<uint64_t>();
         received_sequence_=p.at("sequence").get<uint64_t>();
         send_media(socket_,{{"method","ack"},{"sequence",p.at("sequence")}});
         // At most one decoded frame per host swap; don't drain and discard
@@ -74,9 +76,10 @@ void MediaClient::poll(){
       else if(event=="property")status[string_field(p,"name",64)]=p.at("value");
       else require(event=="initialized"||event=="heartbeat","media_protocol","Unexpected media event");
     }
-    ready=loaded_&&surface.frames>0;
+    const auto& surface=frames.latest();
+    ready=loaded_&&surface.frames>0&&surface.display_revision==occurrence_.display_revision;
     require(std::chrono::steady_clock::now()-received_<std::chrono::seconds(5),"media_unresponsive","Media worker stopped responding for 5 seconds");
-    status["workerPid"]=pid_;status["importedFrames"]=surface.frames;
+    status["workerPid"]=pid_;status["importedFrames"]=frames.count;
     status["surfaceWidth"]=surface.width;status["surfaceHeight"]=surface.height;
     status["workerResponsive"]=true;
     playback_.media_status(id,status);
@@ -92,12 +95,12 @@ void MediaClient::fail(const std::string& message){
   playback_.failed(id,message);
 }
 void MediaClient::controls(){
-  if(playback_.desired()&&playback_.desired()->id==id)occurrence_.display=playback_.desired()->display;
-  else if(playback_.visible()&&playback_.visible()->id==id)occurrence_.display=playback_.visible()->display;
+  if(playback_.desired()&&playback_.desired()->id==id){occurrence_.display=playback_.desired()->display;occurrence_.display_revision=playback_.desired()->display_revision;}
+  else if(playback_.visible()&&playback_.visible()->id==id){occurrence_.display=playback_.visible()->display;occurrence_.display_revision=playback_.visible()->display_revision;}
   auto bounds=presentation_.bounds(occurrence_.display);
   Json value={{"method","controls"},{"paused",playback_.media_paused(id)},
     {"volume",playback_.state()["settings"].value("volume",1.0)},{"muted",playback_.state()["settings"].value("muted",false)},
-    {"display",occurrence_.display},{"width",bounds.width},{"height",bounds.height}};
+    {"display",occurrence_.display},{"displayRevision",occurrence_.display_revision},{"width",bounds.width},{"height",bounds.height}};
   auto key=value.dump();if(key!=controls_){send_media(socket_,value);controls_=key;}
 }
 void MediaClient::seek(double seconds){require(!failed_,"media_unavailable","Media worker has failed");send_media(socket_,{{"method","controls"},{"seekSeconds",seconds}});}
@@ -105,7 +108,7 @@ void MediaClient::did_present(){
   if(failed_||received_sequence_==presented_sequence_)return;
   try{
     send_media(socket_,{{"method","presented"},{"sequence",received_sequence_}});
-    presented_sequence_=received_sequence_;
+    presented_sequence_=received_sequence_;frames.submitted();
   }catch(const std::exception& error){fail(error.what());}
 }
 }

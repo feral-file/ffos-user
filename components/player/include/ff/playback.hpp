@@ -23,6 +23,8 @@ struct Occurrence {
   // command generation this identifies outgoing occurrences of this cast.
   std::string cast_id;
   bool frame_available = false; // Host capture evidence, never persisted.
+  Json adjustment = Json::object();
+  uint64_t display_revision = 1;
 };
 
 // Called only on the host event loop. The renderer consumes desired() and
@@ -36,6 +38,7 @@ class Playback {
   void committed(const std::string& occurrence);
   void frame_ready(const std::string& occurrence);
   void presented(const std::string& occurrence);
+  void composed(const std::string& occurrence,uint64_t display_revision);
   void failed(const std::string& occurrence, std::string reason);
   void ended(const std::string& occurrence);
   const std::optional<Occurrence>& desired() const { return selected_; }
@@ -49,6 +52,8 @@ class Playback {
   const std::string& instance() const { return instance_; }
   bool online() const { return online_; }
   Json overlay() const { return overlay_; }
+  const Json& composition() const { return composition_; }
+  bool composition_pending() const { return presented_&&!composition_.is_null()&&composition_.value("occurrence","")==presented_->id&&composed_display_revision_!=presented_->display_revision; }
   const std::string& storage_error() const { return storage_error_; }
   const std::string& recovery_error() const { return recovery_error_; }
   const Json& presentation_failure() const { return presentation_failure_; }
@@ -73,6 +78,9 @@ class Playback {
   std::function<void(const std::string&, double)> seek_;
   Json media_status_ = nullptr;
   Json presentation_failure_ = nullptr;
+  Json composition_ = nullptr;
+  uint64_t composition_revision_ = 0;
+  uint64_t composed_display_revision_ = 0;
   int64_t media_status_at_ = 0;
   std::string storage_error_;
   int64_t storage_retry_at_ = 0;
@@ -90,7 +98,7 @@ class Playback {
   Json update_playlist(const Json& params);
   bool apply_pending_update();
   void update_order(Json& next, int index) const;
-  Json display(const Json& item, const Json& defaults) const;
+  Json display(const Json& item, const Json& defaults, const Json& adjustment = Json::object()) const;
   bool allowed(const Json& item, const Json& state) const;
   void validate_playlist(const Json& playlist) const;
   void validate_state() const;

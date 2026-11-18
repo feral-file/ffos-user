@@ -1,6 +1,7 @@
 #include "ff/playback.hpp"
 #include "ff/input.hpp"
 #include "ff/overlay.hpp"
+#include "ff/display.hpp"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -12,7 +13,7 @@ Json occurrence_json(const std::optional<Occurrence>& occurrence) {
   if (!occurrence) return nullptr;
   const auto& o = *occurrence;
   return {{"id", o.id}, {"generation", o.generation}, {"index", o.index}, {"item", o.item},
-          {"display", o.display}, {"stage", o.stage}, {"error", o.error}, {"navigationCommitted", o.navigation_committed},
+          {"display", o.display}, {"displayRevision",o.display_revision}, {"stage", o.stage}, {"error", o.error}, {"navigationCommitted", o.navigation_committed},
           {"context",o.context},{"exhibition",o.playlist_title},{"curator",o.curator}};
 }
 bool boolean(const Json& p, const char* field) {
@@ -28,6 +29,7 @@ void validate_display(const Json& p){
   for(auto key:{"autoPlay","loop","userOverrides"})if(p.contains(key))require(p[key].is_boolean(),"playlist_invalid","Display flags must be booleans");
   if(p.contains("scaling"))require(p["scaling"]=="fit"||p["scaling"]=="fill"||p["scaling"]=="stretch"||p["scaling"]=="auto","playlist_invalid","Invalid display scaling");
   optional_text(p,"background",64);
+  if(p.contains("background"))display_color(p["background"].get<std::string>());
   if(p.contains("margin")){
     const auto& margin=p["margin"];
     bool valid=margin.is_number()&&margin.get<double>()>=0&&margin.get<double>()<=16384;
@@ -195,8 +197,8 @@ void Playback::validate_playlist(const Json& playlist) const {
     for (auto key : {"override", "inlineManifest", "resolvedManifest"}) if(item.contains(key))validate_layer(item[key]);
   }
 }
-Json Playback::display(const Json& item, const Json& defaults) const {
-  Json result = {{"scaling", state_["settings"].value("scaling", "fit")}, {"margin", 0}, {"background", "#000000"}, {"autoPlay", true}, {"loop", true}, {"userOverrides", true}};
+Json Playback::display(const Json& item, const Json& defaults, const Json& adjustment) const {
+  Json result = {{"scaling", state_["settings"].value("scaling", "fit")}, {"margin", state_["settings"].value("margin",Json(0))}, {"background", state_["settings"].value("background","#000000")}, {"autoPlay", true}, {"loop", true}, {"userOverrides", true}};
   const auto merge = [&](const Json& layer) { if (layer.is_object()) result.update(layer); };
   merge(defaults.value("display", Json::object()));
   merge(item.value("inlineManifest", Json::object()).value("controls", Json::object()).value("display", Json::object()));
@@ -204,6 +206,7 @@ Json Playback::display(const Json& item, const Json& defaults) const {
   merge(item.value("resolvedManifest", Json::object()).value("controls", Json::object()).value("display", Json::object()));
   merge(item.value("override", Json::object()).value("display", Json::object()));
   merge(item.value("display", Json::object()));
+  if(result.value("userOverrides",true))merge(adjustment);
   auto framing=state_["settings"].value("framing","artwork");
   if(result.value("userOverrides",true)&&framing!="artwork")result["scaling"]=framing;
   return result;
@@ -293,7 +296,7 @@ Json Playback::command(std::string_view method, const Json& p) {
   }
   if (method == "input.dispatch") {
     require(p.contains("occurrence") && presented_ && p["occurrence"] == presented_->id, "stale_occurrence", "Input target is not currently presented");
-    require(overlay_.is_null() && state_["sleeping"] == false && (!selected_ || selected_->stage!="failed"), "input_blocked", "Device UI owns focus");
+    require(overlay_.is_null() && state_["sleeping"] == false && (!selected_ || selected_->stage!="failed") && !composition_pending(), "input_blocked", "Device UI or a pending presentation change owns focus");
     require(static_cast<bool>(input_), "unavailable", "No presentation backend");
     auto kind=string_field(p,"kind",32);
     if(kind=="move"){
@@ -321,6 +324,19 @@ Json Playback::command(std::string_view method, const Json& p) {
     auto seconds=p["seconds"].get<double>();require(std::isfinite(seconds)&&seconds>=0&&seconds<=86400000,"invalid_params","Invalid seek position");
     require(bool(seek_),"unavailable","No media backend");seek_(presented_->id,seconds);
     return {{"outcome","accepted"},{"occurrence",presented_->id}};
+  }
+  if(method=="presentation.set"){
+    fields(p,{"occurrence","display"});
+    auto id=string_field(p,"occurrence",64);
+    require(selected_&&presented_&&selected_->id==id&&presented_->id==id&&selected_->stage=="presented","stale_occurrence","Presentation target changed or is still loading");
+    require(selected_->display.value("userOverrides",true),"presentation_locked","Artwork does not allow presentation overrides");
+    require(p.contains("display"),"invalid_params","Missing presentation settings");
+    auto adjustment=p["display"];fields(adjustment,{"scaling","margin","background"});validate_display(adjustment);
+    auto colors=adjustment;colors.erase("margin");validate_settings(colors);
+    selected_->adjustment.update(adjustment);selected_->display=display(selected_->item,selected_->defaults,selected_->adjustment);++selected_->display_revision;
+    presented_->adjustment=selected_->adjustment;presented_->display=selected_->display;presented_->display_revision=selected_->display_revision;
+    ++revision_;
+    return {{"outcome","accepted"},{"generation",generation_},{"revision",revision_},{"occurrence",id},{"acceptedCompositionRevision",composition_revision_}};
   }
   auto next = state_;
   bool reselection = false, generation = false;
@@ -384,8 +400,8 @@ Json Playback::command(std::string_view method, const Json& p) {
   }
   if (method == "playback.pause") autoplay_hold_ = false;
   if (method == "settings.set") {
-    if(selected_)selected_->display=display(selected_->item,selected_->defaults);
-    if(presented_)presented_->display=display(presented_->item,presented_->defaults);
+    if(selected_){selected_->display=display(selected_->item,selected_->defaults,selected_->adjustment);++selected_->display_revision;}
+    if(presented_){presented_->display=display(presented_->item,presented_->defaults,presented_->adjustment);++presented_->display_revision;}
   }
   if (generation) { ++generation_; cast_id_=uuid(); }
   if (reselection) select();
@@ -398,6 +414,7 @@ Json Playback::snapshot() const {
           {"host", "responsive"}, {"renderer", selected_ ? selected_->stage : "absent"},
           {"storage", {{"health",storage_error_.empty()?"available":"write_failed"},{"error",storage_error_}}},
           {"presentationFailure",presentation_failure_},
+          {"composition",presented_&&!composition_.is_null()&&composition_.value("occurrence","")==presented_->id?composition_:Json(nullptr)},
           {"recovery",{{"attempt",recovery_attempt_},{"limit",3},{"pending",recovery_at_!=0},
             {"exhausted",selected_&&selected_->stage=="failed"&&recovery_attempt_==3},
             {"lastError",recovery_error_},{"failedOccurrence",recovery_occurrence_},
@@ -426,6 +443,14 @@ void Playback::committed(const std::string& id) {
 }
 void Playback::frame_ready(const std::string& id) {
   if(selected_&&selected_->id==id&&selected_->stage=="committed")selected_->frame_available=true;
+}
+void Playback::composed(const std::string& id,uint64_t display_revision){
+  // Only the host calls this, after submitting a frame with this configuration.
+  // An old buffer/configuration acknowledgement cannot confirm a later write.
+  if(!presented_||presented_->id!=id||presented_->display_revision!=display_revision)return;
+  if(!composition_.is_null()&&composition_.value("occurrence","")==id&&composed_display_revision_==display_revision)return;
+  composed_display_revision_=display_revision;++composition_revision_;++revision_;
+  composition_={{"occurrence",id},{"revision",composition_revision_},{"displayRevision",display_revision},{"display",presented_->display}};
 }
 void Playback::presented(const std::string& id) {
   if (!selected_ || selected_->id != id || !selected_->navigation_committed || selected_->stage == "failed" || (presented_ && presented_->id == id)) return;

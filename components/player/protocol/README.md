@@ -146,6 +146,7 @@ replay promise.
 | `playback.mode` | `{loop?,shuffle?}`; loop is none, playlist or one; shuffle order is host-owned and durable |
 | `media.seek` | `{occurrence,seconds}`; only the currently presented seekable native media; acceptance is not seek completion |
 | `settings.set` | Saved device settings. Framing is artwork/fit/fill and respects authored userOverrides; full presentation semantics are still under implementation. |
+| `presentation.set` | `{occurrence,display:{scaling?,margin?,background?}}`; ephemeral preview on the currently selected AND presented occurrence; requires `presentation.v1`. A loading replacement or stale occurrence rejects; an artwork with `userOverrides:false` rejects with `presentation_locked`. No implicit target. |
 | `policy.get`, `policy.set` | Query `{}` or set complete version-1 policy flags; controld retains trust and controller policy decisions |
 | `history.list`, `history.resolve` | List retained presented occurrences or resolve `{recordId}`; resolution does not play it |
 | `schedule.set` | `{playlist,context?,atMs}` or `{clear:true}`; one durable scheduled cast, executed by host |
@@ -154,7 +155,54 @@ replay promise.
 | `overlay.set` | `{owner,state,fields?}`; owner setup/pairing/recovery; only matching owner may hide an overlay; focus/input released on show |
 | `input.dispatch` | Occurrence-fenced input; one connection owns held state; disconnect releases it. The host owns pointer coordinates, buttons and physical keys. See the event forms below. |
 
-### Source refresh
+### Presentation configuration and completion
+
+`settings.set` retains durable device fallbacks. Authored DP1 layers override
+fallback scaling/margin/background. An occurrence's transient adjustment sits
+above those layers; explicit device framing applies last when user overrides
+are allowed. A new occurrence, including an adjacent identical URL or recovery,
+clears transient adjustments. A source refresh of a retained occurrence keeps
+its adjustment. Legacy keyless phone writes must resolve an explicit current
+occurrence in controld; this protocol never guesses a target.
+
+`presentation.set` returns `acceptedCompositionRevision`, the last host-composed
+revision before acceptance. Observe a later `composition.revision` for the same
+occurrence and compare its effective display values. Even an unchanged preview
+gets a new configuration revision and completion. A superseding preview may
+coalesce an earlier one; matching a revision floor alone does not prove that
+earlier values were presented. `selected.display`/`presented.display` describe
+requested configuration; `composition.display` describes the last submitted
+configuration. Renderer readiness or receipt acceptance does not advance it.
+
+The host requires a matching renderer configuration and captured frame before
+submitting changed geometry. Bundled renderers acknowledge layout, then the
+host requests another frame; mpv replies to the tagged property operations and
+tags its next exported frame. Software documents receive viewport resize, with
+no injected bridge. Input is released/blocked while an established composition
+is changing, then restored with the new coordinate conversion. No composition
+success is persisted across process restarts. These acknowledgments establish
+host composition, not arbitrary artwork correctness or physical scanout.
+
+Margins are nonnegative pixels or percentages. Percentages use output width
+horizontally and height vertically, matching DP1's vw/vh behavior. Excessive
+padding is clamped to retain a positive renderable viewport. Preview background
+is `#RRGGBB`; preview does not change playback/loop flags, labels or saved state.
+
+Authored backgrounds accept named CSS colors, 3/4/6/8-digit hex, RGB(A)
+numbers/percentages and HSL(A) literals. The host resolves them to opaque sRGB
+over black for every backend; alpha does not reveal another artwork. Contextual
+values (`var()`, `currentColor`, system colors) and other color functions reject
+at playlist admission with `playlist_invalid`. Artist documents are unchanged.
+The color-name 1.1.4 mapping and MIT license are vendored in `third_party/`.
+
+Each renderer retains separate captured and submitted GPU textures. A superseded
+configuration cannot overwrite the frame associated with recorded composition;
+covered configuration changes retain that frame until uncovered. This adds one
+RGBA texture per renderer (about 14.1 MiB at 1920×1920, 31.6 MiB at 3840×2160),
+without an additional copy. Frame pacing and total GPU memory still require
+measurement on the final runtime.
+
+### Source refresh semantics
 
 `playback.update` is fenced to the observed instance/generation like other
 mutations. It only replaces items; playlist metadata/defaults/URL remain the

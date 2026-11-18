@@ -32,7 +32,7 @@ Json Protocol::receive(Connection& connection, const Json& r) {
       connection.client = std::move(client);
       connection.negotiated = true;
       result = {{"version", 1}, {"instance", playback_.instance()}, {"maxFrameBytes", max_frame}, {"receiptWindow", 1024},
-                {"capabilities", {"playback", "playback.update.v1", "settings", "overlays", "overlay.setup.v1", "history", "schedule", "input", "snapshots"}}, {"snapshot", playback_.snapshot()}};
+                {"capabilities", {"playback", "playback.update.v1", "presentation.v1", "settings", "overlays", "overlay.setup.v1", "history", "schedule", "input", "snapshots"}}, {"snapshot", playback_.snapshot()}};
     } else {
       require(connection.negotiated, "not_negotiated", "Send hello first");
       const bool query = method == "state.get" || method == "health.get" || method == "history.list" || method == "history.resolve" || method == "policy.get" || method == "state.subscribe";

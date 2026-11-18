@@ -1,6 +1,8 @@
 #pragma once
 #include "ff/playback.hpp"
 #include "ff/device_ui.hpp"
+#include "ff/display.hpp"
+#include "ff/surface.hpp"
 #include "ff/frame_clock.hpp"
 #include "ff/presentation_feedback.hpp"
 #include "include/cef_render_handler.h"
@@ -12,12 +14,6 @@
 #include <tuple>
 
 namespace ff {
-struct Surface {
-  GLuint texture = 0;
-  int width = 0, height = 0;
-  uint64_t frames = 0;
-  bool accelerated = false;
-};
 // Bounded timing histogram: one millisecond bins, final bin is overflow.
 // Measures host work/submission, never physical display presentation.
 struct FrameTiming {
@@ -27,7 +23,6 @@ struct FrameTiming {
   void add(double milliseconds);
   Json json() const;
 };
-struct Bounds { int x, y, width, height; };
 class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts);

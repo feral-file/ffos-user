@@ -98,7 +98,7 @@ Json Playback::update_playlist(const Json& p) {
     int mapped=match_slot(o.playlist["items"],o.index,items);
     if(mapped<0)return;
     o.index=mapped;o.item=items[mapped];o.playlist=playlist;o.generation=generation_;o.context=context;
-    o.display=display(o.item,o.defaults);
+    o.display=display(o.item,o.defaults,o.adjustment);++o.display_revision;
   };
   if(!defer){
     if(keep){amend(*selected_);if(same_presented&&presented_)amend(*presented_);}

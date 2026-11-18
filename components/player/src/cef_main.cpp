@@ -71,7 +71,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
       auto sync_input=[&]{
         ff::InputGeometry geometry;geometry.width=presentation.width();geometry.height=presentation.height();
         std::string target;
-        if(playback.visible()){
+        if(playback.visible()&&!playback.composition_pending()){
           target=playback.visible()->id;auto bounds=presentation.bounds(playback.visible()->display);
           geometry.left=bounds.x;geometry.top=bounds.y;geometry.view_width=bounds.width;geometry.view_height=bounds.height;
         }
@@ -145,20 +145,38 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         }
         for(auto& [id,client]:media)client->poll();
         ff::Surface* surface=nullptr;std::string commit;
-        if(auto desired=playback.desired();desired){auto it=clients.find(desired->id);if(it!=clients.end()&&it->second->has_ready_frame()&&desired->stage!="failed"){surface=&it->second->surface;commit=desired->id;}}
-        if(auto desired=playback.desired();desired){auto it=media.find(desired->id);if(it!=media.end()&&it->second->ready&&desired->stage!="failed"){surface=&it->second->surface;commit=desired->id;}}
-        if(!surface&&playback.visible()){auto it=clients.find(playback.visible()->id);if(it!=clients.end())surface=&it->second->surface;}
-        if(!surface&&playback.visible()){auto it=media.find(playback.visible()->id);if(it!=media.end())surface=&it->second->surface;}
+        if(auto desired=playback.desired();desired){auto it=clients.find(desired->id);if(it!=clients.end()&&it->second->has_ready_frame()&&desired->stage!="failed"){surface=&it->second->frames.latest();commit=desired->id;}}
+        if(auto desired=playback.desired();desired){auto it=media.find(desired->id);if(it!=media.end()&&it->second->ready&&desired->stage!="failed"){surface=&it->second->frames.latest();commit=desired->id;}}
+        if(!surface&&playback.visible()){auto it=clients.find(playback.visible()->id);if(it!=clients.end())surface=&it->second->frames.latest();}
+        if(!surface&&playback.visible()){auto it=media.find(playback.visible()->id);if(it!=media.end())surface=&it->second->frames.latest();}
         // Presentation identity advances only after a host-owned frame exists.
         // A swap is composition evidence, never proof of artist correctness or HDMI output.
         const auto* drawing = !commit.empty() ? &*playback.desired() : (playback.visible() ? &*playback.visible() : nullptr);
         if(!commit.empty())playback.frame_ready(commit);
-        ff::Surface* backdrop=nullptr;
-        if(auto it=clients.find(backdrop_id);it!=clients.end()&&it->second->has_ready_frame()&&!it->second->decoration_failed)backdrop=&it->second->surface;
+        std::optional<ff::Occurrence> retained_composition;
         float backdrop_opacity=setup_visible?1.f:backdrop_fade_at?std::clamp(1.f-float(now_ms-backdrop_fade_at)/650,0.f,1.f):0.f;
+        bool configuration_ready=drawing&&surface&&surface->display_revision==drawing->display_revision;
+        // Covered changes cannot replace the texture associated with recorded
+        // composition. A later superseding change may need that exact frame
+        // when the overlay disappears before the new configuration is ready.
+        if(drawing&&(!playback.overlay().is_null()||backdrop_opacity>0)&&
+           !playback.composition().is_null()&&playback.composition().value("occurrence","")==drawing->id&&
+           playback.composition().value("displayRevision",uint64_t{0})!=drawing->display_revision)configuration_ready=false;
+        if(drawing&&!configuration_ready&&!playback.composition().is_null()&&playback.composition().value("occurrence","")==drawing->id){
+          if(auto it=clients.find(drawing->id);it!=clients.end())surface=&it->second->frames.shown;
+          else if(auto it=media.find(drawing->id);it!=media.end())surface=&it->second->frames.shown;
+          retained_composition=*drawing;retained_composition->display=playback.composition()["display"];drawing=&*retained_composition;
+        }
+        ff::Surface* backdrop=nullptr;
+        if(auto it=clients.find(backdrop_id);it!=clients.end()&&it->second->has_ready_frame()&&!it->second->decoration_failed)backdrop=&it->second->frames.latest();
         const bool submitted=presentation.draw(surface,drawing,playback,backdrop,backdrop_opacity);
-        if(submitted&&drawing)if(auto it=media.find(drawing->id);it!=media.end())it->second->did_present();
-        if(submitted&&!commit.empty()&&playback.overlay().is_null()&&backdrop_opacity==0)playback.presented(commit);
+        if(submitted&&!commit.empty()&&configuration_ready&&playback.overlay().is_null()&&backdrop_opacity==0)playback.presented(commit);
+        if(submitted&&drawing&&configuration_ready&&playback.overlay().is_null()&&backdrop_opacity==0)playback.composed(drawing->id,surface->display_revision);
+        if(submitted&&drawing&&configuration_ready){
+          if(auto it=clients.find(drawing->id);it!=clients.end())it->second->frames.submitted();
+          if(auto it=media.find(drawing->id);it!=media.end())it->second->did_present();
+        }
+        if(submitted&&backdrop)if(auto it=clients.find(backdrop_id);it!=clients.end())it->second->frames.submitted();
         sync_input();
         for(auto it=clients.begin();it!=clients.end();){
           auto client=it->second;

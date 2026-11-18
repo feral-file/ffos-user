@@ -133,16 +133,7 @@ void Presentation::software(Surface& surface, const void* data, int width, int h
   ++surface.frames; ++cpu_copies_;
 }
 Bounds Presentation::bounds(const Json& display) const {
-  int margin = 0;
-  if (display.contains("margin")) {
-    const auto& m = display["margin"];
-    if (m.is_number()) margin = static_cast<int>(m.get<double>());
-    else if (m.is_string() && m.get<std::string>().ends_with('%')) {
-      try { margin = static_cast<int>(std::stod(m.get<std::string>()) * std::min(width_, height_) / 100.0); } catch (...) {}
-    }
-  }
-  margin = std::clamp(margin, 0, std::min(width_, height_) / 3);
-  return {margin, margin, width_ - 2*margin, height_ - 2*margin};
+  return display_bounds(display,width_,height_);
 }
 void Presentation::quad(GLuint texture, Bounds rect, float opacity) {
   glViewport(rect.x, height_ - rect.y - rect.height, rect.width, rect.height); glUseProgram(program_);
@@ -199,10 +190,15 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
   if (draw_key_ == key || !draw_clock_.due(now)) return false;
   draw_key_ = key;
   require(SDL_GL_MakeCurrent(window_, context_) == 0, "graphics_error", SDL_GetError());
-  glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,width_,height_);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
+  auto background=display_color(occurrence?occurrence->display.value("background","#000000"):"#000000");
+  unsigned rgb=0;
+  if(background.size()==7&&background[0]=='#'&&background.find_first_not_of("0123456789abcdefABCDEF",1)==std::string::npos)
+    rgb=std::stoul(background.substr(1),nullptr,16);
+  glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,width_,height_);glClearColor(((rgb>>16)&255)/255.f,((rgb>>8)&255)/255.f,(rgb&255)/255.f,1);glClear(GL_COLOR_BUFFER_BIT);
   // Device setup can explicitly own the screen while playback sleeps. In its
   // absence sleep is black, including recent cursor and retained error UI.
   if(playback.state()["sleeping"]==true&&playback.overlay().is_null()){
+    glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
     swap(nullptr);return true;
   }
   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);

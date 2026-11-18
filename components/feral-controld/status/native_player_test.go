@@ -145,3 +145,20 @@ func TestPollNativeUnavailableReportsErrorAndStopsPlaybackAccounting(t *testing.
 	p.pollPlayerStatus(context.Background())
 	require.Equal(t, 1, ws.sendAllCalls, "same outage notification is deduplicated")
 }
+
+func TestNativeStatusRetainsComposedSettingsWhilePreviewIsPending(t *testing.T) {
+	s := nativeSnapshot()
+	s.Presented.DisplayRevision = 3
+	s.Presented.Display.Scaling = "fill"
+	s.Presented.Display.Margin = json.RawMessage(`20`)
+	s.Composition = &playerlink.Composition{Occurrence: s.Presented.ID, Revision: 8, DisplayRevision: 2,
+		Display: playerlink.Display{Scaling: "fit", Margin: json.RawMessage(`"10%"`), Background: "#123456"}}
+	got, err := NativePlayerStatus(s)
+	require.NoError(t, err)
+	require.Equal(t, "fit", *got.DeviceSettings.Scaling)
+	require.JSONEq(t, `"10%"`, string(got.DeviceSettings.Margin))
+	require.Equal(t, uint64(8), *got.DeviceSettings.CompositionRevision)
+	s.Composition.Occurrence = "retired"
+	_, err = NativePlayerStatus(s)
+	require.ErrorContains(t, err, "composition identity")
+}

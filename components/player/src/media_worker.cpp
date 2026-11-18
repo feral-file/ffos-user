@@ -1,4 +1,5 @@
 #include "ff/media_ipc.hpp"
+#include "ff/display.hpp"
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 #include <SDL.h>
@@ -11,6 +12,7 @@
 #include <csignal>
 #include <iostream>
 #include <poll.h>
+#include <set>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -22,8 +24,8 @@ void wake(void*) { render_update.store(true); }
 void* resolve_gl(void*, const char* name) { return SDL_GL_GetProcAddress(name); }
 void check(int result, const char* action) { ff::require(result >= 0, "media_backend", std::string(action)+": "+mpv_error_string(result)); }
 void option(mpv_handle* player, const char* name, const char* value) { check(mpv_set_option_string(player,name,value),name); }
-void property(mpv_handle* player, const char* name, const std::string& value) {
-  const char* text = value.c_str(); check(mpv_set_property_async(player,0,name,MPV_FORMAT_STRING,&text),name);
+void property(mpv_handle* player, const char* name, const std::string& value,uint64_t tag=0) {
+  const char* text = value.c_str(); check(mpv_set_property_async(player,tag,name,MPV_FORMAT_STRING,&text),name);
 }
 void command(mpv_handle* player, const std::vector<std::string>& words) {
   std::vector<const char*> args; for (const auto& word:words)args.push_back(word.c_str()); args.push_back(nullptr);
@@ -88,11 +90,18 @@ class Worker {
     if(p.contains("volume"))property(player_,"volume",std::to_string(std::clamp(p.at("volume").get<double>(),0.0,1.0)*100));
     if(p.contains("muted"))property(player_,"mute",p.at("muted").get<bool>()?"yes":"no");
     if(p.contains("seekSeconds"))command(player_,{"seek",std::to_string(p.at("seekSeconds").get<double>()),"absolute+exact"});
-    if(p.contains("display")){
-      auto display=p.at("display");property(player_,"loop-file",display.value("loop",true)?"inf":"no");
+    if(p.contains("display")&&p.value("displayRevision",uint64_t(1))!=requested_display_){
+      requested_display_=p.value("displayRevision",uint64_t(1));
+      auto set=[&](const char* name,const std::string& value){
+        ff::require(configuration_tags_.size()<4096,"media_protocol","Too many pending media configurations");
+        auto tag=++configuration_tag_;configuration_tags_.insert(tag);property(player_,name,value,tag);
+      };
+      auto display=p.at("display");set("loop-file",display.value("loop",true)?"inf":"no");
       auto scaling=display.value("scaling","fit");
-      property(player_,"keepaspect",scaling=="stretch"?"no":"yes");
-      property(player_,"panscan",scaling=="fill"?"1":"0");
+      set("keepaspect",scaling=="stretch"?"no":"yes");
+      set("panscan",scaling=="fill"?"1":"0");
+      auto background=ff::display_color(display.value("background","#000000"));
+      set("background","color");set("background-color",background);
     }
     if(p.contains("width")&&p.contains("height")){
       pending_width_=p.at("width").get<int>();pending_height_=p.at("height").get<int>();
@@ -139,6 +148,9 @@ class Worker {
         }
         if(event->event_id==MPV_EVENT_COMMAND_REPLY||event->event_id==MPV_EVENT_SET_PROPERTY_REPLY)
           if(event->error<0)ff::send_media(channel,{{"event","error"},{"message",mpv_error_string(event->error)}});
+        if(event->event_id==MPV_EVENT_SET_PROPERTY_REPLY&&configuration_tags_.erase(event->reply_userdata)&&configuration_tags_.empty()){
+          display_revision_=requested_display_;configuration_dirty_=true;
+        }
         if(event->event_id==MPV_EVENT_LOG_MESSAGE){auto log=static_cast<mpv_event_log_message*>(event->data);std::cerr<<"mpv "<<log->prefix<<": "<<log->text;}
       }
       // update() must keep servicing mpv's resource requests even while the
@@ -149,7 +161,7 @@ class Worker {
         width_=pending_width_;height_=pending_height_;glBindTexture(GL_TEXTURE_2D,texture_);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);pending=true;
       }
-      if(pending&&!in_flight){draw(++sequence);pending=false;in_flight=true;}
+      if((pending||configuration_dirty_)&&!in_flight){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=true;}
     }
   }
  private:
@@ -175,12 +187,16 @@ class Worker {
     for(int fd:fds)if(fd>=0)exported.descriptors.push_back(fd);
     ff::require(valid,"media_graphics","Cannot export DMA-BUF planes");
     ff::Json planes=ff::Json::array();for(int i=0;i<count;++i)planes.push_back({{"stride",stride[i]},{"offset",offset[i]}});
-    ff::send_media(channel,{{"event","frame"},{"sequence",sequence},{"width",width_},{"height",height_},{"format",format},{"modifier",modifier},{"planes",planes}},exported.descriptors);
+    ff::send_media(channel,{{"event","frame"},{"sequence",sequence},{"displayRevision",display_revision_},{"width",width_},{"height",height_},{"format",format},{"modifier",modifier},{"planes",planes}},exported.descriptors);
   }
   SDL_Window* window_=nullptr;SDL_GLContext context_=nullptr;
   mpv_handle* player_=nullptr;mpv_render_context* render_=nullptr;
   int width_=0,height_=0;GLuint texture_=0,fbo_=0;
   int pending_width_=0,pending_height_=0;
+  uint64_t display_revision_=0;
+  uint64_t requested_display_=0,configuration_tag_=0;
+  std::set<uint64_t> configuration_tags_;
+  bool configuration_dirty_=false;
 };
 }
 int main() {

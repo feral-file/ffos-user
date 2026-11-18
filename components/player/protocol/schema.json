@@ -47,6 +47,7 @@
             "playback.sleep",
             "playback.mode",
             "media.seek",
+            "presentation.set",
             "settings.set",
             "policy.set",
             "connectivity.set",
@@ -498,6 +499,66 @@
               "required": [
                 "occurrence",
                 "seconds"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "params"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "presentation.set"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "occurrence": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "display": {
+                  "type": "object",
+                  "properties": {
+                    "scaling": {
+                      "enum": [
+                        "fit",
+                        "fill",
+                        "stretch",
+                        "auto"
+                      ]
+                    },
+                    "margin": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 16384
+                        },
+                        {
+                          "type": "string",
+                          "maxLength": 16,
+                          "pattern": "%$",
+                          "description": "Finite percentage 0..100, parsed and range-checked by the host."
+                        }
+                      ]
+                    },
+                    "background": {
+                      "type": "string",
+                      "pattern": "^#[0-9a-fA-F]{6}$"
+                    }
+                  },
+                  "required": [],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "occurrence",
+                "display"
               ],
               "additionalProperties": false
             }
@@ -1112,6 +1173,44 @@
             }
           ]
         },
+        "composition": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "occurrence": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "displayRevision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
+                "display": {
+                  "$ref": "#/$defs/display"
+                }
+              },
+              "required": [
+                "occurrence",
+                "revision",
+                "displayRevision",
+                "display"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "playlist": {
           "anyOf": [
             {
@@ -1368,6 +1467,11 @@
         },
         "display": {
           "$ref": "#/$defs/display"
+        },
+        "displayRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
         },
         "stage": {
           "enum": [
@@ -1715,6 +1819,11 @@
           "maxLength": 64,
           "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
           "minLength": 1
+        },
+        "acceptedCompositionRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
         }
       },
       "required": [

@@ -102,3 +102,19 @@ the isolated performance stage is not yet an installable replacement. Preserve
 legacy state/export and installed files for explicit rollback. Report coverage
 by capability and distinguish acceptance from presentation. Do not claim full
 coverage from the existing synthetic renderer tests.
+
+
+2026-11-18 display-control continuation: the current runtime saves margin and
+background but omits them from effective fallback settings, ignores matte color
+in host composition, and computes percentage margins against the shorter edge
+instead of DP1's per-axis viewport percentages. The phone's ephemeral adjustment
+and composition revision contract has no native equivalent yet. Implement a
+strict occurrence-fenced presentation.set method (no implicit current target in
+the native protocol), separate desired settings from host-composed settings,
+and clear transient adjustments on new occurrences/restart. Preserve authored
+layers and device framing precedence; legacy keyless phone writes are resolved
+at the controld adapter boundary. A receipt reports the last composed revision,
+not success on screen. Backend configuration/frame acknowledgment must precede
+a new composition status. Test stale/same-URL selections, no-op acceptance,
+restart, writer failures, per-axis percentages, actual matte pixels and paused
+media settings. Do not activate partial controls before this contract is wired.

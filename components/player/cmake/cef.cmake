@@ -58,6 +58,7 @@ install(FILES "${CEF_ROOT}/LICENSE.txt" DESTINATION share/licenses/ff-player-nat
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/model-viewer-LICENSE" DESTINATION share/licenses/ff-player-native RENAME model-viewer.txt)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/draco-LICENSE" "${CMAKE_CURRENT_SOURCE_DIR}/vendor/basis-LICENSE" DESTINATION share/licenses/ff-player-native)
 install(FILES dependencies.json DESTINATION share/ff-player-native)
+install(FILES third_party/color-name/LICENSE DESTINATION share/licenses/ff-player-native RENAME color-name.txt)
 install(FILES protocol/schema.json protocol/README.md DESTINATION share/ff-player-native/protocol)
 install(PROGRAMS tools/migrate-legacy.py tools/legacy-export.mjs tools/playerctl.py DESTINATION share/ff-player-native/tools)
 install(FILES tools/diagnostic-cdp.mjs DESTINATION share/ff-player-native/tools)

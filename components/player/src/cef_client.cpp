@@ -20,7 +20,7 @@ void ArtworkClient::OnAfterCreated(CefRefPtr<CefBrowser> b) {
   browser=b;browser->GetHost()->SetFocus(false);
   if(closing)browser->GetHost()->CloseBrowser(true);
 }
-void ArtworkClient::OnBeforeClose(CefRefPtr<CefBrowser>) { browser=nullptr;closed=true;presentation_.destroy(surface); }
+void ArtworkClient::OnBeforeClose(CefRefPtr<CefBrowser>) { browser=nullptr;closed=true;presentation_.destroy(frames.capture);presentation_.destroy(frames.shown); }
 bool ArtworkClient::OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request, bool, bool) {
   auto url=request->GetURL().ToString();
   if(decoration)return !frame->IsMain()||url!="ff-render://bundle/setup-artwork/index.html";
@@ -48,11 +48,11 @@ bool ArtworkClient::admit_paint(){
 }
 void ArtworkClient::OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList&,const void* data,int width,int height) {
   if(type!=PET_VIEW||!admit_paint())return;
-  try {presentation_.software(surface,data,width,height);}catch(const std::exception& e){failed(e.what());}
+  try {presentation_.software(frames.capture,data,width,height);frames.captured();captured_configuration();}catch(const std::exception& e){failed(e.what());}
 }
 void ArtworkClient::OnAcceleratedPaint(CefRefPtr<CefBrowser>, PaintElementType type,const RectList&,const CefAcceleratedPaintInfo& info) {
   if(type!=PET_VIEW||!admit_paint())return;
-  try {presentation_.accelerated(surface,info);}
+  try {presentation_.accelerated(frames.capture,info);frames.captured();captured_configuration();}
   catch(const std::exception& e){failed(e.what());}
 }
 void ArtworkClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus,int code,const CefString& detail) {
@@ -64,7 +64,7 @@ bool ArtworkClient::OnRenderProcessUnresponsive(CefRefPtr<CefBrowser>,CefRefPtr<
 void ArtworkClient::close(){if(!closing){closing=true;if(browser)browser->GetHost()->CloseBrowser(true);}}
 void ArtworkClient::mark_ready(){
   if(ready)return;
-  if(!decoration)playback_.committed(id);ready_after_frame_=surface.frames;ready=true;
+  if(!decoration)playback_.committed(id);ready_after_frame_=frames.count;ready=true;
   // Pre-load frames (including the bundled viewer's empty canvas) are not
   // admission evidence. Request a post-ready frame even for static artworks.
   if(browser)browser->GetHost()->Invalidate(PET_VIEW);
@@ -72,7 +72,15 @@ void ArtworkClient::mark_ready(){
 void ArtworkClient::configure(){
   if(!browser||!bundled)return;
   Json config={{"source",occurrence_.item["source"]},{"display",occurrence_.display},{"mime",occurrence_.item.value("mimeType","")},{"paused",playback_.state()["paused"]},{"online",playback_.online()}, {"volume",playback_.state()["settings"].value("volume",1.0)},{"muted",playback_.state()["settings"].value("muted",false)}};
+  config["displayRevision"]=occurrence_.display_revision;
+  config["display"]["background"]=display_color(occurrence_.display.value("background","#000000"));
   auto message=CefProcessMessage::Create("renderer.configure");message->GetArgumentList()->SetString(0,config.dump());browser->GetMainFrame()->SendProcessMessage(PID_RENDERER,message);
+}
+void ArtworkClient::captured_configuration(){
+  auto& surface=frames.capture;surface.display_revision=0;
+  auto bounds=presentation_.bounds(occurrence_.display);
+  if(surface.width!=bounds.width||surface.height!=bounds.height)return;
+  if(!bundled||(acknowledged_display_==occurrence_.display_revision&&surface.frames>configuration_after_frame_))surface.display_revision=occurrence_.display_revision;
 }
 void ArtworkClient::update_media(){
   paint_pending_=false;
@@ -87,11 +95,13 @@ void ArtworkClient::update_media(){
   // Request a replacement once per host turn, never recursively in OnPaint.
   if(refresh_needed_&&browser){refresh_needed_=false;browser->GetHost()->Invalidate(PET_VIEW);}
 
-  if(playback_.desired()&&playback_.desired()->id==id)occurrence_.display=playback_.desired()->display;
-  else if(playback_.visible()&&playback_.visible()->id==id)occurrence_.display=playback_.visible()->display;
+  auto old_revision=occurrence_.display_revision;
+  if(playback_.desired()&&playback_.desired()->id==id){occurrence_.display=playback_.desired()->display;occurrence_.display_revision=playback_.desired()->display_revision;}
+  else if(playback_.visible()&&playback_.visible()->id==id){occurrence_.display=playback_.visible()->display;occurrence_.display_revision=playback_.visible()->display_revision;}
   auto bounds=presentation_.bounds(occurrence_.display);
   if(browser&&(view_width_!=bounds.width||view_height_!=bounds.height))browser->GetHost()->WasResized();
-  auto key=occurrence_.display.dump()+playback_.state()["settings"].dump()+playback_.state()["paused"].dump()+(playback_.online()?"on":"off");
+  if(browser&&old_revision!=occurrence_.display_revision)browser->GetHost()->Invalidate(PET_VIEW);
+  auto key=std::to_string(occurrence_.display_revision)+occurrence_.display.dump()+playback_.state()["settings"].dump()+playback_.state()["paused"].dump()+(playback_.online()?"on":"off");
   if(key!=media_state_){media_state_=key;configure();}
 }
 bool ArtworkClient::OnProcessMessageReceived(CefRefPtr<CefBrowser>,CefRefPtr<CefFrame> frame,CefProcessId source,CefRefPtr<CefProcessMessage> message){
@@ -101,6 +111,11 @@ bool ArtworkClient::OnProcessMessageReceived(CefRefPtr<CefBrowser>,CefRefPtr<Cef
   auto name=message->GetName();
   if(name=="renderer.configure"){configure();return true;}
   if(name=="renderer.ready"){mark_ready();return true;}
+  if(name=="renderer.configured"){
+    auto value=message->GetArgumentList()->GetString(0).ToString();
+    if(value==std::to_string(occurrence_.display_revision)&&acknowledged_display_!=occurrence_.display_revision){acknowledged_display_=occurrence_.display_revision;configuration_after_frame_=frames.count;browser->GetHost()->Invalidate(PET_VIEW);}
+    return true;
+  }
   if(name=="renderer.ended"){playback_.ended(id);return true;}
   if(name=="renderer.error"){failed(message->GetArgumentList()->GetString(0).ToString().substr(0,512));return true;}
   return false;

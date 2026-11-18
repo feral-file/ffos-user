@@ -87,6 +87,12 @@ func NativePlayerStatus(s playerlink.Snapshot) (*PlayerStatus, error) {
 		out.DeviceSettings.Margin = occurrence.Display.Margin
 		out.DeviceSettings.Background = &occurrence.Display.Background
 		out.DeviceSettings.Scaling = &occurrence.Display.Scaling
+		if s.Composition != nil {
+			out.DeviceSettings.CompositionRevision = &s.Composition.Revision
+			out.DeviceSettings.Margin = s.Composition.Display.Margin
+			out.DeviceSettings.Background = &s.Composition.Display.Background
+			out.DeviceSettings.Scaling = &s.Composition.Display.Scaling
+		}
 	}
 	if len(document) > 0 && string(document) != "null" {
 		out.Playlist = &dp1.Playlist{}

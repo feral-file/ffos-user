@@ -65,6 +65,7 @@ methods={
     'playback.sleep':obj({'sleeping':boolean},('sleeping',)),
     'playback.mode':obj({'loop':enum('none','playlist','one'),'shuffle':boolean}),
     'media.seek':obj({'occurrence':identifier,'seconds':number(0,86400000)},('occurrence','seconds')),
+    'presentation.set':obj({'occurrence':identifier,'display':obj({'scaling':display['properties']['scaling'],'margin':display['properties']['margin'],'background':settings['properties']['background']})},('occurrence','display')),
     'settings.set':ref('settings'),'policy.set':ref('policy'),
     'connectivity.set':obj({'online':boolean},('online',)),
     'overlay.set':obj({'owner':enum('setup','pairing','recovery'),'state':identifier,'fields':{'type':'object','additionalProperties':True}},('owner','state')),
@@ -91,12 +92,13 @@ request['allOf']=[
 request['oneOf']=[{'properties':{'method':{'const':name},'params':params},
                   'required':['params'] if params.get('required') or name in ('input.dispatch','policy.set','schedule.set','boot.set') else []}
                  for name,params in methods.items()]
-occurrence=obj({'id':identifier,'generation':uint,'index':number(0,4095,True),'item':ref('item'),'display':ref('display'),
+occurrence=obj({'id':identifier,'generation':uint,'index':number(0,4095,True),'item':ref('item'),'display':ref('display'),'displayRevision':uint,
     'stage':enum('loading','committed','presented','failed'),'error':{'type':'string'},'navigationCommitted':boolean,
     'context':context,'exhibition':text(),'curator':text()},('id','generation','index','item','display','stage','navigationCommitted'))
 snapshot=obj({'instance':identifier,'generation':uint,'revision':uint,'host':enum('responsive'),
     'renderer':enum('absent','loading','committed','presented','failed'),
     'selected':nullable(ref('occurrence')),'presented':nullable(ref('occurrence')),
+    'composition':nullable(obj({'occurrence':identifier,'revision':uint,'displayRevision':uint,'display':ref('display')},('occurrence','revision','displayRevision','display'))),
     'playlist':nullable(ref('playlist')),'playlistUrl':{'type':'string'},'presentedPlaylist':nullable(ref('playlist')),'presentedPlaylistUrl':{'type':'string'},
     'stopped':boolean,'sleeping':boolean,'paused':boolean,'mediaPaused':boolean,'loop':enum('none','playlist','one'),'shuffle':boolean,
     'online':boolean,'context':context,'settings':ref('settings'),'overlay':nullable({'type':'object'}),'media':nullable({'type':'object'}),
@@ -111,7 +113,7 @@ snapshot['additionalProperties']=True
 response=obj({'v':{'const':1},'id':nullable(identifier),'result':{},'error':obj({'code':identifier,'message':{'type':'string'}},('code','message'))},('v','id'))
 response['oneOf']=[{'required':['result'],'not':{'required':['error']}},{'required':['error'],'not':{'required':['result']}}]
 event=obj({'v':{'const':1},'event':{'const':'state'},'previous':uint,'cursor':uint,'snapshot':ref('snapshot')},('v','event','previous','cursor','snapshot'))
-receipt=obj({'outcome':enum('accepted','applied'),'generation':uint,'revision':uint,'occurrence':nullable(identifier),'updateId':identifier},('outcome',))
+receipt=obj({'outcome':enum('accepted','applied'),'generation':uint,'revision':uint,'occurrence':nullable(identifier),'updateId':identifier,'acceptedCompositionRevision':uint},('outcome',))
 hello=obj({'version':{'const':1},'instance':identifier,'maxFrameBytes':{'const':4194304},'receiptWindow':{'const':1024},
     'capabilities':{'type':'array','items':{'type':'string'}},'snapshot':ref('snapshot')},
     ('version','instance','maxFrameBytes','receiptWindow','capabilities','snapshot'))

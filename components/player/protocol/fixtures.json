@@ -389,6 +389,31 @@
         }
       },
       "error": "invalid_params"
+    },
+    {
+      "name": "presentation requires explicit occurrence",
+      "overrides": {
+        "method": "presentation.set",
+        "params": {
+          "display": {
+            "margin": 10
+          }
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "presentation rejects an unpresented occurrence",
+      "overrides": {
+        "method": "presentation.set",
+        "params": {
+          "occurrence": "retired",
+          "display": {
+            "margin": "10%"
+          }
+        }
+      },
+      "error": "stale_occurrence"
     }
   ]
 }

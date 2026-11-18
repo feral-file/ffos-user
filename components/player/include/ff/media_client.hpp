@@ -16,7 +16,7 @@ class MediaClient {
   void controls();
   void seek(double seconds);
   void did_present();
-  Surface surface;
+  FramePair frames;
   bool ready=false;
   Json status=Json::object();
   const std::string id;

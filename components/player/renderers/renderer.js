@@ -6,6 +6,15 @@ window.addEventListener('unhandledrejection', event => emit('error', event.reaso
 window.addEventListener('error', event => { if(event.message) emit('error',event.message); });
 const applyDisplay = () => {
   if (element) element.style.objectFit = ({fit:'contain',fill:'cover',stretch:'fill',auto:'contain'})[latest.display.scaling] || 'contain';
+  if (element) {
+    document.body.style.background = latest.display.background || '#000000';
+    const revision = latest.displayRevision;
+    // A focused renderer acknowledges its own layout only. The host still
+    // requires a subsequent captured frame and native submission before status.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (latest.displayRevision === revision) emit('configured', String(revision));
+    }));
+  }
 };
 window.ffConfigure = async raw => {
   try {

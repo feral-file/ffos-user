@@ -18,6 +18,7 @@ type Snapshot struct {
 	Renderer             string               `json:"renderer"`
 	Selected             *Occurrence          `json:"selected"`
 	Presented            *Occurrence          `json:"presented"`
+	Composition          *Composition         `json:"composition"`
 	Playlist             json.RawMessage      `json:"playlist"`
 	PlaylistURL          string               `json:"playlistUrl"`
 	PresentedPlaylist    json.RawMessage      `json:"presentedPlaylist"`
@@ -98,12 +99,22 @@ type Occurrence struct {
 	Index               int             `json:"index"`
 	Item                json.RawMessage `json:"item"`
 	Display             Display         `json:"display"`
+	DisplayRevision     uint64          `json:"displayRevision"`
 	Stage               string          `json:"stage"`
 	Error               string          `json:"error"`
 	NavigationCommitted bool            `json:"navigationCommitted"`
 	Context             string          `json:"context"`
 	Exhibition          string          `json:"exhibition"`
 	Curator             string          `json:"curator"`
+}
+
+// Composition is the last host-submitted configuration, distinct from desired
+// occurrence settings while a renderer applies a newer configuration.
+type Composition struct {
+	Occurrence      string  `json:"occurrence"`
+	Revision        uint64  `json:"revision"`
+	DisplayRevision uint64  `json:"displayRevision"`
+	Display         Display `json:"display"`
 }
 
 type Display struct {
@@ -137,10 +148,11 @@ type Overlay struct {
 // Receipt acknowledges host execution or admission, never physical output.
 // Accepted operations must be followed through snapshots using Occurrence.
 type Receipt struct {
-	Outcome    string  `json:"outcome"`
-	Generation uint64  `json:"generation,omitempty"`
-	Revision   uint64  `json:"revision,omitempty"`
-	Occurrence *string `json:"occurrence,omitempty"`
+	Outcome                     string  `json:"outcome"`
+	Generation                  uint64  `json:"generation,omitempty"`
+	Revision                    uint64  `json:"revision,omitempty"`
+	Occurrence                  *string `json:"occurrence,omitempty"`
+	AcceptedCompositionRevision *uint64 `json:"acceptedCompositionRevision,omitempty"`
 }
 
 func (c *Client) Snapshot(ctx context.Context) (Snapshot, error) {
@@ -173,6 +185,9 @@ func (s Snapshot) Validate() error {
 	// must never be replaced by the host's when attaching verification results.
 	if s.Presented != nil && (s.Presented.Stage != "presented" || !s.Presented.NavigationCommitted || len(s.PresentedPlaylist) == 0 || string(s.PresentedPlaylist) == "null") {
 		return fmt.Errorf("native player returned incomplete presentation state")
+	}
+	if s.Composition != nil && (s.Presented == nil || s.Composition.Occurrence != s.Presented.ID || s.Composition.Revision == 0 || s.Composition.DisplayRevision == 0 || s.Composition.DisplayRevision > s.Presented.DisplayRevision) {
+		return fmt.Errorf("native player returned inconsistent composition identity")
 	}
 	return nil
 }

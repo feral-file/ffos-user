@@ -351,3 +351,24 @@ static presentation regressions passed on ANGLE Vulkan, now the default after
 reproducing the p5 line regression in both CEF and standalone Chrome's GL path.
 A final launch with no backend override verified Vulkan and compositor QR.
 Fresh-context final review: accept; whole-rewrite activation remains incomplete.
+
+
+## 2026-11-18: occurrence-scoped display controls (in progress)
+
+Implemented presentation.set, per-axis percentage margins, saved matte defaults,
+causal configuration/composition revisions and Go status mapping. Before the
+review fixes, 14 Linux and 11 macOS CTest groups passed; all controld Go tests,
+vet, scoped lint, playerlink/status race tests and 28 real schema exchanges
+passed. Homelab checks exercised actual software/video matte pixels, paused
+video reconfiguration, stale targets, no-op completion, media/image/GLB/input
+and the 65-second covered-video regression. Raw development evidence remains
+under ignored evidence/device/display; it does not qualify the final fixes.
+
+Review fixes add shared CSS color normalization, separate captured/submitted
+textures and retention across covered changes. All 11 macOS CTest groups and
+schema freshness pass after these changes. Homelab became unreachable during
+its rebuild, before installation of those fixes. Cause is unknown. Anh selected
+FF1-SKYZ2E3A (192.168.31.52) instead; SSH and signed wakeNow succeeded, with
+currentState/overrideState awake. Final Linux build/device checks are pending.
+The original installed kiosk/services are preserved. Normal command/session/
+watchdog migration still prevents declaring a complete installed replacement.

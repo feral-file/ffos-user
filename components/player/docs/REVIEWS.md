@@ -181,3 +181,18 @@ Linux/device checks were performed by the implementer and inspected by review.
 The review explicitly excludes full-portfolio performance, physical-panel and
 overnight acceptance, and the unfinished normal controller/session/watchdog
 migration. DEVICE-UI.md records the tested scope and remaining limitations.
+
+
+## Display control increment, 2026-11-18
+
+Human change owner: Anh. Review surface: local. Fresh-context
+`review_display_control` found Moderate F1 (authored CSS colors disagreed between
+host, bundled and mpv renderers) and F2 (a captured frame overwrote the texture
+associated with prior composition during a superseding adjustment). Fixed with
+shared literal-color resolution at admission/backend configuration and separate
+captured/submitted textures. Fresh-context `review_display_control_final` found
+Moderate F3: overlay-covered configuration updates still promoted that retained
+texture without recording composition. Fixed by holding the last composed
+frame/geometry during covered changes; same-configuration animation continues.
+Its verdict was revise. Final Linux/device verification and review of F3's fix
+remain pending; the previous device passes do not verify these later fixes.

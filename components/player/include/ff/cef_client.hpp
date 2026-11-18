@@ -41,12 +41,12 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   void update_media();
   void close();
   CefRefPtr<CefBrowser> browser;
-  Surface surface;
+  FramePair frames;
   const std::string id;
   bool closed = false;
   bool closing = false;
   bool ready = false;
-  bool has_ready_frame() const { return ready&&surface.frames>ready_after_frame_; }
+  bool has_ready_frame() const { return ready&&frames.latest().frames>ready_after_frame_&&frames.latest().display_revision==occurrence_.display_revision; }
   const bool bundled;
   const bool decoration;
   bool decoration_failed = false;
@@ -57,12 +57,14 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   std::string media_state_;
   int view_width_=0,view_height_=0;
   uint64_t ready_after_frame_=0;
+  uint64_t acknowledged_display_=0,configuration_after_frame_=0;
   FrameClock begin_clock_;
   bool paint_pending_=false, refresh_needed_=false;
   bool admit_paint();
   void mark_ready();
   void failed(const std::string& error);
   void configure();
+  void captured_configuration();
   IMPLEMENT_REFCOUNTING(ArtworkClient);
 };
 CefRefPtr<CefApp> renderer_app();
