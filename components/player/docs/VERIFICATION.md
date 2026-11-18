@@ -455,3 +455,27 @@ It qualifies neither the older homelab numbers nor whole-player parity: the
 current offscreen host remains slower; a native Views diagnostic is measured
 separately. The source/input commits 3d0734a6 and 9ad0b05a passed clean Linux CI
 runs 44226732243 and 44228336255 respectively.
+
+
+## 2026-11-18: native controller controls
+
+Six external commands now use the native snapshot/command boundary. The real
+Go adapter passed on FF1-SKYZ2E3A for saved settings, duration/loop/shuffle,
+same-URL artwork selection, stale preview rejection, composed percentage
+margin/color, malformed parameter rejection and duration reset. Evidence is
+`evidence/office-20261118/controller-controls.json`. The daemon itself remains
+unactivated while cast/session/watchdog migration continues.
+
+Fresh review found F1 (Moderate): raw native transport errors would be logged
+without a reply by the legacy relayer. Snapshot failures now produce an explicit
+unavailable reply before mutation; lost mutation replies report `outcome_unknown`
+and require status reconciliation, with no automatic retry. Invalid host state
+and receipt failures also produce explicit replies. Focused tests, vet and lint
+passed after this correction. The full Go suite, vet and commandrouter/playerlink
+race tests passed before and after it; one initial relay timing test failed under
+concurrent checks, passed three isolated reruns, then the full suite passed.
+
+The preceding 4K benchmark revision 37028ec4 passed clean Linux CI 44231894052.
+
+The final fresh-context controls review found no material findings
+(`Verdict: accept`) after the error-reply correction.

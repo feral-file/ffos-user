@@ -1325,6 +1325,7 @@ func initializeApp(
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
 	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
+	commandrouter.SetNativeControls(rawCmdHandler, nativePlayer)
 	blockUnratedCurated := config.Get().ContentPolicyTuning(logger).BlockUnratedCurated
 	policyStore, policyErr := contentpolicy.Open(constants.CONTENT_POLICY_FILE, blockUnratedCurated)
 	if policyErr != nil {

@@ -86,3 +86,32 @@ All batches are validated before dispatch. The existing 16-offset pressed-drag
 and 16-step zoom limits are retained; ordinary moves are bounded to 128 offsets per request. Oversized input is
 rejected, never silently truncated. No CDP fallback exists. Normal playback routing and
 session/watchdog migration still block activation.
+
+## Playback controls and display settings cutover
+
+The six controller commands `moveToArtwork`, `setShuffle`, `setLoop`,
+`updateDefaultDuration`, `updateArtFraming` and `updateDisplaySettings` now use
+`playback.select`, `playback.mode`, `settings.set` or `presentation.set`.
+Authorization and the staged-reset guard run before this adapter. There is no
+CDP fallback if native wiring or the host is unavailable. Every write uses a
+fresh host-instance/generation fence and is sent once; errors retain their
+structured code. A failed snapshot reports unavailable without sending a write;
+a lost mutation reply reports outcome_unknown and requires status reconciliation.
+Existing command names and reply `message.ok` remain, with an
+additive admission outcome/identity. Composition acceptance retains the public
+`acceptedCompositionRevision` field.
+
+Saved framing, tombstone and scaling update device defaults. Ephemeral
+scaling/margin/background writes require the current presented occurrence;
+older keyless phones resolve it in controld and still reject while a replacement
+loads. Same-URL adjacent occurrences never share a target. The native host
+rechecks the target and authored override lock. Unknown fields are rejected as
+a whole, without partially applying valid fields. Legacy per-side/token flags
+and ephemeral autoplay/loop flags are not covered by this adapter yet; they must
+not be called supported merely because the old browser accepted their envelope.
+
+The real Go adapter passed against the FF1 native host: saved settings,
+loop/shuffle, same-URL selection, stale showing rejection, composed margin/color
+preview, malformed host parameter rejection and duration override reset. This
+is not full-daemon activation: casting, session/watchdog and the other gaps
+above still block replacement of ordinary phone control.

@@ -37,12 +37,13 @@ type Handler interface {
 }
 
 type handler struct {
-	executor     devicectl.Executor
-	cdp          cdp.CDP
-	dp1          dp1.DP1
-	json         wrapper.JSON
-	statusPoller status.Poller
-	mintPairing  mintpairing.Service
+	nativeControls NativeControlPlayer
+	executor       devicectl.Executor
+	cdp            cdp.CDP
+	dp1            dp1.DP1
+	json           wrapper.JSON
+	statusPoller   status.Poller
+	mintPairing    mintpairing.Service
 	// offlineCache may be nil (feature disabled / not yet wired), mirroring
 	// the mintPairing nil-guard pattern above.
 	offlineCache offlinecache.Service
@@ -528,6 +529,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		h.logger.Warn("Rejecting command outside the controller's tier",
 			zap.String("command", commandType.String()), zap.String("role", string(p.Role)))
 		return nil, ErrPermissionDenied
+	}
+
+	if nativeControl(commandType) {
+		return h.processNativeControl(ctx, command)
 	}
 
 	var result interface{}
