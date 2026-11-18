@@ -1,0 +1,33 @@
+{
+  "checks": [
+    {
+      "name": "original HTTPS artwork plays through native decoder",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 25,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 764,
+        "mute": false,
+        "occurrence": "5baa5ca0-b0b7-4e7b-aa1b-c52eb6ef18c6",
+        "pause": false,
+        "sampledAtMs": 1794970228652,
+        "seekable": true,
+        "surfaceHeight": 2160,
+        "surfaceWidth": 3840,
+        "time-pos": 0.26666666666666666,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "volume": 100,
+        "workerPid": 937094,
+        "workerResponsive": true
+      }
+    },
+    {
+      "name": "untrusted self-signed HTTPS media fails before presentation",
+      "error": "loading failed"
+    }
+  ],
+  "physicalOutputVerified": false,
+  "result": "passed"
+}

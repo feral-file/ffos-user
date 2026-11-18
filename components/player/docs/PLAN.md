@@ -129,3 +129,15 @@ its existing kiosk/services and one-shot live API storage export for rollback.
 A separate native preview state imports that export without touching live
 browser database files. Do not describe this preview as normal phone-control
 activation: the full consumer migration listed above remains required.
+
+
+Extensionless source correction: compositor inspection of migrated work “24”
+showed CEF's small built-in video document although state reported presented.
+Its original CDN URL has no media extension and response type is video/mp4.
+Before creating a backend for untyped/opaque HTTP(S) sources, use a private CEF
+request context to inspect HEAD, with first-body-cancelled Range GET fallback
+and a three-second total deadline. Apply the observed MIME only to a transient
+rendering copy; preserve the authored document and original URL. Unknown type
+after a failed/timed-out probe must report failure, not an empty media document
+as success. Test HEAD rejection, redirects, supersession/cancellation, original
+item retention and the actual migrated work through libmpv.

@@ -42,3 +42,18 @@ test device, then serve it with `tools/test-media-server.py`. The generated
 manifest records the installed FFmpeg CLI version, arguments and SHA-256 hashes;
 encoding need not happen on the constrained FF1. The runtime uses the pinned
 private decoder libraries, independently of the fixture encoder.
+
+
+Untyped HTTP(S) sources without a recognized suffix are classified by an
+occurrence-scoped CEF URL request before backend creation. HEAD is followed by
+a bounded Range GET only if needed; the GET cancels on its first body callback
+and the total probe deadline is three seconds. Superseded probes are canceled.
+The observed MIME type selects a backend without rewriting the authored item
+or its original URL. Failed classification becomes a visible incoming failure.
+Cookie-authenticated media handoff to mpv and offline probe interception remain
+unimplemented; these are not covered by the public HTTPS fixture results.
+
+The media sandbox mounts both `/etc/ssl` and `/etc/ca-certificates` read-only
+when present. Arch's SSL bundle links resolve into the latter directory. TLS
+verification remains enabled; the device suite confirms an untrusted
+self-signed HTTPS source fails before presentation.

@@ -398,3 +398,28 @@ compositor captures and 127 native control requests (median 130.39 ms, p95
 artist/title/exhibition panel. This is a responsiveness regression, not a
 matched-seed/engine Chrome benchmark or physical scanout evidence. Retained
 evidence is in `evidence/office-20261118`, including a SHA-256 manifest.
+
+
+## 2026-11-18: extensionless media and HTTPS on FF1-SKYZ2E3A
+
+The restored work “24” exposed two gaps: its extensionless video URL was routed
+to a stock CEF video document, and the isolated mpv worker could not resolve
+Arch's CA-bundle symlink outside `/etc/ssl`. Added occurrence-scoped response
+MIME classification and the read-only CA target mount. CEF callback wrappers
+do not preserve C++ pointer identity; probe lifetime uses terminal state and
+owned references instead of comparing wrapper addresses.
+
+All 11 macOS core and 14 Linux CTest groups passed. Five FF1 source checks
+passed: opaque video, HEAD rejection with GET fallback, redirect, superseded
+slow response and a 3.08-second timeout with a responsive host and no false
+presentation. “24” then played through H.264/VA-API at a 3840x2160 surface; the
+retained sample reports 764 imported frames and zero decoder/frame drops. A
+self-signed HTTPS direct-media test failed before presentation and restored the
+prior playlist afterward. These short observations do not qualify sustained
+frame pacing. Compositor capture showed the portrait work fitted inside the
+4K display; physical scanout remains unverified. Evidence: source.json,
+source-ctest.log and https-media.json in evidence/office-20261118.
+
+The preview remains awake with the original work restored. It is a transient
+service, not the completed phone/session/watchdog replacement. HANDS-ON.md
+documents access and rollback.

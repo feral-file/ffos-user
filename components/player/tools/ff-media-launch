@@ -17,6 +17,11 @@ set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all --share-net 
   --setenv XDG_RUNTIME_DIR "$media_runtime" --setenv WAYLAND_DISPLAY "$media_display" \
   --setenv SDL_VIDEODRIVER wayland --setenv LD_LIBRARY_PATH /app \
   --setenv LANG C.UTF-8
+# Arch's /etc/ssl CA bundle links point outside that mounted directory. Keep
+# the generated trust store visible, read-only; never disable TLS verification.
+if [ -d /etc/ca-certificates ]; then
+  set -- "$@" --ro-bind /etc/ca-certificates /etc/ca-certificates
+fi
 if [ -S "$media_runtime/pulse/native" ]; then
   set -- "$@" --ro-bind "$media_runtime/pulse/native" "$media_runtime/pulse/native" \
     --setenv PULSE_SERVER "unix:$media_runtime/pulse/native"

@@ -19,6 +19,8 @@ int main(int argc, char** argv) {
     check(argc == 2, "Fixture path required"); std::ifstream f(argv[1]); auto fixtures = ff::Json::parse(f);
     check(ff::native_media({{"source","https://example.org/movie.MP4?token=x"}}),"MP4 uses native media despite query");
     check(ff::native_media({{"source","https://example.org/opaque"},{"mimeType","video/mp4"}}),"MIME-resolved video uses native media");
+    check(ff::native_media({{"source","https://example.org/opaque"},{"mimeType","application/x-mpegurl"}}),"Normalized HLS MIME uses native media");
+    check(ff::native_media({{"source","https://example.org/opaque"},{"mimeType","Video/MP4"}}),"Media MIME comparison is case insensitive");
     check(ff::native_media({{"source","https://example.org/live.m3u8"}}),"HLS uses native media");
     check(!ff::native_media({{"source","https://example.org/artwork/"}}),"Software stays a browser document");
     for (const auto& fixture : fixtures["parse"]) {

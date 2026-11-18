@@ -5,6 +5,7 @@
   "display.json": "7157e586b77a317a5fd7991b244d5fd6004e183a8cd405b9fb44f4331e91798c",
   "grit-compositor-review.jpg": "3c949c61c75fa1988175b0f7598814912069479ef2362565819925c4ec3da63a",
   "grit.json": "a5f66f27e2db5e27cc541e19bd399b1c4ff9d4d24a6d26ce4045ff11e43451bf",
+  "https-media.json": "e52e1c41079e4a1b71581505a68f708730aeff81b951622d248eb84e1560ca98",
   "images.json": "900b80ccd12f6edc02945e9af174b05f80dfee84acfdd1e5f5127c711e88a579",
   "input.json": "f8d0430f6389d257386d26deba2d12ce379ecb2d55c8a46ae760c6afa8daefdc",
   "media-fixture-manifest.json": "c7a5b6bc031c3eb94a02df7e42693d70c489456b8ca1aa0b2b14ddd38baba037",
@@ -14,5 +15,7 @@
   "presentation.json": "d2c7135e070cca7dbb67789c9a2fe68a627753afc7f4529aa863cba09b2c9dd0",
   "qr-decode.json": "4eacce530345d4f371f253a49ace4af68af18d35de998674f22a1f057cdb8665",
   "setup.json": "bb2f9e0d46b7551b741569f5359ab21209f2aa88a139b9484da5dfed2eff1a71",
+  "source-ctest.log": "cea0e9a459aea2f2ffe3cf4849f20825c785277cd81e4d9344fdbdda0c59388b",
+  "source.json": "cebe9a9598460dc49b8902c70ff043a167297793d2623ecbd65342e41c48b161",
   "tombstone-native-4k.png": "acc4afbf8e171f5fed039561815293fd64e35fbeffefd7a5a5a236d2d25888da"
 }

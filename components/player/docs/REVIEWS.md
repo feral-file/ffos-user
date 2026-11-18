@@ -211,3 +211,16 @@ JavaScript syntax and Python parsing; device evidence was inspected, not rerun.
 The stale in-progress verification paragraph was corrected after device runs
 finished. Software fallback startup/import is demonstrated, not sustained
 throughput. Full controller/session/watchdog migration remains incomplete.
+
+
+## Source classification and HTTPS increment, 2026-11-18
+
+Human change owner: Anh. Review surface: local. Fresh-context
+`review_source_probe` checked ownership and suggested establishing the owning
+reference before request start; implemented with a Start factory.
+`review_source_final` accepted the updated probe and CEF wrapper-identity fix.
+`review_source_tls_final` reviewed the complete updated diff against b5afbadb,
+including the CA mount and negative TLS evidence: accept, no material findings.
+The reviewer inspected the five probe checks, HTTPS playback/rejection and 14
+Linux CTest results, but did not rerun device tests. Physical output and normal
+phone/session/watchdog migration are outside this evidence.
