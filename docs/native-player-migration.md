@@ -72,3 +72,17 @@ another overlay owner. Native PP Mori, QR layout, tombstone timing and the
 bundled animated setup artwork are implemented. Device regression evidence and
 remaining fidelity/activation limits are in `components/player/docs/DEVICE-UI.md`.
 The normal player-control consumers listed above still prevent activation.
+
+## Input cutover
+
+Phone keyboard, move, click/double-click/long-press, click-and-drag and zoom
+commands now use native occurrence-fenced input. The old CDP implementation and
+its cached pointer/viewport state are deleted. A dedicated connection and
+whole-gesture lane prevent interleaving; failure or cancellation disconnects it
+to release held keys/buttons. ASCII phone codes map to physical HID plus
+separate text; the native protocol also supports Unicode text. Reference-width
+deltas preserve existing movement sensitivity using current host geometry.
+All batches are validated before dispatch. The existing 16-offset pressed-drag
+and 16-step zoom limits are retained; ordinary moves are bounded to 128 offsets per request. Oversized input is
+rejected, never silently truncated. No CDP fallback exists. Normal playback routing and
+session/watchdog migration still block activation.

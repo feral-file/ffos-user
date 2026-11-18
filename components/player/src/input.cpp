@@ -36,6 +36,9 @@ void InputState::target(std::string occurrence, InputGeometry geometry) {
   if (occurrence != target_) { release(); target_ = std::move(occurrence); }
   else if (geometry != geometry_) flush();
   geometry_ = geometry;
+  if (!positioned_ && !target_.empty()) {
+    x_ = geometry.width / 2.0; y_ = geometry.height / 2.0; positioned_ = true;
+  }
   x_ = std::clamp(x_,0.0,static_cast<double>(geometry.width - 1));
   y_ = std::clamp(y_,0.0,static_cast<double>(geometry.height - 1));
 }
@@ -72,8 +75,9 @@ void InputState::dispatch(const Json& event) {
   if (kind=="releaseAll") { release();return; }
   if (target_.empty()) return;
   if (kind=="move") {
-    double x=event.contains("dx")?x_+event.at("dx").get<double>():event.value("x",x_);
-    double y=event.contains("dy")?y_+event.at("dy").get<double>():event.value("y",y_);
+    double scale=event.contains("referenceWidth")?geometry_.width/event.at("referenceWidth").get<double>():1.0;
+    double x=event.contains("dx")?x_+event.at("dx").get<double>()*scale:event.value("x",x_);
+    double y=event.contains("dy")?y_+event.at("dy").get<double>()*scale:event.value("y",y_);
     require(std::isfinite(x)&&std::isfinite(y),"invalid_params","Invalid pointer position");
     x_=std::clamp(x,0.0,static_cast<double>(geometry_.width-1));
     y_=std::clamp(y,0.0,static_cast<double>(geometry_.height-1));

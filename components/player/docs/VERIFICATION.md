@@ -423,3 +423,28 @@ source-ctest.log and https-media.json in evidence/office-20261118.
 The preview remains awake with the original work restored. It is a transient
 service, not the completed phone/session/watchdog replacement. HANDS-ON.md
 documents access and rollback.
+
+
+## 2026-11-18: controld input boundary on FF1-SKYZ2E3A
+
+Deleted devicectl's CDP cursor/viewport/keyboard implementation. The new
+coordinator sends whole validated gestures through a dedicated native socket
+connection, with one snapshot fence, bounded ordering and disconnect cleanup.
+The C++ host resolves reference-width deltas using its current output geometry.
+Eleven macOS and fourteen Linux CTest groups passed.
+
+The real Go coordinator (opt-in test, not the full running daemon) passed four
+FF1 checks observed in the artwork document: relative drag coordinates at 4K,
+DOM double-click sequence, both pinch wheel directions, and Shift/ASCII text
+plus Enter newline, Tab focus and Enter form submission. This caught and fixed
+two transport differences: native CEF wheel direction is opposite CDP; Enter
+requires a separate carriage-return character event for default editing. The
+existing five-check native input suite passed afterward, including disconnect
+release and same-URL stale occurrences. Evidence: controller-input.json,
+input-after-cutover.json and input-ctest.log. No phone-to-daemon deployment is
+claimed yet. The test units were stopped and “24” restored in the awake preview.
+
+The complete controld Go suite, go vet, changed-diff lint and devicectl/playerlink
+race tests passed for this cutover. Clean Linux CI 44226732243 passed for the
+preceding source/TLS revision 3d0734a6; this does not substitute for the input
+increment's own device/build results.

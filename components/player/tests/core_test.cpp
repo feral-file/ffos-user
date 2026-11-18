@@ -89,6 +89,12 @@ int main(int argc, char** argv) {
       check(!p.media_paused(),"Explicit resume releases the autoplay hold");
       auto active=p.desired()->id;p.committed(active);p.presented(active);
       p.committed(active);
+      int input_count=0;p.set_input_handler([&](const ff::Json&){++input_count;});
+      p.command("input.dispatch",{{"kind","move"},{"occurrence",active},{"dx",10},{"referenceWidth",1920}});
+      check(input_count==1,"Reference-width movement accepted at protocol boundary");
+      for(auto width:{0,16385})fails([&]{p.command("input.dispatch",{{"kind","move"},{"occurrence",active},{"dx",10},{"referenceWidth",width}});},"invalid_params");
+      fails([&]{p.command("input.dispatch",{{"kind","move"},{"occurrence",active},{"x",10},{"referenceWidth",1920}});},"invalid_params");
+      check(input_count==1,"Invalid coordinate units dispatch no input");
       check(p.desired()->stage=="presented","Seek restart does not demote a presented occurrence");
       auto incoming=playlist();incoming["title"]="Incoming exhibition";
       p.command("playback.replace",{{"playlist",incoming}});

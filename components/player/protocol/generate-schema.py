@@ -47,12 +47,14 @@ playlist={'type':'object','required':['items'],'properties':{'items':{'type':'ar
     **{key:text() for key in ('id','title','curator','dpVersion','slug','created')},'defaults':{'type':'object'}},'additionalProperties':True,'description':'DP-1 document, at most 1 MiB encoded.'}
 inputs=[]
 for kind,properties,required in [
-    ('move',{key:number(-16384,16384) for key in ('x','y','dx','dy')},()),
+    ('move',{**{key:number(-16384,16384) for key in ('x','y','dx','dy')},'referenceWidth':number(1,16384)},()),
     ('button',{'button':number(1,3,True),'clicks':number(1,3,True),'down':boolean},('down',)),
     ('wheel',{key:number(-32768,32768,True) for key in ('dx','dy')},()),
     ('key',{'usage':number(1,255,True),'down':boolean},('usage','down')),
     ('text',{'text':{**text(4096),'minLength':1}},('text',)),('releaseAll',{},())]:
     inputs.append(obj({'kind':{'const':kind},'occurrence':identifier,**properties},('kind','occurrence',*required)))
+
+inputs[0]['allOf']=[{'if':{'required':['referenceWidth']},'then':{'not':{'anyOf':[{'required':['x']},{'required':['y']}]}}}]
 
 methods={
     'hello':obj({'client':identifier,'versions':{'type':'array','minItems':1,'maxItems':16,'items':number(1,65535,True)}},('client','versions')),

@@ -32,6 +32,7 @@ class InputState {
   uint32_t buttons_ = 0;
   std::set<int> keys_;
   bool pending_move_ = false;
+  bool positioned_ = false;
   void emit(Json event);
 };
 }

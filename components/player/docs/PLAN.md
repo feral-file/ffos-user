@@ -141,3 +141,19 @@ rendering copy; preserve the authored document and original URL. Unknown type
 after a failed/timed-out probe must report failure, not an empty media document
 as success. Test HEAD rejection, redirects, supersession/cancellation, original
 item retention and the actual migrated work through libmpv.
+
+### Native phone-input cutover (2026-11-18)
+
+Current flow: devicectl caches window dimensions and pointer coordinates, injects
+cursor DOM updates, then separately dispatches CDP input. This conflicts with
+host-owned pointer state and can diverge after rotation or replacement.
+Replace that path with an occurrence-fenced native input coordinator; retain
+external gesture names, button choices, double-click sequence, one-second long
+press, outlier clamp and wheel conversion. Keep a dedicated ordered connection
+for a whole gesture, close it on cancellation/failure to release held state,
+and never replay uncertain input. Host resolves reference-width deltas against
+current output geometry; controld retains no pointer coordinates. Validate the
+whole batch before dispatch. Test ordering, stale targets, cancellation, bounds,
+text/physical-key separation, shared protocol schema and real FF1 input. This
+is one cutover stage; it does not authorize deployment of partial controld or
+leave a permanent CDP input fallback.

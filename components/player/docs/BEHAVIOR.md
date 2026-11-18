@@ -11,7 +11,7 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 | `checkStatus` | ff-player/src/models/cast_info.model.ts:14 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `clearPlaylistCache` | ffos-user/components/feral-controld/commands/types.go:267 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `clearPlaylistItemCache` | ffos-user/components/feral-controld/commands/types.go:266 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `clickAndDragGesture` | ffos-user/components/feral-controld/commands/types.go:195 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `clickAndDragGesture` | ffos-user/components/feral-controld/commands/types.go:195 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 | `closeMintPairingSession` | ffos-user/components/feral-controld/commands/types.go:244 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `connect` | ff-player/src/models/cast_info.model.ts:12<br>ffos-user/components/feral-controld/commands/types.go:187 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `cursorUpdate` | ff-player/src/models/cast_info.model.ts:20 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
@@ -21,10 +21,10 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 | `disconnect` | ff-player/src/models/cast_info.model.ts:13 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `displayDefaultPlaylist` | ff-player/src/models/cast_info.model.ts:26<br>ffos-user/components/feral-controld/commands/types.go:211 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `displayPlaylist` | ff-player/src/models/cast_info.model.ts:21<br>ffos-user/components/feral-controld/commands/types.go:205 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
-| `doubleTapGesture` | ffos-user/components/feral-controld/commands/types.go:193 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `doubleTapGesture` | ffos-user/components/feral-controld/commands/types.go:193 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 | `downloadPlaylist` | ffos-user/components/feral-controld/commands/types.go:265 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `downloadPlaylistItem` | ffos-user/components/feral-controld/commands/types.go:264 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `dragGesture` | ffos-user/components/feral-controld/commands/types.go:191 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `dragGesture` | ffos-user/components/feral-controld/commands/types.go:191 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 | `factoryReset` | ffos-user/components/feral-controld/commands/types.go:206 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `getContentPolicy` | ffos-user/components/feral-controld/commands/types.go:269 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `getDeviceStatus` | ffos-user/components/feral-controld/commands/types.go:203 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
@@ -36,7 +36,7 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 | `handleConnectivityChange` | ff-player/src/services/cdp-handler/CDPRequestHandler.ts; ffos-user/components/feral-controld/mediahealth_wiring.go | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `handleWatchdogEvent` | ff-player/src/services/cdp-handler/CDPRequestHandler.ts; ffos-user/components/feral-controld/mediahealth_wiring.go | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `joinMintPairingChannel` | ffos-user/components/feral-controld/commands/types.go:243 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `longPressGesture` | ffos-user/components/feral-controld/commands/types.go:194 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `longPressGesture` | ffos-user/components/feral-controld/commands/types.go:194 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 | `mediaHealthHints` | ff-player/src/services/cdp-handler/CDPRequestHandler.ts; ffos-user/components/feral-controld/mediahealth_wiring.go | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `mintPairingApprovalDecision` | ffos-user/components/feral-controld/commands/types.go:245 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `mintPairingDisplay` | ff-player/src/services/cdp-handler/CDPRequestHandler.ts; ffos-user/components/feral-controld/mediahealth_wiring.go | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
@@ -49,7 +49,7 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 | `resolveRecentlyPlayed` | ff-player/src/models/cast_info.model.ts:32<br>ffos-user/components/feral-controld/commands/types.go:220 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `rotate` | ffos-user/components/feral-controld/commands/types.go:198 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `runNetworkDiagnostics` | ffos-user/components/feral-controld/commands/types.go:258 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `sendKeyboardEvent` | ffos-user/components/feral-controld/commands/types.go:190 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `sendKeyboardEvent` | ffos-user/components/feral-controld/commands/types.go:190 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 | `setContentPolicy` | ffos-user/components/feral-controld/commands/types.go:270 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `setDeviceName` | ffos-user/components/feral-controld/commands/types.go:230 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `setLoop` | ff-player/src/models/cast_info.model.ts:25 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
@@ -66,7 +66,7 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 | `sshAccess` | ffos-user/components/feral-controld/commands/types.go:210 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `startMintPairingSession` | ffos-user/components/feral-controld/commands/types.go:238 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `startWifiSetup` | ffos-user/components/feral-controld/commands/types.go:237 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `tapGesture` | ffos-user/components/feral-controld/commands/types.go:192 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `tapGesture` | ffos-user/components/feral-controld/commands/types.go:192 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 | `toggleMute` | ffos-user/components/feral-controld/commands/types.go:209 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `updateArtFraming` | ff-player/src/models/cast_info.model.ts:18 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
 | `updateDefaultDuration` | ff-player/src/models/cast_info.model.ts:27 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
@@ -75,7 +75,7 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 | `updateToLatestVersion` | ffos-user/components/feral-controld/commands/types.go:204 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `uploadLogs` | ffos-user/components/feral-controld/commands/types.go:207 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `wakeNow` | ffos-user/components/feral-controld/commands/types.go:223 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `zoomGesture` | ffos-user/components/feral-controld/commands/types.go:196 | Native input state; preserved gesture adapter in controld | Pending migration/behavior fixture |
+| `zoomGesture` | ffos-user/components/feral-controld/commands/types.go:196 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |
 
 ## Lifecycle behavior beyond command names
 

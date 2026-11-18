@@ -224,3 +224,17 @@ including the CA mount and negative TLS evidence: accept, no material findings.
 The reviewer inspected the five probe checks, HTTPS playback/rejection and 14
 Linux CTest results, but did not rerun device tests. Physical output and normal
 phone/session/watchdog migration are outside this evidence.
+
+
+## Native phone input increment, 2026-11-18
+
+Human change owner: Anh. Fresh-context `review_native_input` returned revise
+with Moderate F1: CEF wheel direction is opposite CDP, so copying the sign
+reversed phone pinch gestures. Fixed the adapter sign and verified both DOM
+WheelEvent directions on FF1. Its suggested Enter test also found missing
+default editing; added a separate carriage-return text event and verified
+newline, Tab focus and form submission. Fresh-context `review_native_input_final`
+reviewed the full updated increment, traced ownership/fences/cleanup/geometry,
+inspected FF1 evidence and independently passed focused Go tests and diff checks.
+Verdict: accept, no material findings. Full-daemon activation and physical
+scanout remain outside this evidence.

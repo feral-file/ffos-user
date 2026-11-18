@@ -272,10 +272,16 @@ the current device evidence uses rotation 0 and output scale 1.
 - `{"kind":"move","x":400,"y":500}` sets the absolute position;
   `dx`/`dy` apply relative movement. Relative values take precedence on an axis
   when both forms are supplied. Positions/deltas are bounded to ±16,384.
+  Optional `referenceWidth` (1–16,384) makes relative deltas use a reference
+  width; the host multiplies both axes by current framebuffer width divided by
+  that value. It cannot be combined with absolute x/y. Phone gestures use 1920,
+  preserving sensitivity across output sizes without client-cached geometry.
+  The first artwork initializes the pointer at output center; subsequent target
+  changes retain it.
 - `{"kind":"button","button":1,"down":true,"clicks":1}` changes one
   button. Buttons are 1 left, 2 middle, 3 right; click counts are 1–3. A move
   while held is a drag. Button events use the host's current pointer position.
-- `{"kind":"wheel","dx":0,"dy":-40}` sends integer browser scroll deltas,
+- `{"kind":"wheel","dx":0,"dy":-40}` sends integer CEF wheel deltas (positive dy scrolls up, opposite DOM/CDP deltaY),
   each bounded to ±32,768.
 - `{"kind":"key","usage":4,"down":true}` changes a **USB HID keyboard-page
   physical key**, not a character or an OS-dependent virtual key. Examples:

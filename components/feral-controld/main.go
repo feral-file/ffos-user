@@ -1086,6 +1086,10 @@ func initializeApp(
 		logger,
 	)
 
+	nativeInput := playerlink.New(playerlink.SocketPath())
+	devicectl.SetInputPlayer(executor, nativeInput, logger)
+	go func() { <-context.Done(); _ = nativeInput.Close() }()
+
 	// FFIndexer
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 

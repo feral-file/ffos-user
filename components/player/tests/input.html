@@ -3,9 +3,11 @@
 <title>Native input verification</title>
 <style>html,body {margin:0;height:100%;background:#17202a;color:white;font:24px monospace} textarea {position:absolute;left:80px;top:80px;width:700px;height:180px;font:32px monospace} pre {position:absolute;left:80px;top:300px} #pointer {position:absolute;width:12px;height:12px;background:#ff00ff;pointer-events:none}</style>
 <textarea id="text" autofocus aria-label="Input verification"></textarea>
+<form id="form" style="position:absolute;left:80px;top:600px"><input id="formText" aria-label="Form input"></form>
 <pre id="readout">Waiting for native input</pre><div id="pointer"></div>
 <script>
-window.inputEvents=[];
+window.inputEvents=[];window.formSubmits=0;
+document.querySelector("#form").addEventListener("submit",event=>{event.preventDefault();window.formSubmits++;});
 for(const type of ['mousemove','mousedown','mouseup','click','dblclick','wheel','keydown','keyup','input']){
  document.addEventListener(type,event=>{
   const record={type,x:event.clientX,y:event.clientY,buttons:event.buttons,button:event.button,detail:event.detail,

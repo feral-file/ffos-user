@@ -300,7 +300,8 @@ Json Playback::command(std::string_view method, const Json& p) {
     require(static_cast<bool>(input_), "unavailable", "No presentation backend");
     auto kind=string_field(p,"kind",32);
     if(kind=="move"){
-      fields(p,{"kind","occurrence","x","y","dx","dy"});
+      fields(p,{"kind","occurrence","x","y","dx","dy","referenceWidth"});
+      if(p.contains("referenceWidth"))require(p["referenceWidth"].is_number()&&p["referenceWidth"]>=1&&p["referenceWidth"]<=16384&&!p.contains("x")&&!p.contains("y"),"invalid_params","Reference width requires relative coordinates and must be 1..16384");
       for(auto key:{"x","y","dx","dy"})if(p.contains(key))require(p[key].is_number()&&std::abs(p[key].get<double>())<=16384,"invalid_params","Input coordinate exceeds bounds");
     }else if(kind=="button"){
       fields(p,{"kind","occurrence","button","down","clicks"});boolean(p,"down");

@@ -1,0 +1,445 @@
+{
+  "startedAt": "2026-11-18T03:06:11.822Z",
+  "checks": [
+    {
+      "name": "drag uses output pixels minus 40-pixel matte",
+      "events": [
+        {
+          "type": "mousemove",
+          "x": 160,
+          "y": 160,
+          "buttons": 0,
+          "button": 0,
+          "detail": 0,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mousedown",
+          "x": 160,
+          "y": 160,
+          "buttons": 1,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mousemove",
+          "x": 200,
+          "y": 210,
+          "buttons": 1,
+          "button": 0,
+          "detail": 0,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mouseup",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "click",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        }
+      ]
+    },
+    {
+      "name": "double-click and scroll reach artwork"
+    },
+    {
+      "name": "physical keys, modifiers and Unicode text remain separate",
+      "events": [
+        {
+          "type": "mousemove",
+          "x": 160,
+          "y": 160,
+          "buttons": 0,
+          "button": 0,
+          "detail": 0,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mousedown",
+          "x": 160,
+          "y": 160,
+          "buttons": 1,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mousemove",
+          "x": 200,
+          "y": 210,
+          "buttons": 1,
+          "button": 0,
+          "detail": 0,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mouseup",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "click",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mousedown",
+          "x": 200,
+          "y": 210,
+          "buttons": 1,
+          "button": 0,
+          "detail": 2,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mouseup",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 2,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "click",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 2,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "dblclick",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 2,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "wheel",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 0,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "deltaX": 0,
+          "deltaY": 40,
+          "value": ""
+        },
+        {
+          "type": "keydown",
+          "detail": 0,
+          "code": "ShiftLeft",
+          "key": "Shift",
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": ""
+        },
+        {
+          "type": "keydown",
+          "detail": 0,
+          "code": "KeyA",
+          "key": "A",
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": ""
+        },
+        {
+          "type": "input",
+          "detail": 0,
+          "value": "A"
+        },
+        {
+          "type": "keyup",
+          "detail": 0,
+          "code": "KeyA",
+          "key": "A",
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "A"
+        },
+        {
+          "type": "keyup",
+          "detail": 0,
+          "code": "ShiftLeft",
+          "key": "Shift",
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "A"
+        },
+        {
+          "type": "input",
+          "detail": 0,
+          "value": "Aé"
+        },
+        {
+          "type": "input",
+          "detail": 0,
+          "value": "Aé猫"
+        },
+        {
+          "type": "keydown",
+          "detail": 0,
+          "code": "ArrowLeft",
+          "key": "ArrowLeft",
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "keyup",
+          "detail": 0,
+          "code": "ArrowLeft",
+          "key": "ArrowLeft",
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "Aé猫"
+        }
+      ],
+      "text": "Aé猫"
+    },
+    {
+      "name": "disconnect releases held key and button",
+      "events": [
+        {
+          "type": "input",
+          "detail": 0,
+          "value": "Aé猫"
+        },
+        {
+          "type": "keydown",
+          "detail": 0,
+          "code": "ArrowLeft",
+          "key": "ArrowLeft",
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "keyup",
+          "detail": 0,
+          "code": "ArrowLeft",
+          "key": "ArrowLeft",
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "keydown",
+          "detail": 0,
+          "code": "ShiftLeft",
+          "key": "Shift",
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "mousedown",
+          "x": 200,
+          "y": 210,
+          "buttons": 1,
+          "button": 0,
+          "detail": 1,
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "mouseup",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "click",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": true,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": "Aé猫"
+        },
+        {
+          "type": "keyup",
+          "detail": 0,
+          "code": "ShiftLeft",
+          "key": "Shift",
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "repeat": false,
+          "value": "Aé猫"
+        }
+      ]
+    },
+    {
+      "name": "same-URL occurrence rejects stale input and retains authoritative pointer",
+      "events": [
+        {
+          "type": "mousedown",
+          "x": 200,
+          "y": 210,
+          "buttons": 1,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "mouseup",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        },
+        {
+          "type": "click",
+          "x": 200,
+          "y": 210,
+          "buttons": 0,
+          "button": 0,
+          "detail": 1,
+          "shift": false,
+          "ctrl": false,
+          "alt": false,
+          "meta": false,
+          "value": ""
+        }
+      ]
+    }
+  ],
+  "finishedAt": "2026-11-18T03:06:14.592Z"
+}

@@ -10,6 +10,7 @@ int main(){
     std::vector<ff::Json> events;
     ff::InputState input([&](const ff::Json& event){events.push_back(event);});
     input.target("first",{2000,1000,100,50,1800,900});
+    check(input.x()==1000&&input.y()==500,"First artwork centers the host pointer once");
     input.dispatch({{"kind","move"},{"x",900},{"y",400}});
     input.flush();
     check(input.x()==900&&input.y()==400,"Host owns output-pixel pointer position");
@@ -45,6 +46,12 @@ int main(){
     check(events.size()==before_moves+2&&events[before_moves]["kind"]=="move"&&
       events.back()["kind"]=="button"&&events.back()["x"]==90&&events.back()["y"]==80,
       "Coalescing preserves final position and flushes before button transition");
+    input.dispatch({{"kind","move"},{"x",0},{"y",0}});
+    input.dispatch({{"kind","move"},{"dx",20},{"dy",10},{"referenceWidth",1000}});input.flush();
+    check(input.x()==10&&input.y()==5,"Host scales phone deltas using current output geometry");
+    input.target("second",{1000,500,0,0,1000,500});
+    input.dispatch({{"kind","move"},{"dx",20},{"dy",10},{"referenceWidth",1000}});input.flush();
+    check(input.x()==30&&input.y()==15,"Resize updates relative movement without stale client dimensions");
     input.target("",{500,300,0,0,500,300});auto count=events.size();
     input.dispatch({{"kind","move"},{"x",100}});
     check(events.size()==count,"Absent target receives no new input");
