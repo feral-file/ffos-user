@@ -179,3 +179,10 @@ existing Home Assistant integration can send that command; the exact caller was
 not established and no unrelated automation was changed. Sleep was reissued at
 00:31:02 UTC; panel DDC standby was logged and a later signed device-status read
 confirmed current/override state sleeping. `final-sleep.json` retains both events.
+
+
+The 2026-11-18 FF1-SKYZ2E3A 4K/Vulkan follow-up is in OFFICE-PACING.md.
+It qualifies neither the older homelab numbers nor whole-player parity: the
+current offscreen host remains slower; a native Views diagnostic is measured
+separately. The source/input commits 3d0734a6 and 9ad0b05a passed clean Linux CI
+runs 44226732243 and 44228336255 respectively.

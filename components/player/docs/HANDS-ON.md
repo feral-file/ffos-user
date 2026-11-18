@@ -71,6 +71,6 @@ remains unqualified.
 
 Normal phone casting/input/sleep coordination, playlist refresh/scheduling
 ownership, offline resource handling, full session/watchdog activation, full
-portfolio/overnight/physical-panel acceptance, and the new Vulkan/retained-frame
-matched-Chrome benchmark remain incomplete. Do not infer full feature coverage
+portfolio/overnight/physical-panel acceptance remain incomplete. The matched
+4K benchmark is in OFFICE-PACING.md; the offscreen host remains slower than Chrome. Do not infer full feature coverage
 from this preview or the passing synthetic suite.

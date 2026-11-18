@@ -62,3 +62,12 @@ install(FILES third_party/color-name/LICENSE DESTINATION share/licenses/ff-playe
 install(FILES protocol/schema.json protocol/README.md DESTINATION share/ff-player-native/protocol)
 install(PROGRAMS tools/migrate-legacy.py tools/legacy-export.mjs tools/playerctl.py DESTINATION share/ff-player-native/tools)
 install(FILES tools/diagnostic-cdp.mjs DESTINATION share/ff-player-native/tools)
+
+# Built by CI to verify the pinned Views API, but excluded from normal installs:
+# this fixed-fixture measurement program is not a second production runtime.
+add_executable(cef-views-probe tools/cef-views-probe.cpp)
+target_include_directories(cef-views-probe PRIVATE "${CEF_ROOT}")
+target_link_libraries(cef-views-probe PRIVATE libcef_dll_wrapper "${CEF_ROOT}/Release/libcef.so")
+set_target_properties(cef-views-probe PROPERTIES BUILD_RPATH "${CEF_ROOT}/Release" INSTALL_RPATH "$ORIGIN")
+install(TARGETS cef-views-probe RUNTIME DESTINATION lib/ff-player-native
+        COMPONENT diagnostic-probes EXCLUDE_FROM_ALL)
