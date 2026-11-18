@@ -274,3 +274,14 @@ passed 12 current CTests, Go/C++ interoperability, focused controld tests,
 watchdog tests and diff checks. Verdict: accept, no material findings. It did
 not operate hardware; newly pushed CI was pending when reviewed. Broad gaps
 remain explicit in CUTOVER.md; this is not full rewrite/release acceptance.
+
+## Sean public-engine diagnostic trial — 2026-11-18
+
+Human owner: Anh. Fresh-context review_sean_trial inspected the bounded diagnostic
+runner, semantic replay/namespace observations and explicit product-integration
+limits; independently ran the three malformed-pack checks. Verdict: accept,
+no material findings. A non-material capture-entry-cap caution was resolved with
+a 4096-entry admission bound. Reviewer did not operate the device or certify
+visual fidelity. Casey's exact engine run is deferred at Anh's request.
+No production engine/backend was activated by this increment. Ordinary launch
+was restored and the screen remains on. See SEAN-TRIAL-RESULTS.md.

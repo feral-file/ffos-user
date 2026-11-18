@@ -1,0 +1,107 @@
+{
+  "url": "https://leanderherzog.ch/2026/holz/",
+  "mode": "replay",
+  "freshProfile": true,
+  "headed": true,
+  "kernelNetworkIsolated": true,
+  "errors": [],
+  "failures": [
+    {
+      "requestId": "ACA9D1658314C6C402E1A1C9381F2167",
+      "timestamp": 117999.973595,
+      "type": "Other",
+      "errorText": "net::ERR_ABORTED",
+      "canceled": true
+    },
+    {
+      "requestId": "131.8",
+      "timestamp": 117999.973285,
+      "type": "XHR",
+      "errorText": "net::ERR_INTERNET_DISCONNECTED",
+      "canceled": false
+    }
+  ],
+  "targets": [
+    {
+      "targetId": "162C4762B82579DA0EBB71276B03EDA0",
+      "type": "browser_ui",
+      "title": "Omnibox Popup",
+      "url": "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html",
+      "attached": true,
+      "canAccessOpener": false,
+      "browserContextId": "5884E594C93164DC89FF0B8AE3551E66"
+    },
+    {
+      "targetId": "7322BDFC651E48B9FFFF8C8F8A9EC0C2",
+      "type": "page",
+      "title": "about:blank",
+      "url": "about:blank",
+      "attached": true,
+      "canAccessOpener": false,
+      "browserContextId": "5884E594C93164DC89FF0B8AE3551E66"
+    },
+    {
+      "targetId": "7BA63AA1C77349549C2D188BB85E35EB",
+      "type": "browser_ui",
+      "title": "chrome://webui-toolbar.top-chrome",
+      "url": "chrome://webui-toolbar.top-chrome/",
+      "attached": true,
+      "canAccessOpener": false,
+      "browserContextId": "5884E594C93164DC89FF0B8AE3551E66"
+    },
+    {
+      "targetId": "AE6A325D8982D93DE0743A6F3C465FC5",
+      "type": "browser_ui",
+      "title": "Omnibox Popup",
+      "url": "chrome://omnibox-popup.top-chrome/",
+      "attached": true,
+      "canAccessOpener": false,
+      "browserContextId": "5884E594C93164DC89FF0B8AE3551E66"
+    },
+    {
+      "targetId": "4C53E83D2B51D42604290CFFE1BDD5CF",
+      "type": "service_worker",
+      "title": "Service Worker chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/thunk.js",
+      "url": "chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/thunk.js",
+      "attached": true,
+      "canAccessOpener": false,
+      "browserContextId": "5884E594C93164DC89FF0B8AE3551E66"
+    },
+    {
+      "targetId": "1FB335BCD2F7B0965CA4966BF48AB7B8",
+      "type": "service_worker",
+      "title": "Service Worker chrome-extension://glbjnfimcajjenihimblfaponejbkoph/background.js",
+      "url": "chrome-extension://glbjnfimcajjenihimblfaponejbkoph/background.js",
+      "attached": true,
+      "canAccessOpener": false,
+      "browserContextId": "5884E594C93164DC89FF0B8AE3551E66"
+    }
+  ],
+  "responses": [],
+  "misses": [
+    "POST https://leanderherzog.ch/cdn-cgi/rum?",
+    "GET https://leanderherzog.ch/2026/holz/geometry.mjs"
+  ],
+  "engine": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/156.0.8078.80",
+    "revision": "@fb096c0011f9d50f0a264a9376420cdea9c421e3",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    "jsVersion": "15.6.75.27"
+  },
+  "executableSha256": "1bcad71ad1bff85955db13c6d8dd9f32374934d5a5cb079b526c46fb51f9bd97",
+  "page": {
+    "url": "https://leanderherzog.ch/2026/holz/",
+    "origin": "https://leanderherzog.ch",
+    "secure": true,
+    "webgpu": true,
+    "canvas": [
+      [
+        1920,
+        1080
+      ]
+    ],
+    "text": "60 FPS\u2003\u20030 OBJ\u2003\u20030 PTS\u2003\u20030:00 PAUSED\nUnable to run\n\nGrowing pile: Geometry worker failed\n\nCopy error\nFull details"
+  },
+  "captureComplete": false
+}

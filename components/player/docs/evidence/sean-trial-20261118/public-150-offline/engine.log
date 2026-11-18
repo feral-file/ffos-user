@@ -1,0 +1,98 @@
+[2:2:1118/130525.590004:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:208] open /home/feralfile/.config/chromium/Crash Reports/settings.dat: Read-only file system (30)
+[2:2:1118/130525.591315:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:208] open /home/feralfile/.config/chromium/Crash Reports/settings.dat: Read-only file system (30)
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.005: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.006: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.007: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.007: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.007: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.007: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.007: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.033: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.034: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.034: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.062: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chromium:2): dconf-CRITICAL **: 13:05:26.063: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+[2:25:1118/130526.112779:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:208] open /home/feralfile/.config/chromium/Crash Reports/settings.dat: Read-only file system (30)
+[51:51:1118/130526.417957:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+[2:2:1118/130526.774591:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.systemd1.Manager.StartTransientUnit: object_path= /org/freedesktop/systemd1: org.freedesktop.DBus.Error.InvalidArgs: Process 2 is a kernel thread, refusing.
+[2:2:1118/130526.871650:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
