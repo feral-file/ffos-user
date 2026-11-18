@@ -68,3 +68,17 @@ The host's RunUntilIdle loop and poll-and-drop path caused frame/control
 starvation. Scheduled UI ticks, callback coalescing and external BeginFrames
 passed the real artwork/control regression. Whole rewrite and coordinated FFOS
 activation remain incomplete; BENCHMARK.md records comparison and limitations.
+
+2026-11-18 frame-pacing optimization, requested by Anh: establish an isolated
+CEF/Chrome for Testing pair at Chromium 156.0.8078.80 (the production .96 pin has
+no published matching CfT binary). Generate a benchmark-only Transparent Grit
+fixture with an explicit fixed canvas-sketch seed and hashes of source/fixture.
+Keep original artwork and production dependency pin unchanged. Assert engine,
+viewport, WebGL backend and seed before measurement; alternate fresh native and
+Chrome processes with warmup and multiple animation cycles. Measure renderer rAF
+separately from native GPU copies, swap/copy waits and control responsiveness.
+Profile before changing synchronization; borrowed CEF buffers must still be
+consumed within their documented lifetime. Validate any optimization on both the
+matched engine and production engine, run input/media/recovery checks, obtain a
+fresh-context review, push only the feature branch, and restore homelab to sleep.
+No renderer timing or compositor screenshot constitutes physical scanout proof.

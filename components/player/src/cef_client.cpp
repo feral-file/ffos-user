@@ -74,7 +74,10 @@ void ArtworkClient::update_media(){
   // Pace Chromium from host progress rather than its independent 60 Hz timer.
   // Otherwise heavy WebGL can build a long producer queue while this UI thread
   // waits for a copy; coalescing callbacks alone does not drain that GPU backlog.
-  if(browser)browser->GetHost()->SendExternalBeginFrame();
+  const auto now=std::chrono::steady_clock::now();
+  if(browser && begin_clock_.due(now)){
+    browser->GetHost()->SendExternalBeginFrame();
+  }
   // A dropped post-load frame may have been a static document's only update.
   // Request a replacement once per host turn, never recursively in OnPaint.
   if(refresh_needed_&&browser){refresh_needed_=false;browser->GetHost()->Invalidate(PET_VIEW);}

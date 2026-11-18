@@ -4,7 +4,7 @@ set(PROJECT_ARCH "x86_64")
 find_package(CEF REQUIRED)
 add_subdirectory("${CEF_LIBCEF_DLL_WRAPPER_PATH}" "cef-wrapper")
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET sdl2 egl glesv2 libdrm pangocairo libqrencode)
+pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET sdl2 egl glesv2 libdrm pangocairo libqrencode wayland-client)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv>=2.6.0)
 add_executable(ff-media-worker src/media_worker.cpp)
 target_link_libraries(ff-media-worker PRIVATE ff_media_ipc PkgConfig::MPV PkgConfig::NATIVE)
@@ -31,8 +31,16 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/libplacebo-7.387.0/LICENSE"
         DESTINATION share/licenses/ff-player-native RENAME libplacebo.txt)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ffmpeg/COPYING.LGPLv2.1"
         DESTINATION share/licenses/ff-player-native RENAME FFmpeg-LGPL.txt)
-add_executable(ff-player-native src/cef_main.cpp src/cef_client.cpp src/presentation.cpp src/renderer_app.cpp src/media_client.cpp)
-target_include_directories(ff-player-native PRIVATE "${CEF_ROOT}")
+pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
+set(PRESENTATION_XML "${WAYLAND_PROTOCOLS_DIR}/stable/presentation-time/presentation-time.xml")
+install(FILES "${PRESENTATION_XML}" DESTINATION share/licenses/ff-player-native RENAME wayland-presentation-time.xml)
+add_custom_command(OUTPUT presentation-time-client-protocol.h presentation-time-protocol.c
+  COMMAND ${WAYLAND_SCANNER} client-header ${PRESENTATION_XML} presentation-time-client-protocol.h
+  COMMAND ${WAYLAND_SCANNER} private-code ${PRESENTATION_XML} presentation-time-protocol.c
+  DEPENDS ${PRESENTATION_XML} VERBATIM)
+add_executable(ff-player-native presentation-time-protocol.c src/presentation_feedback.cpp src/cef_main.cpp src/cef_client.cpp src/presentation.cpp src/renderer_app.cpp src/media_client.cpp)
+target_include_directories(ff-player-native PRIVATE "${CEF_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(ff-player-native PRIVATE ff_core ff_media_ipc libcef_dll_wrapper "${CEF_ROOT}/Release/libcef.so" PkgConfig::NATIVE dl)
 target_compile_definitions(ff-player-native PRIVATE FF_RENDERER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/renderers")
 set_target_properties(ff-player-native PROPERTIES BUILD_RPATH "${CEF_ROOT}/Release" INSTALL_RPATH "$ORIGIN")

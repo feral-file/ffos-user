@@ -7,6 +7,7 @@
 #include <csignal>
 #include <filesystem>
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <sys/stat.h>
 #include <exception>
@@ -22,7 +23,7 @@ class HostTick final : public CefTask {
   explicit HostTick(std::function<bool()> step):step_(std::move(step)){}
   void Execute() override {
     if(!step_()){CefQuitMessageLoop();return;}
-    if(!CefPostDelayedTask(TID_UI,this,1)){
+    if(!CefPostDelayedTask(TID_UI,this,4)){
       std::cerr<<"CEF refused the next host tick; terminating host\n";
       std::_Exit(1);
     }
@@ -60,7 +61,8 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
     // must receive graceful systemd shutdown after that setup has finished.
     std::signal(SIGTERM,stop);std::signal(SIGINT,stop);
     {
-      ff::Presentation presentation(command->HasSwitch("diagnostic-cpu"));
+      const std::string timing_path=command->GetSwitchValue("diagnostic-presentation-timing");
+      ff::Presentation presentation(command->HasSwitch("diagnostic-cpu"),!timing_path.empty());
       std::map<std::string,CefRefPtr<ff::ArtworkClient>> clients;
       std::map<std::string,std::unique_ptr<ff::MediaClient>> media;
       ff::InputState input_state([&](const ff::Json& event){
@@ -122,9 +124,9 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         // Presentation identity advances only after a host-owned frame exists.
         // A swap is composition evidence, never proof of artist correctness or HDMI output.
         const auto* drawing = !commit.empty() ? &*playback.desired() : (playback.visible() ? &*playback.visible() : nullptr);
-        presentation.draw(surface,drawing,playback);
-        if(drawing)if(auto it=media.find(drawing->id);it!=media.end())it->second->did_present();
-        if(!commit.empty())playback.presented(commit);
+        const bool submitted=presentation.draw(surface,drawing,playback);
+        if(submitted&&drawing)if(auto it=media.find(drawing->id);it!=media.end())it->second->did_present();
+        if(submitted&&!commit.empty())playback.presented(commit);
         sync_input();
         for(auto it=clients.begin();it!=clients.end();){
           auto client=it->second;
@@ -160,7 +162,16 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
       }));
       ff::require(CefPostTask(TID_UI,tick),"cef_initialization","Cannot schedule host work");
       CefRunMessageLoop();
-      std::cerr<<"presentation_metrics "<<presentation.metrics().dump()<<'\n';
+      auto metrics=presentation.metrics();
+      if(!timing_path.empty()){
+        std::ofstream output(timing_path);
+        output<<metrics.dump()<<'\n';output.close();
+        if(!output)std::cerr<<"Could not write presentation diagnostic: "<<timing_path<<'\n';
+      }
+      // Raw bounded samples belong in the requested diagnostic artifact, not a
+      // large journal line that journald may split in the middle of a value.
+      metrics["waylandPresentation"].erase("changedTimestampsNs");
+      std::cerr<<"presentation_metrics "<<metrics.dump()<<'\n';
       if(frame_error)std::rethrow_exception(frame_error);
     }
     CefShutdown();return 0;

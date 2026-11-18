@@ -1,4 +1,5 @@
 #pragma once
+#include "ff/frame_clock.hpp"
 #include "ff/presentation.hpp"
 #include "include/cef_client.h"
 #include "include/cef_app.h"
@@ -54,6 +55,7 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   std::string media_state_;
   int view_width_=0,view_height_=0;
   uint64_t ready_after_frame_=0;
+  FrameClock begin_clock_;
   bool paint_pending_=false, refresh_needed_=false;
   bool admit_paint();
   void mark_ready();

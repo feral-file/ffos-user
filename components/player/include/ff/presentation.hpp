@@ -1,9 +1,14 @@
 #pragma once
 #include "ff/playback.hpp"
+#include "ff/frame_clock.hpp"
+#include "ff/presentation_feedback.hpp"
 #include "include/cef_render_handler.h"
 #include <SDL.h>
 #include <GLES3/gl3.h>
 #include <EGL/egl.h>
+#include <array>
+#include <chrono>
+#include <tuple>
 
 namespace ff {
 struct Surface {
@@ -12,16 +17,25 @@ struct Surface {
   uint64_t frames = 0;
   bool accelerated = false;
 };
+// Bounded timing histogram: one millisecond bins, final bin is overflow.
+// Measures host work/submission, never physical display presentation.
+struct FrameTiming {
+  std::array<uint64_t, 1001> bins{};
+  uint64_t count = 0;
+  double total = 0, maximum = 0;
+  void add(double milliseconds);
+  Json json() const;
+};
 struct Bounds { int x, y, width, height; };
 class Presentation {
  public:
-  explicit Presentation(bool diagnostic_cpu);
+  explicit Presentation(bool diagnostic_cpu, bool timing_samples = false);
   ~Presentation();
   void accelerated(Surface& surface, const CefAcceleratedPaintInfo& info);
   void coalesced_frame() { ++coalesced_frames_; }
   void software(Surface& surface, const void* data, int width, int height);
   void destroy(Surface& surface);
-  void draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback);
+  bool draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback);
   bool events(const std::function<void(const Json&)>& input);
   Bounds bounds(const Json& display) const;
   int width() const { return width_; }
@@ -30,6 +44,8 @@ class Presentation {
   void pointer_position(double x, double y) { pointer_x_ = x; pointer_y_ = y; }
   Json metrics() const;
  private:
+  std::unique_ptr<PresentationFeedback> feedback_;
+  uint64_t frame_serial_ = 0;
   SDL_Window* window_ = nullptr;
   SDL_GLContext context_ = nullptr;
   int width_ = 0, height_ = 0;
@@ -43,6 +59,15 @@ class Presentation {
   uint64_t pointer_active_ = 0, gpu_copies_ = 0, cpu_copies_ = 0, swaps_ = 0;
   uint64_t coalesced_frames_ = 0;
   double copy_ms_ = 0;
+  FrameTiming copy_timing_, swap_timing_, frame_timing_;
+  std::chrono::steady_clock::time_point last_frame_{};
+  FrameClock draw_clock_;
+  GLuint last_frame_texture_ = 0;
+  uint64_t last_frame_number_ = 0;
+  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, double, double>;
+  std::optional<DrawKey> draw_key_;
+  std::string last_frame_occurrence_;
+  void swap(const Surface* artwork);
   void quad(GLuint texture, Bounds rect, float opacity = 1);
   void ui(const std::string& text, const std::string& qr, bool full);
 };
