@@ -30,7 +30,7 @@ Prepared parameters for a human after native image/portfolio acceptance:
 ```sh
 gh workflow run build-image-to-cf.yml -R feral-file/ffos --ref codex/native-player \
   -f version=3.1.0-native.1 -f ffos_user_ref=codex/native-player \
-  -f ff_player_ref=07805905 -f environment=Development \
+  -f ff_player_ref=07805905f85d16a143bc9f409cb41a8df14c356e -f environment=Development \
   -f pacman_snapshot=latest -f dev_iso=true -f soak-test=false \
   -f update_min_version=false -f update_required_version=false -f update_recovery_version=false
 ```

@@ -38,6 +38,9 @@ rotation (2160×3840 compositor). CEF Chromium 156.0.8078.96; libmpv 0.42.
   `682c8a5a-d09c-473a-9356-ba3ba8871c26`, playlist
   `1bbefbc9-0226-439a-921b-12c6cf6a809e`, reached the host. CLI resolves and sends
   inline; a blank playlistUrl is intentional for this path.
+- A signed playlistUrl cast also passed. Its first automatic source refresh
+  applied without replacing the playback generation; normal progression reached
+  the next work after the authored 300 seconds.
 - Signed FF-CLI single holz cast reached selection/presentation. Initial
   compositor image was black despite host presentation. Logs showed unsupported
   WebGPU swap-image backing. Enabling Vulkan/VulkanFromANGLE with the Vulkan
@@ -71,7 +74,9 @@ acceptance is implied.
 
 12 macOS core CTest groups and 15 Linux CEF/media CTest groups passed. Shared
 schema generation and pinned-vendor verification passed. Go race suites, vet,
-changed-diff lint and script contracts are recorded with final evidence.
+changed-diff lint and script contracts passed and are recorded with evidence.
+Clean Linux CI run 44244585012 passed in 10m24s, including full CEF/media build,
+Go/C++ interoperability in the same build image and the uploaded runtime artifact.
 FFOS verification runs as an unprivileged user in the Linux verification image;
 macOS lacks flock semantics and running Linux fixtures as root invalidates
 permission-failure tests. Those exploratory failures are not counted as passes.

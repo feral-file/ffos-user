@@ -1,0 +1,23 @@
+{
+  "test": "signed_url_cast",
+  "title": "Social Codes",
+  "items": 10,
+  "playlistUrl": "https://feed.feralfile.com/api/v1/playlists/1bbefbc9-0226-439a-921b-12c6cf6a809e",
+  "generation": 2,
+  "renderer": "presented",
+  "presentedSource": "https://ipfs.feralfile.com/ipfs/QmcLtLzmEpbwgQDW2rVJ1d9hwjFs3vHLTR1v1WCCvknDNS?edition_number=0&blockchain=bitmark",
+  "afterRefresh": {
+    "sameGeneration": true,
+    "sameOccurrence": false,
+    "renderer": "presented",
+    "url": "https://feed.feralfile.com/api/v1/playlists/1bbefbc9-0226-439a-921b-12c6cf6a809e",
+    "updateOutcome": {
+      "contentBlocked": false,
+      "id": "6100d3b2-bce6-44cd-94f2-6fa65de832a2",
+      "outcome": "applied"
+    },
+    "presentedIndex": 1,
+    "authoredDurationSeconds": 300,
+    "note": "Playback advanced to the next item at its authored duration; unchanged generation and source URL survived automatic refresh."
+  }
+}
