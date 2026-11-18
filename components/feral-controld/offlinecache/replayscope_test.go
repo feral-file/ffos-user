@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -622,4 +623,94 @@ func TestKioskReplay_DropRestoredScope_NeverRestoredLeavesASyncedScope(t *testin
 
 	b.dropSendsNothing(t)
 	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"])
+}
+
+// countRestores registers a restored-scope callback and returns its count.
+func countRestores(t *testing.T, kr offlinecache.KioskReplay) *atomic.Int32 {
+	t.Helper()
+	notifier, ok := kr.(interface{ SetOnScopeRestored(func()) })
+	require.True(t, ok, "kiosk replay reports a restored scope")
+	var restores atomic.Int32
+	notifier.SetOnScopeRestored(func() { restores.Add(1) })
+	return &restores
+}
+
+// TestKioskReplay_AttachOnReconnect_ReportsARestoredScopeOnce: the
+// callback is what asks the player to load the work again, so it runs once
+// for an attach that armed the remembered scope.
+func TestKioskReplay_AttachOnReconnect_ReportsARestoredScopeOnce(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	restores := countRestores(t, b.kr)
+	b.attach(t, 2)
+	assert.EqualValues(t, 1, restores.Load())
+}
+
+// TestKioskReplay_AttachOnReconnect_NoRestoreReportsNothing: every way the
+// restore can decline leaves the player alone.
+func TestKioskReplay_AttachOnReconnect_NoRestoreReportsNothing(t *testing.T) {
+	t.Run("nothing cached", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		b := bootKiosk(t, store)
+		restores := countRestores(t, b.kr)
+		b.attach(t, 1)
+		assert.Zero(t, restores.Load())
+	})
+	t.Run("network present", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		kept := seedItem(t, store, "kept", "<html>kept</html>")
+		rememberScope(t, store, kept.URL)
+		b := bootKioskWithSignal(t, store, func() bool { return false })
+		restores := countRestores(t, b.kr)
+		b.attach(t, 1)
+		assert.Zero(t, restores.Load())
+	})
+	t.Run("a display holds the playback lock", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		kept := seedItem(t, store, "kept", "<html>kept</html>")
+		rememberScope(t, store, kept.URL)
+		b := bootKiosk(t, store)
+		restores := countRestores(t, b.kr)
+		b.kr.LockPlayback()
+		defer b.kr.UnlockPlayback()
+		b.attach(t, 1)
+		assert.Zero(t, restores.Load())
+	})
+
+	// The last two need a scripted replayer.
+	mocked := func(t *testing.T, script func(kr offlinecache.KioskReplay, r *mocks.MockOfflineCacheReplayer, keptURL string)) {
+		store, _ := newTestStore(t)
+		kept := seedItem(t, store, "kept", "<html>kept</html>")
+		rememberScope(t, store, kept.URL)
+		ctrl := gomock.NewController(t)
+		t.Cleanup(ctrl.Finish)
+		mockHTTP, mockDialer, conn := scriptedKiosk(t, ctrl)
+		mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+		kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+			mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+		setOffline(t, kr, func() bool { return true })
+		restores := countRestores(t, kr)
+		script(kr, mockReplayer, kept.URL)
+		(&bootedKiosk{kr: kr, conn: conn}).attach(t, 1)
+		assert.Zero(t, restores.Load())
+	}
+	t.Run("a sync finished first", func(t *testing.T) {
+		mocked(t, func(kr offlinecache.KioskReplay, r *mocks.MockOfflineCacheReplayer, keptURL string) {
+			r.EXPECT().EnableForPlaylist(gomock.Any(), []string{keptURL}, false).Return(nil).Times(1)
+			r.EXPECT().Attach("", gomock.Any()).Do(func(string, offlinecache.CDPSession) {
+				kr.LockPlayback()
+				defer kr.UnlockPlayback()
+				assert.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{keptURL})))
+			})
+		})
+	})
+	t.Run("the enable failed", func(t *testing.T) {
+		mocked(t, func(_ offlinecache.KioskReplay, r *mocks.MockOfflineCacheReplayer, keptURL string) {
+			r.EXPECT().Attach("", gomock.Any())
+			r.EXPECT().EnableForPlaylist(gomock.Any(), []string{keptURL}, true).Return(errors.New("kiosk refused")).Times(1)
+		})
+	})
 }

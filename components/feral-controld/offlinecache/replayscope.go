@@ -251,7 +251,20 @@ func (k *kioskReplay) restoreScope(ctx context.Context, syncsBefore uint64) {
 	}
 	k.logger.Info("offline cache: restored remembered replay scope on kiosk attach",
 		zap.Int("cached_items", len(cached)))
+	if notify := k.onRestored.Load(); notify != nil && *notify != nil {
+		(*notify)()
+	}
 }
+
+// SetOnScopeRestored registers a callback run once per kiosk attach on which
+// the remembered scope was armed, and never when the restore gave way, found
+// nothing to arm or failed. main.go uses it to ask the player to load the
+// work again: the kiosk's first load ran before this session existed and
+// failed, and the kept copy is being served from here on. The callback runs
+// on the CDP connect path with the playback lock held, so it must hand its
+// work to another goroutine. Not on the KioskReplay interface, like
+// SetOffline.
+func (k *kioskReplay) SetOnScopeRestored(notify func()) { k.onRestored.Store(&notify) }
 
 // DropRestoredScope turns replay off if the scope in force is still the one
 // restoreScope armed. main.go calls it when the internet verdict turns to

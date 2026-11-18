@@ -165,6 +165,9 @@ type kioskReplay struct {
 	// the sync count at that restore plus one, zero when there is none. It
 	// is what DropRestoredScope takes back when internet returns.
 	restored atomic.Uint64
+	// onRestored, when set, is told each time restoreScope has armed the
+	// remembered scope — see SetOnScopeRestored.
+	onRestored atomic.Pointer[func()]
 	// offline is the no-network signal restoreScope is gated on — see
 	// SetOffline. Nil until wired, which reads as "not known offline".
 	offline atomic.Pointer[func() bool]

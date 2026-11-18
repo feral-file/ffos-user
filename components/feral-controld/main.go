@@ -1420,6 +1420,15 @@ func initializeApp(
 		// after the verdict above is recorded so no later attach restores
 		// it again. Off the mediator's goroutine: it waits for the playback
 		// lock and sends to the kiosk.
+		// The kiosk's first load of the work on a no-network start runs
+		// before replay can be armed, and fails; once the remembered scope
+		// is in force, ask the player to load it again rather than leave
+		// the screen black until the player's own retry 15s later.
+		if notifier, ok := kioskReplay.(interface{ SetOnScopeRestored(func()) }); ok {
+			notifier.SetOnScopeRestored(func() {
+				go devicectl.RefreshArtworkAfterReplayRestore(context, executor, logger)
+			})
+		}
 		if dropper, ok := kioskReplay.(restoredScopeDropper); ok {
 			internetObservers = append(internetObservers, func(connected bool) {
 				if connected {
