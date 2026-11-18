@@ -827,6 +827,12 @@ func (v *internetVerdict) seed(connected bool) {
 
 func (v *internetVerdict) offline() bool { return v.state.Load() == internetOffline }
 
+// restoredScopeDropper is kiosk replay's optional "internet is back" seam,
+// named here because initializeApp's local `context` shadows the package.
+type restoredScopeDropper interface {
+	DropRestoredScope(ctx context.Context)
+}
+
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
 	logger.Info("Getting connectivity status")
 
@@ -1410,6 +1416,17 @@ func initializeApp(
 		replayInternet = &internetVerdict{}
 		internetObservers = append(internetObservers, replayInternet.observe)
 		sink.SetOffline(replayInternet.offline)
+		// A scope restored while offline is dropped once internet is back,
+		// after the verdict above is recorded so no later attach restores
+		// it again. Off the mediator's goroutine: it waits for the playback
+		// lock and sends to the kiosk.
+		if dropper, ok := kioskReplay.(restoredScopeDropper); ok {
+			internetObservers = append(internetObservers, func(connected bool) {
+				if connected {
+					go dropper.DropRestoredScope(context)
+				}
+			})
+		}
 	}
 	// Media health (#304, #392, docs/media-health.md): the cast-time L0 pass
 	// replaces the former source preflight — a displayPlaylist whose every

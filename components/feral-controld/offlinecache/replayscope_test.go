@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -463,4 +464,162 @@ func TestKioskReplay_AttachOnReconnect_NetworkPresentRestoresNothing(t *testing.
 				"Fetch is never enabled, so no request can be answered from the remembered scope")
 		})
 	}
+}
+
+func dropRestoredScope(t *testing.T, kr offlinecache.KioskReplay) func(context.Context) {
+	t.Helper()
+	dropper, ok := kr.(interface{ DropRestoredScope(context.Context) })
+	require.True(t, ok, "kiosk replay takes the internet-is-back signal")
+	return dropper.DropRestoredScope
+}
+
+// dropAndAck runs DropRestoredScope and answers the one call it sends.
+func (b *bootedKiosk) dropAndAck(t *testing.T, reply func(id int64) map[string]interface{}) string {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dropRestoredScope(t, b.kr)(context.Background())
+	}()
+	msg := b.conn.nextOutbound(t)
+	data, err := json.Marshal(reply(int64(msg["id"].(float64))))
+	require.NoError(t, err)
+	b.conn.pushReply(data)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DropRestoredScope did not complete")
+	}
+	return msg["method"].(string)
+}
+
+func cdpOK(id int64) map[string]interface{} {
+	return map[string]interface{}{"id": id, "result": map[string]interface{}{}}
+}
+
+func cdpError(id int64) map[string]interface{} {
+	return map[string]interface{}{"id": id, "error": map[string]interface{}{"code": -32000, "message": "refused"}}
+}
+
+// dropSendsNothing runs DropRestoredScope and requires that it returned
+// promptly having sent the kiosk nothing.
+func (b *bootedKiosk) dropSendsNothing(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dropRestoredScope(t, b.kr)(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DropRestoredScope did not return; it is waiting on a call it should not have sent")
+	}
+	select {
+	case data := <-b.conn.outbound:
+		t.Fatalf("DropRestoredScope sent %s", data)
+	default:
+	}
+}
+
+// bootOfflineKiosk boots a kiosk known to be offline and returns the switch that
+// turns the verdict to online.
+func bootOfflineKiosk(t *testing.T, store offlinecache.Store) (*bootedKiosk, func()) {
+	t.Helper()
+	var online atomic.Bool
+	return bootKioskWithSignal(t, store, func() bool { return !online.Load() }), func() { online.Store(true) }
+}
+
+// TestKioskReplay_DropRestoredScope_InternetBackStopsServingTheRestoredScope
+// reproduces the review finding on ffos-user#469: playlist A's scope is
+// restored at an offline attach, internet returns before any SyncPlaylist,
+// and a different work then asks for a URL A's capture holds. The origin is
+// reachable, so replay must be off, not answering with A's bytes.
+func TestKioskReplay_DropRestoredScope_InternetBackStopsServingTheRestoredScope(t *testing.T) {
+	store, _ := newTestStore(t)
+	shared := seedItem(t, store, "playlist-a-shared-script", "old bytes")
+	rememberScope(t, store, shared.URL)
+
+	b, goOnline := bootOfflineKiosk(t, store)
+	b.attach(t, 2)
+	require.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", shared.URL)["method"],
+		"while offline the restored scope answers")
+
+	goOnline()
+	assert.Equal(t, "Fetch.disable", b.dropAndAck(t, cdpOK))
+	// Dropped once; a repeated verdict has nothing left to drop.
+	b.dropSendsNothing(t)
+}
+
+// TestKioskReplay_DropRestoredScope_StillOfflineKeepsTheRestoredScope: the
+// drop is for internet being back. Run while the device still has none (a
+// late signal after the network went away again), it leaves the restored
+// scope serving the kept work.
+func TestKioskReplay_DropRestoredScope_StillOfflineKeepsTheRestoredScope(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	b.attach(t, 2)
+	b.dropSendsNothing(t)
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"])
+}
+
+// TestKioskReplay_DropRestoredScope_RetriesAfterTheKioskRefuses: a refused
+// Fetch.disable leaves the capture installed, so the next "available"
+// verdict must try again rather than find nothing to drop.
+func TestKioskReplay_DropRestoredScope_RetriesAfterTheKioskRefuses(t *testing.T) {
+	store, _ := newTestStore(t)
+	shared := seedItem(t, store, "playlist-a-shared-script", "old bytes")
+	rememberScope(t, store, shared.URL)
+
+	b, goOnline := bootOfflineKiosk(t, store)
+	b.attach(t, 2)
+	goOnline()
+	assert.Equal(t, "Fetch.disable", b.dropAndAck(t, cdpError))
+	assert.Equal(t, "Fetch.disable", b.dropAndAck(t, cdpOK))
+	b.dropSendsNothing(t)
+}
+
+// TestKioskReplay_DropRestoredScope_KeepsAScopeASyncInstalled: once a
+// SyncPlaylist has scoped the session from what is on screen, internet
+// returning must not turn replay off under it.
+func TestKioskReplay_DropRestoredScope_KeepsAScopeASyncInstalled(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b, goOnline := bootOfflineKiosk(t, store)
+	b.attach(t, 2)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- syncErr(b.kr.SyncPlaylist(context.Background(), []string{kept.URL})) }()
+	assert.Equal(t, "Fetch.enable", ackOutbound(t, b.conn)["method"])
+	require.NoError(t, <-errCh)
+
+	goOnline()
+	b.dropSendsNothing(t)
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"],
+		"the synced scope still answers")
+}
+
+// TestKioskReplay_DropRestoredScope_NeverRestoredLeavesASyncedScope: with
+// network present at the attach nothing was restored, so the signal never
+// touches the scope a sync installed.
+func TestKioskReplay_DropRestoredScope_NeverRestoredLeavesASyncedScope(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKioskWithSignal(t, store, func() bool { return false })
+	b.attach(t, 1)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- syncErr(b.kr.SyncPlaylist(context.Background(), []string{kept.URL})) }()
+	assert.Equal(t, "Fetch.enable", ackOutbound(t, b.conn)["method"])
+	require.NoError(t, <-errCh)
+
+	b.dropSendsNothing(t)
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"])
 }

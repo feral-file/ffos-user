@@ -161,6 +161,10 @@ type kioskReplay struct {
 	// none has completed since just before its session was attached: such a
 	// sync already set this session's scope from what is on screen.
 	syncs atomic.Uint64
+	// restored marks a scope restoreScope armed that no sync has replaced:
+	// the sync count at that restore plus one, zero when there is none. It
+	// is what DropRestoredScope takes back when internet returns.
+	restored atomic.Uint64
 	// offline is the no-network signal restoreScope is gated on — see
 	// SetOffline. Nil until wired, which reads as "not known offline".
 	offline atomic.Pointer[func() bool]

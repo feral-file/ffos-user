@@ -19,7 +19,7 @@ import (
 // request the kept copy (feral-file/feral-file#3635) — see
 // AttachOnReconnect's doc for why the next SyncPlaylist is too late.
 //
-// Four rules keep it from serving anything the live path would not:
+// Five rules keep it from serving anything the live path would not:
 //
 //   - It is restored only while the device is KNOWN to have no network
 //     (SetOffline). With network present, or with the answer unknown, the
@@ -39,6 +39,8 @@ import (
 //     shows, and a strict scope over the wrong playlist would fail requests
 //     the page could have made. The cached sources themselves are served
 //     from the cache, exactly as they are once the playlist's own sync runs.
+//   - It ends when internet returns: DropRestoredScope turns replay off
+//     unless a sync has replaced the restored scope by then.
 //   - It never competes with an authoritative sync: restore runs under the
 //     playback lock, gives way when a display path already holds it, and
 //     arms nothing once a sync has completed on the attached session.
@@ -239,6 +241,9 @@ func (k *kioskReplay) restoreScope(ctx context.Context, syncsBefore uint64) {
 		return
 	}
 	k.armed.Store(true)
+	// Marked before the call: a failed enable can still leave Fetch on for
+	// some targets, and DropRestoredScope has to cover that too.
+	k.restored.Store(syncsBefore + 1)
 	if err := k.replayer.EnableForPlaylist(ctx, cached, true); err != nil {
 		k.logger.Warn("offline cache: failed to restore remembered replay scope on kiosk attach",
 			zap.Int("cached_items", len(cached)), zap.Error(err))
@@ -246,4 +251,37 @@ func (k *kioskReplay) restoreScope(ctx context.Context, syncsBefore uint64) {
 	}
 	k.logger.Info("offline cache: restored remembered replay scope on kiosk attach",
 		zap.Int("cached_items", len(cached)))
+}
+
+// DropRestoredScope turns replay off if the scope in force is still the one
+// restoreScope armed. main.go calls it when the internet verdict turns to
+// available: the restored scope was justified only by there being no live
+// answer to displace, and nothing has confirmed the page it sits over, so
+// once origins are reachable it could answer another work's request for a
+// shared URL with this capture's old bytes. A scope a SyncPlaylist has
+// installed since is authoritative and is left alone; the next sync is what
+// scopes replay again, as it did before restore existed. It waits for the
+// playback lock, so call it off any path that must not block.
+func (k *kioskReplay) DropRestoredScope(ctx context.Context) {
+	// Under the lock even to find nothing restored: a restore that read
+	// "offline" just before the verdict turned finishes first, and its
+	// scope is then dropped here.
+	k.playbackMu.Lock()
+	defer k.playbackMu.Unlock()
+	at := k.restored.Load()
+	// Offline again by the time this ran: a restore made since stands.
+	if at == 0 || k.knownOffline() {
+		return
+	}
+	if k.syncs.Load()+1 != at {
+		k.restored.Store(0)
+		return
+	}
+	if err := k.replayer.Disable(ctx); err != nil {
+		// The mark stays, so the next "available" verdict tries again.
+		k.logger.Warn("offline cache: failed to drop the restored replay scope when internet returned", zap.Error(err))
+		return
+	}
+	k.restored.Store(0)
+	k.logger.Info("offline cache: dropped the restored replay scope, internet is available")
 }
