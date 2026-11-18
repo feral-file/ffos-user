@@ -166,7 +166,7 @@ light content. Raw artifacts are `*-light.json` and `native-light-timing.json`.
 Both heavy final runs and this light run recorded zero CPU artwork copies.
 
 CI [44205900548](https://github.com/feral-file/ffos-user/actions/runs/44205900548)
-passed the clean container build, CEF/libmpv compilation, 12 tests, schema check,
+passed the clean container build, host/CEF-wrapper/libmpv compilation, 12 tests, schema check,
 installation and artifact upload at `07fb9d85`. The independent final review
 reported no material findings and `Verdict: accept`; its scope and limitations
 are recorded in `REVIEWS.md`. No PR, publishing workflow or device activation
