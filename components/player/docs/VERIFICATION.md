@@ -506,3 +506,19 @@ The refresh completion review found no material findings (`Verdict: accept`).
 The additional idle/sleep/stopped no-mutation tests passed in the twelve-group
 local suite. The installed preview reports responsive/presented, title “24”,
 VA-API decode and sleeping=false after the update.
+
+
+## 2026-11-18: direct native status
+
+Direct `checkStatus` uses the same native mapper as periodic notifications,
+including correct outgoing/incoming occurrence and submitted composition fields.
+The untyped browser status forwarding and annotation helpers are removed.
+Real LAN and legacy-relayer adapters passed status and explicit error-reply
+checks. A read-only Go check against the awake native preview passed
+(`controller-status.log`). Full Go tests, vet and changed-diff lint passed.
+This does not activate normal casts or the remaining session/watchdog consumers.
+CI 44233238684 for 14de02c8 was superseded/cancelled by the next push, not passed;
+087fa4df's cumulative native build is tracked by run 44234362555.
+
+The direct-status fresh-context review found no material findings
+(`Verdict: accept`); commandrouter/status race tests also passed.

@@ -29,7 +29,7 @@ func SetNativeControls(h Handler, player NativeControlPlayer) {
 
 func nativeControl(command commands.Type) bool {
 	switch command {
-	case commands.CMD_REFRESH_ARTWORK, "moveToArtwork", "setShuffle", "setLoop", "updateArtFraming", "updateDisplaySettings", "updateDefaultDuration":
+	case "checkStatus", commands.CMD_REFRESH_ARTWORK, "moveToArtwork", "setShuffle", "setLoop", "updateArtFraming", "updateDisplaySettings", "updateDefaultDuration":
 		return true
 	}
 	return false
@@ -139,6 +139,9 @@ func (h *handler) processNativeControl(ctx context.Context, command commands.Com
 	if err = state.Validate(); err != nil {
 		h.logger.Warn("Native control snapshot invalid", zap.Error(err))
 		return controlFailure("invalid_response", "Native player state is invalid; no command was sent")
+	}
+	if command.Type == "checkStatus" {
+		return h.nativeStatusReply(state)
 	}
 	method, params, err := nativeControlOperation(command, state)
 	if err != nil {

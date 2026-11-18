@@ -8,7 +8,7 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 |---|---|---|---|
 | `analyticsToggle` | ffos-user/components/feral-controld/commands/types.go:201 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `betaFeaturesToggle` | ffos-user/components/feral-controld/commands/types.go:202 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
-| `checkStatus` | ff-player/src/models/cast_info.model.ts:14 | Native host; redesigned typed operation preserving external adapter | Pending migration/behavior fixture |
+| `checkStatus` | ff-player/src/models/cast_info.model.ts:14 | Native host; redesigned typed operation preserving external adapter | Native status mapper and LAN/relayer egress tests |
 | `clearPlaylistCache` | ffos-user/components/feral-controld/commands/types.go:267 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `clearPlaylistItemCache` | ffos-user/components/feral-controld/commands/types.go:266 | Controld/device service; preserved external contract, audit adapter dependency | Pending migration/behavior fixture |
 | `clickAndDragGesture` | ffos-user/components/feral-controld/commands/types.go:195 | Native input state; preserved gesture adapter in controld | Go coordinator tests; FF1 controller-input.json and input-after-cutover.json. Full-daemon activation pending |

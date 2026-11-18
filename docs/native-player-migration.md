@@ -128,3 +128,15 @@ cache purge and `NavigateHomeInline` escalation, its router/session wiring and
 its CDP-only tests are deleted. A fresh isolated artwork request context supplies
 the reload; whole-process recovery stays external. An unavailable host returns
 a structured failure instead of claiming a recovery it did not perform.
+
+
+## Direct status cutover
+
+Direct `checkStatus` now reads the same native snapshot mapper as periodic
+notifications. It reports the presented occurrence/composition while a newer
+selection loads, including identical URLs, and supplies both identities under
+`runtime`. Setup/pairing overlay and series override come from controld. The
+legacy signature slot is not consulted. Raw outcome/history rings never cross
+this status boundary. The old untyped document-response forwarding and its
+annotation helpers are removed; both LAN and legacy relayer egress are tested
+with real adapters, including explicit host-unavailable/unknown-mutation replies.

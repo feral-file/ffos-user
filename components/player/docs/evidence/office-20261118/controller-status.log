@@ -1,0 +1,5 @@
+=== RUN   TestNativeStatusDevice
+    native_status_test.go:39: native status responsive; occurrence=a1f868a2-0b6f-4203-b581-6df998931a9d composition=7 generation=1
+--- PASS: TestNativeStatusDevice (0.04s)
+PASS
+ok  	github.com/feral-file/ffos-user/components/feral-controld/commandrouter	0.569s

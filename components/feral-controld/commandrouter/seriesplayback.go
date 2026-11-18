@@ -47,8 +47,8 @@ func (h *handler) setSeriesPlayback(store *seriesplayback.Store) { h.seriesPlayb
 // (currentSeriesPlaybackMode) to callers outside this package — namely
 // main.go, which wires status.Poller.SetSeriesPlaybackSource against the
 // same handler it builds here, so the poller's pushed player_status and
-// this package's own direct checkStatus reply (annotateSeriesPlaybackReply,
-// called from sendCDPRequest) read the identical device-level store and can
+// this package's own direct checkStatus reply (nativeStatusReply,
+// called from the native snapshot boundary) read the identical device-level store and can
 // never disagree. ok is false (fn nil) when h is not a *handler built by
 // New — same concrete-handler-only, pre-NewGate contract as
 // SetOverlaySource/SetSeriesPlayback; the method itself is nil-safe even
