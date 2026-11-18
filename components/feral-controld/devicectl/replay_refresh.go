@@ -39,7 +39,9 @@ func (e *executor) refreshAfterReplayRestore(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, replayRestoreRefreshWindow)
 	defer cancel()
-	if !e.awaitPlayerCommandHandlerReady(ctx) {
+	// The readiness probe is not bound by ctx and can answer late; a refresh
+	// sent past the window would restart the load the player's retry began.
+	if !e.awaitPlayerCommandHandlerReady(ctx) || ctx.Err() != nil {
 		e.logger.Info("Replay scope restored: player not ready for a refresh; leaving it to the player's retry")
 		return
 	}

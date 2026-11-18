@@ -47,18 +47,22 @@ func TestRefreshArtworkAfterReplayRestore_RefusalAndErrorAreLeftAlone(t *testing
 	}
 }
 
-// TestRefreshArtworkAfterReplayRestore_PlayerNeverReadySendsNothing: with
-// the caller's context already done the handler wait gives up at once and
-// no refresh is sent.
-func TestRefreshArtworkAfterReplayRestore_PlayerNeverReadySendsNothing(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCDP := mocks.NewMockCDP(ctrl)
-	installCDPDispatch(mockCDP, cdpDispatch{handlerReady: func() (interface{}, error) {
-		return map[string]interface{}{"ready": false}, nil
-	}})
+// TestRefreshArtworkAfterReplayRestore_PastTheWindowSendsNothing: with the
+// context done, no refresh is sent, whether the player never became ready
+// or its readiness answer only arrived after the window closed.
+func TestRefreshArtworkAfterReplayRestore_PastTheWindowSendsNothing(t *testing.T) {
+	for name, ready := range map[string]bool{"never ready": false, "ready too late": true} {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			mockCDP := mocks.NewMockCDP(ctrl)
+			installCDPDispatch(mockCDP, cdpDispatch{handlerReady: func() (interface{}, error) {
+				return map[string]interface{}{"ready": ready}, nil
+			}})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	RefreshArtworkAfterReplayRestore(ctx, settledExecutor(mockCDP), zap.NewNop())
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			RefreshArtworkAfterReplayRestore(ctx, settledExecutor(mockCDP), zap.NewNop())
+		})
+	}
 }
