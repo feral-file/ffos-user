@@ -1,3 +1,6 @@
+The later [matched-engine, fixed-seed pacing report](PACING.md) supersedes the
+performance comparison below. This earlier report retains failure-investigation evidence.
+
 # Transparent Grit comparison and failure correction
 
 ## Failure and correction, 2026-11-18

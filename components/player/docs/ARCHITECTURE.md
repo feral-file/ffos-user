@@ -80,7 +80,7 @@ WebGL artwork. This is not a missing-fence repair for NVIDIA (CEF #4313).
 
 Host control, drawing and shutdown run as scheduled CEF UI tasks. They do not
 wait for `CefDoMessageLoopWork` to drain until idle, which continuous accelerated
-paint callbacks can prevent. Each host turn sends an external BeginFrame to
+paint callbacks can prevent. A phase-preserving clock sends at most 60 external BeginFrames per second to
 Chromium. Each artwork admits at most one copy between host turns; surplus
 callbacks retain no resources and request one refresh on the next turn, including
 for static documents. A fresh frame after renderer readiness is still required
@@ -118,3 +118,12 @@ must land in the owning FFOS repositories before rollout.
 The offline design and the legacy response-metadata gaps are recorded in
 OFFLINE.md. Existing cache coverage must not be advertised as native offline
 readiness before the resource/capture boundary is implemented and verified.
+
+Composition submits only changed artwork, changed host state, geometry/exposure,
+cursor motion/expiry, or label expiry. It uses a nonblocking Wayland swap; Cage
+owns vsync. A skipped composition does not acknowledge presentation to playback
+or the media worker. Host socket/timer work runs independently at a bounded
+4 ms polling interval. The optional Wayland presentation-time collector has a
+bounded outstanding-feedback set and dispatches its own event queue on the host
+thread. Its timestamps distinguish compositor output from renderer rAF timing;
+see `PACING.md` for measured tradeoffs and limits.

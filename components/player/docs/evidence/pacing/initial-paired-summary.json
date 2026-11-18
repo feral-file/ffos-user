@@ -1,0 +1,147 @@
+{
+  "physicalOutputVerified": false,
+  "runs": [
+    {
+      "file": "chrome-final-1.json",
+      "arm": "chrome",
+      "outputIntervals": {
+        "count": 1128,
+        "meanMs": 55.31891755319149,
+        "medianMs": 50.0,
+        "p95Ms": 66.667,
+        "p99Ms": 66.667,
+        "over100ms": 0
+      },
+      "rafTimestamps": {
+        "count": 1086,
+        "meanMs": 55.34060773480659,
+        "medianMs": 50,
+        "p95Ms": 66.79999999998836,
+        "p99Ms": 100,
+        "standardDeviationMs": 12.51337771067858,
+        "over50ms": 362
+      },
+      "callbackDelivery": {
+        "count": 1086,
+        "meanMs": 55.338397790056966,
+        "medianMs": 50.30000000074506,
+        "p95Ms": 67.40000000037253,
+        "p99Ms": 68.09999999962747
+      },
+      "cpuPercentOneCore": 14.149310129548171,
+      "memoryMiB": 384.5625,
+      "peakMemoryMiB": 437.03515625,
+      "notes": {
+        "trace": "Display::FrameDisplayed",
+        "physicalOutputVerified": false
+      }
+    },
+    {
+      "file": "native-final-1.json",
+      "arm": "native",
+      "outputIntervals": {
+        "count": 1077,
+        "meanMs": 58.340826369545034,
+        "medianMs": 66.664,
+        "p95Ms": 66.667,
+        "p99Ms": 66.667,
+        "over100ms": 0
+      },
+      "rafTimestamps": {
+        "count": 1030,
+        "meanMs": 58.408155339805816,
+        "medianMs": 57.80000000000291,
+        "p95Ms": 63.69999999999709,
+        "p99Ms": 105.10000000000218,
+        "standardDeviationMs": 9.558049090817255,
+        "over50ms": 1003
+      },
+      "callbackDelivery": {
+        "count": 1030,
+        "meanMs": 58.409223300967255,
+        "medianMs": 57.80000000074506,
+        "p95Ms": 63.69999999925494,
+        "p99Ms": 106.40000000037253
+      },
+      "cpuPercentOneCore": 19.441536296513775,
+      "memoryMiB": 282.6796875,
+      "peakMemoryMiB": 287.63671875,
+      "notes": {
+        "cpuCopies": 0,
+        "waylandFlags": 15,
+        "discardedSubmissionsWholeRun": 0
+      }
+    },
+    {
+      "file": "native-final-2.json",
+      "arm": "native",
+      "outputIntervals": {
+        "count": 1055,
+        "meanMs": 59.03608815165877,
+        "medianMs": 66.666,
+        "p95Ms": 66.667,
+        "p99Ms": 66.668,
+        "over100ms": 6
+      },
+      "rafTimestamps": {
+        "count": 1026,
+        "meanMs": 58.6869395711501,
+        "medianMs": 58.10000000000582,
+        "p95Ms": 64.19999999999709,
+        "p99Ms": 110.10000000000582,
+        "standardDeviationMs": 11.101353244093769,
+        "over50ms": 992
+      },
+      "callbackDelivery": {
+        "count": 1026,
+        "meanMs": 58.68693957114901,
+        "medianMs": 58.19999999925494,
+        "p95Ms": 64.5,
+        "p99Ms": 109.80000000074506
+      },
+      "cpuPercentOneCore": 19.68279285749886,
+      "memoryMiB": 266.2421875,
+      "peakMemoryMiB": 272.09375,
+      "notes": {
+        "cpuCopies": 0,
+        "waylandFlags": 15,
+        "discardedSubmissionsWholeRun": 0
+      }
+    },
+    {
+      "file": "chrome-final-2.json",
+      "arm": "chrome",
+      "outputIntervals": {
+        "count": 1122,
+        "meanMs": 55.466198752228166,
+        "medianMs": 50.0,
+        "p95Ms": 66.667,
+        "p99Ms": 66.667,
+        "over100ms": 0
+      },
+      "rafTimestamps": {
+        "count": 1085,
+        "meanMs": 55.45271889400924,
+        "medianMs": 50,
+        "p95Ms": 66.70000000001164,
+        "p99Ms": 100,
+        "standardDeviationMs": 11.832968256904406,
+        "over50ms": 371
+      },
+      "callbackDelivery": {
+        "count": 1085,
+        "meanMs": 55.45170506912236,
+        "medianMs": 50.399999998509884,
+        "p95Ms": 67.40000000037253,
+        "p99Ms": 68
+      },
+      "cpuPercentOneCore": 14.170186338925165,
+      "memoryMiB": 220.83984375,
+      "peakMemoryMiB": 269.73828125,
+      "notes": {
+        "trace": "Display::FrameDisplayed",
+        "physicalOutputVerified": false
+      }
+    }
+  ]
+}

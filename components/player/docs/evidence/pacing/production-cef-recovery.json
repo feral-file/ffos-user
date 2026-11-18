@@ -1,0 +1,430 @@
+{
+  "before": {
+    "context": "curated",
+    "generation": 22,
+    "host": "responsive",
+    "instance": "ec2d8ecd-b8eb-459d-9ff9-dd82ffe3f405",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": true,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "fixed-grit-benchmark",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "mimeType": "text/html",
+          "source": "http://127.0.0.1:18990/grit-fixed.html"
+        }
+      ]
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "",
+      "generation": 22,
+      "id": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "mimeType": "text/html",
+        "source": "http://127.0.0.1:18990/grit-fixed.html"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "fixed-grit-benchmark",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "mimeType": "text/html",
+          "source": "http://127.0.0.1:18990/grit-fixed.html"
+        }
+      ]
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "presented",
+    "revision": 221,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "",
+      "generation": 22,
+      "id": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "mimeType": "text/html",
+        "source": "http://127.0.0.1:18990/grit-fixed.html"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "off",
+      "transitionMs": 650,
+      "volume": 0.5
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  },
+  "rendererPid": 339131,
+  "observations": [
+    {
+      "elapsed": 0.009163032998912968,
+      "stage": "presented",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "",
+        "lastError": "",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 0.11738348099970608,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.2272118769997178,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.33365448899894545,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.44013791699944704,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.5462722219999705,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.6550910289988678,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.7635611240002618,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.8727645009985281,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 0.9803020219987957,
+      "stage": "failed",
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      }
+    },
+    {
+      "elapsed": 1.086431186999107,
+      "stage": "loading",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.1923084009995364,
+      "stage": "committed",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.6155804139998509,
+      "stage": "committed",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    },
+    {
+      "elapsed": 1.7916083719992457,
+      "stage": "presented",
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      }
+    }
+  ],
+  "result": "passed",
+  "after": {
+    "context": "curated",
+    "generation": 22,
+    "host": "responsive",
+    "instance": "ec2d8ecd-b8eb-459d-9ff9-dd82ffe3f405",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": true,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "fixed-grit-benchmark",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "mimeType": "text/html",
+          "source": "http://127.0.0.1:18990/grit-fixed.html"
+        }
+      ]
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "",
+      "generation": 22,
+      "id": "c056ad42-2b5e-4c5c-b04c-c368b5996c32",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "mimeType": "text/html",
+        "source": "http://127.0.0.1:18990/grit-fixed.html"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "fixed-grit-benchmark",
+      "items": [
+        {
+          "duration": 0,
+          "id": "grit",
+          "mimeType": "text/html",
+          "source": "http://127.0.0.1:18990/grit-fixed.html"
+        }
+      ]
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 1,
+      "exhausted": false,
+      "failedOccurrence": "e596500c-8402-40c3-8e4a-5deb1aa71a8d",
+      "lastError": "Renderer terminated (9): 9",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "presented",
+    "revision": 226,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "error": "",
+      "exhibition": "",
+      "generation": 22,
+      "id": "c056ad42-2b5e-4c5c-b04c-c368b5996c32",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "id": "grit",
+        "mimeType": "text/html",
+        "source": "http://127.0.0.1:18990/grit-fixed.html"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "off",
+      "transitionMs": 650,
+      "volume": 0.5
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  }
+}

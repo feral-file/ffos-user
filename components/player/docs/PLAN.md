@@ -82,3 +82,10 @@ consumed within their documented lifetime. Validate any optimization on both the
 matched engine and production engine, run input/media/recovery checks, obtain a
 fresh-context review, push only the feature branch, and restore homelab to sleep.
 No renderer timing or compositor screenshot constitutes physical scanout proof.
+
+Pacing increment outcome: nonblocking, damage-based composition and a stable
+60 Hz frame clock implemented and tested. Same-engine/same-seed measurements
+show matching p95 but not complete Chrome parity; PACING.md retains mean, tail,
+CPU and memory differences. Production .96 regressions and clean CI passed;
+fresh-context final review had no material findings. Feature branch pushed,
+no PR or activation. Homelab was returned to sleep.

@@ -25,5 +25,11 @@
   "chromeBannerSuppressionSource": "https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/chrome/browser/ui/startup/infobar_utils.cc",
   "cefSource": "https://github.com/chromiumembedded/cef/tree/cf671c0",
   "warmupSeconds": 20,
-  "sampleWindowSeconds": 10
+  "sampleWindowSeconds": 10,
+  "matchedNativeSha256": "ef5442b404b0bcb69787dfb89b2cf9551fdd5fd0ca0102912910c694c2d294d9",
+  "productionNativeSha256": "08218d1b69c6fd5868ed0d0a770b240eb545ef327adc8c2106c665993c4a5ba9",
+  "note": "Native final-1/2 precede the exposure-only invalidation addition. Native final-3/4 and production regressions use the qualified hashes.",
+  "qualifiedSourceCommit": "07fb9d851cdab37f0bc10ada80b324b247557cd6",
+  "qualifiedMatchedNativeSha256": "3bff4ef9aa00a381c42dc4d2cfbe7d4c97bce900f80dd8c1c6fdc775c50c95c7",
+  "qualifiedProductionNativeSha256": "c97e33ee8c6cdb329d954b17bd466221dc80d9486816c2ff96110ddf4b702341"
 }

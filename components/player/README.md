@@ -28,7 +28,7 @@ The tested native environment is recorded in `docs/evidence/homelab-packages.txt
 FFOS 3.0.0, Linux x86-64, GCC 16.1.1, CMake 4.4.0, Meson 1.11.2 and Ninja 1.13.2.
 Use the FFOS pacman snapshot `2026/07/13`. Required build packages include
 `gcc make cmake ninja meson pkgconf python-jinja nasm sdl2-compat libass
-qrencode sqlite pango libdrm libglvnd wayland gnutls libva libpulse lcms2 curl libdisplay-info`.
+qrencode sqlite pango libdrm libglvnd wayland wayland-protocols gnutls libva libpulse lcms2 curl libdisplay-info`.
 The package inventory is evidence of the tested environment, not yet a fully
 reproduced clean-image toolchain lock. The Ubuntu Dockerfile is a development
 build only; its apt packages are not pinned for release.
@@ -71,7 +71,7 @@ AMD_DEBUG=nodcc SDL_VIDEODRIVER=wayland \
   --state-dir=/home/feralfile/.state/native-test \
   --socket=/run/user/1000/ff-native-test/player.sock \
   --renderer-dir=/path/to/stage/usr/share/ff-player-native/renderers \
-  --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu
+  --use-angle=gl-egl --enable-unsafe-webgpu
 ```
 
 `AMD_DEBUG=nodcc` is the measured workaround for CEF #4354, not a general
@@ -102,3 +102,11 @@ archive on feature-branch pushes and pull requests. It does not publish or
 activate packages. The Ubuntu container validates portable compilation; the
 pinned FFOS pacman build remains the production packaging path. See
 `docs/BENCHMARK.md` for the unresolved Transparent Grit presentation failure.
+
+Frame-pacing measurements and the exact-engine/seed comparison are documented in
+[the pacing report](docs/PACING.md). `--diagnostic-presentation-timing=/absolute/path.json`
+writes bounded compositor timestamp samples on graceful shutdown. Normal logs
+contain aggregate timing only. These are compositor observations, not panel
+photographs or artwork correctness attestations. The Wayland runtime does not
+need Chromium's `--enable-features=Vulkan` flag; the selected build reports that
+compositor path as unsupported on Wayland. WebGPU qualification is separate.

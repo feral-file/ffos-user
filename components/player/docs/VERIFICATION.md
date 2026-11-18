@@ -326,3 +326,17 @@ original kiosk, controld and watchdog were active. The owner CLI's signed
 `sleepNow` returned success and `currentState: sleeping`, `overrideState: sleeping`
 (`grit-final-sleep.json`). Native code is staged for development; partial controld
 migration has not been activated as the production session.
+
+
+## 2026-11-18: matched-engine pacing optimization
+
+See [PACING.md](PACING.md) for the fixed-seed Chromium .80 paired comparison,
+raw compositor measurements and limitations. Native p95 matched Chrome at
+66.7 ms; mean throughput, rare tails, CPU and PSS still differ. The production
+.96 pin was unchanged and passed the repeated input/static UI/setup/media/
+image/GLB/recovery regression set. Lightweight native compositor output remained
+60 fps. Both Linux engine builds passed 12 CTest groups; macOS core passed 10.
+CI 44205900548 passed for source 07fb9d85. Final fresh-context review found no
+material issues in this increment. Full migration, hotplug/rotation, physical
+output, overnight and security-update acceptance are still incomplete.
+Homelab test units were stopped and signed sleepNow confirmed sleeping.

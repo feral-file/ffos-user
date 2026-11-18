@@ -137,3 +137,20 @@ emitted presentation metrics and exited without hitting its five-second close
 or systemd eight-second stop deadline (`evidence/grit-fixed-runtime.log`). Systemd
 removed remaining zygote processes after the host exited. A hung GPU can still
 block the shared browser/native process and requires external recovery.
+
+
+## Pacing increment, 2026-11-18
+
+Human change owner: Anh. Review surface: local. Source through `07fb9d85`, plus
+measurement/docs artifacts. Initial fresh-context `review_pacing` and final
+fresh-context `review_pacing_final` both reported `Verdict: accept`, no material
+findings. The final review followed exposure/remap invalidation and the rebuilt
+binary measurements; it inspected the full branch and bounded feedback/host/media
+lifecycle. Independently ran 10 macOS CTest groups, Go playerlink/status/setupui/
+mediator tests, JS syntax and whitespace checks; reproduced all four qualified
+benchmark summaries and light compositor timing. Linux/device evidence was
+inspected, not independently rerun by the reviewer.
+
+Disposition: no material finding to resolve. Performance differences and physical
+scanout/hotplug/overnight/portfolio limits remain explicit in PACING.md. These
+observations do not authorize deployment or qualify the whole rewrite.
