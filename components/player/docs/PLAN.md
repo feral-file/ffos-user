@@ -89,3 +89,16 @@ show matching p95 but not complete Chrome parity; PACING.md retains mean, tail,
 CPU and memory differences. Production .96 regressions and clean CI passed;
 fresh-context final review had no material findings. Feature branch pushed,
 no PR or activation. Homelab was returned to sleep.
+
+2026-11-18 hands-on replacement request: wake homelab and leave it awake for
+Anh's artwork testing. Baseline ffos-user 3cf6844e, ffos a9f51875 and ff-player
+07805905; ffos-user/ffos clean, ff-player's existing artwork-inspection and
+setup/pairing edits belong to other work and remain untouched. Match native
+QR/setup and tombstone presentation to the current ff-player sources, including
+PP Mori, short-edge sizing and timer. Verify raster geometry, QR decoding,
+on-device captures and ordinary external controller commands. Complete the
+normal-control/session/watchdog migration before switching the installed kiosk;
+the isolated performance stage is not yet an installable replacement. Preserve
+legacy state/export and installed files for explicit rollback. Report coverage
+by capability and distinguish acceptance from presentation. Do not claim full
+coverage from the existing synthetic renderer tests.

@@ -91,12 +91,12 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 
 | Existing behavior | Source evidence | New owner / disposition | Verification |
 |---|---|---|---|
-| Wi-Fi join QR, escaped SSID/password, attached phone switches to portal QR; invalid portal keeps join QR | ff-player/src/components/setup/SetupOverlay.tsx:51–216 | Preserved by host `overlay_panel`; controld supplies credentials/phase | overlay-tests; device scanability pending |
-| Claim QR, mDNS device-name guidance, conditional URL/name refresh | SetupOverlay.tsx:418–453; controld/setupui refresh methods | Preserved: controld owns claim token, native UI encodes/displays it | Go ownership/refresh tests, C++ admission; device pending |
+| Wi-Fi join QR, escaped SSID/password, attached phone switches to portal QR; invalid portal keeps join QR | ff-player/src/components/setup/SetupOverlay.tsx:51–216 | Preserved by host `overlay_panel`; controld supplies credentials/phase | overlay-tests; exact QR payload decode at four output sizes and native compositor (DEVICE-UI.md) |
+| Claim QR, mDNS device-name guidance, conditional URL/name refresh | SetupOverlay.tsx:418–453; controld/setupui refresh methods | Preserved: controld owns claim token, native UI encodes/displays it | Go ownership/refresh tests, C++ admission; native panel/copy and synthetic QR decode (DEVICE-UI.md) |
 | Scanning, joining, finalizing, neutral connecting, join/setup failure, update and reset narration | SetupOverlay.tsx:224–411 | Native copy; ready/hidden clear only setup owner | overlay-tests; unknown state rejects and retains previous QR |
 | Narration never stalls provisioning; stale sweep/conditional hide/reconnect replay do not erase newer owner | controld/setupui and overlay/controller.go | Preserved arbitration; socket delivery and host snapshot watch replace CDP navigation park | retained Go race regressions and native reconnect/status tests |
 | Old-player manifest downgrade/no-op rules | controld/setupui prior implementation | Removed: coordinated native runtime requires `overlay.setup.v1`; unsupported is an explicit failure | Go capability check and shared unknown-state fixture |
-| Animated setup artwork backdrop and exit transition | SetupArtworkBackground.tsx; SetupOverlay.tsx:507+ | Pending native presentation fidelity decision/implementation; current development UI uses black | Not accepted |
+| Animated setup artwork backdrop and exit transition | SetupArtworkBackground.tsx; SetupOverlay.tsx:507+ | Original bundled artwork in isolated decorative renderer; live artwork retained under panels; 650 ms fade | Vulkan compositor and covered-media tests (DEVICE-UI.md); offline-degraded no-panel chip pending |
 
 | Playback detail | Source evidence | New owner / disposition | Verification |
 |---|---|---|---|

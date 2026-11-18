@@ -68,5 +68,7 @@ recovery and media-health capability consumers. It is not a narration fallback.
 Native setup includes the Wi-Fi join/attached-portal QR phases, credential
 escaping, claim QR and device-name guidance, neutral connecting copy, failures,
 update progress and reset instructions. `ready` clears setup without clearing
-another overlay owner. The old animated onboarding backdrop and final visual
-layout still need fidelity review; no setup visual acceptance is claimed yet.
+another overlay owner. Native PP Mori, QR layout, tombstone timing and the
+bundled animated setup artwork are implemented. Device regression evidence and
+remaining fidelity/activation limits are in `components/player/docs/DEVICE-UI.md`.
+The normal player-control consumers listed above still prevent activation.

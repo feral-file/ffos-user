@@ -62,7 +62,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
     std::signal(SIGTERM,stop);std::signal(SIGINT,stop);
     {
       const std::string timing_path=command->GetSwitchValue("diagnostic-presentation-timing");
-      ff::Presentation presentation(command->HasSwitch("diagnostic-cpu"),!timing_path.empty());
+      ff::Presentation presentation(command->HasSwitch("diagnostic-cpu"),!timing_path.empty(),(std::filesystem::path(resources).parent_path()/"fonts").string());
       std::map<std::string,CefRefPtr<ff::ArtworkClient>> clients;
       std::map<std::string,std::unique_ptr<ff::MediaClient>> media;
       ff::InputState input_state([&](const ff::Json& event){
@@ -88,9 +88,37 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         ff::require(it->second->status.contains("seekable")&&it->second->status["seekable"]==true,"unsupported","This media source is not seekable");it->second->seek(seconds);
       });
       std::string displayed;
+      std::string backdrop_id;
+      bool backdrop_attempted=false;
+      int64_t backdrop_fade_at=0;
       auto frame=[&]{
         auto now=std::chrono::steady_clock::now().time_since_epoch();
-        playback.tick(std::chrono::duration_cast<std::chrono::milliseconds>(now).count(),ff::wall_ms());server.poll();
+        const auto now_ms=std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+        playback.tick(now_ms,ff::wall_ms());server.poll();
+        // A setup panel over live playback keeps the user's artwork underneath.
+        // The bundled background fills an otherwise empty screen only.
+        const bool setup_visible=!playback.overlay().is_null()&&playback.overlay().value("owner","")=="setup"&&!playback.visible();
+        if(setup_visible){
+          backdrop_fade_at=0;
+          if(!backdrop_attempted){
+            backdrop_attempted=true;
+            // Decorative art has no bridge, input, playback callbacks or history.
+            // A failure leaves native narration/QR usable and retries only on a
+            // later setup episode, never an unbounded browser creation loop.
+            try{
+              ff::Occurrence decoration;decoration.id="setup-"+ff::uuid();decoration.item={{"source","ff-render://bundle/setup-artwork/index.html"}};decoration.display={{"margin",0}};
+              CefWindowInfo window;window.SetAsWindowless(0);window.shared_texture_enabled=true;window.external_begin_frame_enabled=true;window.runtime_style=CEF_RUNTIME_STYLE_ALLOY;
+              CefBrowserSettings settings;settings.windowless_frame_rate=60;
+              CefRequestContextSettings request_settings;auto context=CefRequestContext::CreateContext(request_settings,nullptr);ff::register_renderer_resources(context,resources);
+              auto client=CefRefPtr<ff::ArtworkClient>(new ff::ArtworkClient(playback,presentation,decoration,false,true));
+              ff::require(clients.size()<8&&CefBrowserHost::CreateBrowser(window,client,decoration.item["source"].get<std::string>(),settings,nullptr,context),"renderer_capacity","Cannot create setup backdrop");
+              backdrop_id=decoration.id;clients.emplace(backdrop_id,client);
+            }catch(const std::exception& error){std::cerr<<"Setup backdrop unavailable: "<<error.what()<<'\n';}
+          }
+        }else{
+          if(!backdrop_id.empty()&&!backdrop_fade_at)backdrop_fade_at=now_ms;
+          if(backdrop_id.empty()||(backdrop_fade_at&&now_ms-backdrop_fade_at>=650)){backdrop_id.clear();backdrop_attempted=false;}
+        }
         if(!presentation.events([&](const ff::Json& event){try{if(event.value("kind","")=="releaseAll" || (playback.overlay().is_null()&&(!playback.desired()||playback.desired()->stage!="failed")))input(event);}catch(const std::exception& e){std::cerr<<"input: "<<e.what()<<'\n';}})){stopping=1;return;}
         input_state.flush();
         if(auto desired=playback.desired();desired&&desired->stage!="failed"&&!clients.contains(desired->id)&&!media.contains(desired->id)){
@@ -124,13 +152,18 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         // Presentation identity advances only after a host-owned frame exists.
         // A swap is composition evidence, never proof of artist correctness or HDMI output.
         const auto* drawing = !commit.empty() ? &*playback.desired() : (playback.visible() ? &*playback.visible() : nullptr);
-        const bool submitted=presentation.draw(surface,drawing,playback);
+        if(!commit.empty())playback.frame_ready(commit);
+        ff::Surface* backdrop=nullptr;
+        if(auto it=clients.find(backdrop_id);it!=clients.end()&&it->second->has_ready_frame()&&!it->second->decoration_failed)backdrop=&it->second->surface;
+        float backdrop_opacity=setup_visible?1.f:backdrop_fade_at?std::clamp(1.f-float(now_ms-backdrop_fade_at)/650,0.f,1.f):0.f;
+        const bool submitted=presentation.draw(surface,drawing,playback,backdrop,backdrop_opacity);
         if(submitted&&drawing)if(auto it=media.find(drawing->id);it!=media.end())it->second->did_present();
-        if(submitted&&!commit.empty())playback.presented(commit);
+        if(submitted&&!commit.empty()&&playback.overlay().is_null()&&backdrop_opacity==0)playback.presented(commit);
         sync_input();
         for(auto it=clients.begin();it!=clients.end();){
           auto client=it->second;
           bool keep=(playback.desired()&&playback.desired()->stage!="failed"&&playback.desired()->id==it->first)||(playback.visible()&&playback.visible()->id==it->first);
+          keep=keep||(it->first==backdrop_id&&!client->decoration_failed);
           if(!keep)client->close();else client->update_media();
           if(client->closed)it=clients.erase(it);else ++it;
         }

@@ -6,8 +6,12 @@
 #include <iostream>
 
 namespace ff {
-ArtworkClient::ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool is_bundled)
-    : id(occurrence.id), bundled(is_bundled), playback_(playback), presentation_(presentation), occurrence_(std::move(occurrence)) {}
+ArtworkClient::ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool is_bundled, bool is_decoration)
+    : id(occurrence.id), bundled(is_bundled), decoration(is_decoration), playback_(playback), presentation_(presentation), occurrence_(std::move(occurrence)) {}
+void ArtworkClient::failed(const std::string& error) {
+  if(decoration){decoration_failed=true;ready=false;std::cerr<<"Setup backdrop failed: "<<error<<'\n';}
+  else playback_.failed(id,error);
+}
 bool ArtworkClient::OnConsoleMessage(CefRefPtr<CefBrowser>,cef_log_severity_t severity,const CefString& message,const CefString&,int){
   if(bundled&&severity>=LOGSEVERITY_WARNING)std::cerr<<"renderer "<<id<<": "<<message.ToString().substr(0,1024)<<'\n';
   return false;
@@ -19,16 +23,17 @@ void ArtworkClient::OnAfterCreated(CefRefPtr<CefBrowser> b) {
 void ArtworkClient::OnBeforeClose(CefRefPtr<CefBrowser>) { browser=nullptr;closed=true;presentation_.destroy(surface); }
 bool ArtworkClient::OnBeforeBrowse(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request, bool, bool) {
   auto url=request->GetURL().ToString();
+  if(decoration)return !frame->IsMain()||url!="ff-render://bundle/setup-artwork/index.html";
   if(bundled && frame->IsMain())return url != "ff-render://bundle/index.html";
   return !(url.starts_with("https://")||url.starts_with("http://")||url.starts_with("about:blank")||url.starts_with("blob:")||url.starts_with("data:"));
 }
 void ArtworkClient::OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int status) {
   if(!frame->IsMain())return;
-  if(status>=400){playback_.failed(id,"HTTP "+std::to_string(status));return;}
+  if(status>=400){failed("HTTP "+std::to_string(status));return;}
   if(!bundled)mark_ready();
 }
 void ArtworkClient::OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, ErrorCode code, const CefString& text, const CefString&) {
-  if(frame->IsMain()&&code!=ERR_ABORTED)playback_.failed(id,"Navigation failed: "+text.ToString());
+  if(frame->IsMain()&&code!=ERR_ABORTED)failed("Navigation failed: "+text.ToString());
 }
 void ArtworkClient::GetViewRect(CefRefPtr<CefBrowser>, CefRect& rect) {
   auto b=presentation_.bounds(occurrence_.display);rect={0,0,b.width,b.height};view_width_=b.width;view_height_=b.height;
@@ -43,23 +48,23 @@ bool ArtworkClient::admit_paint(){
 }
 void ArtworkClient::OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const RectList&,const void* data,int width,int height) {
   if(type!=PET_VIEW||!admit_paint())return;
-  try {presentation_.software(surface,data,width,height);}catch(const std::exception& e){playback_.failed(id,e.what());}
+  try {presentation_.software(surface,data,width,height);}catch(const std::exception& e){failed(e.what());}
 }
 void ArtworkClient::OnAcceleratedPaint(CefRefPtr<CefBrowser>, PaintElementType type,const RectList&,const CefAcceleratedPaintInfo& info) {
   if(type!=PET_VIEW||!admit_paint())return;
   try {presentation_.accelerated(surface,info);}
-  catch(const std::exception& e){playback_.failed(id,e.what());}
+  catch(const std::exception& e){failed(e.what());}
 }
 void ArtworkClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus,int code,const CefString& detail) {
-  ready=false;playback_.failed(id,"Renderer terminated ("+std::to_string(code)+"): "+detail.ToString());
+  ready=false;failed("Renderer terminated ("+std::to_string(code)+"): "+detail.ToString());
 }
 bool ArtworkClient::OnRenderProcessUnresponsive(CefRefPtr<CefBrowser>,CefRefPtr<CefUnresponsiveProcessCallback> callback) {
-  playback_.failed(id,"Artwork renderer is unresponsive");callback->Terminate();return true;
+  failed("Artwork renderer is unresponsive");callback->Terminate();return true;
 }
 void ArtworkClient::close(){if(!closing){closing=true;if(browser)browser->GetHost()->CloseBrowser(true);}}
 void ArtworkClient::mark_ready(){
   if(ready)return;
-  playback_.committed(id);ready_after_frame_=surface.frames;ready=true;
+  if(!decoration)playback_.committed(id);ready_after_frame_=surface.frames;ready=true;
   // Pre-load frames (including the bundled viewer's empty canvas) are not
   // admission evidence. Request a post-ready frame even for static artworks.
   if(browser)browser->GetHost()->Invalidate(PET_VIEW);
@@ -97,7 +102,7 @@ bool ArtworkClient::OnProcessMessageReceived(CefRefPtr<CefBrowser>,CefRefPtr<Cef
   if(name=="renderer.configure"){configure();return true;}
   if(name=="renderer.ready"){mark_ready();return true;}
   if(name=="renderer.ended"){playback_.ended(id);return true;}
-  if(name=="renderer.error"){playback_.failed(id,message->GetArgumentList()->GetString(0).ToString().substr(0,512));return true;}
+  if(name=="renderer.error"){failed(message->GetArgumentList()->GetString(0).ToString().substr(0,512));return true;}
   return false;
 }
 void ArtworkClient::input(const Json& p){

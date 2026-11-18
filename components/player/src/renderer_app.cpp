@@ -41,7 +41,9 @@ class Resources : public CefSchemeHandlerFactory {
     // its blob worker, requiring unsafe-eval as well as WASM compilation.
     // Scripts still come only from this pinned bundle. Artist responses retain
     // their own CSP and receive no privileged bridge.
-    headers.emplace("Content-Security-Policy","default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src https: http: data: blob:; media-src https: http: data: blob:; connect-src 'self' https: http: data: blob:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'");
+    if(path.starts_with("/setup-artwork/"))
+      headers.emplace("Content-Security-Policy","default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'");
+    else headers.emplace("Content-Security-Policy","default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src https: http: data: blob:; media-src https: http: data: blob:; connect-src 'self' https: http: data: blob:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'");
     headers.emplace("X-Content-Type-Options","nosniff");
     return new CefStreamResourceHandler(200,"OK",mime,headers,stream);
   }
@@ -58,7 +60,10 @@ class App : public CefApp,public CefRenderProcessHandler {
   void OnBeforeCommandLineProcessing(const CefString& process,CefRefPtr<CefCommandLine> command)override{
     if(process.empty()){
       if(!command->HasSwitch("ozone-platform"))command->AppendSwitchWithValue("ozone-platform","wayland");
-      if(!command->HasSwitch("use-angle"))command->AppendSwitchWithValue("use-angle","gl-egl");
+      // Chromium 156's GL backend drops p5 WebGL line geometry on FFOS AMD.
+      // ANGLE Vulkan renders the same unmodified work in CEF and Chrome;
+      // ENGINE.md records the regression suite and remaining qualification.
+      if(!command->HasSwitch("use-angle"))command->AppendSwitchWithValue("use-angle","vulkan");
       command->AppendSwitchWithValue("autoplay-policy","no-user-gesture-required");
     }
   }

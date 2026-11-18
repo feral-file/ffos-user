@@ -154,3 +154,30 @@ inspected, not independently rerun by the reviewer.
 Disposition: no material finding to resolve. Performance differences and physical
 scanout/hotplug/overnight/portfolio limits remain explicit in PACING.md. These
 observations do not authorize deployment or qualify the whole rewrite.
+
+
+## Native device UI increment, 2026-11-18
+
+Human change owner: Anh. Review surface: local. Fresh-context
+`review_native_ui` found three material lifecycle/presentation issues: captured
+artwork covered by setup could time out after 60 seconds; nonfatal storage
+notices had become full-screen; early media EOF could be lost before uncovered
+presentation. Disposition: fixed. The host records frame availability separately,
+keeps compact notices, pauses incoming media until presentation and retains a
+racing EOF under the selected occurrence. Core and device evidence includes a
+65-second covered-video test followed by normal EOF progression.
+
+Fresh-context `review_device_ui_final` inspected the full updated increment and
+reported only Moderate F1: the default GL backend still rendered the bundled
+setup artwork black despite a working Vulkan override. Disposition: fixed by
+selecting ANGLE Vulkan after image, GLB, media, input and Transparent Grit checks.
+The rebuilt no-override launch independently reported the AMD Vulkan renderer,
+nonzero artwork pixels and a decodable compositor QR.
+
+Fresh-context `review_ui_backend_final` reviewed the full updated branch and
+increment, including that default and its evidence: **Verdict: accept**, no
+material findings. Prior reviewer independently ran ten macOS CTest groups;
+Linux/device checks were performed by the implementer and inspected by review.
+The review explicitly excludes full-portfolio performance, physical-panel and
+overnight acceptance, and the unfinished normal controller/session/watchdog
+migration. DEVICE-UI.md records the tested scope and remaining limitations.

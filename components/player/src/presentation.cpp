@@ -44,34 +44,10 @@ void allocate(Surface& s, int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   }
 }
-std::string escape(const std::string& text) {
-  auto escaped = g_markup_escape_text(text.c_str(), text.size());
-  std::string result(escaped); g_free(escaped); return result;
-}
-std::string label(const Occurrence& o) {
-  auto legacy = o.item.value("metadata", Json::object());
-  auto metadata = o.item.value("inlineManifest", Json::object()).value("metadata", Json::object());
-  if (o.item.contains("resolvedManifest")) metadata = o.item["resolvedManifest"].value("metadata", Json::object());
-  auto title = metadata.value("title", legacy.value("title", o.item.value("title", "")));
-  if (title.empty()) return {};
-  std::string artists;
-  auto people = metadata.value("artists", legacy.value("artists", Json::array()));
-  if (people.is_array()) for (const auto& artist : people) {
-    auto name = artist.is_string() ? artist.get<std::string>() : artist.value("name", "");
-    if (name.empty()) continue;
-    if (!artists.empty()) artists += ", "; artists += name;
-  }
-  std::string result = artists.empty() ? "" : escape(artists) + "\n";
-  result += "<b><i>" + escape(title) + "</i></b>";
-  auto exhibition = o.playlist_title;
-  if (!exhibition.empty()) result += "\n" + escape(exhibition);
-  auto curator = o.curator;
-  if (!curator.empty()) result += "\n<span foreground='#777777'>Curated by: " + escape(curator) + "</span>";
-  return result;
 
 }
-}
-Presentation::Presentation(bool diagnostic_cpu, bool timing_samples) : diagnostic_cpu_(diagnostic_cpu) {
+Presentation::Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts) : diagnostic_cpu_(diagnostic_cpu) {
+  load_device_fonts(fonts);
   require(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0, "display_unavailable", SDL_GetError());
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -173,52 +149,19 @@ void Presentation::quad(GLuint texture, Bounds rect, float opacity) {
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texture); glUniform1i(glGetUniformLocation(program_, "tex"), 0);
   glUniform1f(glGetUniformLocation(program_, "opacity"), opacity); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
-void Presentation::ui(const std::string& text, const std::string& qr, bool full) {
-  std::string key = text + '\n' + qr + (full ? "full" : "label");
-  if (key != ui_key_) {
-    ui_key_ = key;
-    auto measuring = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
-    auto measure_cr = cairo_create(measuring);
-    auto layout = pango_cairo_create_layout(measure_cr);
-    auto font = pango_font_description_from_string(full ? "Sans 22" : "PP Mori 16");
-    pango_layout_set_font_description(layout, font);
-    pango_layout_set_width(layout, (full ? 928 : 620) * PANGO_SCALE);
-    pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
-    pango_layout_set_markup(layout, text.c_str(), static_cast<int>(text.size()));
-    if(full){pango_layout_set_height(layout,480*PANGO_SCALE);pango_layout_set_ellipsize(layout,PANGO_ELLIPSIZE_END);}
-    int text_width, text_height; pango_layout_get_pixel_size(layout, &text_width, &text_height);
-    ui_width_ = full ? 1024 : std::min(640, text_width + 20);
-    ui_height_ = full ? std::max(768,96+text_height+(qr.empty()?0:348)) : std::min(700,text_height + 20);
-    auto surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, ui_width_, ui_height_);
-    auto cr = cairo_create(surface);
-    cairo_set_source_rgb(cr, full ? 0 : 1, full ? 0 : 1, full ? 0 : 1); cairo_paint(cr);
-    cairo_set_source_rgb(cr, full ? 1 : 0, full ? 1 : 0, full ? 1 : 0);
-    cairo_move_to(cr, full ? 48 : 10, full ? 48 : 10); pango_cairo_show_layout(cr, layout);
-    cairo_destroy(measure_cr); cairo_surface_destroy(measuring);
-    if (!qr.empty()) {
-      auto code = QRcode_encodeString(qr.c_str(), 0, QR_ECLEVEL_M, QR_MODE_8, 1);
-      if (code) {
-        const double cell = 300.0 / (code->width + 8); cairo_set_source_rgb(cr, 1, 1, 1); cairo_rectangle(cr, 362, 72+text_height, 300, 300); cairo_fill(cr);
-        cairo_set_source_rgb(cr, 0, 0, 0);
-        for (int y = 0; y < code->width; ++y) for (int x = 0; x < code->width; ++x) if (code->data[y*code->width+x] & 1) { cairo_rectangle(cr, 362 + (x+4)*cell, 72+text_height+(y+4)*cell, cell+0.1, cell+0.1); cairo_fill(cr); }
-        QRcode_free(code);
-      }
-    }
-    cairo_surface_flush(surface);
-    auto data = cairo_image_surface_get_data(surface); std::vector<unsigned char> pixels(static_cast<size_t>(ui_width_)*ui_height_*4);
-    for (size_t i=0;i<pixels.size();i+=4) { pixels[i]=data[i+2];pixels[i+1]=data[i+1];pixels[i+2]=data[i];pixels[i+3]=data[i+3]; }
-    if (!ui_) glGenTextures(1,&ui_); glBindTexture(GL_TEXTURE_2D,ui_);
-    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,ui_width_,ui_height_,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels.data());
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-    pango_font_description_free(font); g_object_unref(layout); cairo_destroy(cr); cairo_surface_destroy(surface);
-  }
-  if (full) {
-    // Preserve QR squares and glyph proportions on portrait/square displays.
-    glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
-    double scale=std::min(width_/double(ui_width_),height_/double(ui_height_));
-    int w=ui_width_*scale,h=ui_height_*scale;quad(ui_,{(width_-w)/2,(height_-h)/2,w,h});
-  }
-  else { double scale=std::min(width_,height_)/720.0; int w=ui_width_*scale,h=ui_height_*scale;quad(ui_,{0,height_-h,w,h}); }
+void Presentation::upload_ui(UIRaster raster, const std::string& key) {
+  ui_key_=key; ui_raster_=std::move(raster);ui_width_=ui_raster_.width;ui_height_=ui_raster_.height;
+  if(!ui_width_||!ui_height_)return;
+  if(!ui_)glGenTextures(1,&ui_);glBindTexture(GL_TEXTURE_2D,ui_);
+  glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,ui_width_,ui_height_,0,GL_RGBA,GL_UNSIGNED_BYTE,ui_raster_.rgba.data());
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+  // Retain geometry only; the texture owns the cached label/panel pixels.
+  ui_raster_.rgba.clear();ui_raster_.rgba.shrink_to_fit();
+}
+void Presentation::ui(const std::string& text,const std::string&,bool full) {
+  auto key=std::string(full?"message:":"notice:")+text+std::to_string(width_)+":"+std::to_string(height_);
+  if(key!=ui_key_)upload_ui(render_message(text,width_,height_,full),key);
+  quad(ui_,{0,full?0:height_-ui_height_,ui_width_,ui_height_});
 }
 void Presentation::swap(const Surface* artwork) {
   const auto start = std::chrono::steady_clock::now();
@@ -234,16 +177,22 @@ void Presentation::swap(const Surface* artwork) {
     last_frame_ = end; last_frame_texture_ = artwork->texture; last_frame_number_ = artwork->frames; last_frame_occurrence_ = label_occurrence_;
   }
 }
-bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback) {
+bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback, const Surface* backdrop, float backdrop_opacity) {
   const auto now = std::chrono::steady_clock::now();
-  if (occurrence && label_occurrence_ != occurrence->id) { label_occurrence_ = occurrence->id; label_started_ = SDL_GetTicks64(); }
   const auto ticks = SDL_GetTicks64();
   const bool pointer_visible = pointer_active_ && ticks-pointer_active_<5000;
   const auto mode = playback.state()["settings"].value("tombstone","timed");
-  const bool label_visible = mode=="on" || (mode=="timed" && ticks-label_started_<30000);
+  const bool has_title=occurrence&&has_tombstone(*occurrence);
+  if(occurrence&&playback.overlay().is_null()&&backdrop_opacity==0&&
+     (label_occurrence_!=occurrence->id||label_mode_!=mode||label_has_title_!=has_title)){
+    label_occurrence_=occurrence->id;label_mode_=mode;label_has_title_=has_title;label_started_=ticks;
+  }
+  const auto label_age=ticks-label_started_;
+  const bool label_visible = has_title && (mode=="on" || (mode=="timed" && label_age<30300));
+  const int label_phase=label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
     occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,
-    pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0};
+    pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0,label_phase,backdrop?backdrop->texture:0,backdrop?backdrop->frames:0,backdrop_opacity};
   // Resubmitting an unchanged texture still consumes GPU/compositor work and
   // can block the next capture. UI revisions, geometry, pointer motion/expiry
   // and timed label expiry all independently invalidate composition.
@@ -258,24 +207,38 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
   }
   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   if (artwork && artwork->texture && occurrence) quad(artwork->texture,bounds(occurrence->display));
+  if(backdrop&&backdrop->texture&&backdrop_opacity>0)quad(backdrop->texture,{0,0,width_,height_},backdrop_opacity);
   auto overlay = playback.overlay();
   if (!overlay.is_null()) {
-    auto panel=overlay_panel(overlay);
-    ui(escape(panel.text),panel.qr,true);
-  } else if (playback.desired() && playback.desired()->stage == "failed") ui("Artwork could not be displayed\n"+escape(playback.desired()->error),"",true);
+    auto key="panel:"+overlay.dump()+std::to_string(width_)+":"+std::to_string(height_);
+    if(key!=ui_key_)upload_ui(render_panel(overlay,width_,height_),key);
+    quad(ui_,{0,0,width_,height_});
+  } else if (playback.desired() && playback.desired()->stage == "failed") ui("Artwork could not be displayed\n"+playback.desired()->error,"",true);
   else if (playback.desired() && playback.desired()->stage != "presented" && !playback.recovery_error().empty())
-    ui("Retrying artwork\n"+escape(playback.recovery_error()),"",!artwork);
+    ui("Retrying artwork\n"+playback.recovery_error(),"",!artwork);
   else if (!playback.presentation_failure().is_null())
-    ui("Previous artwork stopped\n"+escape(playback.presentation_failure().value("error","")),"",!artwork);
-  else if (!playback.storage_error().empty()) ui("Playback state could not be saved\n"+escape(playback.storage_error()),"",false);
+    ui("Previous artwork stopped\n"+playback.presentation_failure().value("error",""),"",!artwork);
+  else if (!playback.storage_error().empty()) ui("Playback state could not be saved\n"+playback.storage_error(),"",false);
   else if (auto outcome=playback.state().value("scheduleOutcome",Json(nullptr));outcome.is_object()&&outcome.value("outcome","")=="failed")
-    ui("Scheduled playlist could not start\n"+escape(outcome["error"].value("message","Unknown scheduling failure")),"",false);
+    ui("Scheduled playlist could not start\n"+outcome["error"].value("message","Unknown scheduling failure"),"",false);
   else if (auto outcome=playback.state().value("updateOutcome",Json(nullptr));outcome.is_object()&&outcome.value("contentBlocked",false)&&(!playback.desired()||outcome.value("outcome","")=="failed"))
     ui("Updated playlist is blocked\nChange content preferences or choose another playlist","",!artwork);
   else if (!artwork && playback.state()["sleeping"] == false) ui(playback.desired() ? "Loading artwork" : "Feral File\nReady for artwork","",true);
-  else if (occurrence) {
-    auto mode = playback.state()["settings"].value("tombstone","timed");
-    if (mode == "on" || (mode == "timed" && SDL_GetTicks64() - label_started_ < 30000)) { auto text=label(*occurrence); if(!text.empty())ui(text,"",false); }
+  else if (occurrence && label_visible) {
+    auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
+    if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed"),key);
+    if(ui_width_&&ui_height_){
+      const float opacity=mode=="timed"&&label_age>30000?float(30300-label_age)/300:1;
+      quad(ui_,{0,height_-ui_height_,ui_width_,ui_height_},opacity);
+      if(ui_raster_.timer_width&&opacity==1){
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(ui_raster_.timer_x,ui_height_-ui_raster_.timer_y-ui_raster_.timer_height,ui_raster_.timer_width,ui_raster_.timer_height);
+        glClearColor(227/255.f,227/255.f,227/255.f,1);glClear(GL_COLOR_BUFFER_BIT);
+        auto remaining=int(ui_raster_.timer_width*std::max(0.0,1.0-label_age/30000.0));
+        glScissor(ui_raster_.timer_x,ui_height_-ui_raster_.timer_y-ui_raster_.timer_height,remaining,ui_raster_.timer_height);
+        glClearColor(160/255.f,160/255.f,160/255.f,1);glClear(GL_COLOR_BUFFER_BIT);glDisable(GL_SCISSOR_TEST);
+      }
+    }
   }
   if (pointer_active_ && SDL_GetTicks64()-pointer_active_<5000 && overlay.is_null()) {
     glEnable(GL_SCISSOR_TEST);glScissor(static_cast<int>(pointer_x_)-5,height_-static_cast<int>(pointer_y_)-5,10,10);glClearColor(1,1,1,1);glClear(GL_COLOR_BUFFER_BIT);glDisable(GL_SCISSOR_TEST);

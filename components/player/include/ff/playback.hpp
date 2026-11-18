@@ -22,6 +22,7 @@ struct Occurrence {
   // Stable across source refreshes; changes for an explicit cast. Unlike the
   // command generation this identifies outgoing occurrences of this cast.
   std::string cast_id;
+  bool frame_available = false; // Host capture evidence, never persisted.
 };
 
 // Called only on the host event loop. The renderer consumes desired() and
@@ -33,6 +34,7 @@ class Playback {
   Json snapshot() const;
   void tick(int64_t monotonic_ms, int64_t wall_time_ms);
   void committed(const std::string& occurrence);
+  void frame_ready(const std::string& occurrence);
   void presented(const std::string& occurrence);
   void failed(const std::string& occurrence, std::string reason);
   void ended(const std::string& occurrence);
@@ -41,7 +43,9 @@ class Playback {
   const Json& state() const { return state_; }
   uint64_t generation() const { return generation_; }
   uint64_t revision() const { return revision_; }
-  bool media_paused() const;
+  // With an occurrence, includes the decoder's initial presentation hold.
+  // Without one, reports the user's pause/autoplay intent for status.
+  bool media_paused(const std::string& occurrence = {}) const;
   const std::string& instance() const { return instance_; }
   bool online() const { return online_; }
   Json overlay() const { return overlay_; }

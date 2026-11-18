@@ -23,7 +23,7 @@ const background=[17,34,51],white=[255,255,255];
 try {
  await c.call('settings.set',{tombstone:'off',durationSeconds:null});
  const receipt=await c.call('playback.replace',{playlist:{id:'static-presentation-test',items:[{source:'http://127.0.0.1:18990/presentation.html',duration:0,title:'Native label',metadata:{artists:['Test fixture']}}]}});
- const castAt=performance.now();let ready=false;
+ let ready=false;
  for(let i=0;i<100;i++){const s=await c.call('state.get');if(s.presented?.id===receipt.occurrence){ready=true;break;}await delay(100);}
  assert(ready,'static artwork not presented');await delay(5500);
  assert.deepEqual((await capture('initial')).pointer,background);
@@ -36,9 +36,9 @@ try {
  await c.call('settings.set',{tombstone:'off'});await delay(300);
  assert.deepEqual((await capture('label-hidden')).label,background);
  evidence.checks.push('label settings redraw static artwork');
- await c.call('settings.set',{tombstone:'timed'});await delay(300);
+ await c.call('settings.set',{tombstone:'timed'});const timedAt=performance.now();await delay(300);
  assert.deepEqual((await capture('label-timed')).label,white);
- await delay(Math.max(0,31500-(performance.now()-castAt)));
+ await delay(Math.max(0,31500-(performance.now()-timedAt)));
  assert.deepEqual((await capture('label-expired')).label,background);
  evidence.checks.push('thirty-second label expiry redraws static artwork');
  evidence.result='passed';

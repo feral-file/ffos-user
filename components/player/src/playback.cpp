@@ -236,7 +236,12 @@ void Playback::select(bool recovering) {
   if(!recovering)autoplay_hold_ = !selected_->display.value("autoPlay", true);
   selected_at_ = now_;
 }
-bool Playback::media_paused() const { return state_["paused"] == true || autoplay_hold_; }
+bool Playback::media_paused(const std::string& occurrence) const {
+  // Decode the first frame while paused, then start only once the host has
+  // actually exposed it. Setup may cover the incoming work for minutes.
+  const bool waiting=!occurrence.empty()&&(!presented_||presented_->id!=occurrence);
+  return state_["paused"] == true || autoplay_hold_ || waiting;
+}
 void Playback::replace(Json& next, const Json& p) {
   fields(p, {"playlist", "index", "context", "playlistUrl"});
   require(p.contains("playlist"), "invalid_params", "Missing playlist");
@@ -419,6 +424,9 @@ void Playback::committed(const std::string& id) {
   if (selected_->navigation_committed) return;
   selected_->navigation_committed = true; selected_->stage = "committed"; ++revision_;
 }
+void Playback::frame_ready(const std::string& id) {
+  if(selected_&&selected_->id==id&&selected_->stage=="committed")selected_->frame_available=true;
+}
 void Playback::presented(const std::string& id) {
   if (!selected_ || selected_->id != id || !selected_->navigation_committed || selected_->stage == "failed" || (presented_ && presented_->id == id)) return;
   selected_->stage = "presented"; presented_ = selected_; presented_at_ = now_; ++revision_;
@@ -471,7 +479,9 @@ void Playback::advance() {
   }
 }
 void Playback::ended(const std::string& id) {
-  if (selected_ && presented_ && selected_->id == id && presented_->id == id && selected_->display.value("loop", true) == false) eos_pending_ = true;
+  // Keep a completion that raced initial pausing; tick only consumes it after
+  // presentation. A retired occurrence can never advance the replacement.
+  if (selected_ && selected_->id == id && (selected_->stage=="committed"||selected_->stage=="presented") && selected_->display.value("loop", true) == false) eos_pending_ = true;
 }
 void Playback::execute_schedule(int64_t wall_time_ms){
   const auto task=state_["schedule"];
@@ -495,7 +505,10 @@ void Playback::execute_schedule(int64_t wall_time_ms){
 void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
   if (!clock_started_) { selected_at_ = presented_at_ = pause_at_ = monotonic_ms; clock_started_ = true; }
   now_ = monotonic_ms;
-  if (selected_ && (selected_->stage == "loading" || selected_->stage == "committed") && now_ - selected_at_ > 60000) failed(selected_->id, "Artwork produced no presentable frame within 60 seconds");
+  // A native QR/approval panel can cover an already captured artwork for an
+  // arbitrary time. It has loaded successfully but must not enter history or
+  // start its duration until uncovered. Navigation alone still times out.
+  if (selected_ && !selected_->frame_available && (selected_->stage == "loading" || selected_->stage == "committed") && now_ - selected_at_ > 60000) failed(selected_->id, "Artwork produced no presentable frame within 60 seconds");
   if(now_<storage_retry_at_)return;
   try {
     if (!state_["schedule"].is_null() && state_["schedule"].value("atMs", INT64_MAX) <= wall_time_ms) {
@@ -512,7 +525,7 @@ void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
     if(recovery_attempt_&&selected_&&presented_&&selected_->id==presented_->id&&now_-presented_at_>=60000){
       clear_recovery();++revision_;
     }
-    if(eos_pending_ && state_["paused"] == false) { advance(); eos_pending_=false; }
+    if(eos_pending_ && selected_ && presented_ && selected_->id==presented_->id && state_["paused"] == false && state_["sleeping"] == false) { advance(); eos_pending_=false; }
     if (selected_ && presented_ && selected_->id == presented_->id && state_["paused"] == false && state_["sleeping"] == false && duration() > 0 && now_ - presented_at_ >= duration() * 1000) advance();
   }catch(const Error& error){
     // A timer is not a request with an error reply. Preserve live playback and

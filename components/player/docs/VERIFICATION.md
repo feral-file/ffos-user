@@ -340,3 +340,14 @@ CI 44205900548 passed for source 07fb9d85. Final fresh-context review found no
 material issues in this increment. Full migration, hotplug/rotation, physical
 output, overnight and security-update acceptance are still incomplete.
 Homelab test units were stopped and signed sleepNow confirmed sleeping.
+
+
+## 2026-11-18: native QR, tombstone and setup presentation
+
+See DEVICE-UI.md and evidence/ui-20261118 for packaged PP Mori, exact QR payload
+decoding, setup/backdrop ownership, timer/fade, initial media hold and early EOF.
+Thirteen Linux and ten macOS CTest groups passed. Media/image/GLB/input and
+static presentation regressions passed on ANGLE Vulkan, now the default after
+reproducing the p5 line regression in both CEF and standalone Chrome's GL path.
+A final launch with no backend override verified Vulkan and compositor QR.
+Fresh-context final review: accept; whole-rewrite activation remains incomplete.

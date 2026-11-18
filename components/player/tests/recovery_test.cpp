@@ -11,6 +11,26 @@ int main(){
   std::filesystem::create_directory(directory);
   try{
     ff::Store store((directory/"state.sqlite").string());ff::Playback p(store);
+    p.tick(0,0);p.command("playback.replace",{{"playlist",playlist()}});
+    auto covered=p.desired()->id;p.committed(covered);p.frame_ready(covered);
+    p.command("overlay.set",{{"owner","setup"},{"state","joining"}});p.tick(120000,120000);
+    check(p.desired()->id==covered&&p.desired()->stage=="committed"&&!p.visible(),"Ready artwork covered by setup must not time out or claim presentation");
+    check(p.state()["history"].empty(),"Covered artwork must not enter history");
+    check(p.media_paused(covered),"Incoming media must wait for uncovered presentation");
+    p.command("overlay.set",{{"owner","setup"},{"state","ready"}});p.presented(covered);
+    check(p.visible()&&p.state()["history"].size()==1,"Uncovering captured artwork must permit presentation");
+    check(!p.media_paused(covered),"Presentation must release initial media hold");
+    auto short_media=playlist();short_media["items"][0]["display"]={{"loop",false}};
+    short_media["items"].push_back({{"source","https://example.org/next"},{"duration",0}});
+    p.command("playback.replace",{{"playlist",short_media}});auto early=p.desired()->id;
+    p.committed(early);p.frame_ready(early);p.ended(early);p.tick(120001,120001);
+    check(p.desired()->id==early,"Early EOS must wait for first uncovered presentation");
+    p.presented(early);p.tick(120002,120002);
+    check(p.desired()->id!=early&&p.desired()->index==1,"Retained EOS must progress after presentation");
+    auto next=p.desired()->id;p.committed(next);p.presented(next);p.ended(early);p.tick(120003,120003);
+    check(p.desired()->id==next,"Retired EOS must not advance the replacement");
+    p.command("playback.replace",{{"playlist",playlist()}});covered=p.desired()->id;p.committed(covered);p.tick(181001,181001);
+    check(p.desired()->stage=="failed","Navigation without captured frame must still time out");
     int releases=0;p.set_input_handler([&](const ff::Json& e){if(e["kind"]=="releaseAll")++releases;});
     p.tick(1000,1000);p.command("playback.replace",{{"playlist",playlist()}});
     const auto generation=p.generation();const auto instance=p.instance();

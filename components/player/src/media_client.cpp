@@ -31,7 +31,7 @@ MediaClient::MediaClient(Playback& playback,Presentation& presentation,Occurrenc
   try{
     auto bounds=presentation_.bounds(occurrence_.display);
     send_media(socket_,{{"method","initialize"},{"source",occurrence_.item["source"]},{"width",bounds.width},{"height",bounds.height},{"display",occurrence_.display},
-      {"paused",playback_.media_paused()},
+      {"paused",playback_.media_paused(id)},
       {"volume",playback_.state()["settings"].value("volume",1.0)},{"muted",playback_.state()["settings"].value("muted",false)}});
   }catch(...){kill(pid_,SIGKILL);retiring.push_back(pid_);close(socket_);throw;}
 }
@@ -95,7 +95,7 @@ void MediaClient::controls(){
   if(playback_.desired()&&playback_.desired()->id==id)occurrence_.display=playback_.desired()->display;
   else if(playback_.visible()&&playback_.visible()->id==id)occurrence_.display=playback_.visible()->display;
   auto bounds=presentation_.bounds(occurrence_.display);
-  Json value={{"method","controls"},{"paused",playback_.media_paused()},
+  Json value={{"method","controls"},{"paused",playback_.media_paused(id)},
     {"volume",playback_.state()["settings"].value("volume",1.0)},{"muted",playback_.state()["settings"].value("muted",false)},
     {"display",occurrence_.display},{"width",bounds.width},{"height",bounds.height}};
   auto key=value.dump();if(key!=controls_){send_media(socket_,value);controls_=key;}

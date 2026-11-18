@@ -1,0 +1,55 @@
+#include "ff/device_ui.hpp"
+#include <cairo.h>
+#include <fontconfig/fontconfig.h>
+#include <pango/pangocairo.h>
+#include <filesystem>
+#include <iostream>
+
+namespace {
+void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
+void save(const ff::UIRaster& raster,const std::string& path){
+  auto data=raster.rgba;
+  for(size_t i=0;i<data.size();i+=4)std::swap(data[i],data[i+2]);
+  auto surface=cairo_image_surface_create_for_data(data.data(),CAIRO_FORMAT_ARGB32,raster.width,raster.height,raster.width*4);
+  check(cairo_surface_write_to_png(surface,path.c_str())==CAIRO_STATUS_SUCCESS,"Cannot save test raster");cairo_surface_destroy(surface);
+}
+}
+int main(int argc,char** argv){
+  try{
+    check(argc==3,"Pass font directory and output directory");ff::load_device_fonts(argv[1]);std::filesystem::create_directories(argv[2]);
+    auto font_context=pango_font_map_create_context(pango_cairo_font_map_get_default());
+    auto description=pango_font_description_from_string("PP Mori");pango_font_description_set_absolute_size(description,92*PANGO_SCALE);
+    auto layout=pango_layout_new(font_context);pango_layout_set_font_description(layout,description);
+    pango_layout_set_text(layout,"Pair with the Feral File app",-1);
+    auto iter=pango_layout_get_iter(layout);auto run=pango_layout_iter_get_run_readonly(iter);
+    auto actual=pango_font_describe(run->item->analysis.font);
+    int measured_width,measured_height;pango_layout_get_pixel_size(layout,&measured_width,&measured_height);
+    std::cout<<"Pango face="<<pango_font_description_get_family(actual)<<" titleWidth="<<measured_width<<'\n';
+    check(std::string(pango_font_description_get_family(actual))=="PP Mori","Pango substituted the bundled UI font");
+    pango_font_description_free(actual);pango_layout_iter_free(iter);g_object_unref(layout);g_object_unref(font_context);pango_font_description_free(description);
+    // A successful raster with substituted DejaVu is not brand-fidelity proof.
+    for(auto name:{"PP Mori:style=Regular","PP Mori:style=Bold","PP Mori:style=Bold Italic"}){
+      auto pattern=FcNameParse(reinterpret_cast<const FcChar8*>(name));FcConfigSubstitute(nullptr,pattern,FcMatchPattern);FcDefaultSubstitute(pattern);
+      FcResult status;auto match=FcFontMatch(nullptr,pattern,&status);FcChar8* family=nullptr;
+      check(match&&FcPatternGetString(match,FC_FAMILY,0,&family)==FcResultMatch&&std::string(reinterpret_cast<char*>(family))=="PP Mori","Bundled font was substituted");
+      FcPatternDestroy(match);FcPatternDestroy(pattern);
+    }
+    ff::Occurrence item;item.item={{"title","Transparent Grit"},{"metadata",{{"artists",ff::Json::array({"Dmitri Cherniak"})}}}};item.playlist_title="Living Code";item.curator="Feral File";
+    auto landscape=ff::render_tombstone(item,1920,1080,true),portrait=ff::render_tombstone(item,1080,1920,true);
+    check(landscape.width==portrait.width&&landscape.height==portrait.height,"Rotation inflated label dimensions");
+    check(landscape.width<960&&landscape.timer_width>0&&landscape.timer_height==2,"Tombstone width/timer geometry");
+    auto always=ff::render_tombstone(item,1920,1080,false);check(always.timer_width==0&&always.height<landscape.height,"Always-on label must omit countdown/gap");
+    auto notice=ff::render_message("Playback state could not be saved",1920,1080,false);
+    check(notice.width<960&&notice.height<200&&notice.rgba[3]==255,"Nonfatal errors must remain compact notices over the retained artwork");
+    item.item["title"]="";check(ff::render_tombstone(item,1920,1080,true).rgba.empty(),"Missing title must omit label");
+    save(landscape,std::string(argv[2])+"/tombstone.png");
+    const ff::Json claim={{"owner","setup"},{"state","claim_qr"},{"fields",{{"url","https://example.org/claim?token=SYNTHETIC-TEST"},{"device_name","My Art Computer"}}}};
+    const ff::Json wifi={{"owner","setup"},{"state","softap_qr"},{"fields",{{"ssid","FF1-test:;"},{"password","fake;password"},{"portal_url","http://10.42.0.1/"}}}};
+    for(auto [w,h]:{std::pair{1920,1080},std::pair{1080,1920},std::pair{1920,1920},std::pair{3840,2160}}){
+      auto result=ff::render_panel(claim,w,h);check(result.width==w&&result.height==h&&result.rgba[3]==209,"Panel dimensions or 82% dimming changed");
+      save(result,std::string(argv[2])+"/claim-"+std::to_string(w)+"x"+std::to_string(h)+".png");
+      save(ff::render_panel(wifi,w,h),std::string(argv[2])+"/wifi-"+std::to_string(w)+"x"+std::to_string(h)+".png");
+    }
+    std::cout<<"Device font, label orientation, countdown geometry and panel raster checks passed\n";return 0;
+  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+}

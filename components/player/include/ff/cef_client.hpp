@@ -11,7 +11,7 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
                       public CefRenderHandler, public CefRequestHandler, public CefPermissionHandler,
                       public CefDownloadHandler, public CefContextMenuHandler, public CefDisplayHandler {
  public:
-  ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool bundled);
+  ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool bundled, bool decoration = false);
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
@@ -48,6 +48,8 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   bool ready = false;
   bool has_ready_frame() const { return ready&&surface.frames>ready_after_frame_; }
   const bool bundled;
+  const bool decoration;
+  bool decoration_failed = false;
  private:
   Playback& playback_;
   Presentation& presentation_;
@@ -59,6 +61,7 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   bool paint_pending_=false, refresh_needed_=false;
   bool admit_paint();
   void mark_ready();
+  void failed(const std::string& error);
   void configure();
   IMPLEMENT_REFCOUNTING(ArtworkClient);
 };
