@@ -104,6 +104,30 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
   paint(after);return canvas.pixels();
 }
 }
+PointerRaster render_pointer(int size) {
+  Canvas canvas(size, size);
+  const int hotspot = size / 8;
+  cairo_translate(canvas.cr, hotspot, hotspot);
+  cairo_scale(canvas.cr, size / 32.0, size / 32.0);
+
+  // The arrow tip is the input hotspot. Yellow echoes the old player's dot,
+  // and the dark edge keeps the shape visible on pale artwork.
+  cairo_move_to(canvas.cr, 0, 0);
+  cairo_line_to(canvas.cr, 0, 23);
+  cairo_line_to(canvas.cr, 6, 17);
+  cairo_line_to(canvas.cr, 10, 25);
+  cairo_line_to(canvas.cr, 15, 23);
+  cairo_line_to(canvas.cr, 11, 15);
+  cairo_line_to(canvas.cr, 19, 15);
+  cairo_close_path(canvas.cr);
+  cairo_set_source_rgb(canvas.cr, 1, .91, .3);
+  cairo_fill_preserve(canvas.cr);
+  cairo_set_line_width(canvas.cr, 2.5);
+  cairo_set_line_join(canvas.cr, CAIRO_LINE_JOIN_ROUND);
+  cairo_set_source_rgb(canvas.cr, .08, .08, .08);
+  cairo_stroke(canvas.cr);
+  return {canvas.pixels(), hotspot};
+}
 void load_device_fonts(const std::string& directory) {
   auto config=FcConfigGetCurrent();
   for(auto file:{"PPMori-Regular.ttf","PPMori-Bold.ttf","PPMori-BoldItalic.ttf"}){

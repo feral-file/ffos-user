@@ -57,7 +57,7 @@ class Presentation {
   SDL_GLContext context_ = nullptr;
   int width_ = 0, height_ = 0;
   bool diagnostic_cpu_;
-  GLuint program_ = 0, ui_ = 0;
+  GLuint program_ = 0, ui_ = 0, pointer_texture_ = 0;
   std::string ui_key_;
   std::string label_occurrence_;
   std::string label_mode_;
@@ -66,6 +66,7 @@ class Presentation {
   int ui_width_ = 0, ui_height_ = 0;
   UIRaster ui_raster_;
   double pointer_x_ = 0, pointer_y_ = 0;
+  int pointer_size_ = 0, pointer_hotspot_ = 0;
   uint64_t pointer_active_ = 0, gpu_copies_ = 0, cpu_copies_ = 0, swaps_ = 0;
   uint64_t coalesced_frames_ = 0;
   double copy_ms_ = 0;
@@ -82,6 +83,7 @@ class Presentation {
   void activate();
   void swap(const Surface* artwork);
   void quad(GLuint texture, Bounds rect, float opacity = 1);
+  void draw_pointer();
   void upload_ui(UIRaster raster, const std::string& key);
   void ui(const std::string& text, const std::string& qr, bool full);
 };

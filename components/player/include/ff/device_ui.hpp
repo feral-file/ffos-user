@@ -12,6 +12,11 @@ struct UIRaster {
   int timer_x = 0, timer_y = 0, timer_width = 0, timer_height = 0;
   std::vector<uint8_t> rgba;
 };
+struct PointerRaster {
+  UIRaster image;
+  int hotspot;
+};
+PointerRaster render_pointer(int size);
 void load_device_fonts(const std::string& directory);
 UIRaster render_panel(const Json& overlay, int width, int height);
 UIRaster render_message(const std::string& text, int width, int height, bool full = true);

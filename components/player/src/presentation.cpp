@@ -5,6 +5,7 @@
 #include <drm_fourcc.h>
 #include <pango/pangocairo.h>
 #include <qrencode.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -72,7 +73,9 @@ Presentation::Presentation(bool diagnostic_cpu, bool timing_samples, const std::
 Presentation::~Presentation() {
   feedback_.reset();
   activate();
-  glDeleteTextures(1, &ui_); glDeleteProgram(program_);
+  glDeleteTextures(1, &ui_);
+  glDeleteTextures(1, &pointer_texture_);
+  glDeleteProgram(program_);
   if (context_) SDL_GL_DeleteContext(context_); if (window_) SDL_DestroyWindow(window_); SDL_Quit();
 }
 void Presentation::destroy(Surface& surface) { activate(); if(surface.copy_fence) glDeleteSync(static_cast<GLsync>(surface.copy_fence)); glDeleteTextures(1, &surface.texture); surface = {}; }
@@ -167,12 +170,29 @@ void Presentation::quad(GLuint texture, Bounds rect, float opacity) {
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texture); glUniform1i(glGetUniformLocation(program_, "tex"), 0);
   glUniform1f(glGetUniformLocation(program_, "opacity"), opacity); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
+static void upload_raster(GLuint& texture, const UIRaster& raster) {
+  if (!texture) glGenTextures(1, &texture);
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, raster.width, raster.height, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, raster.rgba.data());
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+}
+void Presentation::draw_pointer() {
+  const int size = std::clamp(std::min(width_, height_) / 48, 32, 64);
+  if (size != pointer_size_) {
+    const auto pointer = render_pointer(size);
+    upload_raster(pointer_texture_, pointer.image);
+    pointer_size_ = size;
+    pointer_hotspot_ = pointer.hotspot;
+  }
+  quad(pointer_texture_, {static_cast<int>(pointer_x_) - pointer_hotspot_,
+                          static_cast<int>(pointer_y_) - pointer_hotspot_, size, size});
+}
 void Presentation::upload_ui(UIRaster raster, const std::string& key) {
   ui_key_=key; ui_raster_=std::move(raster);ui_width_=ui_raster_.width;ui_height_=ui_raster_.height;
   if(!ui_width_||!ui_height_)return;
-  if(!ui_)glGenTextures(1,&ui_);glBindTexture(GL_TEXTURE_2D,ui_);
-  glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,ui_width_,ui_height_,0,GL_RGBA,GL_UNSIGNED_BYTE,ui_raster_.rgba.data());
-  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+  upload_raster(ui_, ui_raster_);
   // Retain geometry only; the texture owns the cached label/panel pixels.
   ui_raster_.rgba.clear();ui_raster_.rgba.shrink_to_fit();
 }
@@ -278,9 +298,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
       }
     }
   }
-  if (pointer_active_ && SDL_GetTicks64()-pointer_active_<5000 && overlay.is_null()) {
-    glEnable(GL_SCISSOR_TEST);glScissor(static_cast<int>(pointer_x_)-5,height_-static_cast<int>(pointer_y_)-5,10,10);glClearColor(1,1,1,1);glClear(GL_COLOR_BUFFER_BIT);glDisable(GL_SCISSOR_TEST);
-  }
+  if (pointer_visible && overlay.is_null()) draw_pointer();
   swap(blend.opacity>0?artwork:nullptr);return true;
 }
 bool Presentation::events(const std::function<void(const Json&)>& input) {
