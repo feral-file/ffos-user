@@ -327,7 +327,16 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		return Resource{}, fmt.Errorf("write blob: %w", err)
 	}
 
-	return Resource{
+	rawHeaders := map[string]string{}
+	for name, values := range resp.Header {
+		rawHeaders[name] = strings.Join(values, "\n")
+	}
+	fields, supported := browserReplayHeaders(rawHeaders)
+	policyVersion := 0
+	if supported {
+		policyVersion = 2
+	}
+	return Resource{BrowserPolicyVersion: policyVersion, HeaderFields: fields,
 		FreshUntil: freshUntil,
 		URL:        sourceURL,
 		Status:     go_http.StatusOK,

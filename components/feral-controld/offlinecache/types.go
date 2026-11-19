@@ -45,6 +45,10 @@ const (
 // deliberately dropped: role/note/failedRequests/size all derive from
 // these or from the blob file itself).
 type Resource struct {
+	// BrowserPolicyVersion 2 records original end-to-end headers, including CSP
+	// and repeated fields. Older captures cannot prove top-level browser fidelity.
+	BrowserPolicyVersion int           `json:"browserPolicyVersion,omitempty"`
+	HeaderFields         []HeaderField `json:"headerFields,omitempty"`
 	// FreshUntil is set only for automatic entries. Zero retains explicit
 	// offline snapshot semantics; expiry must be checked on every replay.
 	FreshUntil time.Time `json:"freshUntil,omitempty"`

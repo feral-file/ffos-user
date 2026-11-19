@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	go_os "os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -124,6 +125,7 @@ type app struct {
 	// the narrower ProgressObserver interface, which has no Close method —
 	// see offlinecache.Runtime.Notifier's doc.
 	OfflineCacheNotifier *offlinecache.Notifier
+	NativeCacheBroker    *offlinecache.NativeBroker
 	// UARewrite rewrites the outgoing User-Agent for the configured
 	// artwork origins (#296). Independent of the offline cache above: the
 	// bug it fixes has nothing to do with caching, so it must run on a
@@ -518,6 +520,13 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.MintPairing.Stop()
 	}
 
+	if app.NativeCacheBroker != nil {
+		go func() {
+			if err := app.NativeCacheBroker.Run(ctx, filepath.Join(filepath.Dir(playerlink.SocketPath()), "cache.sock")); err != nil {
+				app.Logger.Error("Native cache broker stopped", zap.Error(err))
+			}
+		}()
+	}
 	// Start offline cache (job-queue worker + loopback static server for
 	// large cached assets) when config.OfflineCacheConfig.Enabled. Both
 	// are best-effort: a start failure here must not crash controld, since
@@ -646,8 +655,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	app.Logger.Info("controld started successfully")
 
-	// Check for unhandled chromium OOM kills and recover if needed.
-	// The recoverer handles file I/O, polling, and command dispatch internally.
 	// Native persistence restores playback; systemd/watchdog own process recovery.
 
 	<-ctx.Done()
@@ -1238,6 +1245,13 @@ func initializeApp(
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
+	// Per-occurrence resource requests go through the native cache broker. Do
+	// not arm the retired kiosk CDP connection while admitting a phone cast.
+	if offlineCacheStore != nil {
+		kioskReplay = offlinecache.NewNativePlaybackCache(offlineCacheStore)
+		offlinecache.UseNativeReplay(offlineCache)
+		offlineCacheScopeLost = nil
+	}
 	rawCmdHandler := commandrouter.New(executor, nativeCommands, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
 	wireNativeDefault(nativeCommands, rawCmdHandler)
 	commandrouter.SetNativeControls(rawCmdHandler, nativePlayer)
@@ -1303,7 +1317,7 @@ func initializeApp(
 	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
 	// The probe sends the kiosk's own User-Agent (kiosk_useragent.go), read
 	// from the kiosk's DevTools endpoint for the app's lifetime.
-	kioskUA := newKioskUserAgent(cdpEndpoint, logger)
+	kioskUA := newNativeKioskUserAgent(nativePlayer, logger)
 	go kioskUA.Run(context)
 	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, nil, logger)
 	var mediaHealthObserver *offlinecache.KioskNavigationObserver
@@ -1860,6 +1874,7 @@ func initializeApp(
 		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
+		NativeCacheBroker:        nativeCacheBroker(offlineCacheStore, uaPolicy, mediaHealthSvc),
 		OfflineCacheNotifier:     offlineCacheNotifier,
 		Hub:                      hub,
 		LinkChecker:              linkChecker,
@@ -1941,4 +1956,36 @@ func fenceThroughService(svc offlinecache.Service) offlinecache.ClearFence {
 		return nil
 	}
 	return svc
+}
+
+func nativeCacheBroker(store offlinecache.Store, policy *uarewrite.Policy, health *mediahealth.Service) *offlinecache.NativeBroker {
+	broker := offlinecache.NewNativeBroker(store)
+	broker.Policy = func(raw string, headers map[string]string) (string, []offlinecache.HeaderField) {
+		target := raw
+		if policy != nil && health != nil {
+			referrer := ""
+			for name, value := range headers {
+				if strings.EqualFold(name, "Referer") {
+					referrer = value
+					break
+				}
+			}
+			if override, ok := health.GatewayOverride(raw, referrer); ok {
+				return override, nil
+			}
+		}
+		if policy != nil && policy.Matches(raw) {
+			if rewritten, ok := policy.RewriteURL(raw); ok {
+				target = rewritten
+			} else {
+				fields := []offlinecache.HeaderField{}
+				for _, field := range policy.RewriteHeaders(headers) {
+					fields = append(fields, offlinecache.HeaderField{Name: field["name"], Value: field["value"]})
+				}
+				return target, fields
+			}
+		}
+		return target, nil
+	}
+	return broker
 }

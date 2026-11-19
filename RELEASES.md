@@ -21,7 +21,9 @@ enforced by `scripts/agent-iso-build-guard.sh`).
 
 ## 3.1.0-native.1 — full-image development declaration (not dispatched)
 
-Native cutover changes binaries and user session/unit files. Never ship this as
+Native cutover changes binaries and user session/unit files. The current
+component uses pinned public Chromium158, a private wlroots0.20 compositor and
+native raster/media workers; the session delegates engine flags to its launcher. Never ship this as
 a package-only update. The feature branches target develop; Anh owns promotion.
 No PR, promotion or publishing workflow was opened/triggered for this task.
 

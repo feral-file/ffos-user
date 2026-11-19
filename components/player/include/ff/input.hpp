@@ -13,6 +13,8 @@ struct PhysicalKey { int virtual_key = 0, native_key = 0; };
 // USB HID keyboard-page usage -> Chromium VK and Linux XKB native keycode.
 // Text is a separate UTF-8 event and never inferred from physical position.
 PhysicalKey physical_key(int usage);
+// Typed browser-engine raw key payload. It never synthesizes text.
+Json browser_key(const Json& event);
 
 class InputState {
  public:

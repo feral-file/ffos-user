@@ -1,5 +1,8 @@
 # Normal casting and recovery cutover — 2026-11-18
 
+This records the earlier CEF cutover. The current FF1 installation and public
+Chromium measurements are in [PUBLIC-ENGINE-FF1.md](PUBLIC-ENGINE-FF1.md).
+
 Anh's change request: install the ordinary native replacement on FF1-SKYZ2E3A,
 finish phone casting/session/watchdog integration, test real Feral File playlists
 from FF-CLI, leave the screen on, push the branch, no PR. Baselines were

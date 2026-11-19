@@ -94,7 +94,7 @@ wait_for_vt1() {
 
 wait_for_vt1
 
-# A display is present: from here the CDP readiness probe and cage/Chromium can
+# A display is present: from here the native readiness probe and Cage/player can
 # make real progress, so start the probe now (starting it earlier under headless
 # would just time out and restart the unit for no reason).
 /home/feralfile/scripts/player-ready-check.sh &
@@ -129,6 +129,5 @@ exec cage -s -- /bin/bash -c "
     exec /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /usr/lib/ff-player-native/ff-player-native \
       --state-dir=/home/feralfile/.state/player \
       --socket=/run/user/1000/ff-player/player.sock \
-      --renderer-dir=/usr/share/ff-player-native/renderers \
-      --enable-unsafe-webgpu --enable-features=Vulkan,VulkanFromANGLE --disable-vulkan-surface
+      --renderer-dir=/usr/share/ff-player-native/renderers
 "

@@ -30,6 +30,29 @@ PhysicalKey physical_key(int usage) {
   for (auto key : table) if (key.usage == usage) return {key.vk,key.evdev + 8};
   throw Error("unsupported", "Unsupported USB HID keyboard usage");
 }
+Json browser_key(const Json& event) {
+  const int usage=event.at("usage").get<int>();auto physical=physical_key(usage);
+  std::string code,key;const bool shift=event.value("shift",false);
+  if(usage>=4&&usage<=29){code="Key"+std::string(1,char('A'+usage-4));key=std::string(1,char((shift?'A':'a')+usage-4));}
+  else if(usage>=30&&usage<=39){char value=usage==39?'0':char('1'+usage-30);code="Digit"+std::string(1,value);key=std::string(1,shift?std::string("!@#$%^&*()")[usage-30]:value);}
+  else if(usage>=58&&usage<=69)code=key="F"+std::to_string(usage-57);
+  else {
+    struct Key {int usage;const char* code;const char* key;const char* shifted;};
+    static const Key keys[]={
+      {40,"Enter","Enter","Enter"},{41,"Escape","Escape","Escape"},{42,"Backspace","Backspace","Backspace"},{43,"Tab","Tab","Tab"},{44,"Space"," "," "},
+      {45,"Minus","-","_"},{46,"Equal","=","+"},{47,"BracketLeft","[","{"},{48,"BracketRight","]","}"},{49,"Backslash","\\","|"},{51,"Semicolon",";",":"},{52,"Quote","'","\""},{53,"Backquote","`","~"},{54,"Comma",",","<"},{55,"Period",".",">"},{56,"Slash","/","?"},
+      {57,"CapsLock","CapsLock","CapsLock"},{70,"PrintScreen","PrintScreen","PrintScreen"},{71,"ScrollLock","ScrollLock","ScrollLock"},{72,"Pause","Pause","Pause"},{73,"Insert","Insert","Insert"},{74,"Home","Home","Home"},{75,"PageUp","PageUp","PageUp"},{76,"Delete","Delete","Delete"},{77,"End","End","End"},{78,"PageDown","PageDown","PageDown"},
+      {79,"ArrowRight","ArrowRight","ArrowRight"},{80,"ArrowLeft","ArrowLeft","ArrowLeft"},{81,"ArrowDown","ArrowDown","ArrowDown"},{82,"ArrowUp","ArrowUp","ArrowUp"},
+      {83,"NumLock","NumLock","NumLock"},{84,"NumpadDivide","/","/"},{85,"NumpadMultiply","*","*"},{86,"NumpadSubtract","-","-"},{87,"NumpadAdd","+","+"},{88,"NumpadEnter","Enter","Enter"},
+      {89,"Numpad1","1","1"},{90,"Numpad2","2","2"},{91,"Numpad3","3","3"},{92,"Numpad4","4","4"},{93,"Numpad5","5","5"},{94,"Numpad6","6","6"},{95,"Numpad7","7","7"},{96,"Numpad8","8","8"},{97,"Numpad9","9","9"},{98,"Numpad0","0","0"},{99,"NumpadDecimal",".","."},{100,"IntlBackslash","\\","|"},{101,"ContextMenu","ContextMenu","ContextMenu"},
+      {224,"ControlLeft","Control","Control"},{225,"ShiftLeft","Shift","Shift"},{226,"AltLeft","Alt","Alt"},{227,"MetaLeft","Meta","Meta"},{228,"ControlRight","Control","Control"},{229,"ShiftRight","Shift","Shift"},{230,"AltRight","Alt","Alt"},{231,"MetaRight","Meta","Meta"}
+    };
+    for(const auto& entry:keys)if(entry.usage==usage){code=entry.code;key=shift?entry.shifted:entry.key;break;}
+  }
+  require(!code.empty(),"unsupported","No browser physical key mapping");
+  int modifiers=(event.value("alt",false)?1:0)|(event.value("control",false)?2:0)|(event.value("meta",false)?4:0)|(shift?8:0);
+  return {{"type",event.at("down").get<bool>()?"rawKeyDown":"keyUp"},{"windowsVirtualKeyCode",physical.virtual_key},{"nativeVirtualKeyCode",physical.native_key},{"code",code},{"key",key},{"modifiers",modifiers},{"autoRepeat",event.value("repeat",false)},{"isKeypad",usage>=83&&usage<=99},{"location",usage>=224?(usage>=228?2:1):usage>=83&&usage<=99?3:0}};
+}
 void InputState::target(std::string occurrence, InputGeometry geometry) {
   require(geometry.width > 0 && geometry.height > 0 && geometry.view_width > 0 && geometry.view_height > 0,
     "invalid_params", "Invalid input geometry");

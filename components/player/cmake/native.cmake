@@ -1,0 +1,48 @@
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
+add_library(ff_cache_client src/cache_client.cpp)
+target_link_libraries(ff_cache_client PUBLIC ff_core PkgConfig::CURL)
+pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET sdl2 egl glesv2 libdrm pangocairo pangoft2 fontconfig libqrencode wayland-client)
+pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv>=2.6.0)
+add_executable(ff-media-worker src/media_worker.cpp)
+target_link_libraries(ff-media-worker PRIVATE ff_media_ipc PkgConfig::MPV PkgConfig::NATIVE)
+add_executable(media-decode-tests tests/media_decode_test.cpp)
+target_link_libraries(media-decode-tests PRIVATE PkgConfig::MPV)
+add_test(NAME media-decode COMMAND media-decode-tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/media-h264-aac.mp4)
+set_tests_properties(media-decode PROPERTIES TIMEOUT 25)
+set_target_properties(ff-media-worker PROPERTIES INSTALL_RPATH "$ORIGIN")
+install(TARGETS ff-media-worker RUNTIME DESTINATION lib/ff-player-native/media)
+install(PROGRAMS tools/ff-media-launch DESTINATION lib/ff-player-native/media)
+set(FF_MEDIA_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/build-media/prefix" CACHE PATH "Pinned private media libraries")
+execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/prepare-renderers.py
+  COMMAND_ERROR_IS_FATAL ANY)
+if(NOT EXISTS "${FF_MEDIA_PREFIX}/lib/libmpv.so")
+  message(FATAL_ERROR "Build the pinned private media dependencies with tools/build-ffmpeg.sh and tools/build-media.sh")
+endif()
+install(DIRECTORY "${FF_MEDIA_PREFIX}/lib/" DESTINATION lib/ff-player-native/media
+        FILES_MATCHING PATTERN "*.so*" PATTERN pkgconfig EXCLUDE)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/mpv-0.42.0/LICENSE.LGPL"
+        DESTINATION share/licenses/ff-player-native RENAME mpv-LGPL.txt)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/mpv-0.42.0/Copyright"
+        DESTINATION share/licenses/ff-player-native RENAME mpv-Copyright.txt)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/libplacebo-7.387.0/LICENSE"
+        DESTINATION share/licenses/ff-player-native RENAME libplacebo.txt)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ffmpeg/COPYING.LGPLv2.1"
+        DESTINATION share/licenses/ff-player-native RENAME FFmpeg-LGPL.txt)
+pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
+set(PRESENTATION_XML "${WAYLAND_PROTOCOLS_DIR}/stable/presentation-time/presentation-time.xml")
+install(FILES "${PRESENTATION_XML}" DESTINATION share/licenses/ff-player-native RENAME wayland-presentation-time.xml)
+add_custom_command(OUTPUT presentation-time-client-protocol.h presentation-time-protocol.c
+  COMMAND ${WAYLAND_SCANNER} client-header ${PRESENTATION_XML} presentation-time-client-protocol.h
+  COMMAND ${WAYLAND_SCANNER} private-code ${PRESENTATION_XML} presentation-time-protocol.c
+  DEPENDS ${PRESENTATION_XML} VERBATIM)
+add_library(ff_device_ui src/device_ui.cpp)
+target_link_libraries(ff_device_ui PUBLIC ff_core PkgConfig::NATIVE)
+add_executable(device-ui-tests tests/device_ui_test.cpp)
+target_link_libraries(device-ui-tests PRIVATE ff_device_ui)
+add_test(NAME device-ui COMMAND device-ui-tests ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts ${CMAKE_CURRENT_BINARY_DIR}/ui-evidence)
+add_executable(cache-client-tests tests/cache_client_test.cpp)
+target_link_libraries(cache-client-tests PRIVATE ff_cache_client)
+add_test(NAME cache-client COMMAND cache-client-tests ${CMAKE_CURRENT_SOURCE_DIR}/protocol/cache-fixtures.json)
+set_tests_properties(cache-client PROPERTIES TIMEOUT 15)

@@ -35,6 +35,13 @@ class SummaryTest(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr)
     def test_complete(self):
         self.check_run()
+    def test_public_kiosk_uses_wayland_feedback(self):
+        def change(run, _timing):
+            run["unit"] = "chromium-kiosk.service"
+            run["configuration"] = {"presentationPath": "public"}
+        self.check_run(change)
+    def test_named_public_probe_uses_wayland_feedback(self):
+        self.check_run(lambda run, _: run.update(unit="ff-player-public-test.service"))
     def test_short_prefix(self):
         self.check_run(lambda r,t:t["waylandPresentation"].update(changedTimestampsNs=list(range(900_000_000,2_500_000_000,100_000_000))),"does not cover")
     def test_missing_start(self):

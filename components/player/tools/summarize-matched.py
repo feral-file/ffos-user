@@ -37,7 +37,11 @@ for path in a.runs:
     elif identity != reference:
         raise ValueError(f'{path}: unmatched engine, fixture or rendered document')
     low, high = data['clockStart']['monotonicNs'], data['clockEnd']['monotonicNs']
-    arm = 'native' if 'runtime' in data['unit'] else 'views' if 'views' in data['unit'] else 'chrome'
+    presentation_path = data.get('configuration', {}).get('presentationPath')
+    if presentation_path == 'public' or 'public' in data['unit']:
+        arm = 'native'
+    else:
+        arm = 'native' if 'runtime' in data['unit'] else 'views' if 'views' in data['unit'] else 'chrome'
     copies = None
     if arm != 'native':
         events = data['compositorTrace']['events']

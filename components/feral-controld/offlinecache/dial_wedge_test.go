@@ -55,3 +55,11 @@ func TestDialPageSession_HangingEndpointUnblocksViaInternalCeiling(t *testing.T)
 	assert.Less(t, time.Since(start), 5*time.Second,
 		"dial must return once its internal ceiling elapses, not hang indefinitely")
 }
+
+func (h hangingHTTPClient) GetContext(ctx context.Context, url string) (*go_http.Response, error) {
+	req, err := go_http.NewRequestWithContext(ctx, go_http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return h.Do(req)
+}

@@ -6,7 +6,9 @@ media_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 media_runtime=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}
 media_display=${WAYLAND_DISPLAY:-wayland-0}
 case "$media_display" in */*|.*) echo 'Expected a relative Wayland socket name' >&2; exit 1;; esac
-set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all --share-net --clearenv \
+network="--share-net"
+if [ "${1:-}" = "--offline" ]; then network=""; fi
+set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all $network --clearenv \
   --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
   --proc /proc --dev /dev --dev-bind /dev/dri /dev/dri --tmpfs /tmp \
   --ro-bind /sys/devices /sys/devices --ro-bind /sys/dev/char /sys/dev/char --ro-bind /sys/class/drm /sys/class/drm \

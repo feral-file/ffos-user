@@ -5,7 +5,6 @@
 #include "ff/surface.hpp"
 #include "ff/frame_clock.hpp"
 #include "ff/presentation_feedback.hpp"
-#include "include/cef_render_handler.h"
 #include <SDL.h>
 #include <GLES3/gl3.h>
 #include <EGL/egl.h>
@@ -27,7 +26,8 @@ class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts);
   ~Presentation();
-  void accelerated(Surface& surface, const CefAcceleratedPaintInfo& info);
+  void accelerated(Surface& surface, const DmaFrame& info, bool retained_source = false);
+  bool copy_ready(Surface& surface);
   void coalesced_frame() { ++coalesced_frames_; }
   void software(Surface& surface, const void* data, int width, int height);
   void destroy(Surface& surface);
@@ -39,6 +39,9 @@ class Presentation {
   void pointer(double x, double y) { pointer_x_ = x; pointer_y_ = y; pointer_active_ = SDL_GetTicks64(); }
   void pointer_position(double x, double y) { pointer_x_ = x; pointer_y_ = y; }
   Json metrics() const;
+  void browser_feedback(double elapsed_ms, bool fallback);
+  uint64_t frame_serial() const { return frame_serial_; }
+  PresentedFrame latest_presented() const { return feedback_->latest(); }
  private:
   std::unique_ptr<PresentationFeedback> feedback_;
   uint64_t frame_serial_ = 0;
@@ -58,7 +61,9 @@ class Presentation {
   uint64_t pointer_active_ = 0, gpu_copies_ = 0, cpu_copies_ = 0, swaps_ = 0;
   uint64_t coalesced_frames_ = 0;
   double copy_ms_ = 0;
-  FrameTiming copy_timing_, swap_timing_, frame_timing_;
+  FrameTiming copy_fence_timing_, copy_timing_, swap_timing_, frame_timing_;
+  FrameTiming browser_feedback_timing_;
+  uint64_t browser_feedback_fallbacks_ = 0;
   std::chrono::steady_clock::time_point last_frame_{};
   FrameClock draw_clock_;
   GLuint last_frame_texture_ = 0;
@@ -66,6 +71,7 @@ class Presentation {
   using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, double, double, int, GLuint, uint64_t, float>;
   std::optional<DrawKey> draw_key_;
   std::string last_frame_occurrence_;
+  void activate();
   void swap(const Surface* artwork);
   void quad(GLuint texture, Bounds rect, float opacity = 1);
   void upload_ui(UIRaster raster, const std::string& key);

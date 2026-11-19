@@ -17,11 +17,16 @@ ff::Json playlist() { return {{"id", "test"}, {"title", "Two occurrences"}, {"it
 int main(int argc, char** argv) {
   try {
     check(argc == 2, "Fixture path required"); std::ifstream f(argv[1]); auto fixtures = ff::Json::parse(f);
+    check(ff::virtual_cache_source("https://abc.onchfs.invalid/work.png")&&!ff::virtual_cache_source("https://abc.onchfs.invalid.evil/work.png"),"Virtual chain sources always use the owned cache broker");
     check(ff::native_media({{"source","https://example.org/movie.MP4?token=x"}}),"MP4 uses native media despite query");
     check(ff::native_media({{"source","https://example.org/opaque"},{"mimeType","video/mp4"}}),"MIME-resolved video uses native media");
     check(ff::native_media({{"source","https://example.org/opaque"},{"mimeType","application/x-mpegurl"}}),"Normalized HLS MIME uses native media");
     check(ff::native_media({{"source","https://example.org/opaque"},{"mimeType","Video/MP4"}}),"Media MIME comparison is case insensitive");
     check(ff::native_media({{"source","https://example.org/live.m3u8"}}),"HLS uses native media");
+    for(auto ext:{"PNG","jpeg","GIF","WEBP","avif","tiff"})check(ff::native_raster({{"source",std::string("https://example.org/image.")+ext+"?token=1#x"}}),"Raster image uses native decoder");
+    check(ff::native_raster({{"source","https://example.org/opaque"},{"mimeType","Image/PNG"}}),"MIME-only raster uses native decoder");
+    check(!ff::native_raster({{"source","https://example.org/work.SVG?x"},{"mimeType","image/png"}}),"SVG extension stays a browser document even with a conflicting raster type");
+    check(!ff::native_raster({{"source","https://example.org/opaque"},{"mimeType","image/svg+xml"}}),"SVG MIME stays a browser document");
     check(!ff::native_media({{"source","https://example.org/artwork/"}}),"Software stays a browser document");
     for (const auto& fixture : fixtures["parse"]) {
       bool valid = true; try { ff::parse(fixture["wire"].get<std::string>()); } catch (const ff::Error&) { valid = false; }

@@ -7,6 +7,10 @@ void check(bool condition,const char* message){if(!condition)throw std::runtime_
 }
 int main(){
   try {
+    auto raw=ff::browser_key({{"usage",4},{"down",true},{"shift",true}});
+    check(raw["type"]=="rawKeyDown"&&raw["code"]=="KeyA"&&raw["key"]=="A"&&!raw.contains("text"),"Physical keys must not synthesize a duplicate phone character");
+    auto arrow=ff::browser_key({{"usage",82},{"down",false}});check(arrow["type"]=="keyUp"&&arrow["key"]=="ArrowUp","Native browser arrow release mapping");
+
     std::vector<ff::Json> events;
     ff::InputState input([&](const ff::Json& event){events.push_back(event);});
     input.target("first",{2000,1000,100,50,1800,900});

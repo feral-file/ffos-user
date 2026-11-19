@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <drm_fourcc.h>
 
 namespace ff {
 ArtworkClient::ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool is_bundled, bool is_decoration)
@@ -52,7 +53,12 @@ void ArtworkClient::OnPaint(CefRefPtr<CefBrowser>, PaintElementType type, const 
 }
 void ArtworkClient::OnAcceleratedPaint(CefRefPtr<CefBrowser>, PaintElementType type,const RectList&,const CefAcceleratedPaintInfo& info) {
   if(type!=PET_VIEW||!admit_paint())return;
-  try {presentation_.accelerated(frames.capture,info);frames.captured();captured_configuration();}
+  try {DmaFrame frame{};frame.width=info.extra.coded_size.width;frame.height=info.extra.coded_size.height;
+    frame.visible={info.extra.visible_rect.x,info.extra.visible_rect.y,info.extra.visible_rect.width,info.extra.visible_rect.height};
+    frame.count=info.plane_count;frame.format=info.format==CEF_COLOR_TYPE_BGRA_8888?DRM_FORMAT_ARGB8888:DRM_FORMAT_ABGR8888;frame.modifier=info.modifier;
+    require(frame.count>0&&frame.count<=4,"graphics_error","Invalid CEF DMA planes");
+    for(int i=0;i<frame.count;++i)frame.planes[i]={info.planes[i].fd,info.planes[i].stride,info.planes[i].offset};
+    presentation_.accelerated(frames.capture,frame);frames.captured();captured_configuration();}
   catch(const std::exception& e){failed(e.what());}
 }
 void ArtworkClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus,int code,const CefString& detail) {
@@ -159,8 +165,9 @@ void ArtworkClient::input(const Json& p){
 std::string renderer_url(const Occurrence& o){
   auto source=o.item["source"].get<std::string>();auto mime=o.item.value("mimeType","");
   auto path=source.substr(0,source.find_first_of("?#"));std::transform(path.begin(),path.end(),path.begin(),[](unsigned char c){return std::tolower(c);});
-  for(auto extension:{".jpg",".jpeg",".png",".gif",".webp",".avif",".svg",".glb",".gltf"})if(path.ends_with(extension))return "ff-render://bundle/index.html";
-  if(mime.starts_with("image/")||mime.starts_with("model/"))return "ff-render://bundle/index.html";
+  if(mime.starts_with("image/svg")||path.ends_with(".svg")||path.ends_with(".svgz"))return source;
+  for(auto extension:{".jpg",".jpeg",".png",".gif",".webp",".avif",".glb",".gltf"})if(path.ends_with(extension))return "ff-render://bundle/index.html";
+  if((mime.starts_with("image/")&&!mime.starts_with("image/svg"))||mime.starts_with("model/"))return "ff-render://bundle/index.html";
   return source;
 }
 }

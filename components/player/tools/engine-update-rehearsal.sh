@@ -32,6 +32,6 @@ PY
   cmake --build "$rehearsal_build" -j "${FF_BUILD_JOBS:-3}" > "$rehearsal_logs/$rehearsal_phase-build.log" 2>&1
   ctest --test-dir "$rehearsal_build" --output-on-failure > "$rehearsal_logs/$rehearsal_phase-ctest.log" 2>&1
   cp "$rehearsal_cef/include/cef_version.h" "$rehearsal_logs/$rehearsal_phase-cef-version.h"
-  sha256sum "$rehearsal_build/ff-player-native" > "$rehearsal_logs/$rehearsal_phase-host.sha256"
+  sha256sum "$rehearsal_build/ff-player-cef-rollback" > "$rehearsal_logs/$rehearsal_phase-host.sha256"
 done
 echo 'Both engine builds and core suites passed; updated-engine device qualification is still required.'

@@ -1,10 +1,16 @@
 # Native player (`components/player`)
 
-Native C++ player host for FFOS. Software artworks load as original top-level
-CEF documents. Direct video/audio uses a separate, sandboxed libmpv worker.
-Device UI, playback intent, history and the Unix control socket belong to the
-host. This is an implementation under development, **not a qualified replacement
-image**. See [the execution record](docs/PLAN.md) and [verification](docs/VERIFICATION.md).
+C++ playback/presentation host for FFOS. Software and SVG load as original main
+Chromium documents in separate public engine processes. Raster images, video and
+audio use an isolated native libmpv decoder and GPU view. Labels, QR/setup UI,
+errors, cursor, playback timing, SQLite state and the Unix control interface
+belong to the host. GLB uses the pinned bundled model-viewer, without device
+privileges in artist pages.
+
+The public-engine integration is being verified on FF1-SKYZ2E3A. Hardware results
+are recorded in [PUBLIC-ENGINE.md](docs/PUBLIC-ENGINE.md). This is not a qualified
+fleet image or a claim that the original full-portfolio acceptance is finished.
+The exact-engine capsule remains deferred by Anh.
 
 ## Build the core locally
 
@@ -13,7 +19,7 @@ dependency hashes, including the Linux engine; no source archive is trusted by
 its filename alone.
 
 ```sh
-python3 tools/fetch-dependencies.py
+python3 tools/fetch-dependencies.py --without-cef
 cmake -S . -B build-core -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-core -j 3
 ctest --test-dir build-core --output-on-failure
@@ -34,27 +40,33 @@ reproduced clean-image toolchain lock. The Ubuntu Dockerfile is a development
 build only; its apt packages are not pinned for release.
 
 ```sh
-python3 tools/fetch-dependencies.py
-mkdir -p vendor/cef
-tar -xjf vendor/cef.tar.bz2 --strip-components=1 -C vendor/cef
+python3 tools/fetch-dependencies.py --without-cef
+sh tools/build-presentation.sh
+export PKG_CONFIG_PATH="$PWD/build-presentation/prefix/lib/pkgconfig"
 sh tools/build-ffmpeg.sh
 sh tools/build-media.sh
-export PKG_CONFIG_PATH="$PWD/build-media/prefix/lib/pkgconfig"
-cmake -S . -B build -G Ninja -DFF_WITH_CEF=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+export PKG_CONFIG_PATH="$PWD/build-media/prefix/lib/pkgconfig:$PWD/build-presentation/prefix/lib/pkgconfig"
+cmake -S . -B build -G Ninja -DFF_WITH_PUBLIC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j 3
-LD_LIBRARY_PATH="$PWD/build-media/prefix/lib" ctest --test-dir build --output-on-failure
+LD_LIBRARY_PATH="$PWD/build-media/prefix/lib:$PWD/build-presentation/prefix/lib" ctest --test-dir build --output-on-failure
 cmake --install build --prefix "$PWD/build-stage/usr"
 ```
 
-`dependencies.json` pins CEF, libmpv, libplacebo, FFmpeg and their downloaded
-source dependencies. The media build disables scripting, plugins and user
-configuration. Staged shared media libraries stay private to the worker; they
-do not replace FFOS system FFmpeg or libplacebo. The sandbox launcher requires
-`bubblewrap`, access to the Cage Wayland socket and `/dev/dri`.
+`dependencies.json` pins the public Chromium archive/executable, wlroots,
+libmpv/libplacebo/FFmpeg, viewer and build SDK archives. The private wlroots build
+uses only headless/Wayland and GLES composition; it cannot take the physical DRM
+output from Cage. Its ABI does not depend on a future FFOS wlroots package.
+Media libraries and the browser engine stay private to this component. They do
+not replace FFOS system graphics/media packages.
 
-CEF's `chrome-sandbox` must be installed as root, mode 4755, in the runtime
-directory. Do not use `--no-sandbox`. Packaging still needs its coordinated FFOS
-activation, dependency/license audit and rollback verification.
+The browser's `engine/chrome_sandbox` is installed root:root, mode 4755 by the
+pacman recipe. Chromium's sandbox remains enabled. Bubblewrap separates each
+browser profile and private Wayland socket from the host's state, D-Bus and
+command socket. Offline browser/decoder processes have no live network.
+
+The old CEF backend is an explicit `FF_WITH_CEF=ON` rollback/diagnostic build,
+named `ff-player-cef-rollback`; it is not the production target. Do not activate
+two normal playback owners. See the [local broker contract](protocol/CACHE.md).
 
 ## Isolated device test
 
@@ -71,14 +83,15 @@ AMD_DEBUG=nodcc SDL_VIDEODRIVER=wayland \
   --state-dir=/home/feralfile/.state/native-test \
   --socket=/run/user/1000/ff-native-test/player.sock \
   --renderer-dir=/path/to/stage/usr/share/ff-player-native/renderers \
-  --use-angle=gl-egl --enable-unsafe-webgpu
+  --diagnostic-presentation-timing=/tmp/native-presentation.json
 ```
 
-`AMD_DEBUG=nodcc` is the measured workaround for CEF #4354, not a general
-recommendation for Chromium. `--use-gl=egl` is incompatible with the selected
-CEF build; use the pinned ANGLE path above. WebGPU permission and driver
-qualification remain portfolio checks. Remote debugging is opt-in diagnostic
-configuration, never required for product commands.
+The launcher's engine flags are a tested, fixed configuration, not artist input.
+The AMD DCC workaround still needs retirement evidence. Use
+`--diagnostic-engine-debugger` only for an operator diagnostic session: Chromium
+writes its ephemeral loopback port to that occurrence's `DevToolsActivePort`.
+Normal playback has no debugging TCP port. Product commands always use the
+native protocol; arbitrary evaluation is not a player API.
 
 For systemd tests, use `KillMode=mixed` and a bounded stop timeout. Remove
 `DBUS_SESSION_BUS_ADDRESS` from the child environment so Chromium cannot move
@@ -96,17 +109,16 @@ is serving an exhibition.
 
 ## Development CI
 
-`.github/workflows/build-player.yaml` builds the Linux CEF host and private
+`.github/workflows/build-player.yaml` builds the Linux public Chromium host and private
 FFmpeg/libplacebo/libmpv libraries, runs CTest, and retains a staged runtime
 archive on feature-branch pushes and pull requests. It does not publish or
 activate packages. The Ubuntu container validates portable compilation; the
 pinned FFOS pacman build remains the production packaging path. See
-`docs/BENCHMARK.md` for the unresolved Transparent Grit presentation failure.
+`docs/PUBLIC-ENGINE.md` for current device evidence and remaining boundaries.
 
 Frame-pacing measurements and the exact-engine/seed comparison are documented in
 [the pacing report](docs/PACING.md). `--diagnostic-presentation-timing=/absolute/path.json`
 writes bounded compositor timestamp samples on graceful shutdown. Normal logs
 contain aggregate timing only. These are compositor observations, not panel
-photographs or artwork correctness attestations. The Wayland runtime does not
-need Chromium's `--enable-features=Vulkan` flag; the selected build reports that
-compositor path as unsupported on Wayland. WebGPU qualification is separate.
+photographs or artwork correctness attestations. The public launcher's Vulkan/ANGLE feature set is checked on FF1 AMD hardware;
+recheck it on engine/driver updates. WebGPU qualification remains per artwork.

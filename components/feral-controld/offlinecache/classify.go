@@ -330,6 +330,10 @@ func (c *classifier) rangedGETClassify(ctx context.Context, url string) (MediaCl
 }
 
 func classifyContentType(contentType string) MediaClass {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/svg") {
+		return ClassSoftware
+	}
+
 	if contentType == "" {
 		return ClassUnknown
 	}

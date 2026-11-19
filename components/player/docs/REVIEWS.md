@@ -285,3 +285,21 @@ a 4096-entry admission bound. Reviewer did not operate the device or certify
 visual fidelity. Casey's exact engine run is deferred at Anh's request.
 No production engine/backend was activated by this increment. Ordinary launch
 was restored and the screen remains on. See SEAN-TRIAL-RESULTS.md.
+
+## Public engine cutover and FF1 pacing — 2026-11-19
+
+Human owner: Anh. The public-engine reviews found and corrected cache result
+admission, native media handoff, mixed-cache fallback, and retained-frame fencing
+issues. A later device test reproduced a static artwork stuck at `committed`.
+Scheduling a scene redraw at readiness resolved it. Root cache mode now fails
+closed when controld is unavailable, preventing a manual capture from silently
+opening live. Both corrections passed the homelab reproductions.
+
+The pacing review accepted the separation of frame callbacks from actual
+presentation acknowledgements. The FF1 evidence review found that a diagnostic
+unit named `public` could be treated as standalone Chrome by the output summary.
+The summary now selects native Wayland feedback for that unit, with a regression
+test. The fresh reviewer reran all seven matched-summary cases and the Linux
+OOM hook test and reported accept for the development handoff. The full-image
+workflow still lacks native package staging. Hardware results are recorded in
+[PUBLIC-ENGINE-FF1.md](PUBLIC-ENGINE-FF1.md).

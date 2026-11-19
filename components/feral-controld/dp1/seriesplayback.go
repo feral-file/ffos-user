@@ -567,7 +567,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 		return CastPlan{Segments: segments}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, seriesExpansionBudget)
+	ctx, cancel := context.WithTimeout(ctx, seriesWalkBudget(ctx))
 	defer cancel()
 
 	documentModes := d.readItemSeriesPlaybackModes(rawPlaylist, len(playlist.Items))

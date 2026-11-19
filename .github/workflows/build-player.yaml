@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build Linux toolchain image
         run: docker build -t ff-native-build components/player
-      - name: Build and test complete CEF and native media runtime
+      - name: Build and test public Chromium host and native media runtime
         run: |
           docker run --rm -v "$PWD/components/player:/src" ff-native-build sh tools/ci-build.sh
       - uses: actions/setup-go@v5

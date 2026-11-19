@@ -1,15 +1,17 @@
+import {publicDiagnostic} from './public-diagnostic.mjs';
 // Product input travels over the native socket. CDP is read-only test observation.
 import fs from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import {diagnosticSession} from './diagnostic-cdp.mjs';
 
-const [socketPath, diagnosticURL, output] = process.argv.slice(2);
+let [socketPath, diagnosticURL, output] = process.argv.slice(2);
 if (!socketPath || !diagnosticURL || !output) throw new Error('usage: node device-input-check.mjs SOCKET CDP-URL OUTPUT');
 import {connectNative} from './native-client.mjs';
+const publicMode=diagnosticURL==='public';
 const connect = () => connectNative(socketPath, 'native-input-check');
 const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
 const evidence={startedAt:new Date().toISOString(),checks:[]};
-let client=await connect(),observer;
+let client=await connect(),observer,diagnostic;
 async function cast(){
   const receipt=await client.call('playback.replace',{playlist:{id:'input-test',title:'Native input verification',items:[
     {source:'http://127.0.0.1:18990/input.html',duration:0,display:{margin:40,userOverrides:false}}]}});
@@ -17,6 +19,7 @@ async function cast(){
     const state=await client.call('state.get');
     if(state.presented?.id===receipt.occurrence){
       await delay(300);
+      if(publicMode){diagnostic?.close();diagnostic=await publicDiagnostic(state.presented.id);diagnosticURL=diagnostic.endpoint;}
       const targets=await (await fetch(`${diagnosticURL}/json`)).json();
       const target=targets.find(t=>t.url==='http://127.0.0.1:18990/input.html'&&t.type==='page');
       assert.ok(target,'diagnostic artwork target exists');
@@ -36,6 +39,7 @@ async function observed(){
 let occurrence;
 const input=params=>client.call('input.dispatch',{occurrence,...params});
 try {
+  await client.call('connectivity.set',{online:true});
   occurrence=await cast();
   await input({kind:'move',x:200,y:200});
   await input({kind:'button',button:1,down:true});
@@ -44,6 +48,9 @@ try {
   let data=await observed();
   assert.ok(data.events.some(e=>e.type==='mousemove'&&e.x===200&&e.y===210&&e.buttons===1),JSON.stringify(data));
   evidence.checks.push({name:'drag uses output pixels minus 40-pixel matte',events:data.events});
+  await delay(650);
+  await input({kind:'button',button:1,down:true,clicks:1});
+  await input({kind:'button',button:1,down:false,clicks:1});
   await input({kind:'button',button:1,down:true,clicks:2});
   await input({kind:'button',button:1,down:false,clicks:2});
   await input({kind:'wheel',dx:0,dy:-40});
@@ -76,7 +83,7 @@ try {
   assert.ok(data.events.some(e=>e.type==='mousedown'&&e.x===200&&e.y===210));
   evidence.checks.push({name:'same-URL occurrence rejects stale input and retains authoritative pointer',events:data.events});
 } finally {
-  client.close();observer?.close();evidence.finishedAt=new Date().toISOString();
+  client.close();observer?.close();diagnostic?.close();evidence.finishedAt=new Date().toISOString();
   await fs.writeFile(output,JSON.stringify(evidence,null,2)+'\n');
 }
 console.log(`${evidence.checks.length} native input checks passed`);

@@ -9,7 +9,7 @@ WORKDIR /src
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     meson git python3-jinja2 python3-venv nasm libgnutls28-dev libcurl4-openssl-dev libjpeg-dev wayland-protocols libavcodec-dev libavformat-dev libavfilter-dev \
     libavutil-dev libswresample-dev libswscale-dev libass-dev libva-dev \
-    libpulse-dev liblcms2-dev libdisplay-info-dev libxxhash-dev libgl-dev libwayland-dev \
+    libdav1d-dev libpulse-dev liblcms2-dev libdisplay-info-dev libxxhash-dev libgl-dev libwayland-dev libgbm-dev libudev-dev libpixman-1-dev libxkbcommon-dev libffi-dev libexpat1-dev \
     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/build-tools && /opt/build-tools/bin/pip install --no-cache-dir meson==1.11.2 Jinja2==3.1.6 MarkupSafe==3.0.3

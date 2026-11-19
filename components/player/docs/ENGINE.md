@@ -1,5 +1,38 @@
 # Engine ownership and update procedure
 
+The normal player now uses the separate public Chromium adapter. Its exact pin
+is Chrome for Testing 158.0.8127.36; `dependencies.json` records archive and
+executable hashes, and `maintenance/public-engine-update.json` records the
+156-to-158 integration rehearsal. [PUBLIC-ENGINE.md](PUBLIC-ENGINE.md) is the
+current architecture and qualification record. CEF builds below are retained
+only as the explicit pre-cutover rollback/earlier-trial record.
+
+For a public-engine update:
+
+1. Read the official Chrome for Testing stable manifest. Record its timestamp,
+   release, download URL, archive hash and unpacked executable hash. Validate
+   the archive before extracting. Observe Browser.getVersion and the actual
+   headful user agent on the authorized FF1.
+2. Update the dependency pin, fetch and verify all source inputs, then rebuild
+   the native host/package and run Linux CTest, Go tests/vet/lint, schemas,
+   interoperability and script contracts. Keep the prior runtime/state backup.
+3. Run native raster/video/audio, SVG, original-URL WebGL/WebGPU, bundled GLB,
+   native UI/input, cached replay/cold restart, process isolation and recovery
+   checks. Recheck the worker Fetch-domain limitation on the new engine; do not
+   infer support from a cached worker script. Re-run matched-engine/seed pacing.
+4. Carry or retire each workaround explicitly. There are no applied engine
+   patches in the public adapter. A future patch needs the exact upstream base,
+   complete diff, purpose, regression test, update and retirement procedure.
+5. Stage a fresh public-only install tree, with no stale CEF libraries. Record
+   installed executable hashes and verify engine identity after cutover. Retain
+   compositor captures separately from physical panel evidence. Broader corpus,
+   overnight, distribution licensing/symbol and clean-build reproducibility
+   checks remain release qualification work. Prepare a coordinated full-image
+   release; promotion and publication remain human operated.
+
+## Earlier CEF trial and rollback record
+
+
 This is an implementation/maintenance record, not security-update acceptance.
 The previous-stable/current-stable build rehearsal passed both eleven-test Linux suites. Full portfolio qualification remains pending. The Transparent Grit host scheduling/buffer regression and its verification are recorded in BENCHMARK.md.
 

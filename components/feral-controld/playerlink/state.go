@@ -10,7 +10,15 @@ import (
 // Snapshot is host state, not an artist document's self-report. Playlist and
 // Item remain DP-1 documents: the transport must not discard extension fields.
 // Selected describes intent; Presented describes the last composed occurrence.
+type RuntimeNotice struct {
+	Occurrence string `json:"occurrence"`
+	Category   string `json:"category"`
+	Message    string `json:"message"`
+}
+
 type Snapshot struct {
+	Notice               *RuntimeNotice       `json:"notice,omitempty"`
+	Engine               json.RawMessage      `json:"engine,omitempty"`
 	Instance             string               `json:"instance"`
 	Generation           uint64               `json:"generation"`
 	Revision             uint64               `json:"revision"`

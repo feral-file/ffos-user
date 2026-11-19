@@ -846,6 +846,7 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 				Status:     evt.RedirectResponse.Status,
 				RedirectTo: evt.Request.URL,
 				Headers:    filterReplayableHeaders(evt.RedirectResponse.Headers),
+				RawHeaders: evt.RedirectResponse.Headers,
 				Method:     redirectMethod,
 			})
 		}
@@ -883,6 +884,7 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 			ContentType:        headerValue(evt.Response.Headers, "Content-Type"),
 			SniffedContentType: evt.Response.MimeType,
 			Headers:            filterReplayableHeaders(evt.Response.Headers),
+			RawHeaders:         evt.Response.Headers,
 			Method:             method,
 		})
 		tracker.resolveRequest(evt.RequestID)
@@ -1021,6 +1023,7 @@ type observedResponse struct {
 	SniffedContentType string
 	RedirectTo         string
 	Headers            map[string]string
+	RawHeaders         map[string]string
 	Method             string
 }
 
@@ -1099,7 +1102,15 @@ func (t *captureTracker) recordResource(obs observedResponse) {
 	if normalized := strings.ToUpper(method); normalized != "" && normalized != go_http.MethodGet {
 		storedMethod = normalized
 	}
+	fields, supported := browserReplayHeaders(obs.RawHeaders)
+	policyVersion := 0
+	if obs.RawHeaders != nil && supported {
+		policyVersion = 2
+	} else if obs.RawHeaders != nil {
+		t.overflow++
+	}
 	t.resources[key] = Resource{
+		BrowserPolicyVersion: policyVersion, HeaderFields: fields,
 		URL:                url,
 		Status:             status,
 		ContentType:        contentType,

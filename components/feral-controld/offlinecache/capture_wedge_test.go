@@ -955,3 +955,11 @@ func TestCaptureTracker_SniffedContentTypeSuppressionOrdering(t *testing.T) {
 			"suppressing a value nothing reads must not report the item as degraded")
 	})
 }
+
+func (h *countingHTTPClient) GetContext(ctx context.Context, url string) (*go_http.Response, error) {
+	req, err := go_http.NewRequestWithContext(ctx, go_http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return h.Do(req)
+}

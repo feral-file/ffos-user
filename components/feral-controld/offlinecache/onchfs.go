@@ -642,6 +642,17 @@ func onchfsResources(o contentpath.Onchfs, source string, tree *onchfs.Tree, fre
 	resources := make([]Resource, 0, len(paths)+4)
 	urls := map[string]bool{}
 	add := func(r Resource) {
+		// The virtual origin's complete response policy is synthesized here from
+		// the verified onchfs tree. No artist HTTP headers were discarded.
+		r.BrowserPolicyVersion = 2
+		r.HeaderFields = []HeaderField{{Name: "Access-Control-Allow-Origin", Value: "*"}}
+		if r.ContentType != "" {
+			r.HeaderFields = append(r.HeaderFields, HeaderField{Name: "Content-Type", Value: r.ContentType})
+		}
+		if r.IsRedirect() {
+			r.HeaderFields = append(r.HeaderFields, HeaderField{Name: "Location", Value: r.RedirectTo})
+		}
+
 		if !urls[r.URL] {
 			urls[r.URL] = true
 			resources = append(resources, r)

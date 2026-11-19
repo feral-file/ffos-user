@@ -1,0 +1,10 @@
+{
+  "purpose": "Separate public engine adapter update on FF1-SKYZ2E3A; capsule remains deferred",
+  "baseline": {"version":"156.0.8078.80","sha256":"b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7"},
+  "updated": {"version":"158.0.8127.36","sha256":"dba9cc838e1ce269c33ea68170881127bd15d078fc3ca5891c90802819a4d7c7"},
+  "upstreamIndex":"https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+  "indexTimestamp":"2026-11-17T22:12:16.818Z",
+  "enginePatches": [],
+  "workaroundsCarried": ["AMD_DEBUG=nodcc", "ANGLE Vulkan with VulkanFromANGLE", "test-type=gpu infobar suppression"],
+  "qualification": "See docs/PUBLIC-ENGINE.md and its device evidence; no distribution or full-portfolio acceptance inferred"
+}

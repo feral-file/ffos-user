@@ -53,10 +53,10 @@
     "bundleSha256": "283b0672384614b4847636c306fc93fe4b1fcadc76d668b4e47f0ca76bcf033b"
   },
   "ffmpeg": {
-    "version": "8.1.2",
-    "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n8.1.2",
-    "file": "ffmpeg-8.1.2.tar.gz",
-    "sha256": "9fd092511605bbebafe095ea6d38d9e40f34d12f7386e1258372df8be0576eb7"
+    "version": "8.1.3",
+    "url": "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz",
+    "file": "ffmpeg-8.1.3.tar.xz",
+    "sha256": "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3"
   },
   "renderer_draco_decoder_js": {
     "version": "1.5.6",
@@ -104,5 +104,37 @@
     "file": "basis-LICENSE",
     "url": "https://raw.githubusercontent.com/BinomialLLC/basis_universal/ba1c3e4/LICENSE",
     "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "chromium": {
+    "version": "158.0.8127.36",
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/158.0.8127.36/linux64/chrome-linux64.zip",
+    "file": "chrome-linux64.zip",
+    "sha256": "dba9cc838e1ce269c33ea68170881127bd15d078fc3ca5891c90802819a4d7c7",
+    "executableSha256": "27513c5ffbfcb1e98e29b78d8dceb752cd343a77968335904f1b45a1c555e7b0",
+    "observedUserAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36"
+  },
+  "wlroots": {
+    "version": "0.20.0",
+    "url": "https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/0.20.0/wlroots-0.20.0.tar.gz",
+    "file": "wlroots-0.20.0.tar.gz",
+    "sha256": "e2d024916ed3bd011e058e78007655469e8c624fc338a28da610b087793b887b"
+  },
+  "wayland_sdk": {
+    "version": "1.24.0",
+    "url": "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.24.0/downloads/wayland-1.24.0.tar.xz",
+    "file": "wayland-1.24.0.tar.xz",
+    "sha256": "82892487a01ad67b334eca83b54317a7c86a03a89cfadacfef5211f11a5d0536"
+  },
+  "wayland_protocols": {
+    "version": "1.47",
+    "url": "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/1.47/downloads/wayland-protocols-1.47.tar.xz",
+    "file": "wayland-protocols-1.47.tar.xz",
+    "sha256": "5fd4349bcbc9bab9a46f8cf77d1f434296a7a052c87440a094f63fcf62a58e20"
+  },
+  "libdrm_sdk": {
+    "version": "2.4.129",
+    "url": "https://dri.freedesktop.org/libdrm/libdrm-2.4.129.tar.xz",
+    "file": "libdrm-2.4.129.tar.xz",
+    "sha256": "5978183f978d697e26a50ba066174964efb0ab97caa1ecaa1b861fbe5ddf77dc"
   }
 }

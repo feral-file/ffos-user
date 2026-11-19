@@ -700,6 +700,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	} else {
+		if commands.IsFromController(ctx) {
+			ctx = dp1.WithInteractiveSeriesResolution(ctx)
+		}
 		if err := h.wakeForControllerCast(ctx, commandType); err != nil {
 			return nil, err
 		}
@@ -1217,7 +1220,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						zap.Int("items", len(sources)))
 				} else {
 					probeStarted := time.Now()
-					probeResults := h.mediaHealth.Preflight(ctx, sources)
+					probeCtx := ctx
+					cancelProbe := func() {}
+					if commands.IsFromController(ctx) {
+						probeCtx, cancelProbe = context.WithTimeout(ctx, time.Second)
+					}
+					probeResults := h.mediaHealth.Preflight(probeCtx, sources)
+					cancelProbe()
 					h.logger.Info("displayPlaylist: source preflight completed",
 						zap.Int("items", len(sources)),
 						zap.Duration("duration", time.Since(probeStarted)))

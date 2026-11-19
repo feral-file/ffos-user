@@ -48,7 +48,7 @@ func TestClassifier_Classify(t *testing.T) {
 		{name: "audio", contentType: "audio/mpeg", want: offlinecache.ClassMedia},
 		{name: "unknown binary", contentType: "application/octet-stream", want: offlinecache.ClassUnknown},
 		{name: "missing content-type", contentType: "", want: offlinecache.ClassUnknown},
-		{name: "svg image", contentType: "image/svg+xml", want: offlinecache.ClassMedia},
+		{name: "svg document keeps browser behavior", contentType: "image/svg+xml", want: offlinecache.ClassSoftware},
 		{name: "gltf model", contentType: "model/gltf-binary", want: offlinecache.ClassUnknown},
 		{name: "pdf document", contentType: "application/pdf", want: offlinecache.ClassUnknown},
 		{name: "apple hls manifest", contentType: "application/vnd.apple.mpegurl", want: offlinecache.ClassStreaming},

@@ -18,6 +18,7 @@ struct PresentationFeedback::Impl {
   struct Pending { Impl* owner; struct wp_presentation_feedback* feedback; uint64_t serial; };
   std::set<Pending*> pending;
   FrameTiming intervals;
+  PresentedFrame latest;
   bool timing_samples = false;
   std::deque<uint64_t> changed_timestamps;
   uint64_t truncated = 0;
@@ -41,6 +42,8 @@ struct PresentationFeedback::Impl {
     auto* p = static_cast<Pending*>(data); auto& self = *p->owner;
     ++self.presented; self.last_flags = flags; self.refresh_ns = refresh;
     const auto timestamp = ((uint64_t(hi)<<32) | lo)*1000000000 + ns;
+    if(p->serial && p->serial>=self.latest.serial)
+      self.latest={p->serial,timestamp,refresh,flags,self.clock};
     if (p->serial && p->serial != self.last_serial) {
       if (self.last_ns && timestamp > self.last_ns) self.intervals.add((timestamp-self.last_ns)/1e6);
       self.last_ns = timestamp; self.last_serial = p->serial;
@@ -93,6 +96,7 @@ void PresentationFeedback::poll() {
   auto& self=*impl_;
   if (self.display && self.queue) wl_display_dispatch_queue_pending(self.display,self.queue);
 }
+PresentedFrame PresentationFeedback::latest() const { return impl_->latest; }
 Json PresentationFeedback::metrics() const {
   const auto& s=*impl_;
   timespec clock_now{}, realtime_now{};

@@ -52,6 +52,7 @@ class Playback {
   bool media_paused(const std::string& occurrence = {}) const;
   const std::string& instance() const { return instance_; }
   bool online() const { return online_; }
+  bool connectivity_known() const { return connectivity_known_; }
   bool thermal_hold() const { return thermal_hold_; }
   bool service_failure() const { return service_failure_; }
   Json overlay() const { return overlay_; }
@@ -62,6 +63,9 @@ class Playback {
   const Json& presentation_failure() const { return presentation_failure_; }
   void set_input_handler(std::function<void(const Json&)> fn) { input_ = std::move(fn); }
   void set_seek_handler(std::function<void(const std::string&, double)> fn) { seek_ = std::move(fn); }
+  Json runtime_notice() const { return selected_&&!runtime_notice_.is_null()&&runtime_notice_.value("occurrence","")==selected_->id?runtime_notice_:Json(nullptr); }
+  void runtime_notice(const std::string& id,const std::string& message);
+  void engine_status(const Json& info) { engine_status_=info;++revision_; }
   void media_status(const std::string& occurrence, const Json& status);
   void release_input();
  private:
@@ -72,7 +76,7 @@ class Playback {
   uint64_t generation_ = 1, revision_ = 1;
   std::optional<Occurrence> selected_, presented_;
   Json overlay_ = nullptr;
-  bool online_ = false;
+  bool online_ = false, connectivity_known_ = false;
   bool thermal_hold_ = false, service_failure_ = false;
   bool autoplay_hold_ = false;
   bool eos_pending_ = false;
@@ -82,6 +86,8 @@ class Playback {
   std::function<void(const Json&)> input_;
   std::function<void(const std::string&, double)> seek_;
   Json media_status_ = nullptr;
+  Json engine_status_ = nullptr;
+  Json runtime_notice_ = nullptr;
   Json presentation_failure_ = nullptr;
   Json composition_ = nullptr;
   uint64_t composition_revision_ = 0;

@@ -122,3 +122,17 @@ Audit against revisions in `evidence/baseline.json`. This inventory is not an im
 Device admission/signature checks remain in controld. No renderer may supply
 trusted annotations. Offline resource replay/onchfs and full portfolio acceptance
 remain gaps; see CUTOVER.md rather than interpreting this table as completion.
+
+## Public-engine amendment, 2026-11-18
+
+| Existing behavior / evidence | New owner and disposition | Verification |
+|---|---|---|
+| Browser image renderer, image loading/orientation/animation utilities | Native isolated libmpv raster view, deliberately redesigned; SVG remains an original browser document | Native JPEG EXIF, alpha PNG/framing and GIF compositor pixel suite passed; broader format/ICC matrix still required |
+| CEF software document and native labels | Separate public Chromium process/profile/private Wayland scene per occurrence, native UI unchanged; deliberately redesigned for independent engine updates and browser-process failure isolation | Integrated holz and GLB, private DMA-BUF probe; final input/recovery suite pending |
+| Kiosk CDP replay scope | Controld read-only resource API plus per-occurrence browser resource handling; shared mutable interception scope removed from normal admission | Go policy/header/corruption tests; integrated isolated holz replay seven hits/one miss; cold restart and worker fixture suite pending |
+| Gateway/UA interception policy (uarewrite.Policy, mediahealth gateway override) | Controld retains the decision; native engine consumes typed request-policy results | Existing pure-policy tests; new adapter/device verification pending |
+| Synchronous series resolution during phone cast (dp1/seriesplayback.go, handler.go) | Controld, deliberately bounded optional expansion with representative fallback and background completion | Real HTTP cancellation regression test; identical playlist reply 34.6134s → 2.2898s |
+| Browser-storage/profile assumptions | Host SQLite remains the durable application owner; browser profiles remain isolated, ephemeral and bounded | Core persistence/recovery suite; public profile cleanup/final restart checks pending |
+
+These rows amend the owners above; they do not silently remove pending broader
+portfolio/release checks. See PUBLIC-ENGINE.md for precise acceptance boundaries.

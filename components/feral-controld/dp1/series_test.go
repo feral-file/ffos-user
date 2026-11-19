@@ -100,7 +100,7 @@ func editionsURL(playlistID, itemID string) string {
 // serveEditions answers that route with the catalog's own envelope, decoded
 // by the real encoding/json so the struct tags are under test too.
 func serveEditions(ts *testSetup, playlistID, itemID string, body string) {
-	ts.mockHTTP.EXPECT().Get(editionsURL(playlistID, itemID)).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL(playlistID, itemID)).
 		Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
 	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
@@ -169,7 +169,7 @@ func TestDP1_KeepsASeriesWhenTheCatalogIsUnreachable(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-series")).
 		Return(nil, errors.New("catalog unreachable"))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -190,7 +190,7 @@ func TestDP1_KeepsASeriesThePlaylistTheCatalogDoesNotHold(t *testing.T) {
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
 	// A cast of something never published, or an older channel revision:
 	// the catalog 404s and the body is never read.
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-series")).
 		Return(createMockResponse(http.StatusNotFound, `{"status":404}`), nil)
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -329,7 +329,7 @@ func TestDP1_A256BitSeriesIDOnAnEditionExpands(t *testing.T) {
 		`"provenance":{"type":"onChain","contract":{"chain":"evm","standard":"erc721",`+
 		`"address":"0xe59B7D60d7d7183E09d8ABb6DF8B20EB4CF66632","tokenId":%[1]q,"seriesId":%[1]q}}}]}`,
 		bigSeriesID)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-series")).
 		Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
 	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
@@ -386,7 +386,7 @@ func TestDP1_CastCapHoldsWhenASeriesKeepsItsRepresentative(t *testing.T) {
 		items = append(items, editionItem(fmt.Sprintf("plain-%d", i)))
 	}
 	servePlaylist(ts, url, items)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-series")).
 		Return(nil, errors.New("catalog unreachable"))
 
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
@@ -938,7 +938,7 @@ func TestDP1_TheExpansionWalkSpendsABoundedNumberOfCatalogCalls(t *testing.T) {
 	// Every permitted call answers "no editions", so each series keeps its
 	// representative and the result length is not what bounds the walk.
 	empty := editionsBody(0)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-series")).
 		Return(createMockResponse(http.StatusOK, empty), nil).Times(255)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(empty), nil).Times(255)
 	ts.mockJSON.EXPECT().Unmarshal([]byte(empty), gomock.Any()).

@@ -51,6 +51,7 @@ Presentation::Presentation(bool diagnostic_cpu, bool timing_samples, const std::
   require(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) == 0, "display_unavailable", SDL_GetError());
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_RESET_NOTIFICATION, SDL_GL_CONTEXT_RESET_LOSE_CONTEXT);
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
   window_ = SDL_CreateWindow("Feral File", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI);
   require(window_ != nullptr, "display_unavailable", SDL_GetError());
@@ -70,26 +71,34 @@ Presentation::Presentation(bool diagnostic_cpu, bool timing_samples, const std::
 }
 Presentation::~Presentation() {
   feedback_.reset();
+  activate();
   glDeleteTextures(1, &ui_); glDeleteProgram(program_);
   if (context_) SDL_GL_DeleteContext(context_); if (window_) SDL_DestroyWindow(window_); SDL_Quit();
 }
-void Presentation::destroy(Surface& surface) { glDeleteTextures(1, &surface.texture); surface = {}; }
-void Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& info) {
-  require(SDL_GL_MakeCurrent(window_, context_) == 0, "graphics_error", SDL_GetError());
+void Presentation::destroy(Surface& surface) { activate(); if(surface.copy_fence) glDeleteSync(static_cast<GLsync>(surface.copy_fence)); glDeleteTextures(1, &surface.texture); surface = {}; }
+void Presentation::activate() {
+  // wlroots uses EGL directly, outside SDL's cached current-context state.
+  // Invalidate that cache before restoring the native UI context.
+  if (eglGetCurrentContext()!=reinterpret_cast<EGLContext>(context_))
+    require(SDL_GL_MakeCurrent(window_,nullptr)==0,"graphics_error",SDL_GetError());
+  require(SDL_GL_MakeCurrent(window_,context_)==0,"graphics_error",SDL_GetError());
+}
+void Presentation::accelerated(Surface& surface, const DmaFrame& info, bool retained_source) {
+  activate();
   const auto started = std::chrono::steady_clock::now();
-  require(info.plane_count > 0 && info.plane_count <= 4, "graphics_error", "Invalid DMA-BUF plane count");
+  require(info.count > 0 && info.count <= 4, "graphics_error", "Invalid DMA-BUF plane count");
   auto create = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
   auto release = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
   auto bind = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
   require(create && release && bind, "graphics_error", "DMA-BUF EGL import is unavailable");
-  int width = info.extra.coded_size.width, height = info.extra.coded_size.height;
-  auto format = info.format == CEF_COLOR_TYPE_BGRA_8888 ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_ABGR8888;
+  int width = info.width, height = info.height;
+  auto format = info.format;
   std::vector<EGLint> attrs = {EGL_WIDTH, width, EGL_HEIGHT, height, EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(format)};
   const EGLint fds[] = {EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT, EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT};
   const EGLint offsets[] = {EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT, EGL_DMA_BUF_PLANE2_OFFSET_EXT, EGL_DMA_BUF_PLANE3_OFFSET_EXT};
   const EGLint pitches[] = {EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT, EGL_DMA_BUF_PLANE2_PITCH_EXT, EGL_DMA_BUF_PLANE3_PITCH_EXT};
   const EGLint mods[] = {EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT};
-  for (int i = 0; i < info.plane_count; ++i) {
+  for (int i = 0; i < info.count; ++i) {
     // EGL/driver implicit synchronization orders this read after the producer.
     // Do not poll-and-drop: continuously busy artwork can lose every frame.
     // The GPU copy below completes before CEF reuses its borrowed buffer.
@@ -104,7 +113,7 @@ void Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& 
   glGenFramebuffers(2, framebuffers); glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffers[0]);
   glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, imported, 0);
   const bool source_ok = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-  auto rect = info.extra.visible_rect; if (rect.width <= 0 || rect.height <= 0) rect = {0, 0, width, height};
+  Bounds rect{info.visible.x,info.visible.y,info.visible.width,info.visible.height};if(rect.width<=0||rect.height<=0)rect={0,0,width,height};
   allocate(surface, rect.width, rect.height); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffers[1]);
   glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surface.texture, 0);
   if (source_ok) glBlitFramebuffer(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height, 0, 0, rect.width, rect.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -113,16 +122,34 @@ void Presentation::accelerated(Surface& surface, const CefAcceleratedPaintInfo& 
   // This relies on Mesa's implicit DMA-BUF fences. It does not repair CEF #4313
   // on NVIDIA. A driver/GPU stall is a shared process failure boundary requiring
   // external watchdog recovery, not a recoverable artwork-renderer failure.
-  glFinish(); auto error = glGetError(); glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  if (retained_source) {
+    require(!surface.copy_fence,"graphics_error","Copy already in flight");
+    surface.copy_started_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(started.time_since_epoch()).count();
+    surface.copy_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
+    require(surface.copy_fence,"graphics_error","Cannot fence retained DMA-BUF copy");
+    glFlush();
+  } else glFinish();
+  auto error = glGetError(); glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDeleteFramebuffers(2, framebuffers); glDeleteTextures(1, &imported); release(display, image);
   require(source_ok && error == GL_NO_ERROR, "graphics_error", "DMA-BUF GPU copy failed");
   surface.accelerated = true; ++surface.frames; ++gpu_copies_;
   auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   copy_ms_ += elapsed; copy_timing_.add(elapsed);
 }
+bool Presentation::copy_ready(Surface& surface) {
+  if(!surface.copy_fence) return true;
+  activate();
+  auto status = glClientWaitSync(static_cast<GLsync>(surface.copy_fence),0,0);
+  require(status != GL_WAIT_FAILED,"graphics_error","DMA-BUF copy fence failed");
+  if(status == GL_TIMEOUT_EXPIRED) return false;
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  copy_fence_timing_.add((std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()-surface.copy_started_ns)/1e6);
+  glDeleteSync(static_cast<GLsync>(surface.copy_fence));surface.copy_fence=nullptr;
+  return true;
+}
 void Presentation::software(Surface& surface, const void* data, int width, int height) {
   require(diagnostic_cpu_, "acceleration_unavailable", "CEF returned CPU frames; accelerated playback is required");
-  require(SDL_GL_MakeCurrent(window_, context_) == 0, "graphics_error", SDL_GetError());
+  activate();
   allocate(surface, width, height);
   // CEF BGRA -> RGBA. This explicit diagnostic path is counted and never
   // silently enabled on a production device.
@@ -159,7 +186,12 @@ void Presentation::swap(const Surface* artwork) {
   const bool changed = artwork && (artwork->texture != last_frame_texture_ || artwork->frames != last_frame_number_ || label_occurrence_ != last_frame_occurrence_);
   if (changed) ++frame_serial_;
   feedback_->before_swap(artwork ? frame_serial_ : 0);
-  SDL_GL_SwapWindow(window_); ++swaps_;
+  // Surface/context loss must terminate the host so systemd/watchdog can
+  // recover it; a responsive command loop with a dead UI is not healthy.
+  (void)eglGetError();
+  SDL_GL_SwapWindow(window_);
+  require(eglGetError()==EGL_SUCCESS,"graphics_error","Native display swap failed");
+  ++swaps_;
   const auto end = std::chrono::steady_clock::now();
   swap_timing_.add(std::chrono::duration<double,std::milli>(end-start).count());
   if (changed) {
@@ -189,7 +221,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
   // and timed label expiry all independently invalidate composition.
   if (draw_key_ == key || !draw_clock_.due(now)) return false;
   draw_key_ = key;
-  require(SDL_GL_MakeCurrent(window_, context_) == 0, "graphics_error", SDL_GetError());
+  activate();
   auto background=display_color(occurrence?occurrence->display.value("background","#000000"):"#000000");
   unsigned rgb=0;
   if(background.size()==7&&background[0]=='#'&&background.find_first_not_of("0123456789abcdefABCDEF",1)==std::string::npos)
@@ -222,6 +254,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
   else if (auto outcome=playback.state().value("updateOutcome",Json(nullptr));outcome.is_object()&&outcome.value("contentBlocked",false)&&(!playback.desired()||outcome.value("outcome","")=="failed"))
     ui("Updated playlist is blocked\nChange content preferences or choose another playlist","",!artwork);
   else if (!artwork && playback.state()["sleeping"] == false) ui(playback.desired() ? "Loading artwork" : "Feral File\nReady for artwork","",true);
+  else if(!playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
   else if (occurrence && label_visible) {
     auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
     if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed"),key);
@@ -244,6 +277,10 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
   swap(artwork);return true;
 }
 bool Presentation::events(const std::function<void(const Json&)>& input) {
+  activate();
+  auto reset=reinterpret_cast<PFNGLGETGRAPHICSRESETSTATUSKHRPROC>(eglGetProcAddress("glGetGraphicsResetStatusKHR"));
+  require(!reset || reset()==GL_NO_ERROR,"graphics_error","Native graphics context reset");
+  require(glGetError()!=GL_CONTEXT_LOST_KHR,"graphics_error","Native graphics context lost");
   SDL_Event event;
   while(SDL_PollEvent(&event)) {
     if(event.type==SDL_QUIT)return false;
@@ -267,5 +304,22 @@ bool Presentation::events(const std::function<void(const Json&)>& input) {
   feedback_->poll();
   return true;
 }
-Json Presentation::metrics() const { return {{"gpuCopies",gpu_copies_},{"cpuCopies",cpu_copies_},{"coalescedFrames",coalesced_frames_},{"copyMilliseconds",copy_ms_},{"swaps",swaps_},{"copyTiming",copy_timing_.json()},{"swapTiming",swap_timing_.json()},{"newFrameSubmissionTiming",frame_timing_.json()},{"waylandPresentation",feedback_->metrics()}}; }
+void Presentation::browser_feedback(double elapsed_ms, bool fallback) {
+  if (fallback) ++browser_feedback_fallbacks_;
+  else browser_feedback_timing_.add(elapsed_ms);
+}
+Json Presentation::metrics() const {
+  return {{"gpuCopies", gpu_copies_},
+          {"cpuCopies", cpu_copies_},
+          {"coalescedFrames", coalesced_frames_},
+          {"copyMilliseconds", copy_ms_},
+          {"swaps", swaps_},
+          {"copyTiming", copy_timing_.json()},
+          {"copyFenceLatency", copy_fence_timing_.json()},
+          {"swapTiming", swap_timing_.json()},
+          {"newFrameSubmissionTiming", frame_timing_.json()},
+          {"browserFeedbackDelay", browser_feedback_timing_.json()},
+          {"browserFeedbackFallbacks", browser_feedback_fallbacks_},
+          {"waylandPresentation", feedback_->metrics()}};
+}
 }

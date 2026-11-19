@@ -1,3 +1,13 @@
+// The public-engine bundle fetches only its own bounded configuration. Artist
+// documents never load this file or receive a device-control binding.
+const publicBundle = location.hostname === 'ff-player.internal';
+if (publicBundle) {
+ window.ffRenderer = (kind, detail='') => {
+  if (kind === 'configure') return;
+  const event = kind === 'configured' ? `configured/${detail}` : kind;
+  fetch(`./events/${event}`, {cache:'no-store'}).catch(()=>{});
+ };
+}
 // Bundled image/GLB renderer. Direct video/audio is exclusively native libmpv.
 // This document has no playback, label, persistence or device authority.
 let current, element, latest;
@@ -20,6 +30,7 @@ window.ffConfigure = async raw => {
   try {
     const config = JSON.parse(raw);
     latest = config;
+    if(element?.tagName==='MODEL-VIEWER'){if(config.paused)element.pause();else element.play();}
     if (current === config.source) { applyDisplay(); return; }
     if (current) throw new Error('Renderer source cannot change within an occurrence');
     current = config.source;
@@ -42,7 +53,7 @@ window.ffConfigure = async raw => {
     if (model) {
       // Match ff-player ModelViewerScreen, including its animation behavior.
       for (const [key,value] of Object.entries({autoplay:'','camera-controls':'',crossorigin:'anonymous',exposure:'1',loading:'eager',reveal:'auto','shadow-intensity':'1'})) element.setAttribute(key,value);
-      element.addEventListener('load', () => emit('ready'));
+      element.addEventListener('load', () => {if(latest.paused)element.pause();emit('ready');});
     } else element.addEventListener('load', async () => {
       try { await element.decode(); emit('ready'); }
       catch (error) { emit('error', `Image decode failed: ${error.message}`); }
@@ -51,3 +62,13 @@ window.ffConfigure = async raw => {
   } catch (error) { emit('error', error.message); }
 };
 emit('configure');
+
+if (publicBundle) {
+ const configure = async () => {
+  const response=await fetch('./config.json',{cache:'no-store'});
+  if(!response.ok)throw new Error('Bundled renderer configuration unavailable');
+  const next=await response.text();if(next!==window.lastNativeConfig){window.lastNativeConfig=next;await window.ffConfigure(next);}
+ };
+ configure().catch(error=>emit('error',error.message));
+ setInterval(()=>configure().catch(error=>emit('error',error.message)),250);
+}

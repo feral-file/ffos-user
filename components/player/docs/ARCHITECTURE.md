@@ -1,18 +1,19 @@
 # Native player architecture and ownership
 
-Implementation is in progress. This describes the intended boundaries and calls
-out incomplete migration; it is not an activation or acceptance declaration.
+Current public-engine ownership and device evidence are in [PUBLIC-ENGINE.md](PUBLIC-ENGINE.md).
+This document retains the broader migration/acceptance boundaries; older CEF
+implementation notes below describe the explicit rollback backend.
 
 ```mermaid
 flowchart LR
   Phone[Phone / CLI / LAN / relayer] --> Control[feral-controld]
   Control -->|versioned Unix socket| Host[C++ playback host]
   Host --> UI[Native device UI and GPU composition]
-  Host --> CEF[CEF top-level software / bundled image and GLB]
-  Host -->|private bounded FD channel| Media[Sandboxed libmpv worker]
+  Host --> Browser[Separate public Chromium: software / SVG / bundled GLB]
+  Host -->|private bounded FD channel| Media[Sandboxed native raster / video / audio worker]
   Media -->|DMA-BUF frames| UI
-  CEF -->|borrowed DMA-BUF frames| UI
-  Cache[Controld cache / isolated capture] -. documented resource API pending .-> CEF
+  Browser -->|retained DMA-BUF frames| UI
+  Cache[Controld cache / isolated capture] -->|documented resource socket| Browser
   Watchdog[Watchdog / systemd] -->|process recovery| Host
 ```
 
@@ -33,8 +34,8 @@ new instance IDs; repeated URLs receive distinct occurrence IDs.
 
 The host is the sole playlist schedule executor. Controld may resolve and refresh
 source documents and continues owning device sleep schedules, but it must not
-also run competing playlist timers after migration. The old scheduler/session
-consumers are still being replaced; do not deploy the partial controld diff.
+also run competing playlist timers after migration. The normal scheduler/session, phone and watchdog consumers use the native
+protocol. Broader release qualification remains recorded in CUTOVER.md.
 
 Watchdog/systemd own host termination, GPU failure escalation, resource pressure
 and device reboot policy. Host recovery is limited to three renderer replacements

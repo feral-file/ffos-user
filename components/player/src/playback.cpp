@@ -382,7 +382,15 @@ Json Playback::command(std::string_view method, const Json& p) {
     auto params=p;params.erase("activationTimes");params["items"]=list["items"];
     return update_playlist(params,plan);
   }
-  if (method == "connectivity.set") { fields(p, {"online"}); online_ = boolean(p, "online"); ++revision_; return {{"outcome", "applied"}}; }
+  if (method == "connectivity.set") {
+    fields(p,{"online"});bool was_online=online_;online_=boolean(p,"online");connectivity_known_=true;
+    // An offline edge replaces the browser network namespace. Keep the old
+    // presentation until the isolated replacement has a frame. An online edge
+    // only retries failed/incomplete replay; healthy works keep their state.
+    bool incomplete_offline=!media_status_.is_null()&&media_status_.value("offline",false)&&(media_status_.value("cacheMisses",uint64_t{0})>0||media_status_.value("unsupportedWorkerTargets",uint64_t{0})>0);
+    if(selected_&&((was_online&&!online_)||(!was_online&&online_&&(selected_->stage=="failed"||incomplete_offline)))){clear_recovery();select(true);}
+    ++revision_;return {{"outcome","applied"}};
+  }
   if (method == "overlay.set") {
     validate_overlay(p);
     auto owner=p["owner"].get<std::string>(),state=p["state"].get<std::string>();
@@ -517,7 +525,7 @@ Json Playback::command(std::string_view method, const Json& p) {
 }
 Json Playback::snapshot() const {
   return {{"instance", instance_}, {"generation", generation_}, {"revision", revision_}, {"protection",{{"thermal",thermal_hold_},{"serviceFailure",service_failure_}}},
-          {"host", "responsive"}, {"renderer", selected_ ? selected_->stage : "absent"},
+          {"host", "responsive"}, {"engine",engine_status_}, {"notice",runtime_notice()}, {"renderer", selected_ ? selected_->stage : "absent"},
           {"storage", {{"health",storage_error_.empty()?"available":"write_failed"},{"error",storage_error_}}},
           {"presentationFailure",presentation_failure_},
           {"composition",presented_&&!composition_.is_null()&&composition_.value("occurrence","")==presented_->id?composition_:Json(nullptr)},
@@ -531,11 +539,16 @@ Json Playback::snapshot() const {
           {"stopped", state_["stopped"]}, {"sleeping", state_["sleeping"]}, {"paused", state_["paused"]},
           {"playlist", state_["playlist"]}, {"playlistUrl", state_.value("playlistUrl", "")},
           {"loop", state_["loop"]}, {"shuffle", state_["shuffle"]}, {"settings", state_["settings"]},
-          {"context", state_["context"]}, {"overlay", overlay_}, {"online", online_}, {"media",media_status_}, {"mediaPaused",media_paused()},
+          {"context", state_["context"]}, {"overlay", overlay_}, {"online", online_}, {"connectivityKnown",connectivity_known_}, {"media",media_status_}, {"mediaPaused",media_paused()},
           {"schedule",state_["schedule"]},{"scheduleOutcome",state_.value("scheduleOutcome",Json(nullptr))},
           {"pendingUpdate",state_.value("pendingUpdate",Json(nullptr)).is_null()?Json(nullptr):Json{
             {"id",state_["pendingUpdate"]["id"]},{"itemCount",state_["pendingUpdate"]["playlist"]["items"].size()}}},
           {"updateOutcome",state_.value("updateOutcome",Json(nullptr))}};
+}
+void Playback::runtime_notice(const std::string& id,const std::string& message){
+ if(!selected_||selected_->id!=id)return;
+ Json notice={{"occurrence",id},{"category","offline_dependencies"},{"message",message.substr(0,1024)}};
+ if(notice!=runtime_notice_){runtime_notice_=std::move(notice);++revision_;}
 }
 void Playback::media_status(const std::string& id,const Json& status) {
   if(!selected_||selected_->id!=id||now_-media_status_at_<1000)return;
