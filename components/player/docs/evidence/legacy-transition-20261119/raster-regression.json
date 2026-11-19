@@ -1,0 +1,21 @@
+{"result": "passed", "checks": ["EXIF orientation 6 pixels", "Straight alpha composition and framing", "AVIF auxiliary alpha", "GIF animation advances through both colors"], "gifSamples": [[255, 0, 0], [255, 0, 0], [0, 255, 0], [0, 255, 0], [255, 0, 0], [255, 0, 0]], "capture": "Compositor output; no physical-panel claim"}
+      0
+    ],
+    [
+      0,
+      255,
+      0
+    ],
+    [
+      255,
+      0,
+      0
+    ],
+    [
+      255,
+      0,
+      0
+    ]
+  ],
+  "capture": "Compositor output; no physical-panel claim"
+}

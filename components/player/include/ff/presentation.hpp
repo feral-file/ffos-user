@@ -22,6 +22,12 @@ struct FrameTiming {
   void add(double milliseconds);
   Json json() const;
 };
+struct ArtworkBlend {
+  const Surface* outgoing = nullptr;
+  const Json* stage = nullptr;
+  float outgoing_opacity = 0;
+  float opacity = 1;
+};
 class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts);
@@ -31,7 +37,9 @@ class Presentation {
   void coalesced_frame() { ++coalesced_frames_; }
   void software(Surface& surface, const void* data, int width, int height);
   void destroy(Surface& surface);
-  bool draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback, const Surface* backdrop = nullptr, float backdrop_opacity = 0);
+  bool draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback,
+            const Surface* backdrop = nullptr, float backdrop_opacity = 0,
+            const ArtworkBlend& blend = {});
   bool events(const std::function<void(const Json&)>& input);
   Bounds bounds(const Json& display) const;
   int width() const { return width_; }
@@ -68,7 +76,7 @@ class Presentation {
   FrameClock draw_clock_;
   GLuint last_frame_texture_ = 0;
   uint64_t last_frame_number_ = 0;
-  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, double, double, int, GLuint, uint64_t, float>;
+  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, double, double, int, GLuint, uint64_t, float, GLuint, uint64_t, float, float>;
   std::optional<DrawKey> draw_key_;
   std::string last_frame_occurrence_;
   void activate();

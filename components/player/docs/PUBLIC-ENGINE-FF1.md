@@ -127,3 +127,10 @@ fixture on homelab exercised fonts, WASM, redirects, frames and dedicated
 workers. The cache reports its uncovered dependencies. The capsule stays
 deferred, and fleet image qualification still requires native package staging
 in the image pipeline.
+
+The later legacy-fade update replaced the native host and media worker on the
+same FF1, keeping the device's playback state. The previous pair is under
+`/home/feralfile/ff-transition-rollback.JrsZ2g`. The four normal services and
+readiness targets were active, playback had a presented occurrence, and the
+monitor reported DPM On after the update. See the
+[transition evidence](evidence/legacy-transition-20261119/compositor-pixels.json).

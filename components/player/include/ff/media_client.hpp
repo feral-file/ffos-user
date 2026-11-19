@@ -17,8 +17,7 @@ class MediaClient {
               const std::string& worker, const std::string& cache_socket = "",
               const std::string& cache_mode = "");
   ~MediaClient();
-  void poll();
-  void controls();
+  void poll(bool hold = false, const Json* stage = nullptr);
   void seek(double seconds);
   void did_present();
   FramePair frames;
@@ -35,8 +34,10 @@ class MediaClient {
   bool failed_ = false, loaded_ = false;
   std::string controls_;
   uint64_t received_sequence_ = 0, presented_sequence_ = 0;
+  uint64_t render_revision_ = 0;
   std::chrono::steady_clock::time_point received_ = std::chrono::steady_clock::now();
   void fail(const std::string& message);
+  void controls(bool hold, const Json* stage);
   void start(int cached_fd = -1);
   std::string worker_, source_override_, user_agent_;
   bool policy_pending_ = false, mixed_cache_ = false;

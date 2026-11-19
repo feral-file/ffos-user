@@ -146,7 +146,7 @@ bool MediaClient::fallback_live() {
           "policy_backpressure", "Cannot enqueue live fallback policy");
   return true;
 }
-void MediaClient::poll() {
+void MediaClient::poll(bool hold, const Json* stage) {
   reap_media_workers();
   if (failed_) return;
   try {
@@ -245,9 +245,10 @@ void MediaClient::poll() {
         require(event == "initialized" || event == "heartbeat", "media_protocol",
                 "Unexpected media event");
     }
+    controls(hold, stage);
     const auto& surface = frames.latest();
     ready =
-        loaded_ && surface.frames > 0 && surface.display_revision == occurrence_.display_revision;
+        loaded_ && surface.frames > 0 && surface.display_revision == render_revision_;
     require(std::chrono::steady_clock::now() - received_ < std::chrono::seconds(5),
             "media_unresponsive", "Media worker stopped responding for 5 seconds");
     status["backend"] = native_raster(occurrence_.item) ? "native-raster" : "native-media";
@@ -263,7 +264,6 @@ void MediaClient::poll() {
       pid_ = -1;
       throw Error("media_exit", "Media worker exited: " + std::to_string(exit_status));
     }
-    controls();
   } catch (const std::exception& error) {
     fail(error.what());
   }
@@ -282,7 +282,7 @@ void MediaClient::fail(const std::string& message) {
   }
   playback_.failed(id, message);
 }
-void MediaClient::controls() {
+void MediaClient::controls(bool hold, const Json* stage) {
   if (playback_.desired() && playback_.desired()->id == id) {
     occurrence_.display = playback_.desired()->display;
     occurrence_.display_revision = playback_.desired()->display_revision;
@@ -290,13 +290,20 @@ void MediaClient::controls() {
     occurrence_.display = playback_.visible()->display;
     occurrence_.display_revision = playback_.visible()->display_revision;
   }
-  auto bounds = presentation_.bounds(occurrence_.display);
+  auto display = occurrence_.display;
+  if (stage) {
+    for (auto key : {"margin", "scaling"}) display[key] = stage->at(key);
+  }
+  // The staging bit is private to the worker IPC. A staged texture cannot
+  // satisfy a request for the occurrence's final display revision.
+  render_revision_ = occurrence_.display_revision | (stage ? (uint64_t{1} << 63) : 0);
+  auto bounds = presentation_.bounds(display);
   Json value = {{"method", "controls"},
-                {"paused", playback_.media_paused(id)},
+                {"paused", hold || playback_.media_paused(id)},
                 {"volume", playback_.state()["settings"].value("volume", 1.0)},
                 {"muted", playback_.state()["settings"].value("muted", false)},
-                {"display", occurrence_.display},
-                {"displayRevision", occurrence_.display_revision},
+                {"display", display},
+                {"displayRevision", render_revision_},
                 {"width", bounds.width},
                 {"height", bounds.height}};
   auto key = value.dump();

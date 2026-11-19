@@ -40,6 +40,12 @@ int main(){
    p.command("playback.replace",{{"playlist",playlist()}});auto id=p.desired()->id;
    check(p.desired()->display["margin"]==45&&p.desired()->display["background"]=="#123456","Saved defaults must reach effective presentation");
    p.committed(id);p.presented(id);p.composed(id,p.desired()->display_revision);
+   auto stage=p.desired()->display;stage["margin"]=20;
+   p.composed(id,p.desired()->display_revision,&stage);
+   check(p.composition_pending()&&p.snapshot()["composition"]["display"]["margin"]==20,"Transition status must report the actual old stage under the new occurrence");
+   rejects([&]{p.command("presentation.set",{{"occurrence",id},{"display",{{"margin",25}}}});},"stale_occurrence");
+   p.composed(id,p.desired()->display_revision);
+   check(!p.composition_pending()&&p.snapshot()["composition"]["display"]["margin"]==45,"Final stage needs a fresh composition even with the same target revision");
    auto before=p.snapshot()["composition"];
    auto receipt=p.command("presentation.set",{{"occurrence",id},{"display",{{"margin","10%"},{"background","#ABCDEF"}}}});
    check(receipt["acceptedCompositionRevision"]==before["revision"],"Acceptance must report the previous composition floor");

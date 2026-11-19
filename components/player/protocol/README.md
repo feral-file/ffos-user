@@ -174,6 +174,12 @@ earlier values were presented. `selected.display`/`presented.display` describe
 requested configuration; `composition.display` describes the last submitted
 configuration. Renderer readiness or receipt acceptance does not advance it.
 
+During a native media crossfade, the incoming occurrence becomes presented on
+the first submitted frame at nonzero opacity. `composition.display` can still show the outgoing
+stage until the final layout is submitted. Showing-specific writes return
+`stale_occurrence` while that handoff is in progress. A covered compositor does
+not promote a later renderer frame over the last exposed configuration.
+
 The host requires a matching renderer configuration and captured frame before
 submitting changed geometry. Bundled renderers acknowledge layout, then the
 host requests another frame; mpv replies to the tagged property operations and
@@ -190,7 +196,8 @@ is `#RRGGBB`; preview does not change playback/loop flags, labels or saved state
 
 Authored backgrounds accept named CSS colors, 3/4/6/8-digit hex, RGB(A)
 numbers/percentages and HSL(A) literals. The host resolves them to opaque sRGB
-over black for every backend; alpha does not reveal another artwork. Contextual
+over black for every backend. During a native crossfade, source alpha lets the
+outgoing artwork show through the incoming layer. Contextual
 values (`var()`, `currentColor`, system colors) and other color functions reject
 at playlist admission with `playlist_invalid`. Artist documents are unchanged.
 The color-name 1.1.4 mapping and MIT license are vendored in `third_party/`.

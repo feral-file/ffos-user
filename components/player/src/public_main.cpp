@@ -8,6 +8,7 @@
 #include <map>
 #include <thread>
 
+#include "ff/artwork_fade.hpp"
 #include "ff/media_client.hpp"
 #include "ff/profile_gc.hpp"
 #include "ff/public_browser.hpp"
@@ -63,6 +64,24 @@ int main(int argc, char** argv) {
         (std::filesystem::path(resources).parent_path() / "fonts").string());
     std::map<std::string, std::unique_ptr<ff::PublicBrowser>> clients;
     std::map<std::string, std::unique_ptr<ff::MediaClient>> media;
+    struct Transition {
+      std::string outgoing, incoming;
+      ff::Json outgoing_display;
+      ff::Json policy, update_outcome;
+      std::optional<int64_t> started;
+      uint64_t incoming_revision;
+      double duration;
+      bool sequential;
+      bool staged;
+      bool settling = false;
+    };
+    std::optional<Transition> transition;
+    auto frames_for = [&](const std::string& id) -> ff::FramePair* {
+      if (auto it = clients.find(id); it != clients.end()) return &it->second->frames;
+      if (auto it = media.find(id); it != media.end()) return &it->second->frames;
+      return nullptr;
+    };
+    bool stage_fading = false;
     ff::InputState input_state([&](const ff::Json& event) {
       if (auto it = clients.find(event.at("target").get<std::string>()); it != clients.end())
         it->second->input(event);
@@ -73,7 +92,7 @@ int main(int argc, char** argv) {
       geometry.width = presentation.width();
       geometry.height = presentation.height();
       std::string target;
-      if (playback.visible() && !playback.composition_pending()) {
+      if (playback.visible() && !stage_fading && !playback.composition_pending()) {
         auto bounds = presentation.bounds(playback.visible()->display);
         auto it = clients.find(playback.visible()->id);
         if (it == clients.end() || (it->second->frames.shown.width == bounds.width &&
@@ -155,6 +174,17 @@ int main(int argc, char** argv) {
       const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
       playback.tick(now_ms, ff::wall_ms());
       server.poll();
+      if (transition &&
+          (!playback.desired() || playback.desired()->id != transition->incoming ||
+           playback.desired()->display_revision != transition->incoming_revision ||
+           playback.desired()->stage == "failed" || !playback.visible() ||
+           !playback.overlay().is_null() || playback.service_failure() ||
+           playback.state()["policy"] != transition->policy ||
+           playback.state().value("updateOutcome", ff::Json(nullptr)) != transition->update_outcome)) {
+        // Retained outgoing pixels are also subject to policy and refresh.
+        transition.reset();
+        stage_fading = false;
+      }
       const bool setup_visible = !playback.overlay().is_null() &&
                                  playback.overlay().value("owner", "") == "setup" &&
                                  !playback.visible() && !playback.thermal_hold();
@@ -250,7 +280,20 @@ int main(int argc, char** argv) {
         } else
           ++it;
       }
-      for (auto& [id, client] : media) client->poll();
+      const bool stage_requested = transition && transition->staged && !transition->settling;
+      for (auto& [id, client] : media) {
+        const bool hold = transition && transition->started && id == transition->outgoing;
+        const auto* stage = stage_requested && id == transition->incoming
+                                ? &transition->outgoing_display
+                                : nullptr;
+        client->poll(hold, stage);
+      }
+      // The outgoing renderer can fail during polling. Its staged successor
+      // must wait for a normal frame in that case rather than reuse the matte.
+      if (transition && !playback.visible()) {
+        transition.reset();
+        stage_fading = false;
+      }
       ff::Surface* surface = nullptr;
       std::string commit;
       if (auto desired = playback.desired(); desired) {
@@ -262,7 +305,8 @@ int main(int argc, char** argv) {
       }
       if (auto desired = playback.desired(); desired) {
         auto it = media.find(desired->id);
-        if (it != media.end() && it->second->ready && desired->stage != "failed") {
+        if (it != media.end() && it->second->ready && desired->stage != "failed" &&
+            (!stage_requested || transition)) {
           surface = &it->second->frames.latest();
           commit = desired->id;
         }
@@ -287,13 +331,15 @@ int main(int argc, char** argv) {
                              : 0.f;
       bool configuration_ready =
           drawing && surface && surface->display_revision == drawing->display_revision;
+      if (stage_requested && transition && !commit.empty() && commit == transition->incoming)
+        configuration_ready = true;  // MediaClient checked the private staged revision.
       // Covered changes cannot replace the texture associated with recorded
       // composition. A later superseding change may need that exact frame
       // when the overlay disappears before the new configuration is ready.
-      if (drawing && (!playback.overlay().is_null() || backdrop_opacity > 0) &&
+      if (drawing && (!playback.overlay().is_null() || backdrop_opacity > 0 || playback.service_failure()) &&
           !playback.composition().is_null() &&
           playback.composition().value("occurrence", "") == drawing->id &&
-          playback.composition().value("displayRevision", uint64_t{0}) != drawing->display_revision)
+          playback.composition_pending())
         configuration_ready = false;
       if (drawing && !configuration_ready && !playback.composition().is_null() &&
           playback.composition().value("occurrence", "") == drawing->id) {
@@ -305,25 +351,102 @@ int main(int argc, char** argv) {
         retained_composition->display = playback.composition()["display"];
         drawing = &*retained_composition;
       }
+      ff::ArtworkBlend blend;
+      bool transition_complete = false;
+      bool apply_final_configuration = false;
+      bool staged_composition = false;
+      const bool unobscured =
+          playback.overlay().is_null() && backdrop_opacity == 0 && !playback.service_failure();
+      if (transition && (!unobscured || !playback.visible())) {
+        transition.reset();
+        stage_fading = false;
+      }
+      if (!transition && !commit.empty() && configuration_ready && unobscured &&
+          playback.visible() && playback.visible()->id != commit &&
+          !playback.composition_pending()) {
+        const auto& old = *playback.visible();
+        const auto* frames = frames_for(old.id);
+        const auto duration = playback.state()["settings"].value("transitionMs", 650.0);
+        if (duration > 0 && frames && frames->shown.texture &&
+            frames->shown.display_revision == old.display_revision) {
+          // SVG, GLB and software documents follow the old embedded-view
+          // fade-through-background path. Only native media overlaps.
+          const bool sequential = clients.contains(old.id) || clients.contains(commit);
+          const auto stage_differs = [&](const char* key) {
+            return old.display.at(key) != drawing->display.at(key);
+          };
+          const bool staged = !sequential && (stage_differs("scaling") || stage_differs("margin"));
+          transition = Transition{old.id, commit, old.display, playback.state()["policy"],
+                                  playback.state().value("updateOutcome", ff::Json(nullptr)),
+                                  std::nullopt, drawing->display_revision, duration, sequential,
+                                  staged};
+        }
+      }
+      if (transition && transition->settling) {
+        transition_complete = configuration_ready && !commit.empty();
+      } else if (transition) {
+        auto* outgoing = frames_for(transition->outgoing);
+        if (!transition->started && !commit.empty() && configuration_ready &&
+            (!transition->staged || stage_requested))
+          transition->started = now_ms;
+        const auto opacity = transition->started
+                                 ? ff::artwork_fade(now_ms - *transition->started,
+                                                    transition->duration, transition->sequential)
+                                 : ff::FadeOpacity{1, 0, false};
+        const bool drew_incoming = configuration_ready && !commit.empty();
+        transition_complete = opacity.complete && drew_incoming && !transition->staged;
+        apply_final_configuration = opacity.complete && drew_incoming && transition->staged;
+        if (opacity.incoming == 0 && outgoing && playback.visible()->id == transition->outgoing) {
+          // The outgoing item still owns the screen, input and presentation
+          // acknowledgement until some incoming artwork is actually drawn.
+          drawing = &*playback.visible();
+          auto& newest = outgoing->latest();
+          configuration_ready = newest.display_revision == drawing->display_revision;
+          surface = configuration_ready ? &newest : &outgoing->shown;
+          blend.stage = &transition->outgoing_display;
+          blend.opacity = opacity.outgoing;
+          commit.clear();
+        } else if (drew_incoming && (!opacity.complete || apply_final_configuration)) {
+          blend.opacity = opacity.incoming;
+          if (!transition->sequential && outgoing) {
+            // Both layers use the previous stage until the outgoing slot is
+            // gone. The retained shown texture survives retiring its media.
+            blend.stage = &transition->outgoing_display;
+            blend.outgoing = &outgoing->shown;
+            blend.outgoing_opacity = opacity.outgoing;
+            staged_composition = true;
+          }
+        }
+      }
       ff::Surface* backdrop = nullptr;
       if (auto it = clients.find(backdrop_id);
           it != clients.end() && it->second->has_ready_frame() && !it->second->failed())
         backdrop = &it->second->frames.latest();
       const bool submitted =
-          presentation.draw(surface, drawing, playback, backdrop, backdrop_opacity);
-      if (submitted && !commit.empty() && configuration_ready && playback.overlay().is_null() &&
-          backdrop_opacity == 0)
+          presentation.draw(surface, drawing, playback, backdrop, backdrop_opacity, blend);
+      if (submitted && !commit.empty() && configuration_ready && unobscured && blend.opacity > 0)
         playback.presented(commit);
-      if (submitted && drawing && configuration_ready && playback.overlay().is_null() &&
-          backdrop_opacity == 0)
-        playback.composed(drawing->id, surface->display_revision);
-      if (submitted && drawing && configuration_ready) {
+      if (submitted && drawing && configuration_ready && unobscured && blend.opacity > 0) {
+        if (staged_composition) {
+          auto observed = drawing->display;
+          for (auto key : {"margin", "scaling", "background"}) observed[key] = blend.stage->at(key);
+          playback.composed(drawing->id, drawing->display_revision, &observed);
+        } else {
+          playback.composed(drawing->id, drawing->display_revision);
+        }
+      }
+      if (submitted && drawing && configuration_ready && blend.opacity > 0) {
         if (auto it = clients.find(drawing->id); it != clients.end()) it->second->did_present();
         if (auto it = media.find(drawing->id); it != media.end()) it->second->did_present();
       }
       if (submitted && backdrop) {
         auto it = clients.find(backdrop_id);
         if (it != clients.end()) it->second->did_present();
+      }
+      if (submitted) {
+        stage_fading = staged_composition || blend.opacity == 0;
+        if (apply_final_configuration) transition->settling = true;
+        if (transition_complete) transition.reset();
       }
       sync_input();
       for (auto it = clients.begin(); it != clients.end();) {
@@ -339,7 +462,9 @@ int main(int argc, char** argv) {
       for (auto it = media.begin(); it != media.end();) {
         bool keep = (playback.desired() && playback.desired()->stage != "failed" &&
                      playback.desired()->id == it->first) ||
-                    (playback.visible() && playback.visible()->id == it->first);
+                    (playback.visible() && playback.visible()->id == it->first) ||
+                    (transition && !transition->sequential && !transition->settling &&
+                     transition->outgoing == it->first);
         if (!keep)
           it = media.erase(it);
         else

@@ -303,3 +303,15 @@ test. The fresh reviewer reran all seven matched-summary cases and the Linux
 OOM hook test and reported accept for the development handoff. The full-image
 workflow still lacks native package staging. Hardware results are recorded in
 [PUBLIC-ENGINE-FF1.md](PUBLIC-ENGINE-FF1.md).
+
+## Legacy fade port — 2026-11-19
+
+The first review found premature incoming crop, outgoing policy retention,
+and misleading geometry status during the overlap. The player now stages the
+worker layout, records the observed stage, fences showing-specific changes,
+and cancels a fade on changes to policy or playlist labels. The next review
+found two remaining defects: a frame submitted under an overlay could overwrite
+the last exposed texture, and the media worker's opaque matte accelerated the
+fade behind transparent areas. The covered-frame guard and shared host matte
+resolved both. The reviewer returned accept. The isolated FF1 compositor test
+and the JPEG, alpha PNG, AVIF and GIF pixel regression checks passed afterward.

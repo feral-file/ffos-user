@@ -200,29 +200,33 @@ void Presentation::swap(const Surface* artwork) {
     last_frame_ = end; last_frame_texture_ = artwork->texture; last_frame_number_ = artwork->frames; last_frame_occurrence_ = label_occurrence_;
   }
 }
-bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback, const Surface* backdrop, float backdrop_opacity) {
+bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
+                        const Playback& playback, const Surface* backdrop,
+                        float backdrop_opacity, const ArtworkBlend& blend) {
   const auto now = std::chrono::steady_clock::now();
   const auto ticks = SDL_GetTicks64();
   const bool pointer_visible = pointer_active_ && ticks-pointer_active_<5000;
   const auto mode = playback.state()["settings"].value("tombstone","timed");
   const bool has_title=occurrence&&has_tombstone(*occurrence);
-  if(occurrence&&playback.overlay().is_null()&&backdrop_opacity==0&&
+  if(occurrence&&blend.opacity>0&&playback.overlay().is_null()&&backdrop_opacity==0&&
      (label_occurrence_!=occurrence->id||label_mode_!=mode||label_has_title_!=has_title)){
     label_occurrence_=occurrence->id;label_mode_=mode;label_has_title_=has_title;label_started_=ticks;
   }
   const auto label_age=ticks-label_started_;
-  const bool label_visible = has_title && (mode=="on" || (mode=="timed" && label_age<30300));
+  const bool label_visible = has_title && blend.opacity>0 && (mode=="on" || (mode=="timed" && label_age<30300));
   const int label_phase=label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
     occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,
-    pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0,label_phase,backdrop?backdrop->texture:0,backdrop?backdrop->frames:0,backdrop_opacity};
+    pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0,label_phase,backdrop?backdrop->texture:0,backdrop?backdrop->frames:0,backdrop_opacity,
+    blend.outgoing?blend.outgoing->texture:0,blend.outgoing?blend.outgoing->frames:0,blend.outgoing_opacity,blend.opacity};
   // Resubmitting an unchanged texture still consumes GPU/compositor work and
   // can block the next capture. UI revisions, geometry, pointer motion/expiry
   // and timed label expiry all independently invalidate composition.
   if (draw_key_ == key || !draw_clock_.due(now)) return false;
   draw_key_ = key;
   activate();
-  auto background=display_color(occurrence?occurrence->display.value("background","#000000"):"#000000");
+  const auto* stage = blend.stage ? blend.stage : (occurrence ? &occurrence->display : nullptr);
+  auto background=display_color(stage?stage->value("background","#000000"):"#000000");
   unsigned rgb=0;
   if(background.size()==7&&background[0]=='#'&&background.find_first_not_of("0123456789abcdefABCDEF",1)==std::string::npos)
     rgb=std::stoul(background.substr(1),nullptr,16);
@@ -234,7 +238,10 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
     swap(nullptr);return true;
   }
   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-  if (artwork && artwork->texture && occurrence) quad(artwork->texture,bounds(occurrence->display));
+  if (stage && blend.outgoing && blend.outgoing->texture && blend.outgoing_opacity > 0)
+    quad(blend.outgoing->texture, bounds(*stage), blend.outgoing_opacity);
+  if (stage && artwork && artwork->texture && blend.opacity > 0)
+    quad(artwork->texture, bounds(*stage), blend.opacity);
   if(backdrop&&backdrop->texture&&backdrop_opacity>0)quad(backdrop->texture,{0,0,width_,height_},backdrop_opacity);
   auto overlay = playback.overlay();
   if (!overlay.is_null()) {
@@ -274,7 +281,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence, co
   if (pointer_active_ && SDL_GetTicks64()-pointer_active_<5000 && overlay.is_null()) {
     glEnable(GL_SCISSOR_TEST);glScissor(static_cast<int>(pointer_x_)-5,height_-static_cast<int>(pointer_y_)-5,10,10);glClearColor(1,1,1,1);glClear(GL_COLOR_BUFFER_BIT);glDisable(GL_SCISSOR_TEST);
   }
-  swap(artwork);return true;
+  swap(blend.opacity>0?artwork:nullptr);return true;
 }
 bool Presentation::events(const std::function<void(const Json&)>& input) {
   activate();

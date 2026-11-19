@@ -436,6 +436,8 @@ Json Playback::command(std::string_view method, const Json& p) {
     fields(p,{"occurrence","display"});
     auto id=string_field(p,"occurrence",64);
     require(selected_&&presented_&&selected_->id==id&&presented_->id==id&&selected_->stage=="presented","stale_occurrence","Presentation target changed or is still loading");
+    require(!transition_stage_ || composition_.value("occurrence", "") != id,
+            "stale_occurrence", "Presentation is still transitioning");
     require(selected_->display.value("userOverrides",true),"presentation_locked","Artwork does not allow presentation overrides");
     require(p.contains("display"),"invalid_params","Missing presentation settings");
     auto adjustment=p["display"];fields(adjustment,{"scaling","margin","background"});validate_display(adjustment);
@@ -563,13 +565,18 @@ void Playback::committed(const std::string& id) {
 void Playback::frame_ready(const std::string& id) {
   if(selected_&&selected_->id==id&&selected_->stage=="committed")selected_->frame_available=true;
 }
-void Playback::composed(const std::string& id,uint64_t display_revision){
+void Playback::composed(const std::string& id, uint64_t display_revision,
+                        const Json* transition_stage) {
   // Only the host calls this, after submitting a frame with this configuration.
   // An old buffer/configuration acknowledgement cannot confirm a later write.
   if(!presented_||presented_->id!=id||presented_->display_revision!=display_revision)return;
-  if(!composition_.is_null()&&composition_.value("occurrence","")==id&&composed_display_revision_==display_revision)return;
+  const auto& display = transition_stage ? *transition_stage : presented_->display;
+  if (!composition_.is_null() && composition_.value("occurrence", "") == id &&
+      composed_display_revision_ == display_revision && transition_stage_ == bool(transition_stage))
+    return;
+  transition_stage_ = bool(transition_stage);
   composed_display_revision_=display_revision;++composition_revision_;++revision_;
-  composition_={{"occurrence",id},{"revision",composition_revision_},{"displayRevision",display_revision},{"display",presented_->display}};
+  composition_={{"occurrence",id},{"revision",composition_revision_},{"displayRevision",display_revision},{"display",display}};
 }
 void Playback::presented(const std::string& id) {
   if (!selected_ || selected_->id != id || !selected_->navigation_committed || selected_->stage == "failed" || (presented_ && presented_->id == id)) return;

@@ -18,6 +18,32 @@ Native labels, QR/setup narration, cursor, loading/error UI and composition
 never live in an artist document. GLB alone uses the trusted bundled viewer.
 Raster images use the native media worker; SVG keeps browser semantics.
 
+Artwork changes use the original player's CSS `ease` curve. The default
+650 ms crossfade overlaps native raster and media. A change involving a
+software document, SVG, or GLB fades out for 650 ms and then fades in for
+650 ms. The native host starts only when it has a presentable incoming frame.
+The outgoing artwork owns presentation during the first half of a sequential
+fade. The incoming occurrence enters history on the first submitted frame
+with nonzero opacity. The previous stage stays in place during the crossfade.
+The media worker renders the incoming work at that stage's crop and margin,
+with source alpha and transparent letterboxes. The compositor paints the
+shared matte. Status reports the observed stage and temporarily rejects
+showing-specific overrides. The final stage is published after a frame at that
+configuration is submitted. Policy and source refreshes retire retained
+outgoing pixels.
+Setting `transitionMs` to zero selects a cut. Layout and matte switch together
+when the matching frame is ready. The old web player's separate 200 ms
+padding/background animation is outside this opacity port.
+
+An isolated FF1-SKYZ2E3A test checked blended raster pixels, a raster-to-web
+fade through black, and a zero-duration cut. A fit-to-fill case checked a
+retained white matte and a blue final edge. A covered handoff retained the
+last exposed matte across a change in settings. Transparent overlap preserved
+more of the outgoing image behind the transparent half than behind the opaque
+half. A policy change retired a mature outgoing fixture mid-fade. The captures
+sampled Cage compositor pixels.
+[Transition evidence](evidence/legacy-transition-20261119/compositor-pixels.json)
+
 A focused C wrapper owns a headless wlroots scene, including Chromium's child
 surfaces. Its DMA-BUF export is imported into the native SDL/EGL host. Normal
 artwork composition has no CPU readback. Scene output-sample events count nested

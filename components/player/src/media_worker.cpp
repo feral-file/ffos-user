@@ -1,5 +1,4 @@
 #include "ff/media_ipc.hpp"
-#include "ff/display.hpp"
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 #include <SDL.h>
@@ -56,6 +55,9 @@ class Worker {
     for(auto [key,value]:{std::pair{"config","no"},{"input-default-bindings","no"},
         {"input-vo-keyboard","no"},{"input-terminal","no"},{"terminal","no"},{"osd-level","0"},
         {"image-display-duration","inf"},{"vo","libmpv"},{"hwdec","auto-safe"},{"idle","yes"},{"keep-open","no"},{"audio-display","no"},{"force-window","no"},
+        // Preserve artwork alpha and transparent letterboxes. The compositor
+        // paints the stage once behind both layers during a crossfade.
+        {"background","none"},{"background-color","#00000000"},
         // FFmpeg's CPU-count default retains many full-size reference frames.
         // Bound fallback decoding before the worker's address-space ceiling,
         // especially for 4096-square H.264 outside this GPU's VA-API limits.
@@ -79,7 +81,7 @@ class Worker {
     check(mpv_render_context_create(&render_,player_,params),"create GPU render context");
     mpv_render_context_set_update_callback(render_,wake,nullptr);
     // Enabling this before render-context creation races libmpv's VO startup.
-    // Audio still gets a black compositable surface after the context exists.
+    // Audio still gets a compositable surface in front of the host matte.
     property(player_,"force-window","yes");
     glGenTextures(1,&texture_);glBindTexture(GL_TEXTURE_2D,texture_);
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
@@ -109,8 +111,6 @@ class Worker {
       auto scaling=display.value("scaling","fit");
       set("keepaspect",scaling=="stretch"?"no":"yes");
       set("panscan",scaling=="fill"?"1":"0");
-      auto background=ff::display_color(display.value("background","#000000"));
-      set("background","color");set("background-color",background);
     }
     if(p.contains("width")&&p.contains("height")){
       pending_width_=p.at("width").get<int>();pending_height_=p.at("height").get<int>();
