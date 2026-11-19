@@ -1584,6 +1584,37 @@ func TestWaitForBrowserAndApproval_DeviceCodeFollowsTheBrokerExpiryOnceABrowserJ
 	assert.True(t, s.expiryOf(s.active).Equal(renewed))
 }
 
+// The worker can extend the deadline on its first poll, while the start that
+// launched it is still building its reply: a browser that joins and sends its
+// request the moment the code appears. The reply reads its expiry before the
+// worker starts. This pins the reply's value; -race catches a regression only
+// when the worker happens to run first (reliably with a pause injected after
+// the go statement, which is how the fix was checked).
+func TestHandleStartPairingSession_StartReplyDoesNotRaceTheFirstExtension(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	createExpiry := time.Now().Add(time.Minute).Truncate(time.Second)
+	ch := &fakeBrokerChannel{
+		channelID:    "ch_code",
+		pairingCode:  "PAIR-123",
+		expiresAt:    createExpiry,
+		brokerExpiry: createExpiry.Add(time.Minute),
+		request:      &minter.MintRequest{ChannelID: "ch_code", MessageID: "msg_1", Origin: "https://gallery.example"},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newDeviceExpiryTestService(&fakeBrokerStarter{channel: ch}, relayerClient, &fakeCDP{}, time.Millisecond)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	response := result.(startPairingResponse)
+	require.True(t, response.OK)
+	assert.Equal(t, formatOptionalTime(createExpiry), response.ExpiresAt, "the reply reports the code's expiry as started")
+	assertRelayerNotification(t, <-relayerClient.sent, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+}
+
 // A browser can join in the last poll interval before the deadline, after the
 // device's last look. One more poll at the deadline is the device's chance to
 // see it before closing a channel the browser now holds.
@@ -1786,6 +1817,14 @@ func TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow(t
 		return starter.StartCount() == 2
 	}, 250*time.Millisecond, 5*time.Millisecond, "the refresh must not wait on the slow hide delivery")
 	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+	// The code is displayed before the refresh publishes it; wait for that,
+	// so the refresh goroutine is done with shared state before the deferred
+	// reset runs (a -race report otherwise).
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.active != nil && s.active.channelID == "ch_new"
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {

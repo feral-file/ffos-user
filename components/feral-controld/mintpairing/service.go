@@ -1067,8 +1067,14 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		return commandError("pairing_closed", "the pairing was closed while it was starting", false), nil
 	}
 
-	// The broker approval session must outlive the initiating RPC. sessionCtx is
-	// still bounded by service shutdown and the broker pairing expiry.
+	// The reply below reports the local expiresAt (the code's expiry as
+	// started), never active.expiresAt: from its first poll the worker may
+	// extend that field (extendDeadline), and a read after the go statement
+	// would race it.
+	//
+	// The broker approval session must outlive the initiating RPC. sessionCtx
+	// ends on service shutdown or cancellation; the worker enforces the
+	// broker-followed expiry itself (waitForMintRequestUntilExpiry).
 	go s.waitForBrowserAndApproval(sessionCtx, active, startGuard) //nolint:gosec
 
 	return startPairingResponse{
@@ -1076,7 +1082,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		Status:      "started",
 		ChannelID:   active.channelID,
 		PairingCode: active.pairingCode,
-		ExpiresAt:   formatOptionalTime(active.expiresAt),
+		ExpiresAt:   formatOptionalTime(expiresAt),
 	}, nil
 }
 
