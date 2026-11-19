@@ -1873,6 +1873,15 @@ the same pairing code. If a browser request is already pending controller
 approval, `status` is `pending_approval`; `feral-controld` re-displays the
 request-received overlay instead of showing the QR/code again.
 
+The code's deadline is the broker's channel expiry, and it follows the broker:
+a browser that joins the channel and sends its request renews the broker's
+idle deadline, so the approval runs to the renewed deadline (bounded by the
+approval timeout) rather than to what was left of the code's own. An unused
+code is refreshed when it expires: a new channel and code replace it on screen
+and the old channel is closed. Before closing, `feral-controld` polls the
+broker once more, so a browser that joined in the last poll interval keeps its
+channel instead of finding it gone (issue #333).
+
 Error response:
 
 ```json
@@ -1901,7 +1910,12 @@ Error cases:
   then carry `topicID: ""`, and a Play 0.4 session request (no display
   keys) on it is refused on the channel before the owner is asked.
 - `broker_unavailable`: broker channel creation failed before a pairing code
-  was available.
+  was available. When the broker (or the proxy in front of it) answered, the
+  error also carries `brokerStatus` (the HTTP status) and, when its body named
+  one, `brokerCode` (for example `rate_limited`), and `message` names the
+  status; `retryable` is false for a refusal other than 408/429. With no
+  answer (unreachable, timed out) neither field is present and `retryable` is
+  true.
 - `broker_response_invalid`: broker did not return a pairing code.
 - `display_unavailable`: Chromium/CDP did not accept the player overlay
   display command.
@@ -2066,7 +2080,10 @@ A joined pairing waits for the site's request until the broker's channel
 expiry as reported at join, or for the device's idle TTL when the broker
 reports none. The broker extends its idle deadline on every accepted message,
 so once the request arrives the deadline moves to the later of the two, and
-the approval wait (bounded by the approval timeout) runs to that.
+the approval wait (bounded by the approval timeout) runs to that. A
+device-created channel follows the broker the same way (see
+`startMintPairingSession`), and both ask the broker once more at the deadline
+before ending the wait.
 
 ### Outbound Approval Request
 
