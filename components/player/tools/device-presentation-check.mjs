@@ -16,7 +16,7 @@ async function capture(name) {
  const remote='/home/feralfile/ff-native-evidence/presentation-'+name+'.png',local=path.join(output,name+'.png');
  await run('ssh',[...flags,host,`XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 grim ${remote}`]);
  await run('scp',['-O',...flags,host+':'+remote,local]);
- const {stdout}=await run('python3',['-c','from PIL import Image; import sys,json; im=Image.open(sys.argv[1]).convert("RGB"); print(json.dumps({"pointer":im.getpixel((400,400)),"label":im.getpixel((20,im.height-20)),"size":im.size}))',local]);
+ const {stdout}=await run('python3',['-c','from PIL import Image; import sys,json; im=Image.open(sys.argv[1]).convert("RGB"); print(json.dumps({"pointer":im.getpixel((400,400)),"arrowFill":(255,232,76) in im.crop((400,400,432,432)).getdata(),"label":im.getpixel((20,im.height-20)),"size":im.size}))',local]);
  return JSON.parse(stdout);
 }
 const background=[17,34,51],white=[255,255,255];
@@ -28,7 +28,9 @@ try {
  assert(ready,'static artwork not presented');await delay(5500);
  assert.deepEqual((await capture('initial')).pointer,background);
  await c.call('input.dispatch',{occurrence:receipt.occurrence,kind:'move',x:400,y:400});await delay(300);
- assert.deepEqual((await capture('pointer')).pointer,white);
+ const pointer=await capture('pointer');
+ assert.deepEqual(pointer.pointer,[20,20,20]);
+ assert.equal(pointer.arrowFill,true,'The yellow arrow fill must appear beside the dark hotspot');
  await delay(5200);assert.deepEqual((await capture('pointer-expired')).pointer,background);
  evidence.checks.push('cursor movement and five-second expiry redraw static artwork');
  await c.call('settings.set',{tombstone:'on'});await delay(300);
