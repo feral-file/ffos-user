@@ -16,7 +16,7 @@ class PublicBrowser {
  public:
   PublicBrowser(Playback&, Presentation&, Occurrence, const std::string& launcher,
                 const std::string& profile, const std::string& cache_socket,
-                const std::string& resources, bool decoration = false, bool debugger = false,
+                const std::string& resources, const std::string& backend, bool decoration = false, bool debugger = false,
                 const std::string& cache_mode = "");
   ~PublicBrowser();
   void poll();
@@ -35,6 +35,7 @@ class PublicBrowser {
   const std::string id;
 
  private:
+  const std::string backend_;
   Playback& playback_;
   Presentation& presentation_;
   Occurrence occurrence_;

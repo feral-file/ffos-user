@@ -44,8 +44,9 @@ void reap_public_browsers() {
 PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& cache_socket, const std::string& resources,
-                             bool decoration, bool debugger, const std::string& cache_mode)
+                             const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode)
     : id(o.id),
+      backend_(backend),
       playback_(p),
       presentation_(ui),
       occurrence_(std::move(o)),
@@ -447,7 +448,7 @@ void PublicBrowser::poll() {
       }
     }
     playback_.media_status(
-        id, {{"backend", "public-chromium"},
+        id, {{"backend", backend_},
              {"browserPid", pid_},
              {"documentUrl", document_url_},
              {"nestedCompositorGpuPasses", compositor_gpu_passes_},

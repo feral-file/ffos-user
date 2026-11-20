@@ -20,6 +20,14 @@ void stop(int){stopping=1;}
 class Client final : public CefClient,public CefLifeSpanHandler {
  public:
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override{return this;}
+  // This process owns one artwork. A popup must never take the display or
+  // trigger the main window's shutdown path when the host dismisses it.
+  bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString&,
+                     const CefString&, cef_window_open_disposition_t, bool,
+                     const CefPopupFeatures&, CefWindowInfo&, CefRefPtr<CefClient>&,
+                     CefBrowserSettings&, CefRefPtr<CefDictionaryValue>&, bool*) override {
+    return true;
+  }
   void OnBeforeClose(CefRefPtr<CefBrowser>) override{CefQuitMessageLoop();}
  private: IMPLEMENT_REFCOUNTING(Client);
 };

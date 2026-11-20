@@ -51,11 +51,13 @@ int main(int argc, char** argv) {
          launcher = (root / "ff-browser-launch").string();
     auto resources = options["--renderer-dir"];
     if (resources.empty()) resources = "/usr/share/ff-player-native/renderers";
+    std::string browser_backend = "public-chromium";
     std::ifstream engine_manifest(std::filesystem::path(resources).parent_path() /
                                   "dependencies.json");
     if (engine_manifest) {
       auto manifest = ff::Json::parse(engine_manifest);
-      auto engine = manifest.at("chromium");
+      if (!manifest.contains("chromium") && manifest.contains("cefViews")) browser_backend = "cef-views";
+      const auto& engine = manifest.at(browser_backend == "cef-views" ? "cefViews" : "chromium");
       playback.engine_status({{"product", "Chrome/" + engine.at("version").get<std::string>()},
                               {"userAgent", engine.at("observedUserAgent")},
                               {"identity", "packaged"}});
@@ -205,7 +207,7 @@ int main(int argc, char** argv) {
                     playback, presentation, decoration, launcher,
                     state_path + "/browser/" + ff::uuid(),
                     (std::filesystem::path(socket).parent_path() / "cache.sock").string(),
-                    resources, true));
+                    resources, browser_backend, true));
           } catch (const std::exception& e) {
             backdrop_id.clear();
             std::cerr << "Setup backdrop unavailable: " << e.what() << '\n';
@@ -249,7 +251,7 @@ int main(int argc, char** argv) {
                     playback, presentation, *desired, launcher,
                     state_path + "/browser/" + desired->id,
                     (std::filesystem::path(socket).parent_path() / "cache.sock").string(),
-                    resources, false, options.contains("--diagnostic-engine-debugger"),
+                    resources, browser_backend, false, options.contains("--diagnostic-engine-debugger"),
                     *cache_mode));
         } catch (const std::exception& e) {
           playback.failed(desired->id, e.what());
