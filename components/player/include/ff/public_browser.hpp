@@ -41,7 +41,7 @@ class PublicBrowser {
   ff_browser_view* view_ = nullptr;
   pid_t pid_ = -1;
   int writer_ = -1, reader_ = -1;
-  std::string buffer_, session_, profile_, main_frame_, navigation_url_, navigation_error_;
+  std::string buffer_, session_, profile_, main_frame_, navigation_url_, document_url_, navigation_error_;
   bool initial_response_seen_ = false, decoration_ = false;
   struct Pending {
     std::string data;

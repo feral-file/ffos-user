@@ -281,7 +281,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   else if (auto outcome=playback.state().value("updateOutcome",Json(nullptr));outcome.is_object()&&outcome.value("contentBlocked",false)&&(!playback.desired()||outcome.value("outcome","")=="failed"))
     ui("Updated playlist is blocked\nChange content preferences or choose another playlist","",!artwork);
   else if (!artwork && playback.state()["sleeping"] == false) ui(playback.desired() ? "Loading artwork" : "Feral File\nReady for artwork","",true);
-  else if(!playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
+  else if((!artwork || playback.online()) && !playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
   else if (occurrence && label_visible) {
     auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
     if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed"),key);

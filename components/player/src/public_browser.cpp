@@ -228,6 +228,12 @@ void PublicBrowser::message(const Json& m) {
              {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
       send("Runtime.runIfWaitingForDebugger", {}, child);
     }
+  } else if (method == "Page.frameNavigated" && session == session_) {
+    const auto& frame = p.at("frame");
+    if (!frame.contains("parentId")) document_url_ = frame.at("url").get<std::string>() + frame.value("urlFragment", "");
+  } else if (method == "Page.navigatedWithinDocument" && session == session_ &&
+             p.value("frameId", "") == main_frame_) {
+    document_url_ = p.at("url").get<std::string>();
   } else if (method == "Fetch.requestPaused") {
     auto request = p.at("requestId").get<std::string>();
     auto network = p.at("request");
@@ -443,6 +449,7 @@ void PublicBrowser::poll() {
     playback_.media_status(
         id, {{"backend", "public-chromium"},
              {"browserPid", pid_},
+             {"documentUrl", document_url_},
              {"nestedCompositorGpuPasses", compositor_gpu_passes_},
              {"exportedFrames", frames.count},
              {"offline", offline_},

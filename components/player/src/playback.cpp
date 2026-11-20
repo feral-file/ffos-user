@@ -397,12 +397,12 @@ Json Playback::command(std::string_view method, const Json& p) {
     // Legacy ready is a non-visible setup state, not a success title panel.
     if(state=="hidden" || (owner=="setup" && state=="ready")) {
       if(!overlay_.is_null() && overlay_["owner"]==owner)overlay_=nullptr;
-    } else { release_input(); overlay_=p; }
+    } else { overlay_=p; if (!overlay().is_null()) release_input(); }
     ++revision_; return {{"outcome", "applied"}};
   }
   if (method == "input.dispatch") {
     require(p.contains("occurrence") && presented_ && p["occurrence"] == presented_->id, "stale_occurrence", "Input target is not currently presented");
-    require(overlay_.is_null() && state_["sleeping"] == false && (!selected_ || selected_->stage!="failed") && !composition_pending(), "input_blocked", "Device UI or a pending presentation change owns focus");
+    require(overlay().is_null() && state_["sleeping"] == false && (!selected_ || selected_->stage!="failed") && !composition_pending(), "input_blocked", "Device UI or a pending presentation change owns focus");
     require(static_cast<bool>(input_), "unavailable", "No presentation backend");
     auto kind=string_field(p,"kind",32);
     if(kind=="move"){
@@ -525,6 +525,16 @@ Json Playback::command(std::string_view method, const Json& p) {
   if (state_["paused"] == false && was_paused) presented_at_ += now_ - pause_at_;
   return {{"outcome", reselection && selected_ ? "accepted" : "applied"}, {"generation", generation_}, {"revision", revision_}, {"occurrence", selected_ ? Json(selected_->id) : Json(nullptr)}};
 }
+Json Playback::overlay() const {
+  // A reconnect advisory can yield before presentation. Waiting for presented()
+  // here would deadlock because the overlay itself blocks presentation.
+  if (overlay_.is_object() && overlay_.value("owner", "") == "setup" &&
+      overlay_.value("state", "") == "connecting" && connectivity_known_ && !online_ &&
+      (presented_ || (selected_ && selected_->frame_available && selected_->stage != "failed")))
+    return nullptr;
+  return overlay_;
+}
+
 Json Playback::snapshot() const {
   return {{"instance", instance_}, {"generation", generation_}, {"revision", revision_}, {"protection",{{"thermal",thermal_hold_},{"serviceFailure",service_failure_}}},
           {"host", "responsive"}, {"engine",engine_status_}, {"notice",runtime_notice()}, {"renderer", selected_ ? selected_->stage : "absent"},
@@ -541,7 +551,7 @@ Json Playback::snapshot() const {
           {"stopped", state_["stopped"]}, {"sleeping", state_["sleeping"]}, {"paused", state_["paused"]},
           {"playlist", state_["playlist"]}, {"playlistUrl", state_.value("playlistUrl", "")},
           {"loop", state_["loop"]}, {"shuffle", state_["shuffle"]}, {"settings", state_["settings"]},
-          {"context", state_["context"]}, {"overlay", overlay_}, {"online", online_}, {"connectivityKnown",connectivity_known_}, {"media",media_status_}, {"mediaPaused",media_paused()},
+          {"context", state_["context"]}, {"overlay", overlay()}, {"online", online_}, {"connectivityKnown",connectivity_known_}, {"media",media_status_}, {"mediaPaused",media_paused()},
           {"schedule",state_["schedule"]},{"scheduleOutcome",state_.value("scheduleOutcome",Json(nullptr))},
           {"pendingUpdate",state_.value("pendingUpdate",Json(nullptr)).is_null()?Json(nullptr):Json{
             {"id",state_["pendingUpdate"]["id"]},{"itemCount",state_["pendingUpdate"]["playlist"]["items"].size()}}},

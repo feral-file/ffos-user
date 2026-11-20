@@ -56,7 +56,7 @@ class Playback {
   bool connectivity_known() const { return connectivity_known_; }
   bool thermal_hold() const { return thermal_hold_; }
   bool service_failure() const { return service_failure_; }
-  Json overlay() const { return overlay_; }
+  Json overlay() const;
   const Json& composition() const { return composition_; }
   bool composition_pending() const {
     return presented_ && !composition_.is_null() &&
