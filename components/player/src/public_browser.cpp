@@ -81,11 +81,13 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
               playback_.state()["settings"].value("transitionMs",0.0)==0 &&
               bounds.width==presentation_.width() && bounds.height==presentation_.height() &&
               std::filesystem::exists(std::filesystem::path(launcher).parent_path()/"ff-cage-client");
-    int feedback_child=-1;
+    int feedback_child=-1, admission_child=-1;
     if(cage){
       int pair[2];
       require(socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,pair)==0,"browser_spawn","Cannot create Cage feedback socket");
       feedback_fd_=high_fd(pair[0]);feedback_child=high_fd(pair[1]);
+      require(socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,pair)==0,"browser_spawn","Cannot create window admission socket");
+      admission_fd_=high_fd(pair[0]);admission_child=high_fd(pair[1]);
     }else{
     server_ = ff_browser_server_create();
     require(server_, "browser_compositor", "Cannot initialize private Wayland compositor");
@@ -110,7 +112,10 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, child_read, 3);
     posix_spawn_file_actions_adddup2(&actions, child_write, 4);
-    if(cage)posix_spawn_file_actions_adddup2(&actions,feedback_child,5);
+    if(cage){
+      posix_spawn_file_actions_adddup2(&actions,feedback_child,5);
+      posix_spawn_file_actions_adddup2(&actions,admission_child,6);
+    }
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
@@ -122,6 +127,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     if(feedback_child>=0)close(feedback_child);
+    if(admission_child>=0)close(admission_child);
     close(child_read);
     close(child_write);
     require(rc == 0, "browser_spawn", "Cannot launch public Chromium: " + std::to_string(rc));
@@ -136,7 +142,8 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
       kill(-pid_, SIGKILL);
       retiring.push_back({pid_, profile_});
     }
-    if (feedback_fd_>=0) close(feedback_fd_);
+    if (admission_fd_>=0) close(admission_fd_);
+  if (feedback_fd_>=0) close(feedback_fd_);
     if (writer_ >= 0) close(writer_);
     if (reader_ >= 0) close(reader_);
     if (server_) ff_browser_server_destroy(server_);
@@ -150,6 +157,7 @@ PublicBrowser::~PublicBrowser() {
     kill(-pid_, SIGKILL);
     retiring.push_back({pid_, profile_});
   }
+  if (admission_fd_>=0) close(admission_fd_);
   if (feedback_fd_>=0) close(feedback_fd_);
     if (writer_ >= 0) close(writer_);
   if (reader_ >= 0) close(reader_);
@@ -180,7 +188,8 @@ void PublicBrowser::send(const std::string& method, Json params, const std::stri
 void PublicBrowser::fail(const std::string& error) {
   if (failed_) return;
   failed_ = true;
-  if (!decoration_ && !direct()) playback_.failed(id, error);
+  const bool retry_selected=direct() && playback_.desired() && playback_.desired()->id==id;
+  if (!decoration_ && !retry_selected) playback_.failed(id, error);
   if (pid_ > 0) kill(-pid_, SIGKILL);
 }
 void PublicBrowser::message(const Json& m) {
@@ -473,6 +482,11 @@ void PublicBrowser::poll() {
       }
     }
     if(direct()){
+      if(loaded_ && !window_admitted_ && playback_.desired() && playback_.desired()->id==id &&
+         playback_.overlay().is_null() && !playback_.service_failure() && !playback_.thermal_hold()){
+        const char show=1;
+        window_admitted_=::send(admission_fd_,&show,1,MSG_DONTWAIT|MSG_NOSIGNAL)==1;
+      }
       uint64_t timestamp=0;
       while(recv(feedback_fd_,&timestamp,sizeof(timestamp),MSG_DONTWAIT)==sizeof(timestamp)){
         last_presentation_ns_=std::max(last_presentation_ns_,timestamp);

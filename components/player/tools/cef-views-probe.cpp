@@ -10,6 +10,9 @@
 #include "include/views/cef_fill_layout.h"
 #include "include/views/cef_window_delegate.h"
 #include <csignal>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <filesystem>
 #include <iostream>
 #include <sys/stat.h>
@@ -17,15 +20,8 @@
 namespace {
 volatile std::sig_atomic_t stopping=0;
 void stop(int){stopping=1;}
-class Client final : public CefClient,public CefLifeSpanHandler,public CefLoadHandler {
+class Client final : public CefClient,public CefLifeSpanHandler {
  public:
-  CefRefPtr<CefLoadHandler> GetLoadHandler() override{return this;}
-  void OnLoadEnd(CefRefPtr<CefBrowser> browser,CefRefPtr<CefFrame> frame,int status) override{
-    if(!frame->IsMain() || frame->GetURL()=="about:blank" || status>=400)return;
-    if(auto view=CefBrowserView::GetForBrowser(browser)){
-      if(auto window=view->GetWindow();window && !window->IsVisible())window->Show();
-    }
-  }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override{return this;}
   // This process owns one artwork. A popup must never take the display or
   // trigger the main window's shutdown path when the host dismisses it.
@@ -64,13 +60,22 @@ class WindowDelegate final : public CefWindowDelegate {
 };
 class ShutdownTask final : public CefTask {
  public:
-  explicit ShutdownTask(CefRefPtr<CefWindow> window):window_(window){}
+  ShutdownTask(CefRefPtr<CefWindow> window,bool pending):window_(window),pending_(pending){}
   void Execute() override{
     if(stopping){window_->Close();window_=nullptr;return;}
+    if(pending_){
+      char show=0;
+      if(recv(6,&show,1,MSG_DONTWAIT)==1 && show==1){
+        window_->Show();
+        pending_=false;
+        close(6);
+      }
+    }
     CefPostDelayedTask(TID_UI,this,50);
   }
  private:
   CefRefPtr<CefWindow> window_;
+  bool pending_;
   IMPLEMENT_REFCOUNTING(ShutdownTask);
 };
 class App final : public CefApp,public CefBrowserProcessHandler {
@@ -83,7 +88,7 @@ class App final : public CefApp,public CefBrowserProcessHandler {
       probe ? "http://127.0.0.1:18990/grit-fixed.html" : "about:blank",settings,nullptr,
       CefRequestContext::GetGlobalContext(),new BrowserDelegate);
     auto window=CefWindow::CreateTopLevelWindow(new WindowDelegate(view));
-    CefPostDelayedTask(TID_UI,new ShutdownTask(window),50);
+    CefPostDelayedTask(TID_UI,new ShutdownTask(window,CefCommandLine::GetGlobalCommandLine()->HasSwitch("ff-direct-cage")),50);
   }
  private: IMPLEMENT_REFCOUNTING(App);
 };
@@ -92,6 +97,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
   umask(0077);CefMainArgs args(argc,argv);CefRefPtr<App> app=new App;
   int child=CefExecuteProcess(args,app,nullptr);if(child>=0)return child;
   auto command=CefCommandLine::CreateCommandLine();command->InitFromArgv(argc,argv);
+  if(command->HasSwitch("ff-direct-cage"))fcntl(6,F_SETFD,FD_CLOEXEC);
   auto profile=command->GetSwitchValue("probe-profile").ToString();
   if(profile.empty())profile=command->GetSwitchValue("user-data-dir").ToString();
   if(profile.empty()){std::cerr<<"A private browser profile is required\n";return 2;}

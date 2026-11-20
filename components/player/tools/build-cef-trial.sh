@@ -41,6 +41,9 @@ chmod 4755 "$sandbox"
 root="$stage/usr/lib/ff-player-native"
 test -x build-cage-client/target/release/ff-cage-client || sh tools/build-cage-client.sh
 install -m755 build-cage-client/target/release/ff-cage-client "$root/ff-cage-client"
+for license in LICENSE-MIT LICENSE-APACHE; do
+  install -Dm644 "build-cage-client/wl-proxy/$license" "$stage/usr/share/licenses/ff-player-native/wl-proxy/$license"
+done
 mkdir "$root/engine"
 for src in "$trial/sdk/Release/"* "$trial/sdk/Resources/"*; do
   name=$(basename "$src")
