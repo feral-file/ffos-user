@@ -19,7 +19,8 @@ public Chromium build remains available for same-device comparisons.
 GitHub Actions builds the FF1 CEF archive with `tools/build-ff1.sh`.
 The FFOS package recipe accepts that archive and its tested SHA-256. The CEF
 version and download hash are pinned in `maintenance/cef-ff1.json`.
-See [homelab playback checks](docs/CAGE-WORKERS.md) and the
+See [shipping UI comparison and on-device controls](docs/PLAYER-UI-PARITY.md),
+[homelab playback checks](docs/CAGE-WORKERS.md) and the
 [shipping-player baseline](docs/HOMELAB-PARITY.md).
 
 ## Build the core locally

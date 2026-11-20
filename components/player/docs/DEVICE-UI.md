@@ -1,5 +1,8 @@
 # Native device presentation verification
 
+The [shipping 3.0.1 comparison](PLAYER-UI-PARITY.md) updates the label layout, pointer, setup and pairing evidence for the direct Cage runtime.
+
+
 Development increment, 2026-11-18. This is not activation or whole-player
 acceptance. Homelab remains awake at Anh's request; the installed controller
 still serves the legacy player until the remaining consumer migration is ready.
