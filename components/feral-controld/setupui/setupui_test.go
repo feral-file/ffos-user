@@ -252,7 +252,44 @@ func writeContract(t *testing.T, body string) string {
 
 func newTestService(t *testing.T, sender CDPSender, contract string) *Service {
 	t.Helper()
-	return New(sender, writeContract(t, contract), nil)
+	svc := New(sender, writeContract(t, contract), nil)
+	// Hermetic: a host that happens to carry the real FF1 config file must not
+	// add a version field to payloads the tests compare field by field.
+	svc.versionFile = filepath.Join(t.TempDir(), "absent-ff1-config.json")
+	return svc
+}
+
+// TestPushesCarryInstalledVersion: every visible setup state carries the
+// installed version read from the FF1 config file, so the screen shows which
+// build is running; the read is cached, so an OTA rewriting the file mid-run
+// does not relabel the screen; and a missing file omits the field.
+func TestPushesCarryInstalledVersion(t *testing.T) {
+	t.Run("visible states carry the version, cached once read", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+		cfg := filepath.Join(t.TempDir(), "ff1-config.json")
+		require.NoError(t, os.WriteFile(cfg, []byte(`{"version":"3.0.1","branch":"release"}`), 0o600))
+		svc.versionFile = cfg
+
+		svc.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1")
+		sender.waitForCalls(t, 1)
+		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
+
+		require.NoError(t, os.WriteFile(cfg, []byte(`{"version":"3.0.2"}`), 0o600))
+		svc.ShowUpdating(10)
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
+	})
+
+	t.Run("missing config omits the field", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowJoining()
+		sender.waitForCalls(t, 1)
+		_, present := sender.lastRequest()["version"]
+		assert.False(t, present)
+	})
 }
 
 // TestTypedMethodsEmitContractPayloads asserts each typed method produces the
