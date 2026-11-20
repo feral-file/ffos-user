@@ -15,6 +15,7 @@ struct ff_browser_frame {
 struct ff_browser_server *ff_browser_server_create(void);
 int ff_browser_server_listen(struct ff_browser_server *server, const char *path);
 void ff_browser_server_destroy(struct ff_browser_server *server);
+int ff_browser_server_fd(struct ff_browser_server *server);
 void ff_browser_server_poll(struct ff_browser_server *server);
 /* Each engine uses its own private socket directory and server. */
 struct ff_browser_view *ff_browser_view_create(struct ff_browser_server *server, int width,

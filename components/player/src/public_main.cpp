@@ -1,3 +1,4 @@
+#include <poll.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -6,7 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <thread>
+#include <vector>
 
 #include "ff/artwork_fade.hpp"
 #include "ff/media_client.hpp"
@@ -473,9 +474,16 @@ int main(int argc, char** argv) {
       ff::reap_media_workers();
       ff::reap_public_browsers();
     };
+    std::vector<pollfd> displays;
     while (!stopping) {
       frame();
-      std::this_thread::sleep_for(std::chrono::milliseconds(4));
+      // Wake for a browser commit or Cage feedback as soon as it arrives.
+      // The timeout still services protocol, timers, media and GPU fences.
+      displays.clear();
+      displays.push_back({presentation.display_fd(), POLLIN, 0});
+      for (const auto& entry : clients)
+        displays.push_back({entry.second->display_fd(), POLLIN, 0});
+      (void)poll(displays.data(), displays.size(), 4);
     }
     playback.release_input();
     clients.clear();

@@ -40,6 +40,11 @@ class SummaryTest(unittest.TestCase):
             run["unit"] = "chromium-kiosk.service"
             run["configuration"] = {"presentationPath": "public"}
         self.check_run(change)
+    def test_cef_kiosk_uses_wayland_feedback(self):
+        def change(run, _timing):
+            run["unit"] = "chromium-kiosk.service"
+            run["configuration"] = {"presentationPath": "cef"}
+        self.check_run(change)
     def test_named_public_probe_uses_wayland_feedback(self):
         self.check_run(lambda run, _: run.update(unit="ff-player-public-test.service"))
     def test_short_prefix(self):

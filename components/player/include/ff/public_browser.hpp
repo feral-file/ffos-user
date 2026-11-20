@@ -20,6 +20,7 @@ class PublicBrowser {
                 const std::string& cache_mode = "");
   ~PublicBrowser();
   void poll();
+  int display_fd() const { return ff_browser_server_fd(server_); }
   void input(const Json&);
   void update();
   void did_present();

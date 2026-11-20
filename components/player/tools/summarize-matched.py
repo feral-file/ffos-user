@@ -38,12 +38,14 @@ for path in a.runs:
         raise ValueError(f'{path}: unmatched engine, fixture or rendered document')
     low, high = data['clockStart']['monotonicNs'], data['clockEnd']['monotonicNs']
     presentation_path = data.get('configuration', {}).get('presentationPath')
-    if presentation_path == 'public' or 'public' in data['unit']:
+    if presentation_path in ('cef', 'shipping'):
+        arm = presentation_path
+    elif presentation_path == 'public' or 'public' in data['unit']:
         arm = 'native'
     else:
         arm = 'native' if 'runtime' in data['unit'] else 'views' if 'views' in data['unit'] else 'chrome'
     copies = None
-    if arm != 'native':
+    if arm not in ('native', 'cef'):
         events = data['compositorTrace']['events']
         if len({(e['pid'], e['tid']) for e in events}) != 1:
             raise ValueError('Multiple output streams need separate analysis')

@@ -97,6 +97,9 @@ void PresentationFeedback::poll() {
   auto& self=*impl_;
   if (self.display && self.queue) wl_display_dispatch_queue_pending(self.display,self.queue);
 }
+int PresentationFeedback::display_fd() const {
+  return impl_->display ? wl_display_get_fd(impl_->display) : -1;
+}
 PresentedFrame PresentationFeedback::latest() const { return impl_->latest; }
 Json PresentationFeedback::metrics() const {
   const auto& s=*impl_;

@@ -65,7 +65,7 @@ try {
  evidence.elapsedSeconds=(performance.now()-start)/1000; evidence.clockEnd=await remoteClock(); evidence.after=await metrics();
  await browser.call('Tracing.end'); await traceDone; tracing=false;
  assert(traceEvents.length > 10, 'No compositor feedback trace');
- evidence.compositorTrace={meaning:configuration.presentationPath==='public'||unit.includes('public')?'Private browser compositor feedback; use native Wayland telemetry for output':unit.includes('runtime')?'CEF offscreen compositor feedback; use native Wayland telemetry for output':'Native browser display feedback', events:traceEvents};
+ evidence.compositorTrace={meaning:configuration.presentationPath==='public'||unit.includes('public')?'Private browser compositor feedback; use native Wayland telemetry for output':(configuration.presentationPath==='cef'||unit.includes('runtime'))?'CEF offscreen compositor feedback; use native Wayland telemetry for output':'Native browser display feedback', events:traceEvents};
  evidence.cpuPercentOneCore=(evidence.after.CPUUsageNSec-evidence.before.CPUUsageNSec)/1e9/evidence.elapsedSeconds*100;
  const a=evidence.samples.flatMap(x=>x.intervals).sort((a,b)=>a-b);
  const mean=a.reduce((a,b)=>a+b,0)/a.length;

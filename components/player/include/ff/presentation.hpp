@@ -42,6 +42,7 @@ class Presentation {
             const ArtworkBlend& blend = {});
   bool events(const std::function<void(const Json&)>& input);
   Bounds bounds(const Json& display) const;
+  int display_fd() const { return feedback_->display_fd(); }
   int width() const { return width_; }
   int height() const { return height_; }
   void pointer(double x, double y) { pointer_x_ = x; pointer_y_ = y; pointer_active_ = SDL_GetTicks64(); }

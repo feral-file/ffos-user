@@ -13,6 +13,7 @@ class PresentationFeedback {
   ~PresentationFeedback();
   void before_swap(uint64_t artwork_serial);
   void poll();
+  int display_fd() const;
   Json metrics() const;
   PresentedFrame latest() const;
  private:
