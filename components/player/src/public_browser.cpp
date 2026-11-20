@@ -57,7 +57,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
       offline_(!p.online() || cache_mode == "isolated" ||
                virtual_cache_source(occurrence_.item.at("source"))),
       cache_socket_(cache_socket) {
-  initial_revision_=occurrence_.display_revision;
+  initial_display_=occurrence_.display;
   resources_ = resources;
   mixed_cache_ = cache_mode == "mixed";
   restart_on_online_ = !p.online() && cache_mode != "isolated" &&
@@ -570,7 +570,7 @@ void PublicBrowser::poll() {
                 ? occurrence_.display_revision
                 : 0;
         frames.captured();
-        if (!loaded_ || frames.count <= load_frame_) ff_browser_view_presented(view_);
+        if (!loaded_ || frames.count <= load_frame_ || !frames.capture.display_revision) ff_browser_view_presented(view_);
       }
     }
     }
@@ -613,6 +613,7 @@ void PublicBrowser::did_present() {
     submissions_.push_back({presentation_.swap_serial(), commit, std::chrono::steady_clock::now()});
 }
 void PublicBrowser::update() {
+  const auto previous_revision=occurrence_.display_revision;
   if (playback_.desired() && playback_.desired()->id == id) {
     occurrence_.display = playback_.desired()->display;
     occurrence_.display_revision = playback_.desired()->display_revision;
@@ -621,7 +622,10 @@ void PublicBrowser::update() {
     occurrence_.display_revision = playback_.visible()->display_revision;
   }
   auto b = presentation_.bounds(occurrence_.display);
-  if(view_)ff_browser_view_resize(view_, b.width, b.height);
+  if(view_){
+    ff_browser_view_resize(view_, b.width, b.height);
+    if(previous_revision!=occurrence_.display_revision)ff_browser_view_redraw(view_);
+  }
 }
 void PublicBrowser::input(const Json& p) {
   if (failed_) return;
