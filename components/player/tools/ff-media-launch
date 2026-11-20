@@ -18,7 +18,7 @@ set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all $network --c
   --ro-bind "$media_runtime/$media_display" "$media_runtime/$media_display" \
   --setenv XDG_RUNTIME_DIR "$media_runtime" --setenv WAYLAND_DISPLAY "$media_display" \
   --setenv SDL_VIDEODRIVER wayland --setenv LD_LIBRARY_PATH /app \
-  --setenv LANG C.UTF-8
+  --setenv MALLOC_ARENA_MAX 2 --setenv HOME /tmp --setenv LANG C.UTF-8
 # Arch's /etc/ssl CA bundle links point outside that mounted directory. Keep
 # the generated trust store visible, read-only; never disable TLS verification.
 if [ -d /etc/ca-certificates ]; then

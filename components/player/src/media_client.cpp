@@ -251,7 +251,7 @@ void MediaClient::poll(bool hold, const Json* stage) {
         loaded_ && surface.frames > 0 && surface.display_revision == render_revision_;
     require(std::chrono::steady_clock::now() - received_ < std::chrono::seconds(5),
             "media_unresponsive", "Media worker stopped responding for 5 seconds");
-    status["backend"] = native_raster(occurrence_.item) ? "native-raster" : "native-media";
+    status["backend"] = native_raster(occurrence_.item) ? "glycin" : "native-media";
     status["workerPid"] = pid_;
     status["importedFrames"] = frames.count;
     status["surfaceWidth"] = surface.width;
@@ -299,6 +299,7 @@ void MediaClient::controls(bool hold, const Json* stage) {
   render_revision_ = occurrence_.display_revision | (stage ? (uint64_t{1} << 63) : 0);
   auto bounds = presentation_.bounds(display);
   Json value = {{"method", "controls"},
+                {"directOutput", !hold && !stage && presentation_.can_present_direct(occurrence_,playback_)},
                 {"paused", hold || playback_.media_paused(id)},
                 {"volume", playback_.state()["settings"].value("volume", 1.0)},
                 {"muted", playback_.state()["settings"].value("muted", false)},

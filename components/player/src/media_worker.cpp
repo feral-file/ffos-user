@@ -1,4 +1,5 @@
 #include "ff/media_ipc.hpp"
+#include "ff/raster.hpp"
 #include "ff/presentation_feedback.hpp"
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
@@ -35,6 +36,7 @@ void command(mpv_handle* player, const std::vector<std::string>& words) {
 class Worker {
  public:
   ~Worker() {
+    raster_.reset();
     feedback_.reset();
     if(render_)mpv_render_context_free(render_);
     if(player_)mpv_terminate_destroy(player_);
@@ -61,6 +63,10 @@ class Worker {
       ff::require(SDL_GL_SetSwapInterval(0)==0,"media_graphics",SDL_GetError());
       feedback_=std::make_unique<ff::PresentationFeedback>(window_,true);
     }
+    if(config.value("nativeRaster",false)){
+      if(cached_fd>=0){cached_fd_=dup(cached_fd);ff::require(cached_fd_>=0,"cache_file","Cannot retain image fd");}
+      raster_=std::make_unique<ff::Raster>(ff::string_field(config,"source",16384),cached_fd_,config.value("httpUserAgent",""));
+    }else{
     player_=mpv_create();ff::require(player_!=nullptr,"media_backend","Cannot allocate libmpv");
     for(auto [key,value]:{std::pair{"config","no"},{"input-default-bindings","no"},
         {"input-vo-keyboard","no"},{"input-terminal","no"},{"terminal","no"},{"osd-level","0"},
@@ -76,10 +82,7 @@ class Worker {
         {"tls-verify","yes"},{"network-timeout","15"},{"load-unsafe-playlists","no"},{"sub-auto","no"},{"audio-file-auto","no"},
         {"demuxer-lavf-o","protocol_whitelist=[http,https,tcp,tls,crypto,data,file,fd]"}})option(player_,key,value);
     if(auto agent=config.value("httpUserAgent","");!agent.empty())option(player_,"user-agent",agent.c_str());
-    raster_=config.value("nativeRaster",false);
-    if(raster_){option(player_,"show-dependent-tracks","yes");option(player_,"demuxer-lavf-probe-info","yes");}
     check(mpv_initialize(player_),"initialize libmpv");
-    if(raster_)check(mpv_hook_add(player_,0,"on_preloaded",50),"register native image hook");
     mpv_request_log_messages(player_,"warn");
     for(auto name:{"time-pos","duration","seekable","hwdec-current","video-codec","frame-drop-count","decoder-frame-drop-count","eof-reached",
                    "video-params/w","video-params/h","video-params/rotate","video-params/pixelformat","current-ao","audio-params/samplerate","audio-params/channel-count","pause","volume","mute"})
@@ -93,6 +96,7 @@ class Worker {
     // Enabling this before render-context creation races libmpv's VO startup.
     // Audio still gets a compositable surface in front of the host matte.
     property(player_,"force-window","yes");
+    }
     if(!direct){
       glGenTextures(1,&texture_);glBindTexture(GL_TEXTURE_2D,texture_);
       glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
@@ -102,6 +106,7 @@ class Worker {
       ff::require(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE,"media_graphics","Media FBO incomplete");
     }
     controls(config);
+    if(raster_){ff::send_media(channel,{{"event","initialized"}});return;}
     auto source=ff::string_field(config,"source",16384);
     ff::require(cached_fd>=0||source.starts_with("https://")||source.starts_with("http://")||source.starts_with("data:"),"media_source","Expected HTTP(S), inline media, or a broker-opened cached file");
     if(cached_fd>=0){cached_fd_=dup(cached_fd);ff::require(cached_fd_>=0,"cache_file","Cannot retain cached media descriptor");source="fd://"+std::to_string(cached_fd_);}
@@ -109,11 +114,18 @@ class Worker {
     ff::send_media(channel,{{"event","initialized"},{"version",mpv_client_api_version()}});
   }
   void controls(const ff::Json& p) {
-    if(p.contains("paused"))property(player_,"pause",p.at("paused").get<bool>()?"yes":"no");
-    if(p.contains("volume"))property(player_,"volume",std::to_string(std::clamp(p.at("volume").get<double>(),0.0,1.0)*100));
-    if(p.contains("muted"))property(player_,"mute",p.at("muted").get<bool>()?"yes":"no");
-    if(p.contains("seekSeconds"))command(player_,{"seek",std::to_string(p.at("seekSeconds").get<double>()),"absolute+exact"});
-    if(p.contains("display")&&p.value("displayRevision",uint64_t(1))!=requested_display_){
+    if(p.contains("directOutput"))want_direct_=p.at("directOutput").get<bool>();
+    if(raster_){
+      paused_=p.value("paused",paused_);
+      if(p.contains("display") && (display_.is_null() || display_revision_!=p.value("displayRevision",uint64_t(1)))){
+        display_=p.at("display");display_revision_=p.value("displayRevision",uint64_t(1));configuration_dirty_=true;
+      }
+    }
+    if(player_ && p.contains("paused"))property(player_,"pause",p.at("paused").get<bool>()?"yes":"no");
+    if(player_ && p.contains("volume"))property(player_,"volume",std::to_string(std::clamp(p.at("volume").get<double>(),0.0,1.0)*100));
+    if(player_ && p.contains("muted"))property(player_,"mute",p.at("muted").get<bool>()?"yes":"no");
+    if(player_ && p.contains("seekSeconds"))command(player_,{"seek",std::to_string(p.at("seekSeconds").get<double>()),"absolute+exact"});
+    if(player_ && p.contains("display")&&p.value("displayRevision",uint64_t(1))!=requested_display_){
       requested_display_=p.value("displayRevision",uint64_t(1));
       auto set=[&](const char* name,const std::string& value){
         ff::require(configuration_tags_.size()<4096,"media_protocol","Too many pending media configurations");
@@ -149,22 +161,18 @@ class Worker {
         else if(method=="presented") {
           auto frame=packet->body.at("sequence").get<uint64_t>();
           ff::require(frame>presented&&frame<=sequence,"media_protocol","Invalid presentation acknowledgement");
-          presented=frame;mpv_render_context_report_swap(render_);
+          presented=frame;if(render_)mpv_render_context_report_swap(render_);
         }
         else if(method=="controls")controls(packet->body);
         else throw ff::Error("media_protocol","Unknown host command");
       }
-      for(int i=0;i<64;++i){
+      for(int i=0;player_ && i<64;++i){
         auto event=mpv_wait_event(player_,0);if(event->event_id==MPV_EVENT_NONE)break;
         if(event->event_id==MPV_EVENT_LOG_MESSAGE){
           auto log=static_cast<mpv_event_log_message*>(event->data);std::string text=log->text;
           for(size_t at=text.find("http");at!=std::string::npos;at=text.find("http",at+4)){auto query=text.find('?',at),end=text.find_first_of(" \t\r\n",at);if(query!=std::string::npos&&(end==std::string::npos||query<end))text.replace(query,(end==std::string::npos?text.size():end)-query,"?<redacted>");}
           if(std::string(log->level)=="error")last_error_=text.substr(0,384);
           std::cerr<<"media "<<log->prefix<<": "<<text.substr(0,512);
-        }
-        if(event->event_id==MPV_EVENT_HOOK){
-          auto hook=static_cast<mpv_event_hook*>(event->data);
-          configure_image_alpha();check(mpv_hook_continue(player_,hook->id),"continue native image load");
         }
         if(event->event_id==MPV_EVENT_PLAYBACK_RESTART)ff::send_media(channel,{{"event","loaded"}});
         if(event->event_id==MPV_EVENT_END_FILE){auto end=static_cast<mpv_event_end_file*>(event->data);
@@ -186,58 +194,62 @@ class Worker {
           display_revision_=requested_display_;configuration_dirty_=true;
         }
       }
+      if(want_direct_ && *want_direct_!=bool(feedback_) && !in_flight){
+        if(*want_direct_){
+          SDL_SetWindowSize(window_,width_,height_);
+          ff::require(SDL_SetWindowFullscreen(window_,SDL_WINDOW_FULLSCREEN_DESKTOP)==0,"media_graphics",SDL_GetError());
+          SDL_ShowWindow(window_);SDL_ShowCursor(SDL_DISABLE);
+          SDL_GL_SetSwapInterval(0);
+          feedback_=std::make_unique<ff::PresentationFeedback>(window_,false);
+          glBindFramebuffer(GL_FRAMEBUFFER,0);
+        }else{
+          feedback_.reset();SDL_HideWindow(window_);
+          glBindFramebuffer(GL_FRAMEBUFFER,fbo_);
+          ff::send_media(channel,{{"event","property"},{"name","presentationPath"},{"value","composited"}});
+        }
+        pending=true;direct_reported_=false;
+      }
       if(feedback_){
         SDL_Event event;
         while(SDL_PollEvent(&event)) if(event.type==SDL_QUIT)return;
         feedback_->poll();
+        if(!direct_reported_ && feedback_->latest().timestamp_ns){
+          ff::send_media(channel,{{"event","property"},{"name","presentationPath"},{"value","cage"}});
+          direct_reported_=true;
+        }
         SDL_GL_GetDrawableSize(window_,&width_,&height_);
       }
       // update() must keep servicing mpv's resource requests even while the
       // exported frame waits for the host. Only the texture write waits.
-      if(render_update.exchange(false))pending |= bool(mpv_render_context_update(render_)&MPV_RENDER_UPDATE_FRAME);
+      if(raster_ && raster_->update(paused_,display_.value("loop",true))){
+        if(!raster_loaded_){ff::send_media(channel,{{"event","loaded"}});raster_loaded_=true;}
+        pending=true;
+      }
+      if(render_ && render_update.exchange(false))pending |= bool(mpv_render_context_update(render_)&MPV_RENDER_UPDATE_FRAME);
       if(!feedback_&&!in_flight&&pending_width_>0&&(pending_width_!=width_||pending_height_!=height_)){
         // Never change storage while the host still owns an exported frame.
         width_=pending_width_;height_=pending_height_;glBindTexture(GL_TEXTURE_2D,texture_);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);pending=true;
       }
-      if((pending||configuration_dirty_)&&!in_flight){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
+      if((pending||configuration_dirty_)&&!in_flight&&(!raster_||raster_loaded_)){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
     }
   }
  private:
-  void configure_image_alpha() {
-    if(!raster_)return;
-    int64_t count=0;
-    check(mpv_get_property(player_,"track-list/count",MPV_FORMAT_INT64,&count),"read image tracks");
-    int64_t color=0,alpha=0;
-    for(int64_t n=0;n<std::min<int64_t>(count,64);++n){
-      auto base="track-list/"+std::to_string(n)+"/";
-      auto read=[&](const char* name){char* text=mpv_get_property_string(player_,(base+name).c_str());std::string value=text?text:"";mpv_free(text);return value;};
-      if(read("type")!="video")continue;
-      int64_t id=0;check(mpv_get_property(player_,(base+"id").c_str(),MPV_FORMAT_INT64,&id),"read image track id");
-      if(read("title")=="Alpha")alpha=id;else if(!color)color=id;
-    }
-    if(color&&alpha){
-      // The AVIF demuxer exposes auxiliary alpha as its own named track. Select it
-      // before decoder/VO initialization; never present the opaque color first.
-      // Software AV1 decoding avoids GPU readback for this image-only merge.
-      check(mpv_set_property_string(player_,"hwdec","no"),"select alpha-image decoder");
-      auto graph="[vid"+std::to_string(color)+"][vid"+std::to_string(alpha)+"]alphamerge[vo]";
-      check(mpv_set_property_string(player_,"lavfi-complex",graph.c_str()),"compose image alpha");
-    }
-    ff::send_media(channel,{{"event","property"},{"name","raster-alpha-merged"},{"value",bool(color&&alpha)}});
-  }
   void draw(uint64_t sequence) {
     // Host composition samples the top row at v=0, matching CEF DMA-BUFs.
     // MPV's additional Y flip would invert video while leaving native UI upright.
-    mpv_opengl_fbo target{static_cast<int>(fbo_),width_,height_,feedback_?0:GL_RGBA8};int flip=feedback_?1:0;
+    if(raster_)raster_->draw(feedback_?0:fbo_,width_,height_,display_,bool(feedback_));
+    else{
+    mpv_opengl_fbo target{static_cast<int>(feedback_?0:fbo_),width_,height_,feedback_?0:GL_RGBA8};int flip=feedback_?1:0;
     mpv_render_param params[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
     check(mpv_render_context_render(render_,params),"render media frame");
+    }
     if(feedback_){
-      // For this probe mpv owns the visible window. There is no exported
+      // In direct mode mpv owns the visible window. There is no exported
       // texture to acknowledge and no native host between the worker and Cage.
       feedback_->before_swap(sequence,sequence);
       SDL_GL_SwapWindow(window_);
-      mpv_render_context_report_swap(render_);
+      if(render_)mpv_render_context_report_swap(render_);
       return;
     }
     glFinish();
@@ -262,7 +274,10 @@ class Worker {
   std::unique_ptr<ff::PresentationFeedback> feedback_;
   SDL_Window* window_=nullptr;SDL_GLContext context_=nullptr;
   mpv_handle* player_=nullptr;mpv_render_context* render_=nullptr;
-  bool raster_=false;
+  std::unique_ptr<ff::Raster> raster_;
+  ff::Json display_;
+  std::optional<bool> want_direct_;
+  bool raster_loaded_=false,paused_=false,direct_reported_=false;
   std::string last_error_;
   int cached_fd_=-1;
   int width_=0,height_=0;GLuint texture_=0,fbo_=0;

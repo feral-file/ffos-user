@@ -44,6 +44,7 @@ class Presentation {
             const ArtworkBlend& blend = {});
   bool events(const std::function<void(const Json&)>& input);
   Bounds bounds(const Json& display) const;
+  bool can_present_direct(const Occurrence& occurrence,const Playback& playback) const;
   int width() const { return width_; }
   int height() const { return height_; }
   void pointer(double x, double y) { pointer_x_ = x; pointer_y_ = y; pointer_active_ = SDL_GetTicks64(); }

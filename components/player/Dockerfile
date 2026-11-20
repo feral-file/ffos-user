@@ -1,7 +1,7 @@
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential cmake ninja-build pkg-config python3 ca-certificates curl \
-    libsqlite3-dev libsdl2-dev libegl-dev libgles-dev libdrm-dev \
+    libglycin-2-dev libsqlite3-dev libsdl2-dev libegl-dev libgles-dev libdrm-dev \
     libcairo2-dev libpango1.0-dev libqrencode-dev libnss3 libatk-bridge2.0-0 \
     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64 libgtk-3-0 \
     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*

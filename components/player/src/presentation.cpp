@@ -264,6 +264,19 @@ void Presentation::swap(const Surface* artwork) {
     last_frame_ = end; last_frame_texture_ = artwork->texture; last_frame_number_ = artwork->frames; last_frame_occurrence_ = label_occurrence_;
   }
 }
+bool Presentation::can_present_direct(const Occurrence& occurrence,const Playback& playback) const {
+  if(!playback.visible() || playback.visible()->id!=occurrence.id ||
+     !playback.desired() || playback.desired()->id!=occurrence.id ||
+     !playback.overlay().is_null() || playback.service_failure() || playback.composition_pending())return false;
+  auto rect=bounds(occurrence.display);
+  if(rect.width!=width_ || rect.height!=height_ ||
+     display_color(occurrence.display.value("background","#000000"))!="#000000")return false;
+  auto now=SDL_GetTicks64();
+  if(pointer_active_ && now-pointer_active_<5000)return false;
+  auto mode=playback.state()["settings"].value("tombstone","timed");
+  return !has_tombstone(occurrence) || mode=="off" ||
+         (mode=="timed" && label_occurrence_==occurrence.id && label_mode_==mode && now-label_started_>=30300);
+}
 bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
                         const Playback& playback, const Surface* backdrop,
                         float backdrop_opacity, const ArtworkBlend& blend) {
