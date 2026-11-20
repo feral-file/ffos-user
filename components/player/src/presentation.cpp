@@ -93,7 +93,12 @@ void Presentation::destroy(Surface& surface) {
     if (!import_read_complete(surface)) glFinish();
     glDeleteSync(static_cast<GLsync>(surface.read_fence));
   }
-  if (surface.copy_fence) glDeleteSync(static_cast<GLsync>(surface.copy_fence));
+  if (surface.copy_fence) {
+    // Teardown can precede the next poll of a non-RGB browser blit. Keep
+    // the scene buffer locked until the copy completes.
+    glFinish();
+    glDeleteSync(static_cast<GLsync>(surface.copy_fence));
+  }
   glDeleteTextures(1, &surface.texture);
   surface = {};
 }

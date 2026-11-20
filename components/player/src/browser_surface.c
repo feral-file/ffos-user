@@ -439,7 +439,7 @@ void ff_browser_view_complete(struct ff_browser_view *v, uint32_t sequence, uint
   struct wlr_output_event_present present = {
       .commit_seq = sequence,
       .presented = timestamp_ns != 0,
-      .when = &when,
+      .when = when,
       .refresh = refresh_ns,
       .flags = flags & ~WLR_OUTPUT_PRESENT_ZERO_COPY,
   };
