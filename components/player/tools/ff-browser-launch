@@ -10,6 +10,14 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # Both features are needed for VA-API in artist documents on FF1 with ANGLE Vulkan.
 # Keep the kernel-reported H.264 dimension limit for software fallback.
 browser_features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks
+wayland=()
+if [ "${4:-}" = cage ]; then
+  exec "$root/ff-cage-client" "$0" "$profile" "$2" "$3" filtered
+elif [ "${4:-}" = filtered ]; then
+  # Only the capability-filtered socket enters the browser namespace.
+  case "$WAYLAND_DISPLAY" in /*) relay="$WAYLAND_DISPLAY";; *) relay="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY";; esac
+  wayland=(--ro-bind "$relay" /display/wayland --setenv WAYLAND_DISPLAY /display/wayland)
+fi
 exec /usr/bin/bwrap --die-with-parent --new-session --unshare-all "${network[@]}" --clearenv \
  --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
  --proc /proc --dev /dev --dev-bind /dev/dri /dev/dri --tmpfs /tmp \
@@ -18,7 +26,7 @@ exec /usr/bin/bwrap --die-with-parent --new-session --unshare-all "${network[@]}
  --ro-bind /etc/fonts /etc/fonts --ro-bind /etc/resolv.conf /etc/resolv.conf --ro-bind /etc/hosts /etc/hosts \
  --ro-bind "$root/engine" /engine --bind "$profile" /profile \
  --setenv LANG C.UTF-8 --setenv WAYLAND_DISPLAY /profile/wayland --setenv AMD_DEBUG nodcc \
- /engine/chrome --ozone-platform=wayland --kiosk --no-first-run --no-default-browser-check \
+ "${wayland[@]}" /engine/chrome --ozone-platform=wayland --kiosk --no-first-run --no-default-browser-check \
  --disable-extensions --disable-background-networking --disable-dev-shm-usage \
  --deny-permission-prompts --test-type=gpu --autoplay-policy=no-user-gesture-required --enable-gpu --enable-unsafe-webgpu --use-angle=vulkan --enable-features="$browser_features" \
  --disable-vulkan-surface --user-data-dir=/profile --remote-debugging-pipe "${debug[@]}" about:blank

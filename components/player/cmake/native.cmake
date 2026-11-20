@@ -2,7 +2,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 add_library(ff_cache_client src/cache_client.cpp)
 target_link_libraries(ff_cache_client PUBLIC ff_core PkgConfig::CURL)
-pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET sdl2 egl glesv2 libdrm pangocairo pangoft2 fontconfig libqrencode wayland-client)
+pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET sdl2 egl glesv2 libdrm pangocairo pangoft2 fontconfig libqrencode wayland-client wayland-egl)
 pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv>=2.6.0)
 pkg_check_modules(GLYCIN REQUIRED IMPORTED_TARGET glycin-2>=2.0.1)
 add_executable(ff-media-worker src/media_worker.cpp src/raster.cpp)
@@ -38,7 +38,12 @@ add_custom_command(OUTPUT presentation-time-client-protocol.h presentation-time-
   COMMAND ${WAYLAND_SCANNER} client-header ${PRESENTATION_XML} presentation-time-client-protocol.h
   COMMAND ${WAYLAND_SCANNER} private-code ${PRESENTATION_XML} presentation-time-protocol.c
   DEPENDS ${PRESENTATION_XML} VERBATIM)
-add_library(ff_presentation_feedback STATIC presentation-time-protocol.c src/presentation_feedback.cpp)
+set(XDG_SHELL_XML "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+add_custom_command(OUTPUT xdg-shell-client-protocol.h xdg-shell-protocol.c
+  COMMAND ${WAYLAND_SCANNER} client-header ${XDG_SHELL_XML} xdg-shell-client-protocol.h
+  COMMAND ${WAYLAND_SCANNER} private-code ${XDG_SHELL_XML} xdg-shell-protocol.c
+  DEPENDS ${XDG_SHELL_XML} VERBATIM)
+add_library(ff_presentation_feedback STATIC xdg-shell-client-protocol.h xdg-shell-protocol.c src/cage_overlay.cpp presentation-time-protocol.c src/presentation_feedback.cpp)
 target_include_directories(ff_presentation_feedback PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(ff_presentation_feedback PRIVATE ff_core PkgConfig::NATIVE)
 target_link_libraries(ff-media-worker PRIVATE ff_presentation_feedback)

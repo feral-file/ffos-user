@@ -4,6 +4,7 @@
 #include "ff/display.hpp"
 #include "ff/surface.hpp"
 #include "ff/frame_clock.hpp"
+#include "ff/cage_overlay.hpp"
 #include "ff/presentation_feedback.hpp"
 #include <SDL.h>
 #include <GLES3/gl3.h>
@@ -41,7 +42,7 @@ class Presentation {
   void destroy(Surface& surface);
   bool draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback,
             const Surface* backdrop = nullptr, float backdrop_opacity = 0,
-            const ArtworkBlend& blend = {});
+            const ArtworkBlend& blend = {}, bool external = false);
   bool events(const std::function<void(const Json&)>& input);
   Bounds bounds(const Json& display) const;
   bool can_present_direct(const Occurrence& occurrence,const Playback& playback) const;
@@ -57,6 +58,7 @@ class Presentation {
   PresentedFrame latest_presented() const { return feedback_->latest(); }
  private:
   std::unique_ptr<PresentationFeedback> feedback_;
+  std::unique_ptr<CageOverlay> browser_overlay_;
   uint64_t frame_serial_ = 0;
   SDL_Window* window_ = nullptr;
   SDL_GLContext context_ = nullptr;

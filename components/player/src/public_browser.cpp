@@ -4,6 +4,7 @@
 #include <linux/input-event-codes.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -71,13 +72,25 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     bundled_ = decoration_ || occurrence_.item.value("mimeType", "").starts_with("model/") ||
                path.ends_with(".glb") || path.ends_with(".gltf");
     bundle_prefix_ = "https://ff-player.internal/" + uuid() + "/";
+    auto bounds = presentation_.bounds(occurrence_.display);
+    // Setup decoration and inset artwork need host composition. Fullscreen
+    // CEF forwards its Wayland buffers straight to Cage through the relay.
+    bool cage=backend_=="cef-views" && !decoration_ && !debugger &&
+              bounds.width==presentation_.width() && bounds.height==presentation_.height() &&
+              std::filesystem::exists(std::filesystem::path(launcher).parent_path()/"ff-cage-client");
+    int feedback_child=-1;
+    if(cage){
+      int pair[2];
+      require(socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0,pair)==0,"browser_spawn","Cannot create Cage feedback socket");
+      feedback_fd_=high_fd(pair[0]);feedback_child=high_fd(pair[1]);
+    }else{
     server_ = ff_browser_server_create();
     require(server_, "browser_compositor", "Cannot initialize private Wayland compositor");
-    auto bounds = presentation_.bounds(occurrence_.display);
     require(ff_browser_server_listen(server_, (profile_ + "/wayland").c_str()) == 0,
             "browser_compositor", "Cannot bind private Wayland socket");
     view_ = ff_browser_view_create(server_, bounds.width, bounds.height, nullptr);
     require(view_, "browser_compositor", "Cannot initialize artwork view");
+    }
     int incoming[2], outgoing[2];
     require(pipe2(incoming, O_CLOEXEC | O_NONBLOCK) == 0, "browser_spawn",
             "Cannot create engine command pipe");
@@ -94,16 +107,18 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, child_read, 3);
     posix_spawn_file_actions_adddup2(&actions, child_write, 4);
+    if(cage)posix_spawn_file_actions_adddup2(&actions,feedback_child,5);
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attr, 0);
     char* args[] = {const_cast<char*>(launcher.c_str()), const_cast<char*>(profile_.c_str()),
                     const_cast<char*>(offline_ ? "offline" : "online"),
-                    const_cast<char*>(debugger ? "debug" : "normal"), nullptr};
+                    const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"), nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
+    if(feedback_child>=0)close(feedback_child);
     close(child_read);
     close(child_write);
     require(rc == 0, "browser_spawn", "Cannot launch public Chromium: " + std::to_string(rc));
@@ -118,6 +133,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
       kill(-pid_, SIGKILL);
       retiring.push_back({pid_, profile_});
     }
+    if (feedback_fd_>=0) close(feedback_fd_);
     if (writer_ >= 0) close(writer_);
     if (reader_ >= 0) close(reader_);
     if (server_) ff_browser_server_destroy(server_);
@@ -131,7 +147,8 @@ PublicBrowser::~PublicBrowser() {
     kill(-pid_, SIGKILL);
     retiring.push_back({pid_, profile_});
   }
-  if (writer_ >= 0) close(writer_);
+  if (feedback_fd_>=0) close(feedback_fd_);
+    if (writer_ >= 0) close(writer_);
   if (reader_ >= 0) close(reader_);
   presentation_.destroy(frames.capture);
   presentation_.destroy(frames.shown);
@@ -284,8 +301,8 @@ void PublicBrowser::message(const Json& m) {
   } else if (method == "Page.lifecycleEvent" && (!bundled_ || decoration_) && session == session_ &&
              p.value("name", "") == "load" && p.value("frameId", "") == main_frame_) {
     loaded_ = true;
-    load_frame_ = frames.count;
-    ff_browser_view_redraw(view_);
+    load_frame_ = direct()?direct_frames_:frames.count;
+    if(view_)ff_browser_view_redraw(view_);
     if (!decoration_) playback_.committed(id);
   } else if (method == "Network.loadingFailed" && session == session_ &&
              p.value("type", "") == "Document" && !p.value("canceled", false))
@@ -318,8 +335,8 @@ bool PublicBrowser::bundled_request(const Json& p, const std::string& session) {
     auto event = path.substr(7);
     if (event == "ready") {
       loaded_ = true;
-      load_frame_ = frames.count;
-      ff_browser_view_redraw(view_);
+      load_frame_ = direct()?direct_frames_:frames.count;
+      if(view_)ff_browser_view_redraw(view_);
       if (!decoration_) playback_.committed(id);
     } else if (event.starts_with("configured/")) {
       auto revision = std::to_string(occurrence_.display_revision);
@@ -449,12 +466,16 @@ void PublicBrowser::poll() {
              reply.session);
       }
     }
+    if(direct()){
+      uint64_t timestamp=0;
+      while(recv(feedback_fd_,&timestamp,sizeof(timestamp),MSG_DONTWAIT)==sizeof(timestamp))++direct_frames_;
+    }
     playback_.media_status(
         id, {{"backend", backend_},
              {"browserPid", pid_},
              {"documentUrl", document_url_},
              {"nestedCompositorGpuPasses", compositor_gpu_passes_},
-             {"exportedFrames", frames.count},
+             {"exportedFrames", frames.count},{"presentedFrames",direct_frames_},{"presentationPath",direct()?"cage":"composited"},
              {"offline", offline_},
              {"cacheHits", cache_hits_},
              {"cacheMisses", cache_misses_},
@@ -462,6 +483,7 @@ void PublicBrowser::poll() {
              {"unsupportedWorkerTargets", unsupported_worker_targets_}});
     require(navigation_error_.empty() || !resolved_native_mime.empty(), "browser_navigation",
             navigation_error_);
+    if(!direct()){
     while (!submissions_.empty()) {
       const auto& frame = submissions_.front();
       const auto sample = presentation_.outcome(frame.host_serial);
@@ -528,6 +550,7 @@ void PublicBrowser::poll() {
         if (!loaded_ || frames.count <= load_frame_) ff_browser_view_presented(view_);
       }
     }
+    }
     int status;
     auto exit = waitpid(pid_, &status, WNOHANG);
     if (exit == pid_) {
@@ -552,6 +575,7 @@ void PublicBrowser::poll() {
   }
 }
 bool PublicBrowser::has_ready_frame() const {
+  if(direct())return !failed_ && resolved_native_mime.empty() && loaded_ && direct_frames_>load_frame_;
   return !failed_ && resolved_native_mime.empty() && loaded_ && frames.count > load_frame_ &&
          frames.latest().display_revision == occurrence_.display_revision;
 }
@@ -574,16 +598,32 @@ void PublicBrowser::update() {
     occurrence_.display_revision = playback_.visible()->display_revision;
   }
   auto b = presentation_.bounds(occurrence_.display);
-  ff_browser_view_resize(view_, b.width, b.height);
+  if(view_)ff_browser_view_resize(view_, b.width, b.height);
 }
 void PublicBrowser::input(const Json& p) {
   if (failed_) return;
   auto kind = p.value("kind", "");
+  if(direct()){
+    if(session_.empty())return;
+    if(kind=="move" || kind=="button" || kind=="wheel"){
+      mouse_x_=p.value("x",mouse_x_);mouse_y_=p.value("y",mouse_y_);
+      Json event={{"x",mouse_x_},{"y",mouse_y_}};
+      if(kind=="move")event["type"]="mouseMoved";
+      if(kind=="wheel"){event["type"]="mouseWheel";event["deltaX"]=p.value("dx",0.);event["deltaY"]=p.value("dy",0.);}
+      if(kind=="button"){
+        event["type"]=p.value("down",false)?"mousePressed":"mouseReleased";
+        auto b=p.value("button",1);event["button"]=b==1?"left":b==2?"middle":"right";
+        event["clickCount"]=p.value("clicks",1);
+      }
+      send("Input.dispatchMouseEvent",event,session_);return;
+    }
+    if(kind=="blur")return;
+  }
   if (kind == "blur") {
     ff_browser_view_blur(view_);
     return;
   }
-  ff_browser_view_modifiers(view_, p.value("shift", false), p.value("control", false),
+  if(view_)ff_browser_view_modifiers(view_, p.value("shift", false), p.value("control", false),
                             p.value("alt", false), p.value("meta", false));
   if (kind == "move" || kind == "button")
     ff_browser_view_pointer(view_, p.value("x", 0), p.value("y", 0));
@@ -601,10 +641,10 @@ void PublicBrowser::input(const Json& p) {
   else if (kind == "key" && !session_.empty()) {
     // Wayland key presses synthesize printable text. The player protocol keeps
     // raw physical keys separate, matching the phone's raw+text sequence.
-    ff_browser_view_focus(view_);
+    if(view_)ff_browser_view_focus(view_);
     send("Input.dispatchKeyEvent", browser_key(p), session_);
   } else if (kind == "text" && !session_.empty()) {
-    ff_browser_view_focus(view_);
+    if(view_)ff_browser_view_focus(view_);
     auto text = p.at("text").get<std::string>();
     if (text == "\n" || text == "\r")
       send("Input.dispatchKeyEvent",

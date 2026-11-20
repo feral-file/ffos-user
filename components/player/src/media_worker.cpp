@@ -211,7 +211,16 @@ class Worker {
       }
       if(feedback_){
         SDL_Event event;
-        while(SDL_PollEvent(&event)) if(event.type==SDL_QUIT)return;
+        bool moved=false;int x=0,y=0;
+        while(SDL_PollEvent(&event)){
+          if(event.type==SDL_QUIT)return;
+          if(event.type==SDL_MOUSEMOTION && (event.motion.xrel || event.motion.yrel)){
+            moved=true;x=event.motion.x;y=event.motion.y;
+          }else if(event.type==SDL_MOUSEBUTTONDOWN || event.type==SDL_MOUSEBUTTONUP){
+            moved=true;x=event.button.x;y=event.button.y;
+          }
+        }
+        if(moved)ff::send_media(channel,{{"event","pointer"},{"x",x},{"y",y}});
         feedback_->poll();
         if(!direct_reported_ && feedback_->latest().timestamp_ns){
           ff::send_media(channel,{{"event","property"},{"name","presentationPath"},{"value","cage"}});
@@ -225,6 +234,7 @@ class Worker {
         if(!raster_loaded_){ff::send_media(channel,{{"event","loaded"}});raster_loaded_=true;}
         pending=true;
       }
+      if(raster_ && raster_->take_ended())ff::send_media(channel,{{"event","ended"}});
       if(render_ && render_update.exchange(false))pending |= bool(mpv_render_context_update(render_)&MPV_RENDER_UPDATE_FRAME);
       if(!feedback_&&!in_flight&&pending_width_>0&&(pending_width_!=width_||pending_height_!=height_)){
         // Never change storage while the host still owns an exported frame.

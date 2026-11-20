@@ -146,7 +146,7 @@ bool MediaClient::fallback_live() {
           "policy_backpressure", "Cannot enqueue live fallback policy");
   return true;
 }
-void MediaClient::poll(bool hold, const Json* stage) {
+void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
   reap_media_workers();
   if (failed_) return;
   try {
@@ -239,19 +239,24 @@ void MediaClient::poll(bool hold, const Json* stage) {
         playback_.ended(id);
       else if (event == "error")
         throw Error("media_backend", string_field(p, "message", 1024));
-      else if (event == "property")
+      else if(event=="pointer"){
+        if(playback_.visible() && playback_.visible()->id==id)
+          presentation_.pointer(std::clamp(p.at("x").get<double>(),0.,double(presentation_.width())),
+                                std::clamp(p.at("y").get<double>(),0.,double(presentation_.height())));
+      }else if (event == "property")
         status[string_field(p, "name", 64)] = p.at("value");
       else
         require(event == "initialized" || event == "heartbeat", "media_protocol",
                 "Unexpected media event");
     }
-    controls(hold, stage);
+    controls(hold, stage,allow_direct);
     const auto& surface = frames.latest();
     ready =
         loaded_ && surface.frames > 0 && surface.display_revision == render_revision_;
     require(std::chrono::steady_clock::now() - received_ < std::chrono::seconds(5),
             "media_unresponsive", "Media worker stopped responding for 5 seconds");
-    status["backend"] = native_raster(occurrence_.item) ? "glycin" : "native-media";
+    if(native_raster(occurrence_.item))status["decoder"]="glycin";
+    status["backend"] = native_raster(occurrence_.item) ? "native-raster" : "native-media";
     status["workerPid"] = pid_;
     status["importedFrames"] = frames.count;
     status["surfaceWidth"] = surface.width;
@@ -282,7 +287,7 @@ void MediaClient::fail(const std::string& message) {
   }
   playback_.failed(id, message);
 }
-void MediaClient::controls(bool hold, const Json* stage) {
+void MediaClient::controls(bool hold, const Json* stage,bool allow_direct) {
   if (playback_.desired() && playback_.desired()->id == id) {
     occurrence_.display = playback_.desired()->display;
     occurrence_.display_revision = playback_.desired()->display_revision;
@@ -299,7 +304,7 @@ void MediaClient::controls(bool hold, const Json* stage) {
   render_revision_ = occurrence_.display_revision | (stage ? (uint64_t{1} << 63) : 0);
   auto bounds = presentation_.bounds(display);
   Json value = {{"method", "controls"},
-                {"directOutput", !hold && !stage && presentation_.can_present_direct(occurrence_,playback_)},
+                {"directOutput", allow_direct && !hold && !stage && presentation_.can_present_direct(occurrence_,playback_)},
                 {"paused", hold || playback_.media_paused(id)},
                 {"volume", playback_.state()["settings"].value("volume", 1.0)},
                 {"muted", playback_.state()["settings"].value("muted", false)},

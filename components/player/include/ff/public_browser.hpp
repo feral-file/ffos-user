@@ -24,6 +24,7 @@ class PublicBrowser {
   void update();
   void did_present();
   bool has_ready_frame() const;
+  bool direct() const { return feedback_fd_>=0; }
   bool needs_live_restart() const {
     return restart_on_online_ && playback_.online() && cache_misses_ > 0;
   }
@@ -42,6 +43,9 @@ class PublicBrowser {
   ff_browser_server* server_ = nullptr;
   ff_browser_view* view_ = nullptr;
   pid_t pid_ = -1;
+  int feedback_fd_=-1;
+  uint64_t direct_frames_=0;
+  double mouse_x_=0,mouse_y_=0;
   int writer_ = -1, reader_ = -1;
   std::string buffer_, session_, profile_, main_frame_, navigation_url_, document_url_, navigation_error_;
   bool initial_response_seen_ = false, decoration_ = false;

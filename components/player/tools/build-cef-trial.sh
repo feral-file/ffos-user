@@ -39,6 +39,8 @@ chmod 4755 "$sandbox"
 # bwrap exposes only engine/ to artwork. Hard links let both the offscreen
 # host and the windowed worker use the exact same CEF binaries on disk.
 root="$stage/usr/lib/ff-player-native"
+test -x build-cage-client/target/release/ff-cage-client || sh tools/build-cage-client.sh
+install -m755 build-cage-client/target/release/ff-cage-client "$root/ff-cage-client"
 mkdir "$root/engine"
 for src in "$trial/sdk/Release/"* "$trial/sdk/Resources/"*; do
   name=$(basename "$src")

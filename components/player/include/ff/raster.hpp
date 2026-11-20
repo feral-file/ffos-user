@@ -13,6 +13,7 @@ class Raster {
   Raster(const std::string& source, int fd, const std::string& agent);
   ~Raster();
   bool update(bool paused, bool loop);
+  bool take_ended();
   void draw(GLuint target, int width, int height, const Json& display, bool direct);
  private:
   struct Impl;

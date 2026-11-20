@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <future>
+#include <utility>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -69,6 +70,7 @@ struct Raster::Impl {
   Object<GlyImage> image=take<GlyImage>(nullptr);
   GLuint texture=0, framebuffer=0;
   int width=0,height=0;
+  bool exhausted=false,ended=false;
   Clock::time_point next=Clock::time_point::max();
 };
 Raster::Raster(const std::string& source,int fd,const std::string& agent):impl_(std::make_unique<Impl>()) {
@@ -83,14 +85,15 @@ bool Raster::update(bool paused,bool loop) {
   if(!s.image){
     if(s.loading.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return false;
     s.image=s.loading.get();
-  }else if(paused || Clock::now()<s.next)return false;
+  }else if(paused || (Clock::now()<s.next && !(loop && s.exhausted)))return false;
+  s.exhausted=false;
   auto request=take(gly_frame_request_new());
   gly_frame_request_set_loop_animation(request.get(),loop);
   GError* err=nullptr;
   auto frame=take(gly_image_get_specific_frame(s.image.get(),request.get(),&err));
   if(!frame){
     if(err && err->domain==GLY_LOADER_ERROR && err->code==GLY_LOADER_ERROR_NO_MORE_FRAMES){
-      g_clear_error(&err);s.next=Clock::time_point::max();return false;
+      g_clear_error(&err);s.exhausted=true;s.ended=true;s.next=Clock::time_point::max();return false;
     }
     std::string reason=err?err->message:"Cannot decode image frame";
     g_clear_error(&err);throw Error("image_decode",reason);
@@ -112,6 +115,7 @@ bool Raster::update(bool paused,bool loop) {
   require(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE,"image_graphics","Invalid image framebuffer");
   return true;
 }
+bool Raster::take_ended(){return std::exchange(impl_->ended,false);}
 void Raster::draw(GLuint target,int width,int height,const Json& display,bool direct){
   auto& s=*impl_;
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER,target);

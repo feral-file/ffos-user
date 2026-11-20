@@ -54,6 +54,7 @@ Presentation::Presentation(bool diagnostic_cpu, bool timing_samples, const std::
   std::cerr << "presentation driver=" << SDL_GetCurrentVideoDriver() << " renderer=" << glGetString(GL_RENDERER) << " size=" << width_ << 'x' << height_ << '\n';
 }
 Presentation::~Presentation() {
+  browser_overlay_.reset();
   feedback_.reset();
   activate();
   glDeleteTextures(1, &ui_);
@@ -273,13 +274,19 @@ bool Presentation::can_present_direct(const Occurrence& occurrence,const Playbac
      display_color(occurrence.display.value("background","#000000"))!="#000000")return false;
   auto now=SDL_GetTicks64();
   if(pointer_active_ && now-pointer_active_<5000)return false;
+  if(!playback.runtime_notice().is_null() || !playback.presentation_failure().is_null() ||
+     !playback.storage_error().empty() || playback.thermal_hold())return false;
+  auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
+  auto update=playback.state().value("updateOutcome",Json(nullptr));
+  if((schedule.is_object() && schedule.value("outcome","")=="failed") ||
+     (update.is_object() && update.value("contentBlocked",false)))return false;
   auto mode=playback.state()["settings"].value("tombstone","timed");
   return !has_tombstone(occurrence) || mode=="off" ||
          (mode=="timed" && label_occurrence_==occurrence.id && label_mode_==mode && now-label_started_>=30300);
 }
 bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
                         const Playback& playback, const Surface* backdrop,
-                        float backdrop_opacity, const ArtworkBlend& blend) {
+                        float backdrop_opacity, const ArtworkBlend& blend,bool external) {
   const auto now = std::chrono::steady_clock::now();
   const auto ticks = SDL_GetTicks64();
   const bool pointer_visible = pointer_active_ && ticks-pointer_active_<5000;
@@ -291,6 +298,13 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   }
   const auto label_age=ticks-label_started_;
   const bool label_visible = has_title && blend.opacity>0 && (mode=="on" || (mode=="timed" && label_age<30300));
+  bool overlay_panel=!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
+                     !playback.presentation_failure().is_null() || !playback.storage_error().empty() ||
+                     !playback.runtime_notice().is_null();
+  if(external && !pointer_visible && !label_visible && !overlay_panel){
+    browser_overlay_.reset();draw_key_.reset();return false;
+  }
+  if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
   const int label_phase=label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
     occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,
@@ -302,12 +316,17 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   if (draw_key_ == key || !draw_clock_.due(now)) return false;
   draw_key_ = key;
   activate();
+  if(external){
+    if(!browser_overlay_)browser_overlay_=std::make_unique<CageOverlay>(window_,width_,height_);
+    browser_overlay_->begin();
+  }
   const auto* stage = blend.stage ? blend.stage : (occurrence ? &occurrence->display : nullptr);
   auto background=display_color(stage?stage->value("background","#000000"):"#000000");
   unsigned rgb=0;
   if(background.size()==7&&background[0]=='#'&&background.find_first_not_of("0123456789abcdefABCDEF",1)==std::string::npos)
     rgb=std::stoul(background.substr(1),nullptr,16);
   glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,width_,height_);glClearColor(((rgb>>16)&255)/255.f,((rgb>>8)&255)/255.f,(rgb&255)/255.f,1);glClear(GL_COLOR_BUFFER_BIT);
+  if(external){glClearColor(0,0,0,0);glClear(GL_COLOR_BUFFER_BIT);}
   // Device setup can explicitly own the screen while playback sleeps. In its
   // absence sleep is black, including recent cursor and retained error UI.
   if(playback.state()["sleeping"]==true&&playback.overlay().is_null()){
@@ -337,7 +356,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     ui("Scheduled playlist could not start\n"+outcome["error"].value("message","Unknown scheduling failure"),"",false);
   else if (auto outcome=playback.state().value("updateOutcome",Json(nullptr));outcome.is_object()&&outcome.value("contentBlocked",false)&&(!playback.desired()||outcome.value("outcome","")=="failed"))
     ui("Updated playlist is blocked\nChange content preferences or choose another playlist","",!artwork);
-  else if (!artwork && playback.state()["sleeping"] == false) ui(playback.desired() ? "Loading artwork" : "Feral File\nReady for artwork","",true);
+  else if (!external && !artwork && playback.state()["sleeping"] == false) ui(playback.desired() ? "Loading artwork" : "Feral File\nReady for artwork","",true);
   else if((!artwork || playback.online()) && !playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
   else if (occurrence && label_visible) {
     auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
@@ -356,7 +375,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     }
   }
   if (pointer_visible && overlay.is_null()) draw_pointer();
-  swap(blend.opacity>0?artwork:nullptr);return true;
+  if(external)browser_overlay_->submit();else swap(blend.opacity>0?artwork:nullptr);return true;
 }
 bool Presentation::events(const std::function<void(const Json&)>& input) {
   activate();

@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
       if (playback.visible() && !stage_fading && !playback.composition_pending()) {
         auto bounds = presentation.bounds(playback.visible()->display);
         auto it = clients.find(playback.visible()->id);
-        if (it == clients.end() || (it->second->frames.shown.width == bounds.width &&
+        if (it == clients.end() || it->second->direct() || (it->second->frames.shown.width == bounds.width &&
                                     it->second->frames.shown.height == bounds.height))
           target = playback.visible()->id;
         geometry.left = bounds.x;
@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
         const auto* stage = stage_requested && id == transition->incoming
                                 ? &transition->outgoing_display
                                 : nullptr;
-        client->poll(hold, stage);
+        client->poll(hold, stage,!transition);
       }
       // The outgoing renderer can fail during polling. Its staged successor
       // must wait for a normal frame in that case rather than reuse the matte.
@@ -297,11 +297,22 @@ int main(int argc, char** argv) {
         transition.reset();
         stage_fading = false;
       }
+      // A direct browser's output is admitted by Cage's presentation event.
+      // The host never manufactures a texture or a scanout acknowledgement.
+      if(auto desired=playback.desired();desired && desired->stage!="failed"){
+        auto it=clients.find(desired->id);
+        if(it!=clients.end() && it->second->direct() && it->second->has_ready_frame() &&
+           playback.overlay().is_null() && !playback.service_failure()){
+          playback.frame_ready(desired->id);
+          playback.presented(desired->id);
+          playback.composed(desired->id,desired->display_revision);
+        }
+      }
       ff::Surface* surface = nullptr;
       std::string commit;
       if (auto desired = playback.desired(); desired) {
         auto it = clients.find(desired->id);
-        if (it != clients.end() && it->second->has_ready_frame() && desired->stage != "failed") {
+        if (it != clients.end() && !it->second->direct() && it->second->has_ready_frame() && desired->stage != "failed") {
           surface = &it->second->frames.latest();
           commit = desired->id;
         }
@@ -316,7 +327,7 @@ int main(int argc, char** argv) {
       }
       if (!surface && playback.visible()) {
         auto it = clients.find(playback.visible()->id);
-        if (it != clients.end()) surface = &it->second->frames.latest();
+        if (it != clients.end() && !it->second->direct()) surface = &it->second->frames.latest();
       }
       if (!surface && playback.visible()) {
         auto it = media.find(playback.visible()->id);
@@ -426,7 +437,8 @@ int main(int argc, char** argv) {
           it != clients.end() && it->second->has_ready_frame() && !it->second->failed())
         backdrop = &it->second->frames.latest();
       const bool submitted =
-          presentation.draw(surface, drawing, playback, backdrop, backdrop_opacity, blend);
+          presentation.draw(surface, drawing, playback, backdrop, backdrop_opacity, blend,
+                            drawing && clients.contains(drawing->id) && clients.at(drawing->id)->direct());
       if (submitted && !commit.empty() && configuration_ready && unobscured && blend.opacity > 0)
         playback.presented(commit);
       if (submitted && drawing && configuration_ready && unobscured && blend.opacity > 0) {
@@ -439,7 +451,7 @@ int main(int argc, char** argv) {
         }
       }
       if (submitted && drawing && configuration_ready && blend.opacity > 0) {
-        if (auto it = clients.find(drawing->id); it != clients.end()) it->second->did_present();
+        if (auto it = clients.find(drawing->id); it != clients.end() && !it->second->direct()) it->second->did_present();
         if (auto it = media.find(drawing->id); it != media.end()) it->second->did_present();
       }
       if (submitted && backdrop) {
