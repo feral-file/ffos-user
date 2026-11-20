@@ -91,7 +91,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
       };
       auto input=[&](const ff::Json& event){
         sync_input();input_state.dispatch(event);
-        if(event.value("kind","")=="move"||event.value("kind","")=="button")presentation.pointer(input_state.x(),input_state.y());
+        if(event.value("kind","")=="move"||event.value("kind","")=="button")presentation.pointer(input_state.x(), input_state.y(), input_state.buttons() != 0);
       };
       playback.set_input_handler(input);
       playback.set_seek_handler([&](const std::string& id,double seconds){

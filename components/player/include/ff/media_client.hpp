@@ -21,6 +21,7 @@ class MediaClient {
   void seek(double seconds);
   void did_present();
   std::optional<Json> pointer_motion;
+  bool pointer_clicked = false;
   FramePair frames;
   bool ready = false;
   Json status = Json::object();

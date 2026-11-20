@@ -240,8 +240,10 @@ void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
       else if (event == "error")
         throw Error("media_backend", string_field(p, "message", 1024));
       else if(event=="pointer"){
-        if(playback_.visible() && playback_.visible()->id==id)
+        if(playback_.visible() && playback_.visible()->id==id) {
           pointer_motion=Json{{"kind","move"},{"x",p.at("x")},{"y",p.at("y")}};
+          pointer_clicked |= p.value("clicked",false);
+        }
       }else if (event == "property")
         status[string_field(p, "name", 64)] = p.at("value");
       else

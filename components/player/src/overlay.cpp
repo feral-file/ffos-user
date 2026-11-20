@@ -39,44 +39,96 @@ void validate_overlay(const Json& p) {
   if(state=="softap_qr")require(f.contains("ssid")&&!f["ssid"].get_ref<const std::string&>().empty()&&f["ssid"].get_ref<const std::string&>().size()<=128,"invalid_params","SoftAP SSID is required");
   if(state=="claim_qr")require(f.contains("url")&&http_url(f["url"].get<std::string>()),"invalid_params","Claim QR requires an HTTP(S) URL");
 }
-OverlayPanel overlay_panel(const Json& p) {
-  const auto f=p.value("fields",Json::object()); auto state=p.value("state","");
-  auto reason=trim(f.value("reason","")); OverlayPanel panel;
-  if(p.value("owner","")!="setup") {
-    panel.text=f.value("title",state)+"\n"+reason;
-    for(auto key:{"pairingCode","browserName"})if(f.contains(key))panel.text+="\n"+f[key].get<std::string>();
-    panel.qr=f.value("url","");return panel;
+namespace {
+// Only these escaped values may enter the trusted Pango template markup.
+std::string markup_text(const std::string& value) {
+  std::string result;
+  for (char c : value) {
+    if (c == '&') result += "&amp;";
+    else if (c == '<') result += "&lt;";
+    else if (c == '>') result += "&gt;";
+    else result += c;
   }
-  if(state=="softap_qr") {
-    auto ssid=f.value("ssid",""),password=f.value("password",""),url=trim(f.value("portal_url",""));
-    bool attached=f.value("client_attached",false)&&http_url(url);
-    if(attached){panel.text="Finish setup on your phone\nNothing opened? Scan the code, or turn mobile data/VPN off and open "+url;panel.qr=url;}
-    else {
-      panel.text="Scan the QR code, then follow your phone's prompt to connect";
-      if(!reason.empty())panel.text+="\n"+reason;
-      panel.text+="\nAfter you join, wait about 10 seconds. If this code changes, scan it again.\nNothing opened? Open Wi-Fi Settings.";
-      panel.qr="WIFI:T:"+std::string(password.empty()?"nopass":"WPA")+";S:"+wifi_escape(ssid)+";";
-      if(!password.empty())panel.qr+="P:"+wifi_escape(password)+";";
-      panel.qr+=";";
+  return result;
+}
+std::string bold(const std::string& value) { return "<b>" + markup_text(value) + "</b>"; }
+}
+
+OverlayPanel overlay_panel(const Json& p) {
+  using enum PanelStyle;
+  OverlayPanel panel;
+  const auto f = p.value("fields", Json::object());
+  const auto state = p.value("state", "");
+  const auto owner = p.value("owner", "");
+  const auto reason = markup_text(trim(f.value("reason", "")));
+  auto& lines = panel.before_qr;
+
+  if (owner == "pairing") {
+    auto browser = trim(f.value("browserName", ""));
+    if (browser.empty()) browser = "the browser";
+    if (state == "pairing_code") {
+      lines = {{title, "Pairing code"}, {code, markup_text(f.value("pairingCode", ""))},
+               {subtitle, "Enter it on the website that wants to play art on this Art Computer."}};
+    } else if (state == "creating_token") {
+      lines = {{title, "Connecting " + markup_text(browser) + " to this Art Computer…"}};
+    } else {
+      if (browser.front() >= 'a' && browser.front() <= 'z') browser.front() -= 'a' - 'A';
+      lines = {{title, markup_text(browser) + " wants to play art on this Art Computer."},
+               {subtitle, "Open the Feral File app, go to Settings &gt; Art Computer, and approve the request."}};
     }
-    panel.text+="\nWi-Fi: "+ssid;
-    if(!password.empty())panel.text+="  Password: "+password;
-    panel.text+="\nKeep connected.";
-    if(!attached&&!url.empty())panel.text+=" Still stuck? Turn mobile data/VPN off and open "+url;
-  } else if(state=="claim_qr") {
-    auto name=trim(f.value("device_name",""));if(name.empty())name="this Art Computer";
-    panel.text="Pair with the Feral File app\nOpen the app on a phone on the same Wi-Fi and look for "+name+".\nOr scan this code.";panel.qr=f.value("url","");
-  } else if(state=="scanning")panel.text="Looking for Wi-Fi networks\nThe setup screen will appear in a moment.";
-  else if(state=="joining")panel.text="Connecting to Wi-Fi";
-  else if(state=="finalizing")panel.text="Wi-Fi connected\nGetting your Art Computer ready. This can take a minute.";
-  else if(state=="connecting")panel.text="Connecting to the network"+(reason.empty()?"":"\n"+reason);
-  else if(state=="join_failed")panel.text="Couldn't connect to Wi-Fi\n"+(reason.empty()?"Please try again.":reason);
-  else if(state=="setup_error")panel.text="Setup needs attention\n"+(reason.empty()?"The Art Computer ran into a problem with setup mode. It will keep trying automatically.":reason);
-  else if(state=="updating") {
-    panel.text="Updating software";
-    if(f.contains("progress"))panel.text+="\n"+std::to_string(static_cast<int>(std::round(std::clamp(f["progress"].get<double>(),0.0,100.0))))+"%";
-    panel.text+="\nDon't unplug it.";
-  } else if(state=="factory_reset")panel.text="Resetting to factory settings\nDon't unplug it.";
+  } else if (owner != "setup") {
+    lines = {{title, markup_text(f.value("title", state))}, {subtitle, reason}};
+    panel.qr = f.value("url", "");
+  } else if (state == "softap_qr") {
+    const auto ssid = f.value("ssid", ""), password = f.value("password", "");
+    const auto url = trim(f.value("portal_url", ""));
+    if (f.value("client_attached", false) && http_url(url)) {
+      lines = {{title, "Finish setup on your phone"}};
+      panel.qr = url;
+      panel.after_qr = {{compact, "Nothing opened? Scan the code, or mobile data/VPN off → " + bold(url) +
+          "\nWi-Fi " + bold(ssid) + (password.empty() ? "" : " · Password " + bold(password)) + " · Keep connected"}};
+    } else {
+      lines = {{title, "Scan the QR code, then follow your phone's prompt to connect"}};
+      if (!reason.empty()) lines.push_back({compact, reason});
+      panel.qr = "WIFI:T:" + std::string(password.empty() ? "nopass" : "WPA") + ";S:" + wifi_escape(ssid) + ";";
+      if (!password.empty()) panel.qr += "P:" + wifi_escape(password) + ";";
+      panel.qr += ";";
+      panel.after_qr = {{compact, "After you join, wait about 10 seconds: if this code changes, scan it again"
+          "\nNothing opened? Wi-Fi Settings → " + bold(ssid) + "\n" +
+          (password.empty() ? "" : "Password " + bold(password) + " · ") + "Keep connected" +
+          (url.empty() ? "" : "\nStill stuck? Mobile data/VPN off → " + bold(url))}};
+    }
+  } else if (state == "claim_qr") {
+    const auto name = trim(f.value("device_name", ""));
+    panel.qr = f.value("url", "");
+    lines = {{title, "Pair with the Feral File app"},
+             {subtitle, "Connect your phone to the same Wi-Fi as this Art Computer."},
+             {step, "Then open the app and look for " + (name.empty() ? "this Art Computer" : bold(name)) +
+                    (panel.qr.empty() ? "." : ", or scan this code.")}};
+    if (!panel.qr.empty())
+      panel.after_qr = {{note, "Keep this code private: it can be used to pair with this Art Computer."}};
+  } else if (state == "scanning") {
+    lines = {{title, "Looking for Wi-Fi networks"}, {subtitle, "The setup screen will appear in a moment."}};
+  } else if (state == "joining") {
+    lines = {{title, "Connecting to Wi-Fi"}};
+  } else if (state == "finalizing") {
+    lines = {{title, "Wi-Fi connected"}, {subtitle, "Getting your Art Computer ready. This can take a minute."}};
+  } else if (state == "connecting") {
+    lines = {{title, "Connecting to the network"}};
+    if (!reason.empty()) lines.push_back({subtitle, reason});
+  } else if (state == "join_failed") {
+    lines = {{title, "Couldn't connect to Wi-Fi"}, {subtitle, reason.empty() ? "Please try again." : reason}};
+  } else if (state == "setup_error") {
+    lines = {{title, "Setup needs attention"},
+             {subtitle, reason.empty() ? "The Art Computer ran into a problem with setup mode. It will keep trying automatically." : reason}};
+  } else if (state == "updating" || state == "factory_reset") {
+    lines = {{title, state == "updating" ? "Updating software" : "Resetting to factory settings"}};
+    if (state == "updating" && f.contains("progress")) {
+      const int percent = std::round(std::clamp(f["progress"].get<double>(), 0.0, 100.0));
+      lines.push_back({subtitle, std::to_string(percent) + "%"});
+    }
+    lines.push_back({subtitle, "Don't unplug it."});
+  }
   return panel;
 }
 }

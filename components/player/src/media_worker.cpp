@@ -211,7 +211,7 @@ class Worker {
       }
       if(feedback_){
         SDL_Event event;
-        bool moved=false;int x=0,y=0;
+        bool moved=false, clicked=false;int x=0,y=0;
         while(SDL_PollEvent(&event)){
           if(event.type==SDL_QUIT)return;
           if(event.type==SDL_WINDOWEVENT &&
@@ -222,9 +222,10 @@ class Worker {
             moved=true;x=event.motion.x;y=event.motion.y;
           }else if(event.type==SDL_MOUSEBUTTONDOWN || event.type==SDL_MOUSEBUTTONUP){
             moved=true;x=event.button.x;y=event.button.y;
+            clicked |= event.type==SDL_MOUSEBUTTONDOWN;
           }
         }
-        if(moved)ff::send_media(channel,{{"event","pointer"},{"x",x},{"y",y}});
+        if(moved)ff::send_media(channel,{{"event","pointer"},{"x",x},{"y",y},{"clicked",clicked}});
         feedback_->poll();
         if(!direct_reported_ && feedback_->latest().timestamp_ns){
           ff::send_media(channel,{{"event","property"},{"name","presentationPath"},{"value","cage"}});

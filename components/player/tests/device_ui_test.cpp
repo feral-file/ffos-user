@@ -39,6 +39,14 @@ int main(int argc,char** argv){
     check(landscape.width==portrait.width&&landscape.height==portrait.height,"Rotation inflated label dimensions");
     check(landscape.width<960&&landscape.timer_width>0&&landscape.timer_height==2,"Tombstone width/timer geometry");
     auto always=ff::render_tombstone(item,1920,1080,false);check(always.timer_width==0&&always.height<landscape.height,"Always-on label must omit countdown/gap");
+    item.playlist_title="Another exhibition";
+    check(ff::render_tombstone(item,1920,1080,true).rgba==landscape.rgba,"A shipping tombstone has no separate exhibition line");
+    item.item["resolvedManifest"]={{"metadata",{{"title",""},{"artists",ff::Json::array()}}}};
+    item.item["inlineManifest"]={{"metadata",{{"title","Transparent Grit"}}}};
+    check(ff::has_tombstone(item)&&ff::render_tombstone(item,1920,1080,true).rgba==landscape.rgba,
+          "Empty fetched metadata must fall through to a usable inline label and legacy artist");
+    item.item.erase("resolvedManifest");
+    item.item.erase("inlineManifest");
     auto notice=ff::render_message("Playback state could not be saved",1920,1080,false);
     check(notice.width<960&&notice.height<200&&notice.rgba[3]==255,"Nonfatal errors must remain compact notices over the retained artwork");
     item.item["title"]="";check(ff::render_tombstone(item,1920,1080,true).rgba.empty(),"Missing title must omit label");

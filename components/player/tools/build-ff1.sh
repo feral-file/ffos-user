@@ -1,11 +1,10 @@
 #!/bin/sh
-# Run in the Linux player toolchain image. Build the FF1 trial separately from
-# the shipping public engine so each artifact has an unambiguous runtime.
+# Build the deployable CEF, glycin and libmpv runtime in the Linux toolchain.
 set -eu
-trial="$PWD/build-cef-trial"
+trial="$PWD/build-ff1"
 mkdir -p "$trial/sdk"
 archive="$trial/cef.tar.xz"
-pin=maintenance/cef-trial.json
+pin=maintenance/cef-ff1.json
 url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$pin")
 digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$pin")
 curl --fail --location --retry 3 -o "$archive" "$url"
@@ -39,11 +38,12 @@ chmod 4755 "$sandbox"
 # bwrap exposes only engine/ to artwork. Hard links let both the offscreen
 # host and the windowed worker use the exact same CEF binaries on disk.
 root="$stage/usr/lib/ff-player-native"
-test -x build-cage-client/target/release/ff-cage-client || sh tools/build-cage-client.sh
+sh tools/build-cage-client.sh
 install -m755 build-cage-client/target/release/ff-cage-client "$root/ff-cage-client"
 for license in LICENSE-MIT LICENSE-APACHE; do
-  install -Dm644 "build-cage-client/wl-proxy/$license" "$stage/usr/share/licenses/ff-player-native/wl-proxy/$license"
+  install -Dm644 "build-cage-client/licenses/$license" "$stage/usr/share/licenses/ff-player-native/wl-proxy/$license"
 done
+install -m644 maintenance/ffos-worker-packages.lock "$stage/usr/share/ff-player-native/"
 mkdir "$root/engine"
 for src in "$trial/sdk/Release/"* "$trial/sdk/Resources/"*; do
   name=$(basename "$src")
@@ -67,3 +67,4 @@ PYTHON
 # Archive only the install tree. mktemp makes the staging root mode 0700,
 # which tar would otherwise apply to the installation prefix.
 tar -czf "$trial/ff-player-cef-linux.tar.gz" -C "$stage" ./usr
+(cd "$trial" && sha256sum ff-player-cef-linux.tar.gz > SHA256SUMS)

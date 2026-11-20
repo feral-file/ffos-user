@@ -13,7 +13,7 @@ int main(){
   ff::Store store((directory/"state.sqlite").string());ff::Playback p(store);
   for(auto state:{"scanning","joining","finalizing","connecting","join_failed","setup_error","updating","factory_reset"}){
    auto request=setup(state);p.command("overlay.set",request);
-   check(!ff::overlay_panel(request).text.empty(),"Every visible setup state needs native copy");
+   check(!ff::overlay_panel(request).before_qr.empty(),"Every visible setup state needs native copy");
   }
   auto wifi=setup("softap_qr",{{"ssid","FF1: test;"},{"password","p\\;\""},{"portal_url","http://10.42.0.1/"}});
   p.command("overlay.set",wifi);
@@ -35,7 +35,16 @@ int main(){
   p.command("overlay.set",setup("hidden"));check(p.overlay()["owner"]=="pairing","Setup hide cannot erase another owner");
   p.command("overlay.set",setup("ready"));check(p.overlay()["owner"]=="pairing","Setup ready cannot erase another owner");
   auto long_reason=setup("connecting",{{"reason","  checking & retrying  "}});
-  check(ff::overlay_panel(long_reason).text=="Connecting to the network\nchecking & retrying","Prose must stay plain text, neutral and trimmed");
+  auto connecting=ff::overlay_panel(long_reason);
+  check(connecting.before_qr.size()==2&&connecting.before_qr[1].markup=="checking &amp; retrying","External prose must stay escaped and trimmed");
+  wifi["fields"]["reason"]="  Try <again>  ";
+  auto join=ff::overlay_panel(wifi);
+  check(join.before_qr.size()==2&&join.before_qr[1].markup=="Try &lt;again&gt;","Join reason must appear above the QR");
+  check(join.after_qr.size()==1&&join.after_qr.front().markup.find("Wi-Fi Settings → <b>FF1: test;</b>")!=std::string::npos,"Join recovery must emphasize SSID below the QR");
+  auto approval=ff::overlay_panel({{"owner","pairing"},{"state","approval"},{"fields",{{"browserName","   "}}}});
+  check(approval.before_qr.front().markup=="The browser wants to play art on this Art Computer.","Fallback browser label opens the sentence");
+  auto updating=ff::overlay_panel(setup("updating",{{"progress",89.9}}));
+  check(updating.before_qr.size()==3&&updating.before_qr[1].markup=="90%"&&updating.before_qr[2].markup=="Don't unplug it.","Percent and power warning each get a subtitle gap");
   std::filesystem::remove_all(directory);std::cout<<"Native setup panel, QR and ownership tests passed\n";return 0;
  }catch(const std::exception& e){std::filesystem::remove_all(directory);std::cerr<<e.what()<<'\n';return 1;}
 }

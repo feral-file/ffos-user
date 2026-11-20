@@ -12,10 +12,47 @@
 
 namespace ff {
 namespace {
-Json label_metadata(const Occurrence& o) {
-  for(auto key:{"resolvedManifest","inlineManifest"})
-    if(o.item.contains(key)&&o.item[key].contains("metadata"))return o.item[key]["metadata"];
-  return Json::object();
+const std::string* text_field(const Json& data, const char* key) {
+  auto it = data.find(key);
+  if (it == data.end() || !it->is_string()) return nullptr;
+  const auto& value = it->get_ref<const std::string&>();
+  return value.empty() ? nullptr : &value;
+}
+const std::string* artist_name(const Json& person) {
+  // The native playlist contract also accepts legacy string-form artists.
+  if (!person.is_string()) return text_field(person, "name");
+  const auto& value = person.get_ref<const std::string&>();
+  return value.empty() ? nullptr : &value;
+}
+struct Label {
+  const std::string* title = nullptr;
+  const Json* artists = nullptr;
+};
+Label metadata_label(const Json& data) {
+  Label label{text_field(data, "title")};
+  auto artists = data.find("artists");
+  if (artists != data.end() && artists->is_array() &&
+      std::any_of(artists->begin(), artists->end(), artist_name))
+    label.artists = &*artists;
+  return label;
+}
+Label tombstone_label(const Occurrence& o) {
+  Label label;
+  // The first manifest with usable label data owns both fields. Only the
+  // legacy inline metadata falls through per field, as on the shipping wall.
+  for (auto key : {"resolvedManifest", "inlineManifest"}) {
+    auto manifest = o.item.find(key);
+    if (manifest == o.item.end() || !manifest->contains("metadata")) continue;
+    label = metadata_label((*manifest)["metadata"]);
+    if (label.title || label.artists) break;
+  }
+  if ((!label.title || !label.artists) && o.item.contains("metadata")) {
+    auto legacy = metadata_label(o.item["metadata"]);
+    if (!label.title) label.title = legacy.title;
+    if (!label.artists) label.artists = legacy.artists;
+  }
+  if (!label.title) label.title = text_field(o.item, "title");
+  return label;
 }
 std::string escape(const std::string& text) {
   auto value=g_markup_escape_text(text.c_str(),text.size());
@@ -59,7 +96,11 @@ struct Text {
   ~Text(){g_object_unref(layout);}
   void paint(cairo_t* cr,double x,double y){cairo_move_to(cr,x,y);pango_cairo_show_layout(cr,layout);}
 };
-struct Block {std::string markup;double size,line_height,gap;};
+struct Block {
+  std::string markup;
+  double size, line_height, gap;
+  double width_fraction = .96, opacity = 1;
+};
 void rounded(cairo_t* cr,double x,double y,double size,double radius) {
   constexpr double pi=3.141592653589793;
   cairo_new_sub_path(cr);
@@ -71,11 +112,11 @@ void rounded(cairo_t* cr,double x,double y,double size,double radius) {
 UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block> after,int width,int height) {
   require(width>0&&height>0&&width<=16384&&height<=16384,"graphics_error","Invalid UI dimensions");
   const double edge=std::min(width,height),qr_size=std::min(edge*.296,400.0),padding=edge*.022;
-  const int text_width=std::max(1,int(std::min(width*.86,edge*.96)));
+  auto text_width = [&](const Block& block) { return std::max(1, int(std::min(width*.86, edge*block.width_fraction))); };
   Canvas canvas(width,height);cairo_set_source_rgba(canvas.cr,0,0,0,.82);cairo_paint(canvas.cr);
   std::vector<std::unique_ptr<Text>> layouts;double total=0;
   auto measure=[&](const std::vector<Block>& blocks){for(const auto& block:blocks){
-    auto t=std::make_unique<Text>(canvas.cr,block.markup,block.size,block.line_height,text_width,true);
+    auto t=std::make_unique<Text>(canvas.cr,block.markup,block.size,block.line_height,text_width(block),true);
     total+=block.gap+t->height;layouts.push_back(std::move(t));
   }};
   measure(before);if(!qr.empty())total+=height*.05+qr_size+padding*2;measure(after);
@@ -85,7 +126,8 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
   cairo_translate(canvas.cr,width*.5,(height-total*scale)*.5);cairo_scale(canvas.cr,scale,scale);
   cairo_set_source_rgb(canvas.cr,1,1,1);size_t i=0;double y=0;
   auto paint=[&](const std::vector<Block>& blocks){for(const auto& block:blocks){
-    y+=block.gap;layouts[i]->paint(canvas.cr,-text_width*.5,y);y+=layouts[i++]->height;
+    cairo_set_source_rgba(canvas.cr,1,1,1,block.opacity);
+    y+=block.gap;layouts[i]->paint(canvas.cr,-text_width(block)*.5,y);y+=layouts[i++]->height;
   }};
   paint(before);
   if(!qr.empty()){
@@ -104,28 +146,33 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
   paint(after);return canvas.pixels();
 }
 }
-PointerRaster render_pointer(int size) {
+PointerRaster render_pointer(int size, bool pressed) {
   Canvas canvas(size, size);
-  const int hotspot = size / 8;
+  const int hotspot = size / 4;
   cairo_translate(canvas.cr, hotspot, hotspot);
   cairo_scale(canvas.cr, size / 32.0, size / 32.0);
-
-  // The arrow tip is the input hotspot. Yellow echoes the old player's dot,
-  // and the dark edge keeps the shape visible on pale artwork.
+  cairo_set_line_join(canvas.cr, CAIRO_LINE_JOIN_ROUND);
+  // The open notch leaves the art visible. Both silhouettes point to the
+  // same pixel so changing pose never moves the apparent click target.
+  const double reach = pressed ? 11 : 17;
   cairo_move_to(canvas.cr, 0, 0);
-  cairo_line_to(canvas.cr, 0, 23);
-  cairo_line_to(canvas.cr, 6, 17);
-  cairo_line_to(canvas.cr, 10, 25);
-  cairo_line_to(canvas.cr, 15, 23);
-  cairo_line_to(canvas.cr, 11, 15);
-  cairo_line_to(canvas.cr, 19, 15);
+  cairo_line_to(canvas.cr, reach, reach * .55);
+  cairo_line_to(canvas.cr, reach * .48, reach * .64);
+  cairo_line_to(canvas.cr, reach * .29, reach);
   cairo_close_path(canvas.cr);
   cairo_set_source_rgb(canvas.cr, 1, .91, .3);
   cairo_fill_preserve(canvas.cr);
-  cairo_set_line_width(canvas.cr, 2.5);
-  cairo_set_line_join(canvas.cr, CAIRO_LINE_JOIN_ROUND);
+  cairo_set_line_width(canvas.cr, 1.8);
   cairo_set_source_rgb(canvas.cr, .08, .08, .08);
   cairo_stroke(canvas.cr);
+  if (pressed) {
+    cairo_arc(canvas.cr, 0, 0, 5, 0, 6.283185307);
+    cairo_set_line_width(canvas.cr, 3);
+    cairo_stroke_preserve(canvas.cr);
+    cairo_set_source_rgb(canvas.cr, 1, .98, .88);
+    cairo_set_line_width(canvas.cr, 1.4);
+    cairo_stroke(canvas.cr);
+  }
   return {canvas.pixels(), hotspot};
 }
 void load_device_fonts(const std::string& directory) {
@@ -152,49 +199,44 @@ UIRaster render_message(const std::string& text,int width,int height,bool full) 
   return panel({{escape(text),std::clamp(std::min(width,height)*.045,30.0,62.0),1.14,0}},"",{},width,height);
 }
 UIRaster render_panel(const Json& overlay,int width,int height) {
-  const double edge=std::min(width,height),title=std::clamp(edge*.07,42.0,92.0),subtitle=std::clamp(edge*.045,30.0,62.0);
-  const auto fields=overlay.value("fields",Json::object());auto state=overlay.value("state","");
-  const auto content=overlay_panel(overlay);std::vector<Block> before,after;
-  auto add=[&](const std::string& text,double size,double gap){before.push_back({text,size,size==title?1.08:1.14,gap});};
-  if(overlay.value("owner","")=="setup"&&state=="claim_qr"){
-    add("Pair with the Feral File app",title,0);
-    auto name=fields.value("device_name","");auto name_start=name.find_first_not_of(" \t\r\n");
-    name=name_start==std::string::npos?"":name.substr(name_start,name.find_last_not_of(" \t\r\n")-name_start+1);
-    add("Connect your phone to the same Wi-Fi as this Art Computer.",subtitle,height*.04);
-    add("Then open the app and look for "+(name.empty()?"this Art Computer":"<b>"+escape(name)+"</b>")+", or scan this code.",std::clamp(edge*.032,24.0,44.0),height*.03);
-    after.push_back({"<span foreground='#BBBBBB'>Keep this code private: it can be used to pair with this Art Computer.</span>",std::clamp(edge*.025,20.0,36.0),1.2,height*.04});
-  }else if(overlay.value("owner","")=="pairing"){
-    auto browser=fields.value("browserName","the browser");if(browser.empty())browser="the browser";
-    if(state=="pairing_code"){
-      add("Pairing code",title,0);add(escape(fields.value("pairingCode","")),std::clamp(edge*.13,72.0,168.0),height*.06);
-      add("Enter it on the website that wants to play art on this Art Computer.",subtitle,height*.04);
-    }else if(state=="creating_token")add("Connecting "+escape(browser)+" to this Art Computer…",title,0);
-    else {add(escape(browser)+" wants to play art on this Art Computer.",title,0);add("Open the Feral File app, go to Settings &gt; Art Computer, and approve the request.",subtitle,height*.04);}
-  }else{
-    auto split=content.text.find('\n');add(escape(content.text.substr(0,split)),title,0);
-    if(split!=std::string::npos){
-      auto block=Block{escape(content.text.substr(split+1)),state=="softap_qr"?std::clamp(edge*.03,22.0,42.0):subtitle,1.14,height*(state=="softap_qr"?.03:.04)};
-      (state=="softap_qr"?after:before).push_back(block);
+  const double edge = std::min(width, height);
+  const auto content = overlay_panel(overlay);
+  auto blocks = [&](const std::vector<PanelLine>& lines) {
+    std::vector<Block> result;
+    for (const auto& line : lines) {
+      using enum PanelStyle;
+      const auto& text = line.markup;
+      switch (line.style) {
+        case title: result.push_back({text, std::clamp(edge*.07, 42.0, 92.0), 1.08, 0}); break;
+        case subtitle: result.push_back({text, std::clamp(edge*.045, 30.0, 62.0), 1.14, height*.04, .89}); break;
+        case compact: result.push_back({text, std::clamp(edge*.03, 22.0, 42.0), 1.14, height*.03}); break;
+        case code: result.push_back({text, std::clamp(edge*.13, 72.0, 168.0), 1, height*.06}); break;
+        case step: result.push_back({text, std::clamp(edge*.032, 24.0, 44.0), 1.14, height*.03}); break;
+        case note: result.push_back({text, std::clamp(edge*.026, 20.0, 36.0), 1.2, height*.04, .96, .72}); break;
+      }
     }
-  }
-  return panel(std::move(before),content.qr,std::move(after),width,height);
+    return result;
+  };
+  return panel(blocks(content.before_qr), content.qr, blocks(content.after_qr), width, height);
 }
 bool has_tombstone(const Occurrence& o) {
-  const auto metadata=label_metadata(o);
-  if(metadata.contains("title"))return !metadata["title"].get_ref<const std::string&>().empty();
-  if(o.item.contains("metadata")&&o.item["metadata"].contains("title"))return !o.item["metadata"]["title"].get_ref<const std::string&>().empty();
-  return o.item.contains("title")&&!o.item["title"].get_ref<const std::string&>().empty();
+  return tombstone_label(o).title != nullptr;
 }
 UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed) {
   const double scale=std::min(width,height)/720.0,padding=10*scale,size=16*scale;
-  auto legacy=o.item.value("metadata",Json::object());
-  auto metadata=label_metadata(o);
-  auto title=metadata.value("title",legacy.value("title",o.item.value("title","")));if(title.empty())return {};
-  std::string artists;auto people=metadata.value("artists",legacy.value("artists",Json::array()));
-  if(people.is_array())for(const auto& person:people){auto name=person.is_string()?person.get<std::string>():person.value("name","");if(!name.empty()){if(!artists.empty())artists+=", ";artists+=name;}}
+  const auto label = tombstone_label(o);
+  if (!label.title) return {};
+  std::string artists;
+  if (label.artists) {
+    for (const auto& person : *label.artists) {
+      if (auto name = artist_name(person)) {
+        if (!artists.empty()) artists += ", ";
+        artists += *name;
+      }
+    }
+  }
   Canvas measure(1,1);const int max_width=std::max(1,int(640*scale-padding*2));
-  std::vector<std::string> blocks{(artists.empty()?"":escape(artists)+"\n")+"<b><i>"+escape(title)+"</i></b>"};
-  if(!o.playlist_title.empty())blocks.push_back(escape(o.playlist_title));
+  std::vector<std::string> blocks{(artists.empty()?"":escape(artists)+"\n")+"<b><i>"+escape(*label.title)+"</i></b>"};
   if(!o.curator.empty())blocks.push_back("<span foreground='#A0A0A0'>Curated by: "+escape(o.curator)+"</span>");
   std::vector<std::unique_ptr<Text>> layouts;int text_width=0;double total=0;
   for(const auto& block:blocks){auto t=std::make_unique<Text>(measure.cr,block,size,1.4,max_width,false);text_width=std::max(text_width,t->width);total+=t->height;layouts.push_back(std::move(t));}

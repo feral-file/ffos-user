@@ -48,7 +48,7 @@ class Presentation {
   bool can_present_direct(const Occurrence& occurrence,const Playback& playback) const;
   int width() const { return width_; }
   int height() const { return height_; }
-  void pointer(double x, double y) { pointer_x_ = x; pointer_y_ = y; pointer_active_ = SDL_GetTicks64(); }
+  void pointer(double x, double y, bool button_down);
   void pointer_position(double x, double y) { pointer_x_ = x; pointer_y_ = y; }
   Json metrics() const;
   void browser_feedback(double elapsed_ms, bool fallback);
@@ -73,6 +73,8 @@ class Presentation {
   int ui_width_ = 0, ui_height_ = 0;
   UIRaster ui_raster_;
   double pointer_x_ = 0, pointer_y_ = 0;
+  bool pointer_texture_pressed_ = false;
+  uint64_t pointer_press_until_ = 0;
   int pointer_size_ = 0, pointer_hotspot_ = 0;
   uint64_t pointer_active_ = 0, gpu_copies_ = 0, cpu_copies_ = 0, swaps_ = 0;
   uint64_t direct_imports_ = 0;
@@ -85,14 +87,14 @@ class Presentation {
   FrameClock draw_clock_;
   GLuint last_frame_texture_ = 0;
   uint64_t last_frame_number_ = 0;
-  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, double, double, int, GLuint, uint64_t, float, GLuint, uint64_t, float, float>;
+  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, bool, double, double, int, GLuint, uint64_t, float, GLuint, uint64_t, float, float>;
   std::optional<DrawKey> draw_key_;
   std::string last_frame_occurrence_;
   void activate();
   void swap(const Surface* artwork);
   void quad(GLuint texture, Bounds rect, float opacity = 1);
   void artwork_quad(const Surface& surface, Bounds rect, float opacity);
-  void draw_pointer();
+  void draw_pointer(bool pressed);
   void upload_ui(UIRaster raster, const std::string& key);
   void ui(const std::string& text, const std::string& qr, bool full);
 };

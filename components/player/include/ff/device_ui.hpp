@@ -16,7 +16,7 @@ struct PointerRaster {
   UIRaster image;
   int hotspot;
 };
-PointerRaster render_pointer(int size);
+PointerRaster render_pointer(int size, bool pressed);
 void load_device_fonts(const std::string& directory);
 UIRaster render_panel(const Json& overlay, int width, int height);
 UIRaster render_message(const std::string& text, int width, int height, bool full = true);

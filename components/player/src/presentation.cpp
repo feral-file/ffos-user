@@ -223,10 +223,17 @@ static void upload_raster(GLuint& texture, const UIRaster& raster) {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 }
-void Presentation::draw_pointer() {
+void Presentation::pointer(double x, double y, bool button_down) {
+  pointer_position(x, y);
+  pointer_active_ = SDL_GetTicks64();
+  // A phone can send down and up within a single display refresh.
+  if (button_down) pointer_press_until_ = pointer_active_ + 200;
+}
+void Presentation::draw_pointer(bool pressed) {
   const int size = std::clamp(std::min(width_, height_) / 48, 32, 64);
-  if (size != pointer_size_) {
-    const auto pointer = render_pointer(size);
+  if (size != pointer_size_ || pressed != pointer_texture_pressed_) {
+    pointer_texture_pressed_ = pressed;
+    const auto pointer = render_pointer(size, pressed);
     upload_raster(pointer_texture_, pointer.image);
     pointer_size_ = size;
     pointer_hotspot_ = pointer.hotspot;
@@ -311,8 +318,9 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   }
   if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
   const int label_phase=label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
+  const bool pointer_pressed = pointer_visible && ticks < pointer_press_until_;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
-    occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,
+    occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,pointer_pressed,
     pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0,label_phase,backdrop?backdrop->texture:0,backdrop?backdrop->frames:0,backdrop_opacity,
     blend.outgoing?blend.outgoing->texture:0,blend.outgoing?blend.outgoing->frames:0,blend.outgoing_opacity,blend.opacity};
   // Resubmitting an unchanged texture still consumes GPU/compositor work and
@@ -385,7 +393,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
       }
     }
   }
-  if (pointer_visible && overlay.is_null()) draw_pointer();
+  if (pointer_visible && overlay.is_null()) draw_pointer(pointer_pressed);
   if(external)browser_overlay_->submit();else swap(blend.opacity>0?artwork:nullptr);return true;
 }
 bool Presentation::events(const std::function<void(const Json&)>& input) {

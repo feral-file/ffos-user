@@ -16,9 +16,9 @@ during transitions and when native device UI requires it. Browser handoffs that
 need native composition keep the same composited document after the fade. The
 public Chromium build remains available for same-device comparisons.
 
-GitHub Actions builds the FF1 CEF archive with `tools/build-cef-trial.sh`.
+GitHub Actions builds the FF1 CEF archive with `tools/build-ff1.sh`.
 The FFOS package recipe accepts that archive and its tested SHA-256. The CEF
-version and download hash are pinned in `maintenance/cef-trial.json`.
+version and download hash are pinned in `maintenance/cef-ff1.json`.
 See [homelab playback checks](docs/CAGE-WORKERS.md) and the
 [shipping-player baseline](docs/HOMELAB-PARITY.md).
 
@@ -132,3 +132,27 @@ writes bounded compositor timestamp samples on graceful shutdown. Normal logs
 contain aggregate timing only. These are compositor observations, not panel
 photographs or artwork correctness attestations. The public launcher's Vulkan/ANGLE feature set is checked on FF1 AMD hardware;
 recheck it on engine/driver updates. WebGPU qualification remains per artwork.
+
+## FF1 runtime ownership and upgrade checks
+
+The host, native media worker and CEF worker build from this component. The
+host owns the control socket, layout, tombstone, QR and pointer. The Cage
+overlay is a host-owned Wayland surface. The compositor applies the physical
+output transform once for every surface. Image EXIF and media orientation
+metadata still apply within each artwork.
+
+The **Build FF1 player** workflow produces `ff-player-native-linux-x86_64`
+with the runtime archive and `SHA256SUMS`. Extracting the archive preserves
+the CEF sandbox helper and the hard-linked engine files. The separate
+Chromium comparison workflow produces `ff-player-chromium-linux-x86_64`.
+
+CEF has its own FF1 archive digest. FFmpeg and mpv source digests live in
+`dependencies.json`. The Cage relay builds from a verified wl-proxy revision
+and its Cargo.lock. Ubuntu build packages for glycin are pinned in the
+Dockerfile. The installed `ffos-worker-packages.lock` records the device
+packages independently. Before qualifying a device image, run this from
+the installed `/usr/share/ff-player-native` directory:
+
+```sh
+pacman -Q $(awk '{print $1}' ffos-worker-packages.lock) | diff -u ffos-worker-packages.lock -
+```
