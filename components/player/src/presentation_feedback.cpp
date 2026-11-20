@@ -21,7 +21,7 @@ struct PresentationFeedback::Impl {
   PresentedFrame latest;
   bool timing_samples = false;
   std::deque<uint64_t> changed_timestamps;
-  uint64_t truncated = 0;
+  uint64_t truncated = 0, changed_count = 0;
   uint64_t presented = 0, discarded = 0, omitted = 0, last_ns = 0, last_serial = 0;
   uint32_t clock = 0, last_flags = 0, refresh_ns = 0;
   static void global(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t version) {
@@ -42,9 +42,8 @@ struct PresentationFeedback::Impl {
     auto* p = static_cast<Pending*>(data); auto& self = *p->owner;
     ++self.presented; self.last_flags = flags; self.refresh_ns = refresh;
     const auto timestamp = ((uint64_t(hi)<<32) | lo)*1000000000 + ns;
-    if(p->serial && p->serial>=self.latest.serial)
-      self.latest={p->serial,timestamp,refresh,flags,self.clock};
     if (p->serial && p->serial != self.last_serial) {
+      ++self.changed_count;
       if (self.last_ns && timestamp > self.last_ns) self.intervals.add((timestamp-self.last_ns)/1e6);
       self.last_ns = timestamp; self.last_serial = p->serial;
       if (self.timing_samples) {
@@ -52,6 +51,8 @@ struct PresentationFeedback::Impl {
         self.changed_timestamps.push_back(timestamp);
       }
     }
+    if(p->serial && p->serial>=self.latest.serial)
+      self.latest={p->serial,timestamp,refresh,flags,self.clock,self.changed_count};
     finish(p);
   }
   static void dropped(void* data, struct wp_presentation_feedback*) {

@@ -116,3 +116,30 @@ distinguishes ANGLE/Vulkan initialization from Vulkan compositing; the
 [WebGPU implementation guidance](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)
 lists the Linux interop features. Recheck WebGL, WebGPU, image and media paths
 on each engine/driver update. This change does not establish frame-pacing parity.
+
+### Embedded video frame pacing in the CEF trial
+
+For a session showing video embedded in HTML, launch the rollback host with
+`--cef-browser-frame-clock` to let CEF schedule artwork frames at its configured
+60 Hz. This applies to every artwork browser in that process. Restart without
+the switch to restore host pacing. The setup backdrop always uses host pacing.
+
+The host normally requests frames from its UI loop. CEF ignores an external
+request while the previous one is pending. On an FF1 with a 60 Hz output,
+switching clocks eliminated observed drops on the embedded 4K30 H.264 test
+while retaining VA-API decoding. Keep host pacing for general playlists:
+heavy WebGL can queue GPU work under the browser clock and delay player
+commands. The switch controls scheduling only and requires a codec-enabled
+CEF runtime for H.264 playback.
+[CEF external frame request implementation](https://github.com/chromiumembedded/cef/blob/426920c/libcef/browser/osr/render_widget_host_view_osr.cc#L1207-L1237)
+
+For mixed-workload experiments, `--cef-adaptive-frame-clock` lets CEF
+schedule each artwork view and adjusts its limit between 10 and 60 Hz.
+A long GPU copy at high rates triggers a quick reduction. After outstanding
+work drains, the host measures throughput over two seconds and tries small
+increases. For the visible view it counts changed frames confirmed by Wayland.
+It uses capture callbacks when presentation feedback is unavailable. A probe
+that adds GPU pressure without improving output rolls back and waits before
+retrying. This operates on the live view and requires no playlist metadata.
+The setup decoration retains host pacing. The adaptive option takes precedence
+if both clock switches are present.

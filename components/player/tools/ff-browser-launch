@@ -7,6 +7,9 @@ case "${2:-}" in online) network=(--share-net);; offline) network=();; *) exit 2
 debug=()
 if [ "${3:-normal}" = "debug" ]; then debug=(--remote-debugging-port=0 --remote-debugging-address=127.0.0.1); fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Both features are needed for VA-API in artist documents on FF1 with ANGLE Vulkan.
+# Keep the kernel-reported H.264 dimension limit for software fallback.
+browser_features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks
 exec /usr/bin/bwrap --die-with-parent --new-session --unshare-all "${network[@]}" --clearenv \
  --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
  --proc /proc --dev /dev --dev-bind /dev/dri /dev/dri --tmpfs /tmp \
@@ -17,5 +20,5 @@ exec /usr/bin/bwrap --die-with-parent --new-session --unshare-all "${network[@]}
  --setenv LANG C.UTF-8 --setenv WAYLAND_DISPLAY /profile/wayland --setenv AMD_DEBUG nodcc \
  /engine/chrome --ozone-platform=wayland --kiosk --no-first-run --no-default-browser-check \
  --disable-extensions --disable-background-networking --disable-dev-shm-usage \
- --deny-permission-prompts --test-type=gpu --autoplay-policy=no-user-gesture-required --enable-gpu --enable-unsafe-webgpu --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE \
+ --deny-permission-prompts --test-type=gpu --autoplay-policy=no-user-gesture-required --enable-gpu --enable-unsafe-webgpu --use-angle=vulkan --enable-features="$browser_features" \
  --disable-vulkan-surface --user-data-dir=/profile --remote-debugging-pipe "${debug[@]}" about:blank

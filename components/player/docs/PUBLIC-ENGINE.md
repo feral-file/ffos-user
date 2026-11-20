@@ -142,3 +142,26 @@ not predict dedicated-worker failure: the measured requests replayed through
 the page's interception path. Service-worker registration remained unavailable.
 That precise limitation and incomplete coverage are exposed to the device and
 sender. Broader worker/service-worker acceptance is still open.
+
+## Embedded H.264 regression check
+
+On homelab (Chrome for Testing 158.0.8127.36, RADV Rembrandt, FFOS kernel
+6.18.38-2-lts), the public launcher needed both `DefaultANGLEVulkan` and
+`VaapiIgnoreDriverChecks` in addition to `Vulkan,VulkanFromANGLE`.
+With either added feature alone, embedded 3840×2160 H.264 selected
+`FFmpegVideoDecoder`. With both, it selected `VaapiVideoDecoder`.
+
+Repeat after changing the browser build or flags. Serve the generated
+`media-4k-h264.mp4` and `media-4096-square-h264.mp4` fixtures over HTTP.
+In a test document running under the normal public launcher, play each URL
+in a muted HTML video element. In DevTools' Media panel, check the decoder
+properties for each player while its playback clock advances:
+
+| H.264 fixture | kVideoDecoderName | kIsPlatformVideoDecoder |
+|---|---|---|
+| 3840×2160 at 30 fps | VaapiVideoDecoder | true |
+| 4096×4096 at 2 fps | FFmpegVideoDecoder | false |
+
+The FFOS VCN 3.1.1 driver caps hardware H.264 at 4096×4080. The square clip
+checks software fallback. Casting these MP4 URLs directly exercises libmpv,
+so use the embedded fixtures for this regression.

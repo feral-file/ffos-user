@@ -15,6 +15,10 @@ int main(){
     ff::InputState input([&](const ff::Json& event){events.push_back(event);});
     input.target("first",{2000,1000,100,50,1800,900});
     check(input.x()==1000&&input.y()==500,"First artwork centers the host pointer once");
+    input.flush();
+    check(events.size()==1&&events.back()["kind"]=="move"&&events.back()["x"]==900&&events.back()["y"]==450,"First view receives initial hover in artwork coordinates");
+    input.target("first",{2000,1000,100,50,1800,900});input.flush();
+    check(events.size()==1,"Stable target receives no synthetic movement");
     input.dispatch({{"kind","move"},{"x",900},{"y",400}});
     input.flush();
     check(input.x()==900&&input.y()==400,"Host owns output-pixel pointer position");
@@ -29,6 +33,8 @@ int main(){
     check(input.x()==950&&input.y()==425,"New occurrence does not reset the visible pointer");
     check(events[events.size()-3]["kind"]=="button"&&events[events.size()-3]["target"]=="first"&&events[events.size()-3]["down"]==false,"Old target receives button release before destruction");
     check(events[events.size()-2]["kind"]=="key"&&events[events.size()-2]["target"]=="first"&&events[events.size()-2]["down"]==false,"Old target receives key release before destruction");
+    input.flush();
+    check(events.back()["kind"]=="move"&&events.back()["target"]=="second"&&events.back()["buttons"]==0&&events.back()["x"]==950&&events.back()["y"]==425,"Replacement view receives retained hover without held buttons");
     input.dispatch({{"kind","button"},{"down",true}});
     check(events.back()["x"]==950&&events.back()["y"]==425&&events.back()["target"]=="second","Click matches retained cursor on new work");
     input.dispatch({{"kind","releaseAll"}});

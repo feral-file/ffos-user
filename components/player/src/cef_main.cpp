@@ -66,6 +66,8 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
     // must receive graceful systemd shutdown after that setup has finished.
     std::signal(SIGTERM,stop);std::signal(SIGINT,stop);
     {
+      const bool adaptive_clock = command->HasSwitch("cef-adaptive-frame-clock");
+      const bool host_frame_clock = !adaptive_clock && !command->HasSwitch("cef-browser-frame-clock");
       const std::string timing_path=command->GetSwitchValue("diagnostic-presentation-timing");
       ff::Presentation presentation(command->HasSwitch("diagnostic-cpu"),!timing_path.empty(),(std::filesystem::path(resources).parent_path()/"fonts").string());
       std::map<std::string,CefRefPtr<ff::ArtworkClient>> clients;
@@ -155,13 +157,13 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
           // even if a browser never delivers its creation/close callback.
           ff::require(clients.size()<8,"renderer_capacity","Previous artwork browsers have not closed");
           auto url=ff::renderer_url(rendering);bool bundled=url=="ff-render://bundle/index.html";
-          CefWindowInfo window;window.SetAsWindowless(0);window.shared_texture_enabled=true;window.external_begin_frame_enabled=true;window.runtime_style=CEF_RUNTIME_STYLE_ALLOY;
+          CefWindowInfo window;window.SetAsWindowless(0);window.shared_texture_enabled=true;window.external_begin_frame_enabled=host_frame_clock;window.runtime_style=CEF_RUNTIME_STYLE_ALLOY;
           CefBrowserSettings browser_settings;browser_settings.windowless_frame_rate=60;browser_settings.background_color=CefColorSetARGB(255,0,0,0);
           // A fresh non-shared request context isolates cookies/cache/storage.
           // CEF may still share renderer/GPU processes: this is not a process guarantee.
           CefRequestContextSettings context_settings;auto context=source_probe?source_probe->context():CefRequestContext::CreateContext(context_settings,nullptr);
           if(bundled)ff::register_renderer_resources(context,resources);
-          auto client=CefRefPtr<ff::ArtworkClient>(new ff::ArtworkClient(playback,presentation,rendering,bundled));
+          auto client=CefRefPtr<ff::ArtworkClient>(new ff::ArtworkClient(playback,presentation,rendering,bundled,false,adaptive_clock));
           if(CefBrowserHost::CreateBrowser(window,client,url,browser_settings,nullptr,context))clients.emplace(desired->id,client);
           else playback.failed(desired->id,"Cannot create artwork browser");
           }catch(const std::exception& error){playback.failed(desired->id,error.what());}
@@ -206,7 +208,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
           auto client=it->second;
           bool keep=(playback.desired()&&playback.desired()->stage!="failed"&&playback.desired()->id==it->first)||(playback.visible()&&playback.visible()->id==it->first);
           keep=keep||(it->first==backdrop_id&&!client->decoration_failed);
-          if(!keep)client->close();else client->update_media();
+          if(!keep)client->close();else client->update_media(host_frame_clock || client->decoration);
           if(client->closed)it=clients.erase(it);else ++it;
         }
         for(auto it=media.begin();it!=media.end();){

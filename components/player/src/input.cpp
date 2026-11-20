@@ -56,7 +56,8 @@ Json browser_key(const Json& event) {
 void InputState::target(std::string occurrence, InputGeometry geometry) {
   require(geometry.width > 0 && geometry.height > 0 && geometry.view_width > 0 && geometry.view_height > 0,
     "invalid_params", "Invalid input geometry");
-  if (occurrence != target_) { release(); target_ = std::move(occurrence); }
+  const bool changed = occurrence != target_;
+  if (changed) { release(); target_ = std::move(occurrence); }
   else if (geometry != geometry_) flush();
   geometry_ = geometry;
   if (!positioned_ && !target_.empty()) {
@@ -64,6 +65,8 @@ void InputState::target(std::string occurrence, InputGeometry geometry) {
   }
   x_ = std::clamp(x_,0.0,static_cast<double>(geometry.width - 1));
   y_ = std::clamp(y_,0.0,static_cast<double>(geometry.height - 1));
+  // A newly presented view needs the current hover position even on a stationary kiosk.
+  if (changed && !target_.empty()) pending_move_ = true;
 }
 void InputState::emit(Json event) {
   if (target_.empty()) return;

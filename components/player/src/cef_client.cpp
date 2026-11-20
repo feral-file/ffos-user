@@ -7,8 +7,8 @@
 #include <drm_fourcc.h>
 
 namespace ff {
-ArtworkClient::ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool is_bundled, bool is_decoration)
-    : id(occurrence.id), bundled(is_bundled), decoration(is_decoration), playback_(playback), presentation_(presentation), occurrence_(std::move(occurrence)) {}
+ArtworkClient::ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool is_bundled, bool is_decoration, bool adaptive_clock)
+    : id(occurrence.id), bundled(is_bundled), decoration(is_decoration), playback_(playback), presentation_(presentation), occurrence_(std::move(occurrence)), adaptive_clock_(adaptive_clock) {}
 void ArtworkClient::failed(const std::string& error) {
   if(decoration){decoration_failed=true;ready=false;std::cerr<<"Setup backdrop failed: "<<error<<'\n';}
   else playback_.failed(id,error);
@@ -58,8 +58,22 @@ void ArtworkClient::OnAcceleratedPaint(CefRefPtr<CefBrowser>, PaintElementType t
     frame.count=info.plane_count;frame.format=info.format==CEF_COLOR_TYPE_BGRA_8888?DRM_FORMAT_ARGB8888:DRM_FORMAT_ABGR8888;frame.modifier=info.modifier;
     require(frame.count>0&&frame.count<=4,"graphics_error","Invalid CEF DMA planes");
     for(int i=0;i<frame.count;++i)frame.planes[i]={info.planes[i].fd,info.planes[i].stride,info.planes[i].offset};
-    presentation_.accelerated(frames.capture,frame);frames.captured();captured_configuration();}
+    const auto start = std::chrono::steady_clock::now();
+    presentation_.accelerated(frames.capture,frame);
+    if (adaptive_clock_) adjust_frame_rate(std::chrono::steady_clock::now() - start);
+    frames.captured();captured_configuration();}
   catch(const std::exception& e){failed(e.what());}
+}
+void ArtworkClient::adjust_frame_rate(std::chrono::steady_clock::duration copy_time) {
+  if (!browser) return;
+  const int previous = paint_rate_.rate();
+  const auto shown = presentation_.latest_presented();
+  const bool visible = playback_.visible() && playback_.visible()->id == id;
+  const int next = paint_rate_.sample(CefPaintRate::Clock::now(), copy_time,
+      visible && shown.serial ? std::optional<uint64_t>(shown.changed_count) : std::nullopt);
+  if (next == previous) return;
+  browser->GetHost()->SetWindowlessFrameRate(next);
+  std::cerr << "CEF artwork " << id << " frame limit " << next << '\n';
 }
 void ArtworkClient::OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus,int code,const CefString& detail) {
   ready=false;failed("Renderer terminated ("+std::to_string(code)+"): "+detail.ToString());
@@ -88,13 +102,13 @@ void ArtworkClient::captured_configuration(){
   if(surface.width!=bounds.width||surface.height!=bounds.height)return;
   if(!bundled||(acknowledged_display_==occurrence_.display_revision&&surface.frames>configuration_after_frame_))surface.display_revision=occurrence_.display_revision;
 }
-void ArtworkClient::update_media(){
+void ArtworkClient::update_media(bool host_frame_clock){
   paint_pending_=false;
   // Pace Chromium from host progress rather than its independent 60 Hz timer.
   // Otherwise heavy WebGL can build a long producer queue while this UI thread
   // waits for a copy; coalescing callbacks alone does not drain that GPU backlog.
   const auto now=std::chrono::steady_clock::now();
-  if(browser && begin_clock_.due(now)){
+  if(host_frame_clock && browser && begin_clock_.due(now)){
     browser->GetHost()->SendExternalBeginFrame();
   }
   // A dropped post-load frame may have been a static document's only update.

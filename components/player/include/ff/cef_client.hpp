@@ -1,5 +1,6 @@
 #pragma once
 #include "ff/frame_clock.hpp"
+#include "ff/cef_paint_rate.hpp"
 #include "ff/presentation.hpp"
 #include "include/cef_client.h"
 #include "include/cef_app.h"
@@ -11,7 +12,7 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
                       public CefRenderHandler, public CefRequestHandler, public CefPermissionHandler,
                       public CefDownloadHandler, public CefContextMenuHandler, public CefDisplayHandler {
  public:
-  ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool bundled, bool decoration = false);
+  ArtworkClient(Playback& playback, Presentation& presentation, Occurrence occurrence, bool bundled, bool decoration = false, bool adaptive_clock = false);
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
@@ -38,7 +39,7 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   void OnBeforeContextMenu(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefRefPtr<CefContextMenuParams>, CefRefPtr<CefMenuModel> model) override { model->Clear(); }
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefProcessId, CefRefPtr<CefProcessMessage>) override;
   void input(const Json& event);
-  void update_media();
+  void update_media(bool host_frame_clock);
   void close();
   CefRefPtr<CefBrowser> browser;
   FramePair frames;
@@ -59,6 +60,9 @@ class ArtworkClient : public CefClient, public CefLifeSpanHandler, public CefLoa
   uint64_t ready_after_frame_=0;
   uint64_t acknowledged_display_=0,configuration_after_frame_=0;
   FrameClock begin_clock_;
+  const bool adaptive_clock_;
+  CefPaintRate paint_rate_;
+  void adjust_frame_rate(std::chrono::steady_clock::duration copy_time);
   bool paint_pending_=false, refresh_needed_=false;
   bool admit_paint();
   void mark_ready();
