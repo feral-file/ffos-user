@@ -1,0 +1,20 @@
+[
+  {
+    "renderer": "presented",
+    "sleeping": false,
+    "selected": "d39caa40-ef7e-4860-a895-b838c087ea15",
+    "presented": "d39caa40-ef7e-4860-a895-b838c087ea15",
+    "backend": "cef-views",
+    "frames": 427,
+    "source": "http://127.0.0.1:18990/grit-fixed.html"
+  },
+  {
+    "renderer": "presented",
+    "sleeping": false,
+    "selected": "d39caa40-ef7e-4860-a895-b838c087ea15",
+    "presented": "d39caa40-ef7e-4860-a895-b838c087ea15",
+    "backend": "cef-views",
+    "frames": 461,
+    "source": "http://127.0.0.1:18990/grit-fixed.html"
+  }
+]

@@ -38,7 +38,7 @@ for path in a.runs:
         raise ValueError(f'{path}: unmatched engine, fixture or rendered document')
     low, high = data['clockStart']['monotonicNs'], data['clockEnd']['monotonicNs']
     presentation_path = data.get('configuration', {}).get('presentationPath')
-    if presentation_path in ('cef', 'shipping'):
+    if presentation_path in ('cef', 'direct', 'shipping'):
         arm = presentation_path
     elif presentation_path == 'public' or 'public' in data['unit']:
         arm = 'native'

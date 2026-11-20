@@ -81,3 +81,36 @@ GPU process diagnostics reported AMD driver 26.1.4, RADV Rembrandt, hardware com
 The decoder names were `VaapiVideoDecoder` with platform decoding and `FFmpegVideoDecoder` with software decoding. FFOS caps H.264 hardware decoding at 4096×4080 on VCN 3.1.1. The square clip exceeds that height. For the 19 HEVC Range Extensions cases, 14 reported `DEMUXER_ERROR_NO_SUPPORTED_STREAMS`. The other five advanced playback time with zero decoded frames and zero picture dimensions. The Main-profile BT.709 control (sample 8) produced 3840×2160 frames in every runtime tested. A resolved play promise or an advancing clock alone would misclassify those five. These are browser-embedded results. Standalone media has its own libmpv path.
 
 The [fixture hashes](evidence/homelab-parity-20261120/fixture-sha256.txt), [per-file decoder observations](evidence/homelab-parity-20261120/embedded-video.json), [compositor captures](evidence/homelab-parity-20261120/video-output.jpg) and [raw timing files](evidence/homelab-parity-20261120/) accompany this report. To reproduce the output statistics, decompress each benchmark JSON and its sibling timing JSON into one directory and pass them to `tools/summarize-matched.py`. Group runs with the same engine version and document identity.
+
+## Workers as Cage clients
+
+We compared the deployed hosted path with one visible worker connected directly to Cage on the same homelab FF1 and HDMI mode. The device ran one workload at a time. The direct CEF run used the deployed CEF Views executable in probe mode. It opened Grit as a top-level document and bypassed the native host, private compositor and per-artwork launcher. This measures the whole change in launch and presentation path. It does not isolate the cost of a single copy.
+
+| Fixed-seed Transparent Grit, in run order | Mean interval | p95 | p99 | Kiosk CPU, one core | Final cgroup memory |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Direct CEF | 55.06 ms | 66.67 ms | 66.67 ms | 25.5% | 363 MiB |
+| Hosted CEF | 58.06 ms | 66.67 ms | 83.33 ms | 31.4% | 337 MiB |
+| Direct CEF repeat | 55.38 ms | 66.67 ms | 66.67 ms | 20.1% | 271 MiB |
+
+All three runs used CEF's Chromium 156.0.8078.48, the same fixed-seed document, the 1920×1920 canvas and ANGLE Vulkan on RADV Rembrandt. Each run warmed for 20 seconds and sampled six ten-second windows. Direct CEF used Chromium's display trace and hosted CEF used the outer Wayland compositor's presentation feedback. Both direct runs saved one refresh at p99. End-of-run memory varied enough that these runs do not establish a CEF memory saving. [Raw measurements and summary](evidence/direct-cage-20261120/)
+
+### Hardware-decoded standalone video
+
+Both arms ran the same GitHub-built media worker from 0813f7c2 with the deployed libmpv 0.42.0 and libavcodec libraries. We repeated the 3840×2160 H.264 30 fps fixture to 90 seconds by remuxing its original H.264 and AAC packets. Both paths fetched the same file from a loopback server. They played audio through PulseAudio at full volume and used fit scaling on black. We captured two images from Cage before each measurement, warmed up to 10 seconds of media playback, and recorded six ten-second windows per run.
+
+The hosted worker renders into a texture, synchronizes it and exports it via DMA-BUF to the player for composition. The direct worker keeps the same media sandbox and libmpv renderer, draws into its fullscreen SDL window and swaps directly to Cage. Its Python control process lives in the kiosk cgroup. It sends the initialize and stop commands and collects properties. The hosted measurement client runs outside the kiosk cgroup.
+
+In the first direct trial, PulseAudio's shared-memory allocation failed near the worker's 3 GiB address-space limit. Setting `MALLOC_ARENA_MAX=2` inside the sandbox reduced the observed direct worker virtual size from about 3.0 GiB to 1.2 GiB. We applied that setting to both trial launchers and required active PulseAudio for every measured run. The default deployed launcher keeps its original configuration.
+
+We measured Cage presentation feedback on the Linux monotonic clock. The video interval is the time between presented artwork swaps. A redraw can present the same video frame twice. The separate libmpv decoder and video-output drop counters show whether libmpv itself dropped frames. The DRM decode-engine counter comes from the worker's amdgpu file descriptors, with duplicate DRM client IDs counted once. CPU covers the kiosk cgroup and memory is the mean of seven cgroup readings. Compositor captures verify visible content and motion. These runs did not measure panel latency or audible output.
+
+| 4K H.264, in run order | Mean swap interval | p95 | p99 | Kiosk CPU, one core | Mean cgroup memory | GPU decode-engine time in 60 s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Direct libmpv | 33.43 ms | 33.33 ms | 33.35 ms | 12.0% | 228 MiB | 10.46 s |
+| Hosted libmpv | 33.42 ms | 50.00 ms | 50.00 ms | 17.4% | 246 MiB | 9.94 s |
+| Hosted repeat | 33.42 ms | 50.00 ms | 50.00 ms | 17.6% | 282 MiB | 10.30 s |
+| Direct repeat | 33.43 ms | 33.33 ms | 50.00 ms | 11.1% | 225 MiB | 10.49 s |
+
+All four runs reported VA-API hardware decoding and VA-API video surfaces, with the AMD decode-engine counter increasing in every ten-second window. All 24 windows recorded zero additional decoder or video-output drops. Two compositor captures per run showed changing pixels in the same letterboxed region. Direct presentation reduced p95 by one 60 Hz refresh in both comparisons at essentially identical average cadence. Direct p99 varied by one refresh between repetitions. A hosted attempt interrupted by a sleep command during warm-up was discarded and repeated after waking the device.
+
+The single-artwork trial bypasses the player's overlays, transitions and input routing. A fullscreen video path has a measurable benefit on this hardware. Integration would need a tested handoff to hosted composition for UI and transitions and equivalent isolation for a directly displayed browser. These runs establish no benefit from changing the decoder or rebuilding CEF. [Media samples, Cage captures and measured intervals](evidence/direct-cage-20261120/video-summary.json) · [GitHub build of the tested worker](https://github.com/feral-file/ffos-user/actions/runs/44709998436)
