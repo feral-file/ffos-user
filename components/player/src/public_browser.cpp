@@ -44,9 +44,11 @@ void reap_public_browsers() {
 PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& cache_socket, const std::string& resources,
-                             const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode)
+                             const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
+                             bool render_ahead)
     : id(o.id),
       backend_(backend),
+      max_submissions_(render_ahead ? 2 : 1),
       playback_(p),
       presentation_(ui),
       occurrence_(std::move(o)),
@@ -485,7 +487,7 @@ void PublicBrowser::poll() {
     const bool writable = presentation_.import_read_complete(frames.capture);
     if (!frames.pending && writable && frames.capture.producer_buffer)
       presentation_.destroy(frames.capture);
-    if (writable && source_released && submissions_.size() < 2 &&
+    if (writable && source_released && submissions_.size() < max_submissions_ &&
         (!frames.pending || !loaded_ || frames.count <= load_frame_ ||
          frames.capture.display_revision != occurrence_.display_revision)) {
       ff_browser_frame frame{};

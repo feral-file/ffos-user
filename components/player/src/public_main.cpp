@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
                     state_path + "/browser/" + desired->id,
                     (std::filesystem::path(socket).parent_path() / "cache.sock").string(),
                     resources, browser_backend, false, options.contains("--diagnostic-engine-debugger"),
-                    *cache_mode));
+                    *cache_mode, options.contains("--diagnostic-browser-render-ahead")));
         } catch (const std::exception& e) {
           playback.failed(desired->id, e.what());
         }

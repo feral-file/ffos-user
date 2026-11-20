@@ -17,7 +17,7 @@ class PublicBrowser {
   PublicBrowser(Playback&, Presentation&, Occurrence, const std::string& launcher,
                 const std::string& profile, const std::string& cache_socket,
                 const std::string& resources, const std::string& backend, bool decoration = false, bool debugger = false,
-                const std::string& cache_mode = "");
+                const std::string& cache_mode = "", bool render_ahead = false);
   ~PublicBrowser();
   void poll();
   void input(const Json&);
@@ -35,6 +35,7 @@ class PublicBrowser {
 
  private:
   const std::string backend_;
+  const size_t max_submissions_;
   Playback& playback_;
   Presentation& presentation_;
   Occurrence occurrence_;
