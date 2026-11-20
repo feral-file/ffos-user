@@ -37,7 +37,9 @@ class CefPaintRate {
         ? *presented - *first_presented_ : samples_ - 1;
     const double delivered = frames / duration<double>(elapsed).count();
     const bool overloaded = delivered < rate_ * 0.75 && work_ > elapsed * 0.65;
-    const bool spare = work_ < elapsed * 0.70 || delivered >= rate_ * 0.93;
+    // A saturated renderer can hit its current limit with almost no
+    // headroom. Probing then queues GPU work and misses display refreshes.
+    const bool spare = work_ < elapsed * 0.65;
     samples_ = 0;
     work_ = {};
 

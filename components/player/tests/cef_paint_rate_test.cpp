@@ -44,6 +44,11 @@ int main() {
   for (int i=0; i<100 && display.rate()==16; ++i) presented_sample(62, 4);
   check(display.rate() == 15);
 
+  Trial busy;
+  check(busy.frame(50, 45) == 30);
+  check(busy.frame(600, 70) == 15);
+  for (int i=0; i<200; ++i) check(busy.frame(67, 54) == 15);
+
   Trial high;
   check(high.frame(50, 50) == 30);
   for (int i=0; i<400 && high.clock.rate()<40; ++i) high.frame(1000/high.clock.rate(), 3);

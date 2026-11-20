@@ -5,9 +5,11 @@ set -eu
 trial="$PWD/build-cef-trial"
 mkdir -p "$trial/sdk"
 archive="$trial/cef.tar.xz"
-curl --fail --location --retry 3 -o "$archive" \
-  https://github.com/obs-rust/cef/releases/download/8078/cef_binary_8078_linux_x86_64.tar.xz
-echo "fb36df11bc8280c9cb666732becc1fe267f833bb964dbb13d69cad33488171dc  $archive" | sha256sum -c -
+pin=maintenance/cef-trial.json
+url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$pin")
+digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$pin")
+curl --fail --location --retry 3 -o "$archive" "$url"
+echo "$digest  $archive" | sha256sum -c -
 tar -xf "$archive" -C "$trial/sdk" --strip-components=1
 python3 tools/fetch-dependencies.py --without-cef
 python3 tools/verify-vendor.py --without-cef
@@ -20,4 +22,18 @@ cmake -S . -B "$trial/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$trial/build" -j3
 ctest --test-dir "$trial/build" --output-on-failure
 DESTDIR="$trial/stage" cmake --install "$trial/build" --strip
+# The FFOS launch path uses Chromium's root-owned sandbox helper.
+sandbox="$trial/stage/usr/lib/ff-player-native/chrome-sandbox"
+test "$(stat -c %u:%g "$sandbox")" = 0:0
+chmod 4755 "$sandbox"
+python3 - "$trial/stage/usr/share/ff-player-native/dependencies.json" "$pin" <<'PYTHON'
+import json
+from pathlib import Path
+import sys
+manifest, trial_pin = map(Path, sys.argv[1:])
+dependencies = json.loads(manifest.read_text())
+dependencies["cef"] = json.loads(trial_pin.read_text())
+dependencies.pop("chromium")
+manifest.write_text(json.dumps(dependencies, indent=2) + "\n")
+PYTHON
 tar -czf "$trial/ff-player-cef-linux.tar.gz" -C "$trial/stage" .

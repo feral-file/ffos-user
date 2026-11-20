@@ -5,6 +5,7 @@ on:
     paths:
       - 'components/player/src/cef*.cpp'
       - 'components/player/include/ff/cef*.hpp'
+      - 'components/player/maintenance/cef-trial.json'
       - 'components/player/tools/build-cef-trial.sh'
       - '.github/workflows/build-player-cef-trial.yaml'
   workflow_dispatch:
