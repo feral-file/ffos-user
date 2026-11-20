@@ -563,7 +563,7 @@ void PublicBrowser::poll() {
         ff_browser_view_frame_requested(view_);
         auto b = presentation_.bounds(occurrence_.display);
         frames.capture.display_revision =
-            frame.width == b.width && frame.height == b.height &&
+            frame.layout_ready && frame.width == b.width && frame.height == b.height &&
                     (!bundled_ || decoration_ ||
                      (configured_revision_ == occurrence_.display_revision &&
                       frames.count + 1 > configuration_frame_))
@@ -614,6 +614,7 @@ void PublicBrowser::did_present() {
 }
 void PublicBrowser::update() {
   const auto previous_revision=occurrence_.display_revision;
+  const auto old_bounds=presentation_.bounds(occurrence_.display);
   if (playback_.desired() && playback_.desired()->id == id) {
     occurrence_.display = playback_.desired()->display;
     occurrence_.display_revision = playback_.desired()->display_revision;
@@ -624,7 +625,8 @@ void PublicBrowser::update() {
   auto b = presentation_.bounds(occurrence_.display);
   if(view_){
     ff_browser_view_resize(view_, b.width, b.height);
-    if(previous_revision!=occurrence_.display_revision)ff_browser_view_redraw(view_);
+    if(previous_revision!=occurrence_.display_revision &&
+       b.width==old_bounds.width && b.height==old_bounds.height)ff_browser_view_redraw(view_);
   }
 }
 void PublicBrowser::input(const Json& p) {

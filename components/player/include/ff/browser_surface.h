@@ -6,7 +6,7 @@ extern "C" {
 struct ff_browser_server;
 struct ff_browser_view;
 struct ff_browser_frame {
-  int width, height, count, compositor_copies;
+  int width, height, count, compositor_copies, layout_ready;
   uint32_t format;
   uint64_t modifier;
   int fd[4];

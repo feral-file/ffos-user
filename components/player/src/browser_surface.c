@@ -55,7 +55,7 @@ struct ff_browser_view {
   struct wlr_output_state frame_state;
   int frame_pending;
   int compositor_copies;
-  uint32_t pending_present_seq;
+  uint32_t pending_present_seq, resize_serial;
   struct wl_listener commit, destroy, client_destroy;
   int width, height, dirty;
 };
@@ -71,6 +71,14 @@ static void on_commit(struct wl_listener *listener, void *data) {
     wlr_xdg_toplevel_set_size(view->toplevel, view->width, view->height);
     wlr_xdg_toplevel_set_fullscreen(view->toplevel, true);
     wlr_xdg_toplevel_set_activated(view->toplevel, true);
+  }
+  if (view->resize_serial) {
+    struct wlr_xdg_surface *base = view->toplevel->base;
+    if ((int32_t)(base->current.configure_serial - view->resize_serial) >= 0 &&
+        base->geometry.width == view->width && base->geometry.height == view->height) {
+      view->resize_serial = 0;
+      ff_browser_view_redraw(view);
+    }
   }
   view->dirty = 1;
 }
@@ -403,6 +411,7 @@ int ff_browser_view_frame(struct ff_browser_view *v, struct ff_browser_frame *fr
   bool built = wlr_scene_output_build_state(v->scene_output, &v->frame_state, NULL);
   for (int i = 0; i < observers.count; i++) wl_list_remove(&observers.entries[i].listener.link);
   if (!built) return -1;
+  frame->layout_ready = v->resize_serial == 0;
   frame->compositor_copies = v->compositor_copies;
   if (!v->frame_state.buffer) return 0;
   struct wlr_dmabuf_attributes attrs;
@@ -472,7 +481,7 @@ void ff_browser_view_resize(struct ff_browser_view *v, int width, int height) {
   wlr_output_state_set_custom_mode(&state, width, height, 60000);
   wlr_output_commit_state(v->output, &state);
   wlr_output_state_finish(&state);
-  if (v->toplevel) wlr_xdg_toplevel_set_size(v->toplevel, width, height);
+  if (v->toplevel) v->resize_serial = wlr_xdg_toplevel_set_size(v->toplevel, width, height);
 }
 static struct wlr_surface *focus(struct ff_browser_view *v) {
   if (!v->toplevel) return NULL;
