@@ -11,7 +11,7 @@ class PresentationFeedback {
  public:
   explicit PresentationFeedback(SDL_Window* window, bool timing_samples);
   ~PresentationFeedback();
-  void before_swap(uint64_t artwork_serial);
+  void before_swap(uint64_t artwork_serial, uint64_t swap_serial);
   void poll();
   Json metrics() const;
   PresentedFrame latest() const;

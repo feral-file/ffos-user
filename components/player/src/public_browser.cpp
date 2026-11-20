@@ -558,7 +558,7 @@ void PublicBrowser::did_present() {
     return;
   }
   if (auto commit = ff_browser_view_take_commit(view_))
-    submissions_.push_back({presentation_.frame_serial(), commit, std::chrono::steady_clock::now()});
+    submissions_.push_back({presentation_.swap_serial(), commit, std::chrono::steady_clock::now()});
 }
 void PublicBrowser::update() {
   if (playback_.desired() && playback_.desired()->id == id) {

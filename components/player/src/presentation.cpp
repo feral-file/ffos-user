@@ -266,7 +266,7 @@ void Presentation::swap(const Surface* artwork) {
   const auto start = std::chrono::steady_clock::now();
   const bool changed = artwork && (artwork->texture != last_frame_texture_ || artwork->frames != last_frame_number_ || label_occurrence_ != last_frame_occurrence_);
   if (changed) ++frame_serial_;
-  feedback_->before_swap(artwork ? frame_serial_ : 0);
+  feedback_->before_swap(artwork ? frame_serial_ : 0, swaps_ + 1);
   // Surface/context loss must terminate the host so systemd/watchdog can
   // recover it; a responsive command loop with a dead UI is not healthy.
   (void)eglGetError();

@@ -49,6 +49,7 @@ class Presentation {
   void pointer_position(double x, double y) { pointer_x_ = x; pointer_y_ = y; }
   Json metrics() const;
   void browser_feedback(double elapsed_ms, bool fallback);
+  uint64_t swap_serial() const { return swaps_; }
   uint64_t frame_serial() const { return frame_serial_; }
   PresentedFrame outcome(uint64_t serial) const { return feedback_->outcome(serial); }
   PresentedFrame latest_presented() const { return feedback_->latest(); }

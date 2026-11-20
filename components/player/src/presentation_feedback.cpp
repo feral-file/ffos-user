@@ -16,17 +16,17 @@ struct PresentationFeedback::Impl {
   wl_surface* surface = nullptr;
   wl_registry* registry = nullptr;
   wp_presentation* presentation = nullptr;
-  struct Pending { Impl* owner; struct wp_presentation_feedback* feedback; uint64_t serial; };
+  struct Pending { Impl* owner; struct wp_presentation_feedback* feedback; uint64_t serial, swap; };
   std::set<Pending*> pending;
   FrameTiming intervals;
   PresentedFrame latest;
-  // Key outcomes by artwork serial. A newer Cage notification can arrive
-  // in the same dispatch as the one a nested browser is waiting for.
+  // A commit is acknowledged against the exact host swap that first submitted
+  // it. A later UI redraw can present the same texture in a different swap.
   std::array<PresentedFrame, 64> outcomes{};
   void remember(PresentedFrame frame) {
     if (!frame.serial) return;
     auto& slot = outcomes[frame.serial % outcomes.size()];
-    if (slot.serial < frame.serial || (slot.serial == frame.serial && !slot.timestamp_ns))
+    if (slot.serial < frame.serial)
       slot = frame;
   }
   bool timing_samples = false;
@@ -61,14 +61,14 @@ struct PresentationFeedback::Impl {
         self.changed_timestamps.push_back(timestamp);
       }
     }
-    self.remember({p->serial,timestamp,refresh,flags,self.clock,self.changed_count});
+    self.remember({p->swap,timestamp,refresh,flags,self.clock,self.changed_count});
     if(p->serial && p->serial>=self.latest.serial)
       self.latest={p->serial,timestamp,refresh,flags,self.clock,self.changed_count};
     finish(p);
   }
   static void dropped(void* data, struct wp_presentation_feedback*) {
     auto* p = static_cast<Pending*>(data); ++p->owner->discarded;
-    p->owner->remember({p->serial}); finish(p);
+    p->owner->remember({p->swap}); finish(p);
   }
   ~Impl() {
     while (!pending.empty()) finish(*pending.begin());
@@ -94,11 +94,11 @@ PresentationFeedback::PresentationFeedback(SDL_Window* window, bool timing_sampl
   if (wl_display_roundtrip_queue(self.display,self.queue) < 0) self.surface=nullptr;
 }
 PresentationFeedback::~PresentationFeedback() = default;
-void PresentationFeedback::before_swap(uint64_t serial) {
+void PresentationFeedback::before_swap(uint64_t serial, uint64_t swap) {
   auto& self=*impl_;
   if (!self.presentation || !self.surface) return;
   if (self.pending.size()>=64) {++self.omitted;return;}
-  auto* p=new Impl::Pending{&self,wp_presentation_feedback(self.presentation,self.surface),serial};
+  auto* p=new Impl::Pending{&self,wp_presentation_feedback(self.presentation,self.surface),serial,swap};
   self.pending.insert(p);
   static const wp_presentation_feedback_listener listener = {
     [](void*,struct wp_presentation_feedback*,wl_output*){}, Impl::shown, Impl::dropped
