@@ -4,8 +4,7 @@ The normal player now uses the separate public Chromium adapter. Its exact pin
 is Chrome for Testing 158.0.8127.36; `dependencies.json` records archive and
 executable hashes, and `maintenance/public-engine-update.json` records the
 156-to-158 integration rehearsal. [PUBLIC-ENGINE.md](PUBLIC-ENGINE.md) is the
-current architecture and qualification record. CEF builds below are retained
-only as the explicit pre-cutover rollback/earlier-trial record.
+current architecture and qualification record. The separate [homelab CEF Views trial](HOMELAB-PARITY.md) uses the same native Wayland host with a codec-enabled windowed CEF worker. The off-screen CEF builds described below provide the earlier trial and rollback history.
 
 For a public-engine update:
 

@@ -1,5 +1,8 @@
 # Public Chromium cutover on FF1-SKYZ2E3A
 
+The [homelab follow-up](HOMELAB-PARITY.md) compares the public player with standalone Chromium at 1920×1920 and records separate shipping and CEF results for embedded video.
+
+
 On 2026-11-19, the normal kiosk, controld and watchdog on FF1-SKYZ2E3A were
 switched to the public Chromium adapter. The device had been running the
 earlier CEF cutover. The new host uses Chrome for Testing 158.0.8127.36 and the
