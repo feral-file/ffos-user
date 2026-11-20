@@ -22,6 +22,9 @@ cmake -S . -B "$trial/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$trial/build" -j3
 ctest --test-dir "$trial/build" --output-on-failure
 DESTDIR="$trial/stage" cmake --install "$trial/build" --strip
+DESTDIR="$trial/probe" cmake --install "$trial/build" --component diagnostic-probes --strip
+install -m755 "$trial/probe/usr/lib/ff-player-native/cef-views-probe" \
+  "$trial/stage/usr/lib/ff-player-native/ff-cef-views-engine"
 # The FFOS launch path uses Chromium's root-owned sandbox helper.
 sandbox="$trial/stage/usr/lib/ff-player-native/chrome-sandbox"
 test "$(stat -c %u:%g "$sandbox")" = 0:0

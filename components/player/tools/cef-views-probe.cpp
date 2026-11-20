@@ -1,6 +1,5 @@
-// Diagnostic only: compare CEF Views' native compositor against accelerated
-// offscreen composition. This is not a player and owns no playback state/UI.
-// It intentionally loads only the locally served, fixed-seed benchmark fixture.
+// Single native Wayland browser view. The FF1 host owns navigation over its
+// inherited engine pipes. A probe profile loads the fixed benchmark directly.
 #include "include/cef_app.h"
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
@@ -62,10 +61,11 @@ class App final : public CefApp,public CefBrowserProcessHandler {
  public:
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override{return this;}
   void OnContextInitialized() override{
-    CefBrowserSettings settings;CefRequestContextSettings context;
+    CefBrowserSettings settings;
+    const bool probe = CefCommandLine::GetGlobalCommandLine()->HasSwitch("probe-profile");
     auto view=CefBrowserView::CreateBrowserView(new Client,
-      "http://127.0.0.1:18990/grit-fixed.html",settings,nullptr,
-      CefRequestContext::CreateContext(context,nullptr),new BrowserDelegate);
+      probe ? "http://127.0.0.1:18990/grit-fixed.html" : "about:blank",settings,nullptr,
+      CefRequestContext::GetGlobalContext(),new BrowserDelegate);
     auto window=CefWindow::CreateTopLevelWindow(new WindowDelegate(view));
     CefPostDelayedTask(TID_UI,new ShutdownTask(window),50);
   }
@@ -77,7 +77,8 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
   int child=CefExecuteProcess(args,app,nullptr);if(child>=0)return child;
   auto command=CefCommandLine::CreateCommandLine();command->InitFromArgv(argc,argv);
   auto profile=command->GetSwitchValue("probe-profile").ToString();
-  if(profile.empty()){std::cerr<<"--probe-profile=PATH required\n";return 2;}
+  if(profile.empty())profile=command->GetSwitchValue("user-data-dir").ToString();
+  if(profile.empty()){std::cerr<<"A private browser profile is required\n";return 2;}
   CefSettings settings;CefString(&settings.root_cache_path)=std::filesystem::absolute(profile).string();
   if(!CefInitialize(args,settings,app,nullptr))return 1;
   std::signal(SIGTERM,stop);std::signal(SIGINT,stop);
