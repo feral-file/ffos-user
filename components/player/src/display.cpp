@@ -69,7 +69,7 @@ Bounds display_bounds(const Json& display,int width,int height){
  if(it!=display.end()){
    if(it->is_number()){
      double px=it->get<double>();
-     require(std::isfinite(px)&&px>=0&&px<=16384,"playlist_invalid","Invalid pixel margin");
+     require(std::isfinite(px)&&px>=0&&px<=86400000,"playlist_invalid","Invalid pixel margin");
      inset.fill(px);
    }else{
      require(it->is_string() && it->get_ref<const std::string&>().size()<=96,"playlist_invalid","Invalid CSS padding");

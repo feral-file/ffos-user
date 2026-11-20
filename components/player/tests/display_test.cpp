@@ -31,6 +31,8 @@ int main(){
   check(pixels.x==100&&pixels.y==100,"Pixel matte must use equal insets");
   auto css=ff::display_bounds({{"margin","1rem 2vw 3px 4vh"}},1000,500);
   check(css.x==20&&css.y==16&&css.width==960&&css.height==481,"CSS padding follows top right bottom left");
+  auto saved=ff::display_bounds({{"margin",86400000}},1920,1080);
+  check(saved.width>0 && saved.height>0,"Existing large device mattes must remain renderable");
   auto large=ff::display_bounds({{"margin","90%"}},1920,1080);
   check(large.width>0&&large.height>0,"Extreme matte must retain a bounded renderable viewport");
   {

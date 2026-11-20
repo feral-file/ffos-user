@@ -42,7 +42,10 @@ void validate_display(const Json& p){
   if(p.contains("imageRendering"))require(p["imageRendering"]=="auto" || p["imageRendering"]=="pixelated","playlist_invalid","Invalid image rendering");
   optional_text(p,"background",64);
   if(p.contains("background"))display_color(p["background"].get<std::string>());
-  if(p.contains("margin"))display_bounds(p,1920,1080);
+  if(p.contains("margin")){
+    if(p["margin"].is_number())require(p["margin"].get<double>()<=16384,"playlist_invalid","Authored pixel margin exceeds 16384");
+    display_bounds(p,1920,1080);
+  }
 }
 void validate_metadata(const Json& p){
   require(p.is_object(),"playlist_invalid","Metadata must be an object");
@@ -709,7 +712,7 @@ void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
     if(!selected_&&state_["stopped"]==false&&state_["sleeping"]==false&&!state_.value("pendingUpdate",Json(nullptr)).is_null())
       apply_pending_update();
     if(selected_ && selected_->stage=="failed" && recovery_attempt_==3 &&
-       !state_.value("paused",false) && !state_.value("sleeping",false) && overlay_.is_null() &&
+       !state_.value("paused",false) && !state_.value("sleeping",false) && overlay().is_null() &&
        !exhausted_items_.contains(selected_->index)){
       exhausted_items_.insert(selected_->index);
       try { advance(true); }

@@ -111,6 +111,15 @@ int main(){
     p.command("playback.update",{{"items",ff::Json::array({{{"source","https://example.org/new"}}})}});
     p.tick(clock,clock);
     check(p.desired()->item["source"]=="https://example.org/new","Refresh can replace an exhausted occurrence");
+    p.committed(p.desired()->id);p.presented(p.desired()->id);
+    p.command("connectivity.set",{{"online",false}});
+    p.command("overlay.set",{{"owner","setup"},{"state","connecting"}});
+    p.command("playback.replace",{{"playlist",mixed}});
+    check(p.overlay().is_null(),"An existing presentation must let the offline advisory yield");
+    for(int attempt=0;attempt<=3;++attempt){
+      p.failed(p.desired()->id,"Offline cache miss");clock+=8000;p.tick(clock,clock);
+    }
+    check(p.desired()->index==1,"A yielded advisory must allow failed offline artwork to advance");
     std::filesystem::remove_all(directory);std::cout<<"Bounded renderer recovery checks passed\n";
   }catch(const std::exception& error){std::filesystem::remove_all(directory);std::cerr<<error.what()<<'\n';return 1;}
 }
