@@ -21,6 +21,8 @@ struct ff_browser_view *ff_browser_view_create(struct ff_browser_server *server,
                                                int height, int *client_fd);
 void ff_browser_view_destroy(struct ff_browser_view *view);
 int ff_browser_view_frame(struct ff_browser_view *view, struct ff_browser_frame *frame);
+void *ff_browser_view_lock_frame(struct ff_browser_view *view);
+void ff_browser_frame_unlock(void *buffer);
 void ff_browser_view_redraw(struct ff_browser_view *view);
 void ff_browser_view_frame_requested(struct ff_browser_view *view);
 void ff_browser_view_presented_at(struct ff_browser_view *, uint64_t timestamp_ns,

@@ -32,7 +32,8 @@ class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts);
   ~Presentation();
-  void accelerated(Surface& surface, const DmaFrame& info, bool retained_source = false);
+  void accelerated(Surface& surface, const DmaFrame& info, std::shared_ptr<void> producer_buffer = {});
+  bool import_read_complete(const Surface& surface);
   bool copy_ready(Surface& surface);
   void coalesced_frame() { ++coalesced_frames_; }
   void software(Surface& surface, const void* data, int width, int height);
@@ -68,6 +69,7 @@ class Presentation {
   double pointer_x_ = 0, pointer_y_ = 0;
   int pointer_size_ = 0, pointer_hotspot_ = 0;
   uint64_t pointer_active_ = 0, gpu_copies_ = 0, cpu_copies_ = 0, swaps_ = 0;
+  uint64_t direct_imports_ = 0;
   uint64_t coalesced_frames_ = 0;
   double copy_ms_ = 0;
   FrameTiming copy_fence_timing_, copy_timing_, swap_timing_, frame_timing_;
@@ -83,6 +85,7 @@ class Presentation {
   void activate();
   void swap(const Surface* artwork);
   void quad(GLuint texture, Bounds rect, float opacity = 1);
+  void artwork_quad(const Surface& surface, Bounds rect, float opacity);
   void draw_pointer();
   void upload_ui(UIRaster raster, const std::string& key);
   void ui(const std::string& text, const std::string& qr, bool full);

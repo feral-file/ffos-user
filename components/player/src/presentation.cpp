@@ -78,7 +78,25 @@ Presentation::~Presentation() {
   glDeleteProgram(program_);
   if (context_) SDL_GL_DeleteContext(context_); if (window_) SDL_DestroyWindow(window_); SDL_Quit();
 }
-void Presentation::destroy(Surface& surface) { activate(); if(surface.copy_fence) glDeleteSync(static_cast<GLsync>(surface.copy_fence)); glDeleteTextures(1, &surface.texture); surface = {}; }
+bool Presentation::import_read_complete(const Surface& surface) {
+  if (!surface.read_fence) return true;
+  activate();
+  auto status = glClientWaitSync(static_cast<GLsync>(surface.read_fence), 0, 0);
+  require(status != GL_WAIT_FAILED, "graphics_error", "Imported texture read fence failed");
+  return status != GL_TIMEOUT_EXPIRED;
+}
+void Presentation::destroy(Surface& surface) {
+  activate();
+  // Normal reuse has already polled the fence. During occurrence teardown
+  // finish the last read before returning the buffer to its Wayland producer.
+  if (surface.read_fence) {
+    if (!import_read_complete(surface)) glFinish();
+    glDeleteSync(static_cast<GLsync>(surface.read_fence));
+  }
+  if (surface.copy_fence) glDeleteSync(static_cast<GLsync>(surface.copy_fence));
+  glDeleteTextures(1, &surface.texture);
+  surface = {};
+}
 void Presentation::activate() {
   // wlroots uses EGL directly, outside SDL's cached current-context state.
   // Invalidate that cache before restoring the native UI context.
@@ -86,7 +104,7 @@ void Presentation::activate() {
     require(SDL_GL_MakeCurrent(window_,nullptr)==0,"graphics_error",SDL_GetError());
   require(SDL_GL_MakeCurrent(window_,context_)==0,"graphics_error",SDL_GetError());
 }
-void Presentation::accelerated(Surface& surface, const DmaFrame& info, bool retained_source) {
+void Presentation::accelerated(Surface& surface, const DmaFrame& info, std::shared_ptr<void> producer_buffer) {
   activate();
   const auto started = std::chrono::steady_clock::now();
   require(info.count > 0 && info.count <= 4, "graphics_error", "Invalid DMA-BUF plane count");
@@ -112,7 +130,33 @@ void Presentation::accelerated(Surface& surface, const DmaFrame& info, bool reta
   attrs.push_back(EGL_NONE);
   auto display = eglGetCurrentDisplay(); auto image = create(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs.data());
   require(image != EGL_NO_IMAGE_KHR, "graphics_error", "DMA-BUF format/modifier cannot be imported");
+  if (surface.producer_buffer) destroy(surface);
   GLuint imported, framebuffers[2]; glGenTextures(1, &imported); glBindTexture(GL_TEXTURE_2D, imported); bind(GL_TEXTURE_2D, image);
+  // The private Wayland compositor gives us explicit ownership of RGB buffers.
+  // Sample their full texture directly. CEF OSR and libmpv callback buffers
+  // still require a copy before returning control to the producer.
+  const bool rgb = format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_ARGB8888 ||
+                   format == DRM_FORMAT_XBGR8888 || format == DRM_FORMAT_ABGR8888;
+  if (producer_buffer && rgb && info.count == 1 && info.visible.width == 0) {
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    release(display, image);
+    if (glGetError() != GL_NO_ERROR) {
+      glDeleteTextures(1, &imported);
+      throw Error("graphics_error", "Cannot sample the imported browser texture");
+    }
+    glDeleteTextures(1, &surface.texture);
+    surface.texture = imported;
+    surface.width = width;
+    surface.height = height;
+    surface.accelerated = true;
+    surface.producer_buffer = std::move(producer_buffer);
+    ++surface.frames;
+    ++direct_imports_;
+    return;
+  }
   glGenFramebuffers(2, framebuffers); glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffers[0]);
   glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, imported, 0);
   const bool source_ok = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
@@ -125,7 +169,7 @@ void Presentation::accelerated(Surface& surface, const DmaFrame& info, bool reta
   // This relies on Mesa's implicit DMA-BUF fences. It does not repair CEF #4313
   // on NVIDIA. A driver/GPU stall is a shared process failure boundary requiring
   // external watchdog recovery, not a recoverable artwork-renderer failure.
-  if (retained_source) {
+  if (producer_buffer) {
     require(!surface.copy_fence,"graphics_error","Copy already in flight");
     surface.copy_started_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(started.time_since_epoch()).count();
     surface.copy_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
@@ -169,6 +213,18 @@ void Presentation::quad(GLuint texture, Bounds rect, float opacity) {
   glViewport(rect.x, height_ - rect.y - rect.height, rect.width, rect.height); glUseProgram(program_);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, texture); glUniform1i(glGetUniformLocation(program_, "tex"), 0);
   glUniform1f(glGetUniformLocation(program_, "opacity"), opacity); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+void Presentation::artwork_quad(const Surface& surface, Bounds rect, float opacity) {
+  quad(surface.texture, rect, opacity);
+  if (!surface.producer_buffer) return;
+  // UI redraws and crossfades can sample a shown surface more than once.
+  // Keep the fence for the most recent read in this GL command stream.
+  if (surface.read_fence) glDeleteSync(static_cast<GLsync>(surface.read_fence));
+  surface.read_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!surface.read_fence) {
+    glFinish();
+    throw Error("graphics_error", "Cannot fence an imported browser texture");
+  }
 }
 static void upload_raster(GLuint& texture, const UIRaster& raster) {
   if (!texture) glGenTextures(1, &texture);
@@ -259,10 +315,10 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   }
   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   if (stage && blend.outgoing && blend.outgoing->texture && blend.outgoing_opacity > 0)
-    quad(blend.outgoing->texture, bounds(*stage), blend.outgoing_opacity);
+    artwork_quad(*blend.outgoing, bounds(*stage), blend.outgoing_opacity);
   if (stage && artwork && artwork->texture && blend.opacity > 0)
-    quad(artwork->texture, bounds(*stage), blend.opacity);
-  if(backdrop&&backdrop->texture&&backdrop_opacity>0)quad(backdrop->texture,{0,0,width_,height_},backdrop_opacity);
+    artwork_quad(*artwork, bounds(*stage), blend.opacity);
+  if(backdrop&&backdrop->texture&&backdrop_opacity>0)artwork_quad(*backdrop,{0,0,width_,height_},backdrop_opacity);
   auto overlay = playback.overlay();
   if (!overlay.is_null()) {
     auto key="panel:"+overlay.dump()+std::to_string(width_)+":"+std::to_string(height_);
@@ -337,6 +393,7 @@ Json Presentation::metrics() const {
   return {{"gpuCopies", gpu_copies_},
           {"cpuCopies", cpu_copies_},
           {"coalescedFrames", coalesced_frames_},
+          {"directTextureImports", direct_imports_},
           {"copyMilliseconds", copy_ms_},
           {"swaps", swaps_},
           {"copyTiming", copy_timing_.json()},

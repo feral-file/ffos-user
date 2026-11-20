@@ -418,6 +418,12 @@ int ff_browser_view_frame(struct ff_browser_view *v, struct ff_browser_frame *fr
   v->dirty = 0;
   return 1;
 }
+void *ff_browser_view_lock_frame(struct ff_browser_view *v) {
+  return wlr_buffer_lock(v->frame_state.buffer);
+}
+void ff_browser_frame_unlock(void *buffer) {
+  wlr_buffer_unlock(buffer);
+}
 void ff_browser_view_presented_at(struct ff_browser_view *v, uint64_t timestamp_ns,
                                   uint32_t refresh_ns, uint32_t flags) {
   if (v->toplevel) {

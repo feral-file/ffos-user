@@ -59,6 +59,8 @@ for path in a.runs:
         if not times or times[0] > low:
             raise ValueError('Native feedback does not cover sample start')
         copies = {key: timing[key] for key in ('gpuCopies', 'cpuCopies', 'coalescedFrames')}
+        if 'directTextureImports' in timing:
+            copies['directTextureImports'] = timing['directTextureImports']
     # A short prefix must not be compared with CPU statistics for a full run.
     # Two hundred milliseconds allows the measured slow fixture's final frame;
     # longer gaps need separate investigation, not a silently shortened sample.

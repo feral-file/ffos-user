@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <utility>
 
 namespace ff {
@@ -13,6 +14,9 @@ struct Surface {
   int width = 0, height = 0;
   uint64_t frames = 0, display_revision = 0;
   bool accelerated = false;
+  // Windowed browsers can keep a compositor buffer locked across UI redraws.
+  std::shared_ptr<void> producer_buffer;
+  mutable void* read_fence = nullptr;
   void* copy_fence = nullptr;
   int64_t copy_started_ns = 0;
 };

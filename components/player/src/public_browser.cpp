@@ -131,9 +131,9 @@ PublicBrowser::~PublicBrowser() {
   }
   if (writer_ >= 0) close(writer_);
   if (reader_ >= 0) close(reader_);
-  if (server_) ff_browser_server_destroy(server_);
   presentation_.destroy(frames.capture);
   presentation_.destroy(frames.shown);
+  if (server_) ff_browser_server_destroy(server_);
   // Profiles contain only this occurrence's browser state, no application data.
   // Garbage collection belongs off the presentation loop; leave them for the
   // bounded startup sweeper rather than synchronously deleting a large cache.
@@ -480,7 +480,12 @@ void PublicBrowser::poll() {
     // fence check. The fence moves with its texture when FramePair swaps.
     const bool source_released = presentation_.copy_ready(frames.shown) &&
                                  presentation_.copy_ready(frames.capture);
-    if (source_released && !pending_host_serial_ &&
+    // After a swap the old shown buffer becomes the spare. Release its lock as
+    // soon as the last GPU read completes, even while the producer is idle.
+    const bool writable = presentation_.import_read_complete(frames.capture);
+    if (!frames.pending && writable && frames.capture.producer_buffer)
+      presentation_.destroy(frames.capture);
+    if (writable && source_released && !pending_host_serial_ &&
         (!frames.pending || !loaded_ || frames.count <= load_frame_ ||
          frames.capture.display_revision != occurrence_.display_revision)) {
       ff_browser_frame frame{};
@@ -499,12 +504,12 @@ void PublicBrowser::poll() {
         dma.modifier = frame.modifier;
         for (int i = 0; i < frame.count; ++i)
           dma.planes[i] = {frame.fd[i], frame.stride[i], frame.offset[i]};
-        // Unlike CEF callback-local buffers, our scene keeps this source locked
-        // until the next view_frame call. Poll the GPU fence without blocking
-        // command/input admission or releasing/reusing the producer's buffer.
+        // An explicit wlroots lock keeps the DMA-BUF valid through later UI
+        // draws. Non-RGB exports use the existing fenced blit fallback.
         if (frames.pending) presentation_.coalesced_frame();
         frames.pending = false;
-        presentation_.accelerated(frames.capture, dma, true);
+        std::shared_ptr<void> producer(ff_browser_view_lock_frame(view_), ff_browser_frame_unlock);
+        presentation_.accelerated(frames.capture, dma, std::move(producer));
         ff_browser_view_frame_requested(view_);
         auto b = presentation_.bounds(occurrence_.display);
         frames.capture.display_revision =
