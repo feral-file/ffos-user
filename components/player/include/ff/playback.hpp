@@ -2,6 +2,7 @@
 #include "ff/store.hpp"
 #include <functional>
 #include <optional>
+#include <set>
 
 namespace ff {
 struct Occurrence {
@@ -103,14 +104,15 @@ class Playback {
   int64_t storage_retry_at_ = 0;
   // Retry budget belongs to one selection, not one renderer. Short-lived
   // successful frames cannot hide a crash loop by replenishing it.
+  std::set<int> exhausted_items_;
   unsigned recovery_attempt_ = 0;
   int64_t recovery_at_ = 0;
   std::string recovery_error_, recovery_occurrence_;
   int prepare_replace(Json& next,const Json& params);
   void clear_recovery();
   void persist(Json next);
-  void select(bool recovering = false);
-  void advance();
+  void select(bool recovering = false, bool skipping_failure = false);
+  void advance(bool skipping_failure = false);
   void execute_schedule(int64_t wall_time_ms);
   void replace(Json& next, const Json& params);
   Json update_playlist(const Json& params,const Json& plan = nullptr);

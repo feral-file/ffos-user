@@ -4,7 +4,7 @@
 use std::{env, error::Error, os::fd::FromRawFd, os::unix::net::UnixDatagram,
           process::Command, rc::Rc, sync::Arc};
 use wl_proxy::{
-    baseline::Baseline, global_mapper::GlobalMapper,
+    baseline::Baseline, fixed::Fixed, global_mapper::GlobalMapper,
     object::{Object, ObjectCoreApi, ObjectRcUtils, ObjectUtils},
     protocols::{ObjectInterface,
         presentation_time::{
@@ -12,6 +12,7 @@ use wl_proxy::{
             wp_presentation_feedback::{WpPresentationFeedback, WpPresentationFeedbackHandler, WpPresentationFeedbackKind}},
         xdg_shell::{xdg_surface::{XdgSurface,XdgSurfaceHandler},xdg_toplevel::XdgToplevel,xdg_wm_base::{XdgWmBase,XdgWmBaseHandler}},
         wayland::{wl_display::{WlDisplay,WlDisplayHandler}, wl_registry::{WlRegistry,WlRegistryHandler},
+                  wl_pointer::{WlPointer,WlPointerHandler,WlPointerButtonState}, wl_seat::{WlSeat,WlSeatHandler},
                   wl_surface::{WlSurface,WlSurfaceHandler}}},
     simple::{SimpleProxy,SimpleCommandExt},
 };
@@ -35,7 +36,7 @@ impl WlRegistryHandler for Registry {
             "wl_compositor" | "wl_subcompositor" | "wl_output" | "wl_seat" | "wl_shm" |
             "xdg_wm_base" | "wp_presentation" | "wp_viewporter" | "wp_single_pixel_buffer_manager_v1" |
             "wp_fractional_scale_manager_v1" | "zwp_linux_dmabuf_v1" | "wp_linux_drm_syncobj_manager_v1" |
-            "zxdg_output_manager_v1" | "zxdg_decoration_manager_v1" | "wp_cursor_shape_manager_v1" =>
+            "zxdg_output_manager_v1" | "zxdg_decoration_manager_v1" =>
                 self.map.forward_global(registry,name,interface,version),
             _ => self.map.ignore_global(name),
         }
@@ -49,7 +50,46 @@ impl WlRegistryHandler for Registry {
                 id.downcast::<XdgWmBase>().set_handler(Shell(self.host.clone(),presentation.clone()));
             }
         }
+        if id.interface()==ObjectInterface::WlSeat {
+            id.downcast::<WlSeat>().set_handler(Seat(self.host.clone()));
+        }
         self.map.forward_bind(registry,name,&id);
+    }
+}
+struct Seat(Arc<UnixDatagram>);
+impl WlSeatHandler for Seat {
+    fn handle_get_pointer(&mut self, seat: &Rc<WlSeat>, pointer: &Rc<WlPointer>) {
+        pointer.set_handler(Pointer { host: self.0.clone(), x: 0, y: 0 });
+        seat.send_get_pointer(pointer);
+    }
+}
+struct Pointer { host: Arc<UnixDatagram>, x: i32, y: i32 }
+impl Pointer {
+    fn report(&self, pressed: bool) {
+        // Three native-endian words distinguish input from the 8-byte presentation timestamp.
+        let mut packet = [0u8; 12];
+        packet[..4].copy_from_slice(&i32::from(pressed).to_ne_bytes());
+        packet[4..8].copy_from_slice(&self.x.to_ne_bytes());
+        packet[8..].copy_from_slice(&self.y.to_ne_bytes());
+        let _ = self.host.send(&packet);
+    }
+}
+impl WlPointerHandler for Pointer {
+    fn handle_enter(&mut self, p: &Rc<WlPointer>, serial: u32, surface: &Rc<WlSurface>, x: Fixed, y: Fixed) {
+        self.x=x.to_f64() as i32; self.y=y.to_f64() as i32;
+        p.send_enter(serial,surface,x,y);
+        p.send_set_cursor(serial,None,0,0);
+    }
+    fn handle_motion(&mut self, p: &Rc<WlPointer>, time: u32, x: Fixed, y: Fixed) {
+        self.x=x.to_f64() as i32; self.y=y.to_f64() as i32;
+        p.send_motion(time,x,y); self.report(false);
+    }
+    fn handle_button(&mut self,p: &Rc<WlPointer>,serial:u32,time:u32,button:u32,state:WlPointerButtonState) {
+        p.send_button(serial,time,button,state);
+        self.report(state==WlPointerButtonState::PRESSED);
+    }
+    fn handle_set_cursor(&mut self,p: &Rc<WlPointer>,serial:u32,_surface:Option<&Rc<WlSurface>>,_x:i32,_y:i32) {
+        p.send_set_cursor(serial,None,0,0);
     }
 }
 #[derive(Clone)]

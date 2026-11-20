@@ -20,6 +20,9 @@ int main(){
   for(auto [literal,expected]:{std::pair{"#fff","#FFFFFF"},std::pair{"white","#FFFFFF"},std::pair{"gray","#808080"},std::pair{"#f008","#880000"},std::pair{"rgba(255, 0, 0, 0.5)","#800000"},std::pair{"rgb(100% 0% 0% / 50%)","#800000"},std::pair{"hsl(120deg, 100%, 50%)","#00FF00"},std::pair{"transparent","#000000"}})
    check(ff::display_color(literal)==expected,"CSS color must resolve identically for native and bundled/media backends");
   rejects([]{ff::display_color("var(--artist-color)");},"playlist_invalid");
+  check(ff::hard_pixel_edges({{"scaling","fill"}},400,200,500,500),"Cover enlargement uses the larger axis");
+  check(!ff::hard_pixel_edges({{"scaling","fit"}},400,200,500,500),"Small enlargement must stay smooth");
+  check(ff::hard_pixel_edges({{"imageRendering","pixelated"}},400,200,100,100),"Authored pixelation wins on reduction");
   auto landscape=ff::display_bounds({{"margin","10%"}},1920,1080);
   check(landscape.x==192&&landscape.y==108&&landscape.width==1536&&landscape.height==864,"Percentage matte must use each viewport axis");
   auto portrait=ff::display_bounds({{"margin","10%"}},1080,1920);
@@ -60,6 +63,15 @@ int main(){
    p.command("playback.select",{{"index",1}});
    rejects([&]{p.command("presentation.set",{{"occurrence",id},{"display",{{"scaling","fill"}}}});},"stale_occurrence");
    check(p.desired()->display["margin"]==45,"Adjacent identical URL must not inherit preview");
+   auto mapped=playlist();
+   mapped["defaults"]["display"]["userOverrides"]={{"duration",false},{"scaling",true}};
+   mapped["items"][0]["display"]={{"scaling","fit"},{"userOverrides",{{"scaling",false}}}};
+   p.command("settings.set",{{"framing","fill"}});
+   p.command("playback.replace",{{"playlist",mapped}});id=p.desired()->id;p.committed(id);p.presented(id);
+   check(p.desired()->display["scaling"]=="fit" && p.desired()->display["overridePermissions"]["duration"]==false,
+         "Per-field locks must merge across layers and retain the artwork's scaling");
+   rejects([&]{p.command("presentation.set",{{"occurrence",id},{"display",{{"scaling","fill"}}}});},"presentation_locked");
+   p.command("presentation.set",{{"occurrence",id},{"display",{{"margin",10}}}});
    auto authored=playlist();authored["items"][0]["display"]={{"margin",12},{"background","#654321"},{"userOverrides",false}};
    p.command("playback.replace",{{"playlist",authored}});id=p.desired()->id;p.committed(id);p.presented(id);
    check(p.desired()->display["margin"]==12,"Authored margin must beat saved fallback");

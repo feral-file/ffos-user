@@ -21,6 +21,7 @@ class InputState {
   explicit InputState(std::function<void(const Json&)> sink) : sink_(std::move(sink)) {}
   void target(std::string occurrence, InputGeometry geometry);
   void dispatch(const Json& event);
+  void observe_pointer(double x, double y);
   void release();
   void flush();
   double x() const { return x_; }

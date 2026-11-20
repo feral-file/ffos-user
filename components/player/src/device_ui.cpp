@@ -82,6 +82,9 @@ struct Text {
   int width=0,height=0;
   Text(cairo_t* cr,const std::string& markup,double size,double line_height,int max_width,bool center) {
     layout=pango_cairo_create_layout(cr);auto font=pango_font_description_from_string("PP Mori");
+    // CSS keeps fractional glyph advances. Rounding each character pushes the
+    // claim title over its 86vw limit on a portrait 1080px display.
+    pango_context_set_round_glyph_positions(pango_layout_get_context(layout), false);
     // CSS uses pixels, while Pango's normal font-description size uses points.
     pango_font_description_set_absolute_size(font,size*PANGO_SCALE);
     pango_layout_set_font_description(layout,font);pango_font_description_free(font);
@@ -101,12 +104,12 @@ struct Block {
   double size, line_height, gap;
   double width_fraction = .96, opacity = 1;
 };
-void rounded(cairo_t* cr,double x,double y,double size,double radius) {
+void rounded(cairo_t* cr,double x,double y,double width,double height,double radius) {
   constexpr double pi=3.141592653589793;
   cairo_new_sub_path(cr);
-  cairo_arc(cr,x+size-radius,y+radius,radius,-pi/2,0);
-  cairo_arc(cr,x+size-radius,y+size-radius,radius,0,pi/2);
-  cairo_arc(cr,x+radius,y+size-radius,radius,pi/2,pi);
+  cairo_arc(cr,x+width-radius,y+radius,radius,-pi/2,0);
+  cairo_arc(cr,x+width-radius,y+height-radius,radius,0,pi/2);
+  cairo_arc(cr,x+radius,y+height-radius,radius,pi/2,pi);
   cairo_arc(cr,x+radius,y+radius,radius,pi,pi*1.5);cairo_close_path(cr);
 }
 UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block> after,int width,int height) {
@@ -134,7 +137,7 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
     auto code=QRcode_encodeString(qr.c_str(),0,QR_ECLEVEL_L,QR_MODE_8,1);
     require(code!=nullptr,"graphics_error","QR payload cannot be encoded");
     y+=height*.05;const double box=qr_size+padding*2;
-    cairo_set_source_rgb(canvas.cr,1,1,1);rounded(canvas.cr,-box*.5,y,box,edge*.015);cairo_fill(canvas.cr);
+    cairo_set_source_rgb(canvas.cr,1,1,1);rounded(canvas.cr,-box*.5,y,box,box,edge*.015);cairo_fill(canvas.cr);
     const double cell=qr_size/(code->width+4); // qrcode.react marginSize=2.
     cairo_set_antialias(canvas.cr,CAIRO_ANTIALIAS_NONE);cairo_set_source_rgb(canvas.cr,0,0,0);
     for(int row=0;row<code->width;++row)for(int col=0;col<code->width;++col)if(code->data[row*code->width+col]&1){
@@ -188,6 +191,17 @@ void load_device_fonts(const std::string& directory) {
   pango_fc_font_map_set_config(PANGO_FC_FONT_MAP(map),config);
   pango_fc_font_map_config_changed(PANGO_FC_FONT_MAP(map));
 }
+UIRaster render_loading_label() {
+  Canvas measure(1,1);
+  Text label(measure.cr,"Loading...",32,1.2,480,false);
+  Canvas canvas(label.width,label.height+4);
+  cairo_set_source_rgb(canvas.cr,1,1,1);
+  label.paint(canvas.cr,0,0);
+  cairo_set_source_rgb(canvas.cr,46/255.,46/255.,46/255.);
+  cairo_rectangle(canvas.cr,0,label.height,label.width,4);
+  cairo_fill(canvas.cr);
+  return canvas.pixels();
+}
 UIRaster render_message(const std::string& text,int width,int height,bool full) {
   if(!full){
     const double scale=std::min(width,height)/720.0,padding=10*scale;
@@ -196,7 +210,27 @@ UIRaster render_message(const std::string& text,int width,int height,bool full) 
     cairo_set_source_rgb(canvas.cr,1,1,1);cairo_paint(canvas.cr);cairo_set_source_rgb(canvas.cr,0,0,0);layout.paint(canvas.cr,padding,padding);
     return canvas.pixels();
   }
-  return panel({{escape(text),std::clamp(std::min(width,height)*.045,30.0,62.0),1.14,0}},"",{},width,height);
+  // MessageModal at screenRatio=1 has a centered 80%-wide charcoal card.
+  Canvas canvas(width,height);
+  cairo_set_source_rgba(canvas.cr,0,0,0,.80);cairo_paint(canvas.cr);
+  const double card_width=width*.8;
+  const double padding=std::min({100.,card_width*.25,height*.18});
+  const int text_width=std::max(1,int(card_width-2*padding));
+  auto split=text.find('\n');
+  Text heading(canvas.cr,escape(text.substr(0,split)),36,1.2,text_width,true);
+  const auto body_text=split==std::string::npos?"":text.substr(split+1);
+  Text body(canvas.cr,escape(body_text),24,1.2,text_width,true);
+  const double gap=body_text.empty()?0:30;
+  const double stack_height=heading.height+gap+(body_text.empty()?0:body.height);
+  const double card_height=std::min(double(height),stack_height+2*padding);
+  const double top=(height-card_height)/2;
+  cairo_set_source_rgb(canvas.cr,46/255.,46/255.,46/255.);
+  rounded(canvas.cr,(width-card_width)/2,top,card_width,card_height,std::min(20.,card_height/2));
+  cairo_fill(canvas.cr);cairo_set_source_rgb(canvas.cr,1,1,1);
+  const double x=(width-text_width)/2.,y=std::max(top,(height-stack_height)/2.);
+  heading.paint(canvas.cr,x,y);
+  if(!body_text.empty())body.paint(canvas.cr,x,y+heading.height+gap);
+  return canvas.pixels();
 }
 UIRaster render_panel(const Json& overlay,int width,int height) {
   const double edge = std::min(width, height);

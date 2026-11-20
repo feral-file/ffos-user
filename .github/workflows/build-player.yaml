@@ -42,3 +42,8 @@ jobs:
             components/player/build-ff1/ff-player-cef-linux.tar.gz
             components/player/build-ff1/SHA256SUMS
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ff-player-ui-fixtures
+          path: components/player/build-ff1/build/ui-evidence/*.png
+          if-no-files-found: error

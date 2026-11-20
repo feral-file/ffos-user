@@ -56,6 +56,12 @@ std::string display_color(const std::string& css){
  }
  std::ostringstream result;result<<'#'<<std::hex<<std::uppercase<<std::setfill('0');for(auto c:rgb)result<<std::setw(2)<<int(std::round(std::clamp(c*alpha,0.0,255.0)));return result.str();
 }
+bool hard_pixel_edges(const Json& display,int source_width,int source_height,int width,int height){
+  if(display.value("imageRendering","auto")=="pixelated")return true;
+  if(source_width<=0 || source_height<=0)return false;
+  const double x=double(width)/source_width,y=double(height)/source_height;
+  return (display.value("scaling","fit")=="fill"?std::max(x,y):std::min(x,y))>=2.;
+}
 Bounds display_bounds(const Json& display,int width,int height){
  require(width>0&&height>0,"display_unavailable","Display dimensions must be positive");
  double x=0,y=0;

@@ -95,6 +95,9 @@ class Presentation {
   void quad(GLuint texture, Bounds rect, float opacity = 1);
   void artwork_quad(const Surface& surface, Bounds rect, float opacity);
   void draw_pointer(bool pressed);
+  void draw_loading(uint64_t ticks);
+  std::string loading_occurrence_;
+  uint64_t loading_started_ = 0;
   void upload_ui(UIRaster raster, const std::string& key);
   void ui(const std::string& text, const std::string& qr, bool full);
 };

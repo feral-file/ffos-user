@@ -96,6 +96,10 @@ void InputState::release() {
 void InputState::flush() {
   if (pending_move_) { pending_move_ = false; emit({{"kind","move"}}); }
 }
+void InputState::observe_pointer(double x,double y) {
+  x_=std::clamp(x,0.0,static_cast<double>(geometry_.width-1));
+  y_=std::clamp(y,0.0,static_cast<double>(geometry_.height-1));
+}
 void InputState::dispatch(const Json& event) {
   auto kind=string_field(event,"kind",32);
   if (kind=="releaseAll") { release();return; }
@@ -105,8 +109,7 @@ void InputState::dispatch(const Json& event) {
     double x=event.contains("dx")?x_+event.at("dx").get<double>()*scale:event.value("x",x_);
     double y=event.contains("dy")?y_+event.at("dy").get<double>()*scale:event.value("y",y_);
     require(std::isfinite(x)&&std::isfinite(y),"invalid_params","Invalid pointer position");
-    x_=std::clamp(x,0.0,static_cast<double>(geometry_.width-1));
-    y_=std::clamp(y,0.0,static_cast<double>(geometry_.height-1));
+    observe_pointer(x,y);
     pending_move_=true;
     return;
   }

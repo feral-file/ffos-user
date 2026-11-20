@@ -88,6 +88,18 @@ int main(){
     check(!p.media_paused(),"Automatic recovery must preserve explicit resume of autoplay-disabled media");
     p.command("playback.sleep",{{"sleeping",true}});expect_no_artwork();
     p.command("playback.sleep",{{"sleeping",false}});p.command("playback.stop",ff::Json::object());expect_no_artwork();
+    auto mixed=playlist();mixed["items"].push_back({{"source","https://example.org/healthy"},{"duration",0}});
+    p.command("playback.replace",{{"playlist",mixed}});
+    int64_t clock=now+201000;
+    for(int item=0;item<2;++item){
+      check(p.desired()->index==item,"An exhausted work must yield to a later work");
+      for(int attempt=0;attempt<=3;++attempt){
+        p.failed(p.desired()->id,"Broken source");
+        clock+=8000;p.tick(clock,clock);
+      }
+    }
+    auto last=p.desired()->id;p.tick(clock+60000,clock+60000);
+    check(p.desired()->id==last && p.snapshot()["recovery"]["exhausted"]==true,"An all-broken list must stop");
     std::filesystem::remove_all(directory);std::cout<<"Bounded renderer recovery checks passed\n";
   }catch(const std::exception& error){std::filesystem::remove_all(directory);std::cerr<<error.what()<<'\n';return 1;}
 }

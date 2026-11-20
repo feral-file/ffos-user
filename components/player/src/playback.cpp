@@ -25,10 +25,21 @@ void optional_text(const Json& p,const char* key,size_t limit=4096){
   if(p.contains(key))require(p[key].is_string()&&p[key].get_ref<const std::string&>().size()<=limit,
     "playlist_invalid",std::string("Invalid text field: ")+key);
 }
+bool allows_override(const Json& display,const std::string& field){
+  const auto permissions=display.find("overridePermissions");
+  if(permissions!=display.end() && permissions->contains(field))return permissions->at(field).get<bool>();
+  return display.value("userOverrides",true);
+}
 void validate_display(const Json& p){
   require(p.is_object(),"playlist_invalid","Display must be an object");
-  for(auto key:{"autoPlay","loop","userOverrides"})if(p.contains(key))require(p[key].is_boolean(),"playlist_invalid","Display flags must be booleans");
+  if(p.contains("userOverrides")){
+    const auto& value=p.at("userOverrides");
+    require(value.is_boolean() || (value.is_object() && std::all_of(value.begin(),value.end(),
+      [](const Json& field){return field.is_boolean();})),"playlist_invalid","Invalid display override permissions");
+  }
+  for(auto key:{"autoPlay","loop"})if(p.contains(key))require(p[key].is_boolean(),"playlist_invalid","Display flags must be booleans");
   if(p.contains("scaling"))require(p["scaling"]=="fit"||p["scaling"]=="fill"||p["scaling"]=="stretch"||p["scaling"]=="auto","playlist_invalid","Invalid display scaling");
+  if(p.contains("imageRendering"))require(p["imageRendering"]=="auto" || p["imageRendering"]=="pixelated","playlist_invalid","Invalid image rendering");
   optional_text(p,"background",64);
   if(p.contains("background"))display_color(p["background"].get<std::string>());
   if(p.contains("margin")){
@@ -220,23 +231,36 @@ void Playback::validate_playlist(const Json& playlist) const {
 }
 Json Playback::display(const Json& item, const Json& defaults, const Json& adjustment) const {
   Json result = {{"scaling", state_["settings"].value("scaling", "fit")}, {"margin", state_["settings"].value("margin",Json(0))}, {"background", state_["settings"].value("background","#000000")}, {"autoPlay", true}, {"loop", true}, {"userOverrides", true}};
-  const auto merge = [&](const Json& layer) { if (layer.is_object()) result.update(layer); };
+  // The native v1 snapshot exposes a boolean default for older controllers.
+  // Preserve DP-1's authored per-field exceptions separately across layers.
+  const auto merge = [&](const Json& layer) {
+    for(const auto& [field,value]:layer.items()){
+      if(field=="userOverrides" && value.is_object()){
+        if(!result.contains("overridePermissions"))result["overridePermissions"]=Json::object();
+        result["overridePermissions"].update(value);
+      }else if(field!="overridePermissions"){
+        if(field=="userOverrides")result.erase("overridePermissions");
+        result[field]=value;
+      }
+    }
+  };
   merge(defaults.value("display", Json::object()));
   merge(item.value("inlineManifest", Json::object()).value("controls", Json::object()).value("display", Json::object()));
   // resolvedManifest is supplied by controld after its bounded fetch/hash check.
   merge(item.value("resolvedManifest", Json::object()).value("controls", Json::object()).value("display", Json::object()));
   merge(item.value("override", Json::object()).value("display", Json::object()));
   merge(item.value("display", Json::object()));
-  if(result.value("userOverrides",true))merge(adjustment);
+  for(const auto& [field,value]:adjustment.items())if(allows_override(result,field))result[field]=value;
   auto framing=state_["settings"].value("framing","artwork");
-  if(result.value("userOverrides",true)&&framing!="artwork")result["scaling"]=framing;
+  if(allows_override(result,"scaling")&&framing!="artwork")result["scaling"]=framing;
   return result;
 }
 void Playback::release_input() { if (input_) input_({{"kind", "releaseAll"}}); }
 void Playback::clear_recovery() {
   recovery_attempt_=0;recovery_at_=0;recovery_error_.clear();recovery_occurrence_.clear();
 }
-void Playback::select(bool recovering) {
+void Playback::select(bool recovering,bool skipping_failure) {
+  if(!recovering && !skipping_failure)exhausted_items_.clear();
   if(!recovering){clear_recovery();presentation_failure_=nullptr;}
   release_input();
   eos_pending_ = false;
@@ -438,9 +462,9 @@ Json Playback::command(std::string_view method, const Json& p) {
     require(selected_&&presented_&&selected_->id==id&&presented_->id==id&&selected_->stage=="presented","stale_occurrence","Presentation target changed or is still loading");
     require(!transition_stage_ || composition_.value("occurrence", "") != id,
             "stale_occurrence", "Presentation is still transitioning");
-    require(selected_->display.value("userOverrides",true),"presentation_locked","Artwork does not allow presentation overrides");
     require(p.contains("display"),"invalid_params","Missing presentation settings");
     auto adjustment=p["display"];fields(adjustment,{"scaling","margin","background"});validate_display(adjustment);
+    for(const auto& field:adjustment.items())require(allows_override(selected_->display,field.key()),"presentation_locked","Artwork locks "+field.key());
     auto colors=adjustment;colors.erase("margin");validate_settings(colors);
     selected_->adjustment.update(adjustment);selected_->display=display(selected_->item,selected_->defaults,selected_->adjustment);++selected_->display_revision;
     presented_->adjustment=selected_->adjustment;presented_->display=selected_->display;presented_->display_revision=selected_->display_revision;
@@ -618,11 +642,11 @@ void Playback::failed(const std::string& id, std::string reason) {
 }
 double Playback::duration() const {
   if (!selected_) return 0;
-  if (selected_->display.value("loop", true) && selected_->display.value("userOverrides", true) && state_["settings"].contains("durationSeconds") && !state_["settings"]["durationSeconds"].is_null())
+  if (selected_->display.value("loop", true) && allows_override(selected_->display,"duration") && state_["settings"].contains("durationSeconds") && !state_["settings"]["durationSeconds"].is_null())
     return state_["settings"]["durationSeconds"].get<double>();
   return selected_->item.value("duration", 0.0);
 }
-void Playback::advance() {
+void Playback::advance(bool skipping_failure) {
   if (!selected_ || state_["paused"] == true) return;
   if(apply_pending_update())return;
   auto next = state_; const auto& items = next["playlist"]["items"];
@@ -632,11 +656,12 @@ void Playback::advance() {
   auto it = std::find(order.begin(), order.end(), selected_->index);
   size_t pos = it == order.end() ? 0 : static_cast<size_t>(it - order.begin());
   for (size_t n = 0; n < order.size(); ++n) {
-    if (state_["loop"] != "one") {
+    if (skipping_failure || state_["loop"] != "one") {
       if (pos + 1 == order.size() && state_["loop"] == "none") return;
       pos = (pos + 1) % order.size();
     }
-    if (allowed(items[order[pos]], next)) { next["index"] = order[pos]; persist(std::move(next)); select(); return; }
+    if(skipping_failure && exhausted_items_.contains(order[pos]))continue;
+    if (allowed(items[order[pos]], next)) { next["index"] = order[pos]; persist(std::move(next)); select(false,skipping_failure); return; }
   }
 }
 void Playback::ended(const std::string& id) {
@@ -694,6 +719,13 @@ void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
     }
     if(!selected_&&state_["stopped"]==false&&state_["sleeping"]==false&&!state_.value("pendingUpdate",Json(nullptr)).is_null())
       apply_pending_update();
+    if(selected_ && selected_->stage=="failed" && recovery_attempt_==3 &&
+       !state_.value("paused",false) && !state_.value("sleeping",false) && overlay_.is_null() &&
+       !exhausted_items_.contains(selected_->index)){
+      exhausted_items_.insert(selected_->index);
+      try { advance(true); }
+      catch (...) { exhausted_items_.erase(selected_->index);throw; }
+    }
     if(recovery_at_&&now_>=recovery_at_&&selected_&&selected_->stage=="failed"){
       // Selection changes clear the deadline. Reusing the playlist generation
       // preserves its trust binding; a new occurrence rejects every late

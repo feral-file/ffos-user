@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <csignal>
 #include <ctime>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -487,10 +488,17 @@ void PublicBrowser::poll() {
         const char show=1;
         window_admitted_=::send(admission_fd_,&show,1,MSG_DONTWAIT|MSG_NOSIGNAL)==1;
       }
-      uint64_t timestamp=0;
-      while(recv(feedback_fd_,&timestamp,sizeof(timestamp),MSG_DONTWAIT)==sizeof(timestamp)){
-        last_presentation_ns_=std::max(last_presentation_ns_,timestamp);
-        ++direct_frames_;
+      int32_t packet[3]{};
+      for(int i=0;i<256;++i){
+        auto bytes=recv(feedback_fd_,packet,sizeof(packet),MSG_DONTWAIT|MSG_TRUNC);
+        if(bytes<=0)break;
+        if(bytes==sizeof(uint64_t)){
+          uint64_t timestamp;std::memcpy(&timestamp,packet,sizeof(timestamp));
+          last_presentation_ns_=std::max(last_presentation_ns_,timestamp);
+          ++direct_frames_;
+        }else if(bytes==sizeof(packet)){
+          physical_pointer=PointerSample{packet[1],packet[2],packet[0]!=0 || (physical_pointer && physical_pointer->clicked)};
+        }
       }
     }
     playback_.media_status(

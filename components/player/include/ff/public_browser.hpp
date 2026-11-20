@@ -28,6 +28,8 @@ class PublicBrowser {
   bool needs_live_restart() const {
     return restart_on_online_ && playback_.online() && cache_misses_ > 0;
   }
+  struct PointerSample { int x, y; bool clicked; };
+  std::optional<PointerSample> physical_pointer;
   std::string resolved_native_mime;
   std::string cache_mode() const { return offline_ ? "isolated" : mixed_cache_ ? "mixed" : ""; }
   bool needs_compositor() const {

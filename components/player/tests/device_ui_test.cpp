@@ -47,6 +47,13 @@ int main(int argc,char** argv){
           "Empty fetched metadata must fall through to a usable inline label and legacy artist");
     item.item.erase("resolvedManifest");
     item.item.erase("inlineManifest");
+    save(always,std::string(argv[2])+"/tombstone-on.png");
+    const auto moving=ff::render_pointer(40,false),pressed=ff::render_pointer(40,true);
+    check(moving.hotspot==pressed.hotspot && moving.image.rgba!=pressed.image.rgba,"Pointer feedback must preserve its hotspot");
+    save(moving.image,std::string(argv[2])+"/pointer-moving.png");
+    save(pressed.image,std::string(argv[2])+"/pointer-pressed.png");
+    const ff::Json pairing={{"owner","pairing"},{"state","pairing_code"},{"fields",{{"pairingCode","123456"}}}};
+    save(ff::render_panel(pairing,1920,1080),std::string(argv[2])+"/pairing.png");
     auto notice=ff::render_message("Playback state could not be saved",1920,1080,false);
     check(notice.width<960&&notice.height<200&&notice.rgba[3]==255,"Nonfatal errors must remain compact notices over the retained artwork");
     item.item["title"]="";check(ff::render_tombstone(item,1920,1080,true).rgba.empty(),"Missing title must omit label");
@@ -55,6 +62,11 @@ int main(int argc,char** argv){
     const ff::Json wifi={{"owner","setup"},{"state","softap_qr"},{"fields",{{"ssid","FF1-test:;"},{"password","fake;password"},{"portal_url","http://10.42.0.1/"}}}};
     for(auto [w,h]:{std::pair{1920,1080},std::pair{1080,1920},std::pair{1920,1920},std::pair{3840,2160}}){
       auto result=ff::render_panel(claim,w,h);check(result.width==w&&result.height==h&&result.rgba[3]==209,"Panel dimensions or 82% dimming changed");
+      if(w==1080 && h==1920){
+        // 3.0.1 places the claim frame at y=972. A wrapped title moves it
+        // 41px down; sample the solid white top padding, above the QR cells.
+        check(result.rgba[(size_t(982)*w+w/2)*4]==255,"Portrait claim title wrapped and displaced the QR");
+      }
       save(result,std::string(argv[2])+"/claim-"+std::to_string(w)+"x"+std::to_string(h)+".png");
       save(ff::render_panel(wifi,w,h),std::string(argv[2])+"/wifi-"+std::to_string(w)+"x"+std::to_string(h)+".png");
     }

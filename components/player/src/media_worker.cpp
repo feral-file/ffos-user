@@ -83,9 +83,14 @@ class Worker {
         {"demuxer-lavf-o","protocol_whitelist=[http,https,tcp,tls,crypto,data,file,fd]"}})option(player_,key,value);
     if(auto agent=config.value("httpUserAgent","");!agent.empty())option(player_,"user-agent",agent.c_str());
     check(mpv_initialize(player_),"initialize libmpv");
+    for(auto name:{"scale","dscale"}){
+      char* value=mpv_get_property_string(player_,name);
+      ff::require(value,"media_backend","Cannot read the configured video scaler");
+      default_scalers_.emplace_back(value);mpv_free(value);
+    }
     mpv_request_log_messages(player_,"warn");
     for(auto name:{"time-pos","duration","seekable","hwdec-current","video-codec","frame-drop-count","decoder-frame-drop-count","eof-reached",
-                   "video-params/w","video-params/h","video-params/rotate","video-params/pixelformat","current-ao","audio-params/samplerate","audio-params/channel-count","pause","volume","mute"})
+                   "video-params/w","video-params/h","video-params/dw","video-params/dh","video-params/rotate","video-params/pixelformat","current-ao","audio-params/samplerate","audio-params/channel-count","pause","volume","mute"})
       check(mpv_observe_property(player_,0,name,MPV_FORMAT_NODE),"observe media");
     mpv_opengl_init_params init{resolve_gl,nullptr};int advanced=1;
     mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
@@ -131,8 +136,8 @@ class Worker {
         ff::require(configuration_tags_.size()<4096,"media_protocol","Too many pending media configurations");
         auto tag=++configuration_tag_;configuration_tags_.insert(tag);property(player_,name,value,tag);
       };
-      auto display=p.at("display");set("loop-file",display.value("loop",true)?"inf":"no");
-      auto scaling=display.value("scaling","fit");
+      display_=p.at("display");set("loop-file",display_.value("loop",true)?"inf":"no");
+      auto scaling=display_.value("scaling","fit");
       set("keepaspect",scaling=="stretch"?"no":"yes");
       set("panscan",scaling=="fill"?"1":"0");
     }
@@ -185,6 +190,12 @@ class Worker {
             if(node->format==MPV_FORMAT_INT64)v=node->u.int64;
             if(node->format==MPV_FORMAT_DOUBLE)v=node->u.double_;
             if(node->format==MPV_FORMAT_FLAG)v=bool(node->u.flag);
+            if(v.is_number_integer()){
+              std::string_view name=value->name;
+              if(name=="video-params/dw")source_width_=v.get<int>();
+              if(name=="video-params/dh")source_height_=v.get<int>();
+              if(name=="video-params/rotate")source_rotation_=v.get<int>();
+            }
             ff::send_media(channel,{{"event","property"},{"name",value->name},{"value",v}});
           }
         }
@@ -263,6 +274,14 @@ class Worker {
     // MPV's additional Y flip would invert video while leaving native UI upright.
     if(raster_)raster_->draw(feedback_?0:fbo_,width_,height_,display_,bool(feedback_));
     else{
+    const bool sideways=source_rotation_%180!=0;
+    const bool hard=ff::hard_pixel_edges(display_,sideways?source_height_:source_width_,
+                                         sideways?source_width_:source_height_,width_,height_);
+    if(hard!=hard_edges_){
+      property(player_,"scale",hard?"nearest":default_scalers_[0]);
+      property(player_,"dscale",hard?"nearest":default_scalers_[1]);
+      hard_edges_=hard;
+    }
     mpv_opengl_fbo target{static_cast<int>(feedback_?0:fbo_),width_,height_,feedback_?0:GL_RGBA8};int flip=feedback_?1:0;
     mpv_render_param params[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
     check(mpv_render_context_render(render_,params),"render media frame");
@@ -298,7 +317,10 @@ class Worker {
   SDL_Window* window_=nullptr;SDL_GLContext context_=nullptr;
   mpv_handle* player_=nullptr;mpv_render_context* render_=nullptr;
   std::unique_ptr<ff::Raster> raster_;
-  ff::Json display_;
+  ff::Json display_=ff::Json::object();
+  std::vector<std::string> default_scalers_;
+  int source_width_=0,source_height_=0,source_rotation_=0;
+  bool hard_edges_=false;
   std::optional<bool> want_direct_;
   bool raster_loaded_=false,paused_=false,direct_reported_=false;
   std::string last_error_;

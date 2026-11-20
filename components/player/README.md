@@ -38,7 +38,7 @@ ctest --test-dir build-core --output-on-failure
 The core executable has no display backend. It exists for protocol/state tests.
 It must never be installed as the production presentation service.
 
-## Build the FFOS Linux runtime
+## Build the standalone Chromium comparison runtime
 
 The tested native environment is recorded in `docs/evidence/homelab-packages.txt`:
 FFOS 3.0.0, Linux x86-64, GCC 16.1.1, CMake 4.4.0, Meson 1.11.2 and Ninja 1.13.2.
@@ -46,8 +46,7 @@ Use the FFOS pacman snapshot `2026/07/13`. Required build packages include
 `gcc make cmake ninja meson pkgconf python-jinja nasm sdl2-compat libass
 qrencode sqlite pango libdrm libglvnd wayland wayland-protocols gnutls libva libpulse lcms2 curl libdisplay-info`.
 The package inventory is evidence of the tested environment, not yet a fully
-reproduced clean-image toolchain lock. The Ubuntu Dockerfile is a development
-build only; its apt packages are not pinned for release.
+reproduced clean-image toolchain lock. The FF1 CEF artifact uses the separately documented GitHub build.
 
 ```sh
 python3 tools/fetch-dependencies.py --without-cef
@@ -117,14 +116,10 @@ server and an isolated runtime. It kills/stops decoder children intentionally.
 It is not an ordinary controller command or a test to run against a wall that
 is serving an exhibition.
 
-## Development CI
+## Comparison CI
 
-`.github/workflows/build-player.yaml` builds the Linux public Chromium host and private
-FFmpeg/libplacebo/libmpv libraries, runs CTest, and retains a staged runtime
-archive on feature-branch pushes and pull requests. It does not publish or
-activate packages. The Ubuntu container validates portable compilation; the
-pinned FFOS pacman build remains the production packaging path. See
-`docs/PUBLIC-ENGINE.md` for current device evidence and remaining boundaries.
+The Chromium comparison runs `build-player-chromium.yaml` and retains its own
+archive. The FF1 CEF artifact and device package checks are described below.
 
 Frame-pacing measurements and the exact-engine/seed comparison are documented in
 [the pacing report](docs/PACING.md). `--diagnostic-presentation-timing=/absolute/path.json`

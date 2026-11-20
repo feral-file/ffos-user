@@ -1,5 +1,6 @@
 #include "ff/presentation.hpp"
 #include "ff/overlay.hpp"
+#include "ff/artwork_fade.hpp"
 #include <EGL/eglext.h>
 #include <GLES2/gl2ext.h>
 #include <drm_fourcc.h>
@@ -241,6 +242,21 @@ void Presentation::draw_pointer(bool pressed) {
   quad(pointer_texture_, {static_cast<int>(pointer_x_) - pointer_hotspot_,
                           static_cast<int>(pointer_y_) - pointer_hotspot_, size, size});
 }
+void Presentation::draw_loading(uint64_t ticks) {
+  if(ui_key_!="loading")upload_ui(render_loading_label(),"loading");
+  const int x=(width_-ui_width_)/2,y=(height_-ui_height_)/2;
+  glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
+  quad(ui_,{x,y,ui_width_,ui_height_});
+  // Shipping loader has two identical bars moving consecutively over 3s.
+  const double t=((ticks-loading_started_-2000)%3000)/3000.;
+  const double phase=t<.66?t/.66:(t-.66)/.34;
+  const int left=int(ui_width_*(-.6+1.6*artwork_ease(phase)));
+  const int start=std::max(0,left),end=std::min(ui_width_,left+int(.6*ui_width_));
+  if(end>start){
+    glEnable(GL_SCISSOR_TEST);glScissor(x+start,height_-y-ui_height_,end-start,4);
+    glClearColor(160/255.f,160/255.f,160/255.f,1);glClear(GL_COLOR_BUFFER_BIT);glDisable(GL_SCISSOR_TEST);
+  }
+}
 void Presentation::upload_ui(UIRaster raster, const std::string& key) {
   ui_key_=key; ui_raster_=std::move(raster);ui_width_=ui_raster_.width;ui_height_=ui_raster_.height;
   if(!ui_width_||!ui_height_)return;
@@ -317,7 +333,15 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     browser_overlay_.reset();draw_key_.reset();return false;
   }
   if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
-  const int label_phase=label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
+  const bool loading=!external && !artwork && playback.desired() && !overlay_panel &&
+                     playback.state()["sleeping"]==false;
+  if(!loading)loading_occurrence_.clear();
+  else if(loading_occurrence_!=playback.desired()->id){
+    loading_occurrence_=playback.desired()->id;
+    loading_started_=ticks;
+  }
+  const bool show_loading=loading && ticks-loading_started_>=2000;
+  const int label_phase=show_loading?1+int((ticks-loading_started_-2000)%3000/16):label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
   const bool pointer_pressed = pointer_visible && ticks < pointer_press_until_;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
     occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,pointer_pressed,
@@ -364,7 +388,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     if(key!=ui_key_)upload_ui(render_panel(overlay,width_,height_),key);
     quad(ui_,{0,0,width_,height_});
   } else if (playback.thermal_hold()) ui("Cooling down\nPlayback will resume when the device cools.","",true);
-  else if(playback.service_failure()) ui("Device service unavailable\nReconnecting device controls.","",false);
+  else if(playback.service_failure()) ui("Service failed\nReconnecting device controls.","",true);
   else if (playback.desired() && playback.desired()->stage == "failed") ui("Artwork could not be displayed\n"+playback.desired()->error,"",true);
   else if (playback.desired() && playback.desired()->stage != "presented" && !playback.recovery_error().empty())
     ui("Retrying artwork\n"+playback.recovery_error(),"",!artwork);
@@ -375,13 +399,13 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     ui("Scheduled playlist could not start\n"+outcome["error"].value("message","Unknown scheduling failure"),"",false);
   else if (auto outcome=playback.state().value("updateOutcome",Json(nullptr));outcome.is_object()&&outcome.value("contentBlocked",false)&&(!playback.desired()||outcome.value("outcome","")=="failed"))
     ui("Updated playlist is blocked\nChange content preferences or choose another playlist","",!artwork);
-  else if (!external && !artwork && playback.state()["sleeping"] == false) ui(playback.desired() ? "Loading artwork" : "Feral File\nReady for artwork","",true);
+  else if (show_loading) draw_loading(ticks);
   else if((!artwork || playback.online()) && !playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
   else if (occurrence && label_visible) {
     auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
     if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed"),key);
     if(ui_width_&&ui_height_){
-      const float opacity=mode=="timed"&&label_age>30000?float(30300-label_age)/300:1;
+      const float opacity=mode=="timed"&&label_age>30000?1-artwork_ease((label_age-30000)/300.):1;
       quad(ui_,{0,height_-ui_height_,ui_width_,ui_height_},opacity);
       if(ui_raster_.timer_width&&opacity==1){
         glEnable(GL_SCISSOR_TEST);

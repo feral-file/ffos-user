@@ -7,6 +7,7 @@
 #include <iostream>
 #include <map>
 #include <thread>
+#include <utility>
 
 #include "ff/artwork_fade.hpp"
 #include "ff/media_client.hpp"
@@ -258,7 +259,15 @@ int main(int argc, char** argv) {
           playback.failed(desired->id, e.what());
         }
       }
-      for (auto& [id, client] : clients) client->poll();
+      for (auto& [id, client] : clients) {
+        client->poll();
+        if(auto sample=std::exchange(client->physical_pointer,std::nullopt);
+           sample && playback.visible() && playback.visible()->id==id && playback.overlay().is_null()){
+          // Cage already delivered this event to Chromium. Only update the device glyph.
+          input_state.observe_pointer(sample->x,sample->y);
+          presentation.pointer(input_state.x(),input_state.y(),sample->clicked);
+        }
+      }
       if (auto desired = playback.desired(); desired) {
         auto it = clients.find(desired->id);
         if(it!=clients.end() && it->second->needs_compositor()){

@@ -19,6 +19,7 @@ struct PointerRaster {
 PointerRaster render_pointer(int size, bool pressed);
 void load_device_fonts(const std::string& directory);
 UIRaster render_panel(const Json& overlay, int width, int height);
+UIRaster render_loading_label();
 UIRaster render_message(const std::string& text, int width, int height, bool full = true);
 bool has_tombstone(const Occurrence& occurrence);
 UIRaster render_tombstone(const Occurrence& occurrence, int width, int height, bool timed);

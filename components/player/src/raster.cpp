@@ -132,7 +132,8 @@ void Raster::draw(GLuint target,int width,int height,const Json& display,bool di
   int x=b.x+(b.width-w)/2,y=b.y+(b.height-h)/2;
   glEnable(GL_SCISSOR_TEST);glScissor(b.x,b.y,b.width,b.height);
   glBindFramebuffer(GL_READ_FRAMEBUFFER,s.framebuffer);
-  glBlitFramebuffer(0,0,s.width,s.height,x,direct?y+h:y,x+w,direct?y:y+h,GL_COLOR_BUFFER_BIT,GL_LINEAR);
+  glBlitFramebuffer(0,0,s.width,s.height,x,direct?y+h:y,x+w,direct?y:y+h,GL_COLOR_BUFFER_BIT,
+                    hard_pixel_edges(display,s.width,s.height,b.width,b.height)?GL_NEAREST:GL_LINEAR);
   glDisable(GL_SCISSOR_TEST);glBindFramebuffer(GL_FRAMEBUFFER,target);
 }
 }
