@@ -9,7 +9,7 @@ if(!socket||!output)throw new Error('usage: device-controller-controls-check.mjs
 const evidence={startedAt:new Date().toISOString(),physicalOutputVerified:false};
 const client=await connectNative(socket,'controller-controls-fixture');
 try{
- await client.call('settings.set',{transitionMs:0,framing:'artwork',tombstone:'off',durationSeconds:null});
+ await client.call('settings.set',{framing:'artwork',tombstone:'off',durationSeconds:null});
  const item={source:'http://127.0.0.1:18990/input.html',duration:0};
  const receipt=await client.call('playback.replace',{playlist:{id:'controld-controls-test',items:[{...item,title:'First'},{...item,title:'Second'}]}});
  for(let i=0;i<150;i++){
