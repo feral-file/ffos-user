@@ -1,4 +1,5 @@
 #include "ff/media_ipc.hpp"
+#include "ff/presentation_feedback.hpp"
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 #include <SDL.h>
@@ -34,6 +35,7 @@ void command(mpv_handle* player, const std::vector<std::string>& words) {
 class Worker {
  public:
   ~Worker() {
+    feedback_.reset();
     if(render_)mpv_render_context_free(render_);
     if(player_)mpv_terminate_destroy(player_);
     if(context_)SDL_GL_DeleteContext(context_);
@@ -46,11 +48,19 @@ class Worker {
     ff::require(SDL_Init(SDL_INIT_VIDEO)==0,"media_graphics",SDL_GetError());
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,0);
-    window_=SDL_CreateWindow("FF media context",0,0,16,16,SDL_WINDOW_OPENGL|SDL_WINDOW_HIDDEN);
+    const bool direct=config.value("diagnosticDirectOutput",false);
+    const auto flags=SDL_WINDOW_OPENGL | (direct ? SDL_WINDOW_FULLSCREEN_DESKTOP : SDL_WINDOW_HIDDEN);
+    window_=SDL_CreateWindow("FF media context",0,0,direct?width_:16,direct?height_:16,flags);
     ff::require(window_!=nullptr,"media_graphics",SDL_GetError());
     context_=SDL_GL_CreateContext(window_);ff::require(context_!=nullptr,"media_graphics",SDL_GetError());
     SDL_SysWMinfo wm{};SDL_VERSION(&wm.version);
     ff::require(SDL_GetWindowWMInfo(window_,&wm)&&wm.subsystem==SDL_SYSWM_WAYLAND,"media_graphics","Wayland EGL display required");
+    if(direct){
+      SDL_ShowCursor(SDL_DISABLE);
+      SDL_GL_GetDrawableSize(window_,&width_,&height_);
+      ff::require(SDL_GL_SetSwapInterval(0)==0,"media_graphics",SDL_GetError());
+      feedback_=std::make_unique<ff::PresentationFeedback>(window_,true);
+    }
     player_=mpv_create();ff::require(player_!=nullptr,"media_backend","Cannot allocate libmpv");
     for(auto [key,value]:{std::pair{"config","no"},{"input-default-bindings","no"},
         {"input-vo-keyboard","no"},{"input-terminal","no"},{"terminal","no"},{"osd-level","0"},
@@ -83,12 +93,14 @@ class Worker {
     // Enabling this before render-context creation races libmpv's VO startup.
     // Audio still gets a compositable surface in front of the host matte.
     property(player_,"force-window","yes");
-    glGenTextures(1,&texture_);glBindTexture(GL_TEXTURE_2D,texture_);
-    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-    glGenFramebuffers(1,&fbo_);glBindFramebuffer(GL_FRAMEBUFFER,fbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture_,0);
-    ff::require(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE,"media_graphics","Media FBO incomplete");
+    if(!direct){
+      glGenTextures(1,&texture_);glBindTexture(GL_TEXTURE_2D,texture_);
+      glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+      glGenFramebuffers(1,&fbo_);glBindFramebuffer(GL_FRAMEBUFFER,fbo_);
+      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture_,0);
+      ff::require(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE,"media_graphics","Media FBO incomplete");
+    }
     controls(config);
     auto source=ff::string_field(config,"source",16384);
     ff::require(cached_fd>=0||source.starts_with("https://")||source.starts_with("http://")||source.starts_with("data:"),"media_source","Expected HTTP(S), inline media, or a broker-opened cached file");
@@ -129,7 +141,10 @@ class Worker {
       for(int i=0;i<8;++i){
         auto packet=ff::receive_media(channel);if(!packet)break;
         auto method=ff::string_field(packet->body,"method",32);
-        if(method=="stop")return;
+        if(method=="stop"){
+          if(feedback_)std::cout<<feedback_->metrics().dump()<<'\n';
+          return;
+        }
         if(method=="ack") {ff::require(in_flight&&packet->body.at("sequence")==sequence,"media_protocol","Unexpected frame acknowledgement");in_flight=false;}
         else if(method=="presented") {
           auto frame=packet->body.at("sequence").get<uint64_t>();
@@ -171,15 +186,21 @@ class Worker {
           display_revision_=requested_display_;configuration_dirty_=true;
         }
       }
+      if(feedback_){
+        SDL_Event event;
+        while(SDL_PollEvent(&event)) if(event.type==SDL_QUIT)return;
+        feedback_->poll();
+        SDL_GL_GetDrawableSize(window_,&width_,&height_);
+      }
       // update() must keep servicing mpv's resource requests even while the
       // exported frame waits for the host. Only the texture write waits.
       if(render_update.exchange(false))pending |= bool(mpv_render_context_update(render_)&MPV_RENDER_UPDATE_FRAME);
-      if(!in_flight&&pending_width_>0&&(pending_width_!=width_||pending_height_!=height_)){
+      if(!feedback_&&!in_flight&&pending_width_>0&&(pending_width_!=width_||pending_height_!=height_)){
         // Never change storage while the host still owns an exported frame.
         width_=pending_width_;height_=pending_height_;glBindTexture(GL_TEXTURE_2D,texture_);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);pending=true;
       }
-      if((pending||configuration_dirty_)&&!in_flight){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=true;}
+      if((pending||configuration_dirty_)&&!in_flight){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
     }
   }
  private:
@@ -208,9 +229,18 @@ class Worker {
   void draw(uint64_t sequence) {
     // Host composition samples the top row at v=0, matching CEF DMA-BUFs.
     // MPV's additional Y flip would invert video while leaving native UI upright.
-    mpv_opengl_fbo target{static_cast<int>(fbo_),width_,height_,GL_RGBA8};int flip=0;
+    mpv_opengl_fbo target{static_cast<int>(fbo_),width_,height_,feedback_?0:GL_RGBA8};int flip=feedback_?1:0;
     mpv_render_param params[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
-    check(mpv_render_context_render(render_,params),"render media frame");glFinish();
+    check(mpv_render_context_render(render_,params),"render media frame");
+    if(feedback_){
+      // For this probe mpv owns the visible window. There is no exported
+      // texture to acknowledge and no native host between the worker and Cage.
+      feedback_->before_swap(sequence,sequence);
+      SDL_GL_SwapWindow(window_);
+      mpv_render_context_report_swap(render_);
+      return;
+    }
+    glFinish();
     auto create=reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
     auto query=reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
     auto export_image=reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
@@ -229,6 +259,7 @@ class Worker {
     ff::Json planes=ff::Json::array();for(int i=0;i<count;++i)planes.push_back({{"stride",stride[i]},{"offset",offset[i]}});
     ff::send_media(channel,{{"event","frame"},{"sequence",sequence},{"displayRevision",display_revision_},{"width",width_},{"height",height_},{"format",format},{"modifier",modifier},{"planes",planes}},exported.descriptors);
   }
+  std::unique_ptr<ff::PresentationFeedback> feedback_;
   SDL_Window* window_=nullptr;SDL_GLContext context_=nullptr;
   mpv_handle* player_=nullptr;mpv_render_context* render_=nullptr;
   bool raster_=false;

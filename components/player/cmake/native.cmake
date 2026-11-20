@@ -37,6 +37,10 @@ add_custom_command(OUTPUT presentation-time-client-protocol.h presentation-time-
   COMMAND ${WAYLAND_SCANNER} client-header ${PRESENTATION_XML} presentation-time-client-protocol.h
   COMMAND ${WAYLAND_SCANNER} private-code ${PRESENTATION_XML} presentation-time-protocol.c
   DEPENDS ${PRESENTATION_XML} VERBATIM)
+add_library(ff_presentation_feedback STATIC presentation-time-protocol.c src/presentation_feedback.cpp)
+target_include_directories(ff_presentation_feedback PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(ff_presentation_feedback PRIVATE ff_core PkgConfig::NATIVE)
+target_link_libraries(ff-media-worker PRIVATE ff_presentation_feedback)
 add_library(ff_device_ui src/device_ui.cpp)
 target_link_libraries(ff_device_ui PUBLIC ff_core PkgConfig::NATIVE)
 add_executable(device-ui-tests tests/device_ui_test.cpp)

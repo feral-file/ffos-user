@@ -11,23 +11,6 @@
 #include <iostream>
 
 namespace ff {
-void FrameTiming::add(double milliseconds) {
-  ++count; total += milliseconds; maximum = std::max(maximum, milliseconds);
-  ++bins[std::min<size_t>(bins.size()-1, static_cast<size_t>(milliseconds))];
-}
-Json FrameTiming::json() const {
-  auto percentile = [&](double p) {
-    if (!count) return size_t(0);
-    uint64_t sum = 0;
-    for (size_t i=0; i<bins.size(); ++i) {
-      sum += bins[i];
-      if (sum >= std::max<uint64_t>(1, static_cast<uint64_t>(std::ceil(count*p)))) return i;
-    }
-    return bins.size()-1;
-  };
-  return {{"count",count},{"meanMs",count?total/count:0},{"maxMs",maximum},
-          {"p50BinMs",percentile(.5)},{"p95BinMs",percentile(.95)},{"p99BinMs",percentile(.99)}};
-}
 namespace {
 GLuint shader(GLenum type, const char* source) {
   auto handle = glCreateShader(type); glShaderSource(handle, 1, &source, nullptr); glCompileShader(handle);
