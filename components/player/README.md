@@ -1,16 +1,26 @@
 # Native player (`components/player`)
 
-C++ playback/presentation host for FFOS. Software and SVG load as original main
-Chromium documents in separate public engine processes. Raster images, video and
-audio use an isolated native libmpv decoder and GPU view. Labels, QR/setup UI,
-errors, cursor, playback timing, SQLite state and the Unix control interface
-belong to the host. GLB uses the pinned bundled model-viewer, without device
-privileges in artist pages.
+The FF1 runtime uses a C++ playback host under Cage. Controld delivers signed
+DP-1 playlists to the host over its Unix socket. The host owns scheduling,
+SQLite state, labels, device panels, cursor routing and worker recovery.
 
-The public-engine integration is being verified on FF1-SKYZ2E3A. Hardware results
-are recorded in [PUBLIC-ENGINE.md](docs/PUBLIC-ENGINE.md). This is not a qualified
-fleet image or a claim that the original full-portfolio acceptance is finished.
-The exact-engine capsule remains deferred by Anh.
+| Artwork | Worker |
+| --- | --- |
+| Raster image, including animated GIF and AVIF | Sandboxed libglycin loader, native GL presentation |
+| Direct video and audio | libmpv with FFmpeg, VA-API when supported, software decode otherwise |
+| SVG, website and software artwork | CEF Views, original document URL |
+| glTF and GLB | CEF Views with the bundled model-viewer |
+
+Eligible fullscreen workers submit buffers to Cage. The host composites media
+during transitions and when native device UI requires it. Browser handoffs that
+need native composition keep the same composited document after the fade. The
+public Chromium build remains available for same-device comparisons.
+
+GitHub Actions builds the FF1 CEF archive with `tools/build-cef-trial.sh`.
+The FFOS package recipe accepts that archive and its tested SHA-256. The CEF
+version and download hash are pinned in `maintenance/cef-trial.json`.
+See [homelab playback checks](docs/CAGE-WORKERS.md) and the
+[shipping-player baseline](docs/HOMELAB-PARITY.md).
 
 ## Build the core locally
 
