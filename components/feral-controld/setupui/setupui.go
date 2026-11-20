@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
@@ -167,6 +168,14 @@ type Service struct {
 	// contract as the poll bounds above.
 	navigationParkPollInterval time.Duration
 	navigationParkTimeout      time.Duration
+
+	// versionFile is the FF1 config file the installed software version is
+	// read from (the same source the OTA gate and the claim QR read); empty
+	// means constants.FF1_CONFIG_FILE. Test-only override, same pre-worker
+	// contract as the poll bounds above. versionMu guards the cached value.
+	versionFile string
+	versionMu   sync.Mutex
+	version     string
 
 	mu      sync.Mutex
 	support support
@@ -1092,6 +1101,7 @@ func (s *Service) trySend(req map[string]any) {
 	// (a no-op for every other state) — must stay AFTER narrationSupported, so
 	// the downgrade decision only ever runs when a manifest is present.
 	req = s.resolveExtensionState(req)
+	req = s.withVersion(req)
 
 	payload, err := json.Marshal(map[string]any{
 		"command": setupDisplayCommand,
@@ -1128,6 +1138,56 @@ func (s *Service) trySend(req map[string]any) {
 	if state := stringField(req, "state"); state != stateUpdating {
 		s.logger.Info("Setup narration pushed", zap.String("state", state))
 	}
+}
+
+// withVersion returns req with the installed software version as `version`,
+// so every setup panel can show which build is running and an old one is
+// visible at boot. Copy-on-write: the retained intent is never mutated.
+// Players that predate the field ignore it. Hidden carries nothing to label,
+// and an unreadable version is simply omitted.
+func (s *Service) withVersion(req map[string]any) map[string]any {
+	if stringField(req, "state") == stateHidden {
+		return req
+	}
+	version := s.installedVersion()
+	if version == "" {
+		return req
+	}
+	out := make(map[string]any, len(req)+1)
+	for k, v := range req {
+		out[k] = v
+	}
+	out["version"] = version
+	return out
+}
+
+// installedVersion reads the installed version from the FF1 config file once
+// it is readable and caches it for the process: the label names the build
+// that is RUNNING, so an OTA that rewrites the file before controld restarts
+// must not relabel the updating screen with the version still to come.
+// Unreadable or blank reads are not cached, so a later push retries.
+func (s *Service) installedVersion() string {
+	s.versionMu.Lock()
+	defer s.versionMu.Unlock()
+	if s.version != "" {
+		return s.version
+	}
+	path := s.versionFile
+	if path == "" {
+		path = constants.FF1_CONFIG_FILE
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed FF1 config path; tests inject temp files.
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return ""
+	}
+	s.version = strings.TrimSpace(cfg.Version)
+	return s.version
 }
 
 // narrationSupported resolves, once, whether the player advertises setupDisplay
