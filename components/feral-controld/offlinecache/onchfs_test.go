@@ -78,7 +78,7 @@ func newTestMaterializer(t *testing.T, store offlinecache.Store, r offlinecache.
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg.Store, cfg.Resolver, cfg.Logger, cfg.Base = store, r, zaptest.NewLogger(t), ctx
 	m := offlinecache.NewOnchfsMaterializer(cfg)
-	// Cancel, then wait for the jobs: a cancelled job logs its failure, and
+	// Cancel, then wait for the jobs: a canceled job logs its failure, and
 	// that log must land before the test returns (see DrainForTest).
 	t.Cleanup(func() {
 		cancel()

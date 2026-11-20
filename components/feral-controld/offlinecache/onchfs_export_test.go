@@ -2,7 +2,7 @@ package offlinecache
 
 // DrainForTest blocks until every job in flight has finished, logging
 // included. Tests cancel the materializer's base context and then drain, so a
-// cancelled job never logs through a test logger after its test has returned
+// canceled job never logs through a test logger after its test has returned
 // (the race detector reports that write against testing.T).
 func (m *OnchfsMaterializer) DrainForTest() {
 	m.mu.Lock()
