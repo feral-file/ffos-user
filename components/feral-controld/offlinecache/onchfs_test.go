@@ -76,9 +76,15 @@ func (r *fakeOnchfsResolver) Resolve(ctx context.Context, root, _ string) (*onch
 func newTestMaterializer(t *testing.T, store offlinecache.Store, r offlinecache.OnchfsResolver, cfg offlinecache.OnchfsMaterializerConfig) *offlinecache.OnchfsMaterializer {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	cfg.Store, cfg.Resolver, cfg.Logger, cfg.Base = store, r, zaptest.NewLogger(t), ctx
-	return offlinecache.NewOnchfsMaterializer(cfg)
+	m := offlinecache.NewOnchfsMaterializer(cfg)
+	// Cancel, then wait for the jobs: a cancelled job logs its failure, and
+	// that log must land before the test returns (see DrainForTest).
+	t.Cleanup(func() {
+		cancel()
+		m.DrainForTest()
+	})
+	return m
 }
 
 func TestOnchfsMaterializerWritesARecordReplayServes(t *testing.T) {
