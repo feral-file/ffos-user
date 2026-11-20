@@ -132,14 +132,10 @@ class Worker {
     if(player_ && p.contains("seekSeconds"))command(player_,{"seek",std::to_string(p.at("seekSeconds").get<double>()),"absolute+exact"});
     if(player_ && p.contains("display")&&p.value("displayRevision",uint64_t(1))!=requested_display_){
       requested_display_=p.value("displayRevision",uint64_t(1));
-      auto set=[&](const char* name,const std::string& value){
-        ff::require(configuration_tags_.size()<4096,"media_protocol","Too many pending media configurations");
-        auto tag=++configuration_tag_;configuration_tags_.insert(tag);property(player_,name,value,tag);
-      };
-      display_=p.at("display");set("loop-file",display_.value("loop",true)?"inf":"no");
+      display_=p.at("display");configure("loop-file",display_.value("loop",true)?"inf":"no");
       auto scaling=display_.value("scaling","fit");
-      set("keepaspect",scaling=="stretch"?"no":"yes");
-      set("panscan",scaling=="fill"?"1":"0");
+      configure("keepaspect",scaling=="stretch"?"no":"yes");
+      configure("panscan",scaling=="fill"?"1":"0");
     }
     if(p.contains("width")&&p.contains("height")){
       pending_width_=p.at("width").get<int>();pending_height_=p.at("height").get<int>();
@@ -265,23 +261,34 @@ class Worker {
         width_=pending_width_;height_=pending_height_;glBindTexture(GL_TEXTURE_2D,texture_);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);pending=true;
       }
-      if((pending||configuration_dirty_)&&!in_flight&&(!raster_||raster_loaded_)){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
+      // Set filtering before advertising a frame at the new display revision.
+      // Paused videos also repaint when mpv acknowledges the last scaler change.
+      if(player_ && (pending||configuration_dirty_))configure_scaler();
+      if(configuration_tags_.empty()&&(pending||configuration_dirty_)&&!in_flight&&(!raster_||raster_loaded_)){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
     }
   }
  private:
+  void configure(const char* name,const std::string& value){
+    ff::require(configuration_tags_.size()<4096,"media_protocol","Too many pending media configurations");
+    const auto tag=++configuration_tag_;
+    configuration_tags_.insert(tag);
+    property(player_,name,value,tag);
+  }
+  void configure_scaler(){
+    const bool sideways=source_rotation_%180!=0;
+    const bool hard=ff::hard_pixel_edges(display_,sideways?source_height_:source_width_,
+                                         sideways?source_width_:source_height_,width_,height_);
+    if(hard!=hard_edges_){
+      configure("scale",hard?"nearest":default_scalers_[0]);
+      configure("dscale",hard?"nearest":default_scalers_[1]);
+      hard_edges_=hard;
+    }
+  }
   void draw(uint64_t sequence) {
     // Host composition samples the top row at v=0, matching CEF DMA-BUFs.
     // MPV's additional Y flip would invert video while leaving native UI upright.
     if(raster_)raster_->draw(feedback_?0:fbo_,width_,height_,display_,bool(feedback_));
     else{
-    const bool sideways=source_rotation_%180!=0;
-    const bool hard=ff::hard_pixel_edges(display_,sideways?source_height_:source_width_,
-                                         sideways?source_width_:source_height_,width_,height_);
-    if(hard!=hard_edges_){
-      property(player_,"scale",hard?"nearest":default_scalers_[0]);
-      property(player_,"dscale",hard?"nearest":default_scalers_[1]);
-      hard_edges_=hard;
-    }
     mpv_opengl_fbo target{static_cast<int>(feedback_?0:fbo_),width_,height_,feedback_?0:GL_RGBA8};int flip=feedback_?1:0;
     mpv_render_param params[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
     check(mpv_render_context_render(render_,params),"render media frame");

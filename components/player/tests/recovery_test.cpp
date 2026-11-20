@@ -100,6 +100,17 @@ int main(){
     }
     auto last=p.desired()->id;p.tick(clock+60000,clock+60000);
     check(p.desired()->id==last && p.snapshot()["recovery"]["exhausted"]==true,"An all-broken list must stop");
+    auto added=mixed["items"];added.push_back({{"source","https://example.org/added"},{"duration",0}});
+    p.command("playback.update",{{"items",added}});p.tick(clock+61000,clock+61000);
+    check(p.desired()->index==2,"Refreshed list must release exhausted selection");
+    clock+=61000;
+    for(int attempt=0;attempt<=3;++attempt){
+      p.failed(p.desired()->id,"Unavailable");clock+=8000;
+      if(attempt<3)p.tick(clock,clock);
+    }
+    p.command("playback.update",{{"items",ff::Json::array({{{"source","https://example.org/new"}}})}});
+    p.tick(clock,clock);
+    check(p.desired()->item["source"]=="https://example.org/new","Refresh can replace an exhausted occurrence");
     std::filesystem::remove_all(directory);std::cout<<"Bounded renderer recovery checks passed\n";
   }catch(const std::exception& error){std::filesystem::remove_all(directory);std::cerr<<error.what()<<'\n';return 1;}
 }

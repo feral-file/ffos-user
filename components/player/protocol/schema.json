@@ -576,9 +576,8 @@
                         },
                         {
                           "type": "string",
-                          "maxLength": 16,
-                          "pattern": "%$",
-                          "description": "Finite percentage 0..100, parsed and range-checked by the host."
+                          "maxLength": 96,
+                          "description": "One to four nonnegative CSS lengths, parsed and range-checked by the host."
                         }
                       ]
                     },
@@ -1765,9 +1764,8 @@
             },
             {
               "type": "string",
-              "maxLength": 16,
-              "pattern": "%$",
-              "description": "Finite percentage 0..100, parsed and range-checked by the host."
+              "maxLength": 96,
+              "description": "One to four nonnegative CSS lengths, parsed and range-checked by the host."
             }
           ]
         },
@@ -1782,8 +1780,24 @@
         "loop": {
           "type": "boolean"
         },
+        "imageRendering": {
+          "enum": [
+            "auto",
+            "pixelated"
+          ]
+        },
         "userOverrides": {
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "boolean"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": true

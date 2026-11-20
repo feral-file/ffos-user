@@ -25,9 +25,6 @@ cmake --build "$trial/build" -j3
 ctest --test-dir "$trial/build" --output-on-failure
 stage=$(mktemp -d "$trial/stage.XXXXXX")
 DESTDIR="$stage" cmake --install "$trial/build" --strip
-DESTDIR="$trial/probe" cmake --install "$trial/build" --component diagnostic-probes --strip
-install -m755 "$trial/probe/usr/lib/ff-player-native/cef-views-probe" \
-  "$stage/usr/lib/ff-player-native/ff-cef-views-engine"
 # The SDK retains static symbols for debugging. Ship only the dynamic
 # symbols needed by the loader. The pinned archive preserves the originals.
 strip --strip-unneeded "$stage/usr/lib/ff-player-native/libcef.so"

@@ -145,8 +145,8 @@ replay promise.
 | `playback.sleep` | `{sleeping}`; durable sleep intent; suspend presentation, restore selection on wake |
 | `playback.mode` | `{loop?,shuffle?}`; loop is none, playlist or one; shuffle order is host-owned and durable |
 | `media.seek` | `{occurrence,seconds}`; only the currently presented seekable native media; acceptance is not seek completion |
-| `settings.set` | Saved device settings. Framing is artwork/fit/fill and respects authored userOverrides; full presentation semantics are still under implementation. |
-| `presentation.set` | `{occurrence,display:{scaling?,margin?,background?}}`; ephemeral preview on the currently selected AND presented occurrence; requires `presentation.v1`. A loading replacement or stale occurrence rejects; an artwork with `userOverrides:false` rejects with `presentation_locked`. No implicit target. |
+| `settings.set` | Saved device settings. Framing is artwork/fit/fill and respects authored userOverrides; the authored DP-1 permissions map is merged per field. Effective snapshots preserve the original native boolean default and carry field exceptions in `overridePermissions`. |
+| `presentation.set` | `{occurrence,display:{scaling?,margin?,background?}}`; ephemeral preview on the currently selected AND presented occurrence; requires `presentation.v1`. A loading replacement or stale occurrence rejects; a locked field rejects the whole preview with `presentation_locked`. No implicit target. |
 | `policy.get`, `policy.set` | Query `{}` or set complete version-1 policy flags; controld retains trust and controller policy decisions |
 | `history.list`, `history.resolve` | List retained presented occurrences or resolve `{recordId}`; resolution does not play it |
 | `schedule.set` | `{playlist,context?,atMs}` or `{clear:true}`; one durable scheduled cast, executed by host |

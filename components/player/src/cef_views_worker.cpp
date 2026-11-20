@@ -83,9 +83,13 @@ class App final : public CefApp,public CefBrowserProcessHandler {
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override{return this;}
   void OnContextInitialized() override{
     CefBrowserSettings settings;
+    const char* initial_url="about:blank";
+#ifdef FF_VIEWS_BENCHMARK
     const bool probe = CefCommandLine::GetGlobalCommandLine()->HasSwitch("probe-profile");
+    if(probe) initial_url="http://127.0.0.1:18990/grit-fixed.html";
+#endif
     auto view=CefBrowserView::CreateBrowserView(new Client,
-      probe ? "http://127.0.0.1:18990/grit-fixed.html" : "about:blank",settings,nullptr,
+      initial_url,settings,nullptr,
       CefRequestContext::GetGlobalContext(),new BrowserDelegate);
     auto window=CefWindow::CreateTopLevelWindow(new WindowDelegate(view));
     CefPostDelayedTask(TID_UI,new ShutdownTask(window,CefCommandLine::GetGlobalCommandLine()->HasSwitch("ff-direct-cage")),50);
@@ -98,8 +102,10 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
   int child=CefExecuteProcess(args,app,nullptr);if(child>=0)return child;
   auto command=CefCommandLine::CreateCommandLine();command->InitFromArgv(argc,argv);
   if(command->HasSwitch("ff-direct-cage"))fcntl(6,F_SETFD,FD_CLOEXEC);
-  auto profile=command->GetSwitchValue("probe-profile").ToString();
-  if(profile.empty())profile=command->GetSwitchValue("user-data-dir").ToString();
+  auto profile=command->GetSwitchValue("user-data-dir").ToString();
+#ifdef FF_VIEWS_BENCHMARK
+  if(profile.empty())profile=command->GetSwitchValue("probe-profile").ToString();
+#endif
   if(profile.empty()){std::cerr<<"A private browser profile is required\n";return 2;}
   CefSettings settings;CefString(&settings.root_cache_path)=std::filesystem::absolute(profile).string();
   if(!CefInitialize(args,settings,app,nullptr))return 1;

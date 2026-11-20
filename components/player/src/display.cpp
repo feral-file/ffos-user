@@ -64,17 +64,44 @@ bool hard_pixel_edges(const Json& display,int source_width,int source_height,int
 }
 Bounds display_bounds(const Json& display,int width,int height){
  require(width>0&&height>0,"display_unavailable","Display dimensions must be positive");
- double x=0,y=0;
- if(display.contains("margin")){
-  const auto& margin=display["margin"];
-  if(margin.is_number())x=y=margin.get<double>();
-  else if(margin.is_string()){
-   const auto text=margin.get<std::string>();size_t end=0;
-   try{auto value=std::stod(text,&end);if(text.ends_with('%')&&end==text.size()-1&&std::isfinite(value)){x=value*width/100;y=value*height/100;}}catch(const std::exception&){}
-  }
+ std::array<double,4> inset{};
+ const auto it=display.find("margin");
+ if(it!=display.end()){
+   if(it->is_number()){
+     double px=it->get<double>();
+     require(std::isfinite(px)&&px>=0&&px<=16384,"playlist_invalid","Invalid pixel margin");
+     inset.fill(px);
+   }else{
+     require(it->is_string() && it->get_ref<const std::string&>().size()<=96,"playlist_invalid","Invalid CSS padding");
+     std::istringstream stream(it->get_ref<const std::string&>());
+     std::vector<std::string> parts;
+     for(std::string part;stream>>part;)parts.push_back(part);
+     require(!parts.empty() && parts.size()<=4,"playlist_invalid","Expected one to four padding lengths");
+     const size_t sides[]={0,parts.size()>1?1u:0u,parts.size()>2?2u:0u,parts.size()==4?3u:parts.size()>1?1u:0u};
+     for(size_t side=0;side<4;++side){
+       const auto& token=parts[sides[side]];size_t n=0;double value;
+       try{value=std::stod(token,&n);}catch(const std::exception&){throw Error("playlist_invalid","Invalid CSS padding length");}
+       require(std::isfinite(value)&&value>=0&&value<=16384,"playlist_invalid","Invalid CSS padding magnitude");
+       const auto unit=token.substr(n);
+       if(unit=="px" || (unit.empty() && value==0))inset[side]=value;
+       else if(unit=="em" || unit=="rem")inset[side]=value*16;
+       else if(unit=="vw")inset[side]=value*width/100;
+       else if(unit=="vh")inset[side]=value*height/100;
+       else if(unit=="vmin")inset[side]=value*std::min(width,height)/100;
+       else if(unit=="vmax")inset[side]=value*std::max(width,height)/100;
+       else if(unit=="%"){
+         require(value<=100,"playlist_invalid","Padding percentage exceeds 100");
+         // ff-player translates a single percentage into vh vertically and vw horizontally.
+         inset[side]=value*(parts.size()==1 && side%2==0?height:width)/100;
+       }else throw Error("playlist_invalid","Unsupported CSS padding unit");
+     }
+   }
  }
- int mx=static_cast<int>(std::clamp(x,0.0,(width-1)/2.0));
- int my=static_cast<int>(std::clamp(y,0.0,(height-1)/2.0));
- return {mx,my,width-2*mx,height-2*my};
+ // Scale excessive opposing insets together to retain a drawable pixel.
+ auto constrain=[](double& a,double& b,int extent){
+   if(a+b>=extent){double scale=(extent-1)/(a+b);a*=scale;b*=scale;}
+ };
+ constrain(inset[1],inset[3],width);constrain(inset[0],inset[2],height);
+ return {int(inset[3]),int(inset[0]),width-int(inset[1])-int(inset[3]),height-int(inset[0])-int(inset[2])};
 }
 }

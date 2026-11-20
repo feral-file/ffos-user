@@ -42,18 +42,7 @@ void validate_display(const Json& p){
   if(p.contains("imageRendering"))require(p["imageRendering"]=="auto" || p["imageRendering"]=="pixelated","playlist_invalid","Invalid image rendering");
   optional_text(p,"background",64);
   if(p.contains("background"))display_color(p["background"].get<std::string>());
-  if(p.contains("margin")){
-    const auto& margin=p["margin"];
-    bool valid=margin.is_number()&&margin.get<double>()>=0&&margin.get<double>()<=16384;
-    if(margin.is_string()){
-      auto text=margin.get<std::string>();
-      if(text.size()<=16&&text.ends_with('%'))try{
-        size_t consumed=0;auto value=std::stod(text,&consumed);
-        valid=consumed==text.size()-1&&std::isfinite(value)&&value>=0&&value<=100;
-      }catch(const std::exception&){}
-    }
-    require(valid,"playlist_invalid","Invalid display margin");
-  }
+  if(p.contains("margin"))display_bounds(p,1920,1080);
 }
 void validate_metadata(const Json& p){
   require(p.is_object(),"playlist_invalid","Metadata must be an object");

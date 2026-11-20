@@ -17,7 +17,7 @@ target_link_libraries(ff-player-native PRIVATE ff_presentation_feedback ff_core 
 install(TARGETS ff-player-native RUNTIME DESTINATION lib/ff-player-native)
 install(PROGRAMS tools/ff-browser-launch DESTINATION lib/ff-player-native)
 
-option(FF_PACKAGE_CEF_VIEWS "Package the CEF Views trial instead of Chrome for Testing" OFF)
+option(FF_PACKAGE_CEF_VIEWS "Package the FF1 CEF Views worker" OFF)
 if(FF_PACKAGE_CEF_VIEWS AND NOT FF_WITH_CEF)
   message(FATAL_ERROR "The Views engine requires FF_WITH_CEF")
 endif()

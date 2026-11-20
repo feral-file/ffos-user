@@ -36,8 +36,8 @@ settings=obj({
 policy=obj({'version':{'const':1},'showMatureContent':boolean,'strictPersonal':boolean,'blockUnratedCurated':boolean},
            ('version','showMatureContent','strictPersonal','blockUnratedCurated'))
 display={'type':'object','properties':{'scaling':enum('fit','fill','stretch','auto'),
-    'margin':{'anyOf':[number(0,16384),{'type':'string','maxLength':16,'pattern':'%$','description':'Finite percentage 0..100, parsed and range-checked by the host.'}]},
-    'background':text(64),'autoPlay':boolean,'loop':boolean,'userOverrides':boolean},'additionalProperties':True}
+    'margin':{'anyOf':[number(0,16384),{'type':'string','maxLength':96,'description':'One to four nonnegative CSS lengths, parsed and range-checked by the host.'}]},
+    'background':text(64),'autoPlay':boolean,'loop':boolean,'imageRendering':enum('auto','pixelated'),'userOverrides':{'anyOf':[boolean,{'type':'object','additionalProperties':boolean}]}},'additionalProperties':True}
 item={'type':'object','required':['source'],'properties':{'source':{**text(16384),'pattern':'^(https?://|data:|ipfs://|onchfs://)'},
     **{key:text() for key in ('id','title','slug','license','ref','refHash')},'mimeType':text(256),'duration':{'type':'number','minimum':0},
     'contentRating':{'type':'string'},'contentReasons':{'type':'array','items':{'type':'string'}},'display':ref('display'),

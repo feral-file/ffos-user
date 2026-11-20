@@ -95,7 +95,12 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   persist(std::move(next));
   // Identical refreshes cancel a deferred update without remounting, changing
   // mode/order or invalidating current trust bindings.
-  if(!unchanged||plan_changed)++generation_;
+  if(!unchanged||plan_changed){
+    ++generation_;
+    // Failed slots are indices in the previous ordering. A refreshed playlist
+    // can replace a broken work or append its first playable successor.
+    exhausted_items_.clear();
+  }
   if(retire_presented||p.value("retireBlockedCurrent",false)){release_input();presented_.reset();}
   auto amend=[&](Occurrence& o){
     int mapped=match_slot(o.playlist["items"],o.index,items);

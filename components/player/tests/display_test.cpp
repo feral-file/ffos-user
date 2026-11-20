@@ -29,6 +29,8 @@ int main(){
   check(portrait.x==108&&portrait.y==192,"Rotating must swap percentage insets");
   auto pixels=ff::display_bounds({{"margin",100}},1920,1080);
   check(pixels.x==100&&pixels.y==100,"Pixel matte must use equal insets");
+  auto css=ff::display_bounds({{"margin","1rem 2vw 3px 4vh"}},1000,500);
+  check(css.x==20&&css.y==16&&css.width==960&&css.height==481,"CSS padding follows top right bottom left");
   auto large=ff::display_bounds({{"margin","90%"}},1920,1080);
   check(large.width>0&&large.height>0,"Extreme matte must retain a bounded renderable viewport");
   {
