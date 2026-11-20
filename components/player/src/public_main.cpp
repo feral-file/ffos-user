@@ -84,6 +84,7 @@ int main(int argc, char** argv) {
       if (auto it = media.find(id); it != media.end()) return &it->second->frames;
       return nullptr;
     };
+    std::string composed_browser_id;
     bool stage_fading = false;
     ff::InputState input_state([&](const ff::Json& event) {
       if (auto it = clients.find(event.at("target").get<std::string>()); it != clients.end())
@@ -249,10 +250,10 @@ int main(int argc, char** argv) {
                 desired->id,
                 std::make_unique<ff::PublicBrowser>(
                     playback, presentation, *desired, launcher,
-                    state_path + "/browser/" + desired->id,
+                    state_path + "/browser/" + ff::uuid(),
                     (std::filesystem::path(socket).parent_path() / "cache.sock").string(),
                     resources, browser_backend, false, options.contains("--diagnostic-engine-debugger"),
-                    *cache_mode, options.contains("--diagnostic-browser-render-ahead")));
+                    *cache_mode, options.contains("--diagnostic-browser-render-ahead"), composed_browser_id!=desired->id));
         } catch (const std::exception& e) {
           playback.failed(desired->id, e.what());
         }
@@ -260,7 +261,13 @@ int main(int argc, char** argv) {
       for (auto& [id, client] : clients) client->poll();
       if (auto desired = playback.desired(); desired) {
         auto it = clients.find(desired->id);
-        if (it != clients.end() && it->second->needs_live_restart())
+        if(it!=clients.end() && it->second->needs_compositor()){
+          // Reopen this occurrence once with host composition for a new layout
+          // or when the compositor cannot confirm the direct presentation.
+          composed_browser_id=desired->id;
+          playback.release_input();
+          clients.erase(it);
+        } else if (it != clients.end() && it->second->needs_live_restart())
           playback.command("playback.refresh", ff::Json::object());
       }
       for (auto it = clients.begin(); it != clients.end();) {
@@ -290,6 +297,11 @@ int main(int argc, char** argv) {
                                 ? &transition->outgoing_display
                                 : nullptr;
         client->poll(hold, stage,!transition);
+        if(client->pointer_motion){
+          sync_input();
+          if(input_ready && playback.overlay().is_null())input(*client->pointer_motion);
+          client->pointer_motion.reset();
+        }
       }
       // The outgoing renderer can fail during polling. Its staged successor
       // must wait for a normal frame in that case rather than reuse the matte.

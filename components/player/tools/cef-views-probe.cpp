@@ -17,8 +17,15 @@
 namespace {
 volatile std::sig_atomic_t stopping=0;
 void stop(int){stopping=1;}
-class Client final : public CefClient,public CefLifeSpanHandler {
+class Client final : public CefClient,public CefLifeSpanHandler,public CefLoadHandler {
  public:
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override{return this;}
+  void OnLoadEnd(CefRefPtr<CefBrowser> browser,CefRefPtr<CefFrame> frame,int status) override{
+    if(!frame->IsMain() || frame->GetURL()=="about:blank" || status>=400)return;
+    if(auto view=CefBrowserView::GetForBrowser(browser)){
+      if(auto window=view->GetWindow();window && !window->IsVisible())window->Show();
+    }
+  }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override{return this;}
   // This process owns one artwork. A popup must never take the display or
   // trigger the main window's shutdown path when the host dismisses it.
@@ -40,8 +47,9 @@ class WindowDelegate final : public CefWindowDelegate {
  public:
   explicit WindowDelegate(CefRefPtr<CefBrowserView> view):view_(view){}
   void OnWindowCreated(CefRefPtr<CefWindow> window) override{
-    window->SetToFillLayout();window->AddChildView(view_);window->SetTitle("CEF Views benchmark");
-    window->SetFullscreen(true);window->Show();
+    window->SetToFillLayout();window->AddChildView(view_);window->SetTitle("Feral File artwork");
+    window->SetFullscreen(true);
+    if(!CefCommandLine::GetGlobalCommandLine()->HasSwitch("ff-direct-cage"))window->Show();
   }
   void OnWindowDestroyed(CefRefPtr<CefWindow>) override{view_=nullptr;}
   bool CanClose(CefRefPtr<CefWindow>) override{

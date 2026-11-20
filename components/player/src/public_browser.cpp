@@ -46,7 +46,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& cache_socket, const std::string& resources,
                              const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
-                             bool render_ahead)
+                             bool render_ahead, bool allow_direct)
     : id(o.id),
       backend_(backend),
       max_submissions_(render_ahead ? 2 : 1),
@@ -57,6 +57,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
       offline_(!p.online() || cache_mode == "isolated" ||
                virtual_cache_source(occurrence_.item.at("source"))),
       cache_socket_(cache_socket) {
+  initial_revision_=occurrence_.display_revision;
   resources_ = resources;
   mixed_cache_ = cache_mode == "mixed";
   restart_on_online_ = !p.online() && cache_mode != "isolated" &&
@@ -75,7 +76,9 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     auto bounds = presentation_.bounds(occurrence_.display);
     // Setup decoration and inset artwork need host composition. Fullscreen
     // CEF forwards its Wayland buffers straight to Cage through the relay.
-    bool cage=backend_=="cef-views" && !decoration_ && !debugger &&
+    bool cage=allow_direct && backend_=="cef-views" && !decoration_ && !debugger && !bundled_ &&
+              playback_.overlay().is_null() && !playback_.service_failure() &&
+              playback_.state()["settings"].value("transitionMs",0.0)==0 &&
               bounds.width==presentation_.width() && bounds.height==presentation_.height() &&
               std::filesystem::exists(std::filesystem::path(launcher).parent_path()/"ff-cage-client");
     int feedback_child=-1;
@@ -177,7 +180,7 @@ void PublicBrowser::send(const std::string& method, Json params, const std::stri
 void PublicBrowser::fail(const std::string& error) {
   if (failed_) return;
   failed_ = true;
-  if (!decoration_) playback_.failed(id, error);
+  if (!decoration_ && !direct()) playback_.failed(id, error);
   if (pid_ > 0) kill(-pid_, SIGKILL);
 }
 void PublicBrowser::message(const Json& m) {
@@ -300,7 +303,10 @@ void PublicBrowser::message(const Json& m) {
     if (native_media(classified)) resolved_native_mime = mime;
   } else if (method == "Page.lifecycleEvent" && (!bundled_ || decoration_) && session == session_ &&
              p.value("name", "") == "load" && p.value("frameId", "") == main_frame_) {
+    if(direct() && document_url_=="about:blank")return;
     loaded_ = true;
+    loaded_at_=std::chrono::steady_clock::now();
+    navigation_load_ns_=static_cast<uint64_t>(p.value("timestamp",0.)*1e9);
     load_frame_ = direct()?direct_frames_:frames.count;
     if(view_)ff_browser_view_redraw(view_);
     if (!decoration_) playback_.committed(id);
@@ -468,7 +474,10 @@ void PublicBrowser::poll() {
     }
     if(direct()){
       uint64_t timestamp=0;
-      while(recv(feedback_fd_,&timestamp,sizeof(timestamp),MSG_DONTWAIT)==sizeof(timestamp))++direct_frames_;
+      while(recv(feedback_fd_,&timestamp,sizeof(timestamp),MSG_DONTWAIT)==sizeof(timestamp)){
+        last_presentation_ns_=std::max(last_presentation_ns_,timestamp);
+        ++direct_frames_;
+      }
     }
     playback_.media_status(
         id, {{"backend", backend_},
@@ -575,7 +584,7 @@ void PublicBrowser::poll() {
   }
 }
 bool PublicBrowser::has_ready_frame() const {
-  if(direct())return !failed_ && resolved_native_mime.empty() && loaded_ && direct_frames_>load_frame_;
+  if(direct())return !failed_ && resolved_native_mime.empty() && loaded_ && navigation_load_ns_ && last_presentation_ns_>=navigation_load_ns_;
   return !failed_ && resolved_native_mime.empty() && loaded_ && frames.count > load_frame_ &&
          frames.latest().display_revision == occurrence_.display_revision;
 }
@@ -607,7 +616,11 @@ void PublicBrowser::input(const Json& p) {
     if(session_.empty())return;
     if(kind=="move" || kind=="button" || kind=="wheel"){
       mouse_x_=p.value("x",mouse_x_);mouse_y_=p.value("y",mouse_y_);
-      Json event={{"x",mouse_x_},{"y",mouse_y_}};
+      const unsigned held=p.value("buttons",0u);
+      const unsigned buttons=(held&1u)|((held&2u)<<1)|((held&4u)>>1);
+      const unsigned modifiers=(p.value("alt",false)?1:0)|(p.value("control",false)?2:0)|
+                               (p.value("meta",false)?4:0)|(p.value("shift",false)?8:0);
+      Json event={{"x",mouse_x_},{"y",mouse_y_},{"buttons",buttons},{"modifiers",modifiers}};
       if(kind=="move")event["type"]="mouseMoved";
       if(kind=="wheel"){event["type"]="mouseWheel";event["deltaX"]=p.value("dx",0.);event["deltaY"]=p.value("dy",0.);}
       if(kind=="button"){

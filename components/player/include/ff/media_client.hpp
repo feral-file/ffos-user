@@ -20,6 +20,7 @@ class MediaClient {
   void poll(bool hold = false, const Json* stage = nullptr,bool allow_direct = false);
   void seek(double seconds);
   void did_present();
+  std::optional<Json> pointer_motion;
   FramePair frames;
   bool ready = false;
   Json status = Json::object();

@@ -298,7 +298,12 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   }
   const auto label_age=ticks-label_started_;
   const bool label_visible = has_title && blend.opacity>0 && (mode=="on" || (mode=="timed" && label_age<30300));
-  bool overlay_panel=!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
+  auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
+  auto update=playback.state().value("updateOutcome",Json(nullptr));
+  bool overlay_panel=(schedule.is_object() && schedule.value("outcome","")=="failed") ||
+                     (update.is_object() && update.value("contentBlocked",false)) ||
+                     (playback.desired() && playback.desired()->stage=="failed") ||
+                     !playback.recovery_error().empty() ||!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
                      !playback.presentation_failure().is_null() || !playback.storage_error().empty() ||
                      !playback.runtime_notice().is_null();
   if(external && !pointer_visible && !label_visible && !overlay_panel){
@@ -318,7 +323,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   activate();
   if(external){
     if(!browser_overlay_)browser_overlay_=std::make_unique<CageOverlay>(window_,width_,height_);
-    browser_overlay_->begin();
+    browser_overlay_->begin(overlay_panel);
   }
   const auto* stage = blend.stage ? blend.stage : (occurrence ? &occurrence->display : nullptr);
   auto background=display_color(stage?stage->value("background","#000000"):"#000000");

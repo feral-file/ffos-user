@@ -62,7 +62,7 @@ CageOverlay::CageOverlay(SDL_Window* owner,int width,int height):impl_(std::make
   static const xdg_wm_base_listener ping={[](void*,xdg_wm_base* shell,uint32_t id){xdg_wm_base_pong(shell,id);}};
   xdg_wm_base_add_listener(s.shell,&ping,nullptr);
   s.surface=wl_compositor_create_surface(s.compositor);
-  auto* region=wl_compositor_create_region(s.compositor);wl_surface_set_input_region(s.surface,region);wl_region_destroy(region);
+
   s.xsurface=xdg_wm_base_get_xdg_surface(s.shell,s.surface);
   static const xdg_surface_listener configure={[](void* data,xdg_surface* surface,uint32_t serial){
     xdg_surface_ack_configure(surface,serial);static_cast<Impl*>(data)->configured=true;
@@ -88,8 +88,11 @@ CageOverlay::CageOverlay(SDL_Window* owner,int width,int height):impl_(std::make
   require(s.layer!=EGL_NO_SURFACE,"device_ui","Cannot allocate overlay surface");
 }
 CageOverlay::~CageOverlay()=default;
-void CageOverlay::begin(){
+void CageOverlay::begin(bool modal){
   auto& s=*impl_;
+  auto* region=modal ? nullptr : wl_compositor_create_region(s.compositor);
+  wl_surface_set_input_region(s.surface,region);
+  if(region)wl_region_destroy(region);
   wl_display_dispatch_queue_pending(s.display,s.queue);
   require(eglMakeCurrent(s.egl,s.layer,s.layer,s.context),"device_ui","Cannot activate overlay");
   eglSwapInterval(s.egl,0);

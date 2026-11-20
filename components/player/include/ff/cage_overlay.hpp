@@ -9,7 +9,7 @@ class CageOverlay {
  public:
   CageOverlay(SDL_Window* owner,int width,int height);
   ~CageOverlay();
-  void begin();
+  void begin(bool modal);
   void submit();
  private:
   struct Impl;

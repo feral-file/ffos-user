@@ -17,7 +17,7 @@ class PublicBrowser {
   PublicBrowser(Playback&, Presentation&, Occurrence, const std::string& launcher,
                 const std::string& profile, const std::string& cache_socket,
                 const std::string& resources, const std::string& backend, bool decoration = false, bool debugger = false,
-                const std::string& cache_mode = "", bool render_ahead = false);
+                const std::string& cache_mode = "", bool render_ahead = false, bool allow_direct = true);
   ~PublicBrowser();
   void poll();
   void input(const Json&);
@@ -30,6 +30,10 @@ class PublicBrowser {
   }
   std::string resolved_native_mime;
   std::string cache_mode() const { return offline_ ? "isolated" : mixed_cache_ ? "mixed" : ""; }
+  bool needs_compositor() const {
+    return direct() && (failed_ || occurrence_.display_revision!=initial_revision_ ||
+           (!has_ready_frame() && loaded_ && std::chrono::steady_clock::now()-loaded_at_>std::chrono::seconds(3)));
+  }
   bool failed() const { return failed_; }
   FramePair frames;
   const std::string id;
@@ -44,7 +48,8 @@ class PublicBrowser {
   ff_browser_view* view_ = nullptr;
   pid_t pid_ = -1;
   int feedback_fd_=-1;
-  uint64_t direct_frames_=0;
+  uint64_t direct_frames_=0, last_presentation_ns_=0, navigation_load_ns_=0, initial_revision_=0;
+  std::chrono::steady_clock::time_point loaded_at_;
   double mouse_x_=0,mouse_y_=0;
   int writer_ = -1, reader_ = -1;
   std::string buffer_, session_, profile_, main_frame_, navigation_url_, document_url_, navigation_error_;

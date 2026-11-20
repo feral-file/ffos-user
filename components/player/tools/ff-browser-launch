@@ -17,6 +17,7 @@ elif [ "${4:-}" = filtered ]; then
   # Only the capability-filtered socket enters the browser namespace.
   case "$WAYLAND_DISPLAY" in /*) relay="$WAYLAND_DISPLAY";; *) relay="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY";; esac
   wayland=(--ro-bind "$relay" /display/wayland --setenv WAYLAND_DISPLAY /display/wayland)
+  debug+=(--ff-direct-cage)
 fi
 exec /usr/bin/bwrap --die-with-parent --new-session --unshare-all "${network[@]}" --clearenv \
  --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
