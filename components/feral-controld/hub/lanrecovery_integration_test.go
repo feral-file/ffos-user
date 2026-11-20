@@ -55,6 +55,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -66,12 +67,6 @@ import (
 // errLANNotExist stands in for an fs "not found": every executor OS read misses
 // in this test. Its identity does not matter because IsNotExist is mocked true.
 var errLANNotExist = errors.New("lan test: not exist")
-
-// otaLocalConfigPath mirrors otagate's unexported localConfigPath — the running
-// build descriptor the OTA gate reads first. Duplicated rather than imported
-// because it is package-private to otagate; if that path moves, this test stops
-// observing the gate and fails loudly rather than silently passing.
-const otaLocalConfigPath = "/home/feralfile/ff1-config.json"
 
 // lanRig is a fully wired offline hub: real executor -> real storm gate ->
 // real hub handler chain, fronted by a loopback httptest.Server. Only the leaf
@@ -291,7 +286,7 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 		// the descriptor once per run, and once is what "it ran" means here.
 		gateRanLocally := make(chan struct{})
 		var closeOnce sync.Once
-		rig.mockOS.EXPECT().ReadFile(otaLocalConfigPath).DoAndReturn(
+		rig.mockOS.EXPECT().ReadFile(constants.FF1_CONFIG_FILE).DoAndReturn(
 			func(string) ([]byte, error) {
 				closeOnce.Do(func() { close(gateRanLocally) })
 				return nil, errLANNotExist
