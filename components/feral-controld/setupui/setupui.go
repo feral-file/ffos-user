@@ -22,7 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
@@ -169,13 +169,13 @@ type Service struct {
 	navigationParkPollInterval time.Duration
 	navigationParkTimeout      time.Duration
 
-	// versionFile is the FF1 config file the installed software version is
-	// read from (the same source the OTA gate and the claim QR read); empty
-	// means constants.FF1_CONFIG_FILE. Test-only override, same pre-worker
-	// contract as the poll bounds above. versionMu guards the cached value.
-	versionFile string
-	versionMu   sync.Mutex
-	version     string
+	// readBuild reads the installed build (the same ff1config descriptor the
+	// OTA gate and the claim QR read); nil means ff1config.ReadInstalled.
+	// Test-only override, same pre-worker contract as the poll bounds above.
+	// versionMu guards the cached value.
+	readBuild func() (ff1config.Build, error)
+	versionMu sync.Mutex
+	version   string
 
 	mu      sync.Mutex
 	support support
@@ -1172,21 +1172,15 @@ func (s *Service) installedVersion() string {
 	if s.version != "" {
 		return s.version
 	}
-	path := s.versionFile
-	if path == "" {
-		path = constants.FF1_CONFIG_FILE
+	read := s.readBuild
+	if read == nil {
+		read = ff1config.ReadInstalled
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed FF1 config path; tests inject temp files.
+	build, err := read()
 	if err != nil {
 		return ""
 	}
-	var cfg struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return ""
-	}
-	s.version = strings.TrimSpace(cfg.Version)
+	s.version = strings.TrimSpace(build.Version)
 	return s.version
 }
 

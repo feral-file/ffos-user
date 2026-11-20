@@ -3,11 +3,9 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -16,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
@@ -148,17 +147,11 @@ func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, o
 // effort: "" when unreadable — the build stamp on a record is diagnostic,
 // never a gate.
 func installedControldVersion() string {
-	raw, err := os.ReadFile(constants.FF1_CONFIG_FILE)
+	build, err := ff1config.ReadInstalled()
 	if err != nil {
 		return ""
 	}
-	var cfg struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return ""
-	}
-	return cfg.Version
+	return build.Version
 }
 
 // mediaHealthCursorReconciler flags the outcome-ring cursor on every

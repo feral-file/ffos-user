@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
@@ -255,7 +256,7 @@ func newTestService(t *testing.T, sender CDPSender, contract string) *Service {
 	svc := New(sender, writeContract(t, contract), nil)
 	// Hermetic: a host that happens to carry the real FF1 config file must not
 	// add a version field to payloads the tests compare field by field.
-	svc.versionFile = filepath.Join(t.TempDir(), "absent-ff1-config.json")
+	svc.readBuild = func() (ff1config.Build, error) { return ff1config.Build{}, os.ErrNotExist }
 	return svc
 }
 
@@ -267,15 +268,14 @@ func TestPushesCarryInstalledVersion(t *testing.T) {
 	t.Run("visible states carry the version, cached once read", func(t *testing.T) {
 		sender := newFakeCDP()
 		svc := newTestService(t, sender, validContract)
-		cfg := filepath.Join(t.TempDir(), "ff1-config.json")
-		require.NoError(t, os.WriteFile(cfg, []byte(`{"version":"3.0.1","branch":"release"}`), 0o600))
-		svc.versionFile = cfg
+		installed := "3.0.1"
+		svc.readBuild = func() (ff1config.Build, error) { return ff1config.Build{Version: installed}, nil }
 
 		svc.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1")
 		sender.waitForCalls(t, 1)
 		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
 
-		require.NoError(t, os.WriteFile(cfg, []byte(`{"version":"3.0.2"}`), 0o600))
+		installed = "3.0.2" // an OTA rewrote the descriptor before the restart
 		svc.ShowUpdating(10)
 		sender.waitForCalls(t, 2)
 		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
@@ -663,6 +663,9 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 				StateFields map[string]struct {
 					Optional []string `json:"optional"`
 				} `json:"stateFields"`
+				CommonFields struct {
+					Optional []string `json:"optional"`
+				} `json:"commonFields"`
 			} `json:"setupDisplay"`
 		} `json:"contracts"`
 	}
@@ -682,6 +685,8 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 		"softap_qr must declare the attached-phase flag ShowSoftAPPortalQR sends")
 	assert.Contains(t, softAPFields.Optional, "reason",
 		"softap_qr must declare the failure line ShowSoftAPQRRetry sends")
+	assert.Contains(t, manifest.Contracts.SetupDisplay.CommonFields.Optional, "version",
+		"every state must accept the installed version withVersion sends")
 }
 
 // TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking
