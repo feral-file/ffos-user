@@ -1176,7 +1176,7 @@ func (s *Service) installedVersion() string {
 	if path == "" {
 		path = constants.FF1_CONFIG_FILE
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed FF1 config path; tests inject temp files.
 	if err != nil {
 		return ""
 	}
