@@ -15,6 +15,7 @@ class PresentationFeedback {
   void poll();
   Json metrics() const;
   PresentedFrame latest() const;
+  PresentedFrame outcome(uint64_t serial) const;
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

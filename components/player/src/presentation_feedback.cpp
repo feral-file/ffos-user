@@ -3,6 +3,7 @@
 #include "presentation-time-client-protocol.h"
 #include <SDL_syswm.h>
 #include <wayland-client.h>
+#include <array>
 #include <cstring>
 #include <set>
 #include <deque>
@@ -19,6 +20,15 @@ struct PresentationFeedback::Impl {
   std::set<Pending*> pending;
   FrameTiming intervals;
   PresentedFrame latest;
+  // Key outcomes by artwork serial. A newer Cage notification can arrive
+  // in the same dispatch as the one a nested browser is waiting for.
+  std::array<PresentedFrame, 64> outcomes{};
+  void remember(PresentedFrame frame) {
+    if (!frame.serial) return;
+    auto& slot = outcomes[frame.serial % outcomes.size()];
+    if (slot.serial < frame.serial || (slot.serial == frame.serial && !slot.timestamp_ns))
+      slot = frame;
+  }
   bool timing_samples = false;
   std::deque<uint64_t> changed_timestamps;
   uint64_t truncated = 0, changed_count = 0;
@@ -51,12 +61,14 @@ struct PresentationFeedback::Impl {
         self.changed_timestamps.push_back(timestamp);
       }
     }
+    self.remember({p->serial,timestamp,refresh,flags,self.clock,self.changed_count});
     if(p->serial && p->serial>=self.latest.serial)
       self.latest={p->serial,timestamp,refresh,flags,self.clock,self.changed_count};
     finish(p);
   }
   static void dropped(void* data, struct wp_presentation_feedback*) {
-    auto* p = static_cast<Pending*>(data); ++p->owner->discarded; finish(p);
+    auto* p = static_cast<Pending*>(data); ++p->owner->discarded;
+    p->owner->remember({p->serial}); finish(p);
   }
   ~Impl() {
     while (!pending.empty()) finish(*pending.begin());
@@ -96,6 +108,10 @@ void PresentationFeedback::before_swap(uint64_t serial) {
 void PresentationFeedback::poll() {
   auto& self=*impl_;
   if (self.display && self.queue) wl_display_dispatch_queue_pending(self.display,self.queue);
+}
+PresentedFrame PresentationFeedback::outcome(uint64_t serial) const {
+  const auto& item = impl_->outcomes[serial % impl_->outcomes.size()];
+  return item.serial == serial ? item : PresentedFrame{};
 }
 PresentedFrame PresentationFeedback::latest() const { return impl_->latest; }
 Json PresentationFeedback::metrics() const {

@@ -25,7 +25,8 @@ void *ff_browser_view_lock_frame(struct ff_browser_view *view);
 void ff_browser_frame_unlock(void *buffer);
 void ff_browser_view_redraw(struct ff_browser_view *view);
 void ff_browser_view_frame_requested(struct ff_browser_view *view);
-void ff_browser_view_presented_at(struct ff_browser_view *, uint64_t timestamp_ns,
+uint32_t ff_browser_view_take_commit(struct ff_browser_view *view);
+void ff_browser_view_complete(struct ff_browser_view *, uint32_t commit, uint64_t timestamp_ns,
                                   uint32_t refresh_ns, uint32_t flags);
 void ff_browser_view_presented(struct ff_browser_view *view);
 void ff_browser_view_resize(struct ff_browser_view *view, int width, int height);

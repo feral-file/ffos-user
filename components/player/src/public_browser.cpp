@@ -460,19 +460,19 @@ void PublicBrowser::poll() {
              {"unsupportedWorkerTargets", unsupported_worker_targets_}});
     require(navigation_error_.empty() || !resolved_native_mime.empty(), "browser_navigation",
             navigation_error_);
-    if (pending_host_serial_) {
-      auto sample = presentation_.latest_presented();
-      const auto elapsed = std::chrono::steady_clock::now() - host_submitted_;
-      const auto milliseconds = std::chrono::duration<double, std::milli>(elapsed).count();
-      if (sample.serial >= pending_host_serial_ && sample.clock == CLOCK_MONOTONIC) {
-        ff_browser_view_presented_at(view_, sample.timestamp_ns, sample.refresh_ns, sample.flags);
-        presentation_.browser_feedback(milliseconds, false);
-        pending_host_serial_ = 0;
-      } else if (elapsed > std::chrono::milliseconds(500)) {
-        ff_browser_view_presented(view_);
-        presentation_.browser_feedback(milliseconds, true);
-        pending_host_serial_ = 0;
-      }
+    while (!submissions_.empty()) {
+      const auto& frame = submissions_.front();
+      const auto sample = presentation_.outcome(frame.host_serial);
+      const auto elapsed = std::chrono::steady_clock::now() - frame.submitted;
+      const bool confirmed = sample.serial && (!sample.timestamp_ns || sample.clock == CLOCK_MONOTONIC);
+      if (!confirmed && elapsed < std::chrono::milliseconds(500)) break;
+      // Only a matching presentation gets a timestamp. Explicit discard and
+      // timeout both release this commit without reporting fictitious scanout.
+      ff_browser_view_complete(view_, frame.nested_commit, confirmed ? sample.timestamp_ns : 0,
+                               sample.refresh_ns, sample.flags);
+      presentation_.browser_feedback(std::chrono::duration<double, std::milli>(elapsed).count(),
+                                     !confirmed);
+      submissions_.pop_front();
     }
     ff_browser_server_poll(server_);
     // The blit and the final draw use the same GL context. Their GPU command
@@ -485,7 +485,7 @@ void PublicBrowser::poll() {
     const bool writable = presentation_.import_read_complete(frames.capture);
     if (!frames.pending && writable && frames.capture.producer_buffer)
       presentation_.destroy(frames.capture);
-    if (writable && source_released && !pending_host_serial_ &&
+    if (writable && source_released && submissions_.size() < 2 &&
         (!frames.pending || !loaded_ || frames.count <= load_frame_ ||
          frames.capture.display_revision != occurrence_.display_revision)) {
       ff_browser_frame frame{};
@@ -557,8 +557,8 @@ void PublicBrowser::did_present() {
     ff_browser_view_presented(view_);
     return;
   }
-  pending_host_serial_ = presentation_.frame_serial();
-  host_submitted_ = std::chrono::steady_clock::now();
+  if (auto commit = ff_browser_view_take_commit(view_))
+    submissions_.push_back({presentation_.frame_serial(), commit, std::chrono::steady_clock::now()});
 }
 void PublicBrowser::update() {
   if (playback_.desired() && playback_.desired()->id == id) {

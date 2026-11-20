@@ -242,8 +242,11 @@ static bool output_test(struct wlr_output *output, const struct wlr_output_state
 static bool output_commit(struct wlr_output *output, const struct wlr_output_state *state) {
   if (!output_test(output, state)) return false;
   struct ff_browser_view *view = output->data;
-  if (state->committed & WLR_OUTPUT_STATE_BUFFER)
+  if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
+    // A superseded startup or resize frame may never reach host submission.
+    ff_browser_view_complete(view, ff_browser_view_take_commit(view), 0, 0, 0);
     view->pending_present_seq = output->commit_seq + 1;
+  }
   return true;
 }
 static void output_destroy(struct wlr_output *output) {
@@ -424,23 +427,23 @@ void *ff_browser_view_lock_frame(struct ff_browser_view *v) {
 void ff_browser_frame_unlock(void *buffer) {
   wlr_buffer_unlock(buffer);
 }
-void ff_browser_view_presented_at(struct ff_browser_view *v, uint64_t timestamp_ns,
-                                  uint32_t refresh_ns, uint32_t flags) {
-  if (v->toplevel) {
-    struct timespec now = {.tv_sec = timestamp_ns / 1000000000,
-                           .tv_nsec = timestamp_ns % 1000000000};
-    if (v->pending_present_seq) {
-      struct wlr_output_event_present present = {
-          .commit_seq = v->pending_present_seq,
-          .presented = true,
-          .when = now,
-          .refresh = refresh_ns,
-          .flags = flags & ~WLR_OUTPUT_PRESENT_ZERO_COPY,
-      };
-      wlr_output_send_present(v->output, &present);
-      v->pending_present_seq = 0;
-    }
-  }
+uint32_t ff_browser_view_take_commit(struct ff_browser_view *v) {
+  uint32_t sequence = v->pending_present_seq;
+  v->pending_present_seq = 0;
+  return sequence;
+}
+void ff_browser_view_complete(struct ff_browser_view *v, uint32_t sequence, uint64_t timestamp_ns,
+                              uint32_t refresh_ns, uint32_t flags) {
+  if (!sequence) return;
+  struct timespec when = {.tv_sec = timestamp_ns / 1000000000, .tv_nsec = timestamp_ns % 1000000000};
+  struct wlr_output_event_present present = {
+      .commit_seq = sequence,
+      .presented = timestamp_ns != 0,
+      .when = &when,
+      .refresh = refresh_ns,
+      .flags = flags & ~WLR_OUTPUT_PRESENT_ZERO_COPY,
+  };
+  wlr_output_send_present(v->output, &present);
 }
 void ff_browser_view_frame_requested(struct ff_browser_view *v) {
   if (!v->toplevel) return;
@@ -458,7 +461,7 @@ void ff_browser_view_presented(struct ff_browser_view *v) {
   clock_gettime(CLOCK_MONOTONIC, &now);
   // Startup/feedback fallback has no scanout claim. Normal acknowledged frames
   // carry Cage's actual presentation timestamp and flags, excluding ZERO_COPY.
-  ff_browser_view_presented_at(v, (uint64_t)now.tv_sec * 1000000000 + now.tv_nsec, 16666666, 0);
+  ff_browser_view_complete(v, ff_browser_view_take_commit(v), (uint64_t)now.tv_sec * 1000000000 + now.tv_nsec, 16666666, 0);
 }
 void ff_browser_view_resize(struct ff_browser_view *v, int width, int height) {
   if (width == v->width && height == v->height) return;

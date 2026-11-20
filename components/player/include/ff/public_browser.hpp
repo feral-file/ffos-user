@@ -56,8 +56,12 @@ class PublicBrowser {
     std::function<void(const Json&)> callback;
   };
   std::map<uint64_t, Reply> replies_;
-  uint64_t pending_host_serial_ = 0;
-  std::chrono::steady_clock::time_point host_submitted_;
+  struct Submission {
+    uint64_t host_serial;
+    uint32_t nested_commit;
+    std::chrono::steady_clock::time_point submitted;
+  };
+  std::deque<Submission> submissions_;
   bool mixed_cache_ = false, restart_on_online_ = false;
   std::map<std::string, Json> mixed_requests_;
   bool loaded_ = false, failed_ = false, offline_ = false, cache_coverage_ = false,
