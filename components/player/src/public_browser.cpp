@@ -78,7 +78,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     // CEF forwards its Wayland buffers straight to Cage through the relay.
     bool cage=allow_direct && backend_=="cef-views" && !decoration_ && !debugger && !bundled_ &&
               playback_.overlay().is_null() && !playback_.service_failure() &&
-              playback_.state()["settings"].value("transitionMs",0.0)==0 &&
+              (!playback_.visible() || playback_.state()["settings"].value("transitionMs",0.0)==0) &&
               bounds.width==presentation_.width() && bounds.height==presentation_.height() &&
               std::filesystem::exists(std::filesystem::path(launcher).parent_path()/"ff-cage-client");
     int feedback_child=-1, admission_child=-1;
