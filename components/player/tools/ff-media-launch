@@ -8,6 +8,8 @@ media_display=${WAYLAND_DISPLAY:-wayland-0}
 case "$media_display" in */*|.*) echo 'Expected a relative Wayland socket name' >&2; exit 1;; esac
 network="--share-net"
 if [ "${1:-}" = "--offline" ]; then network=""; fi
+# Cage owns fullscreen presentation. Client decorations initialize a redundant
+# GTK renderer and can crash in libdecor during Wayland window configuration.
 set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all $network --clearenv \
   --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
   --proc /proc --dev /dev --dev-bind /dev/dri /dev/dri --tmpfs /tmp \
@@ -17,7 +19,7 @@ set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all $network --c
   --ro-bind "$media_dir" /app --dir "$media_runtime" \
   --ro-bind "$media_runtime/$media_display" "$media_runtime/$media_display" \
   --setenv XDG_RUNTIME_DIR "$media_runtime" --setenv WAYLAND_DISPLAY "$media_display" \
-  --setenv SDL_VIDEODRIVER wayland --setenv LD_LIBRARY_PATH /app \
+  --setenv SDL_VIDEODRIVER wayland --setenv SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR 0 --setenv LD_LIBRARY_PATH /app \
   --setenv MALLOC_ARENA_MAX 2 --setenv HOME /tmp --setenv LANG C.UTF-8
 # Arch's /etc/ssl CA bundle links point outside that mounted directory. Keep
 # the generated trust store visible, read-only; never disable TLS verification.
