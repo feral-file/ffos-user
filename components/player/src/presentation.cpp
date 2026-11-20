@@ -306,7 +306,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
                      !playback.recovery_error().empty() ||!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
                      !playback.presentation_failure().is_null() || !playback.storage_error().empty() ||
                      !playback.runtime_notice().is_null();
-  if(external && !pointer_visible && !label_visible && !overlay_panel){
+  if(external && blend.opacity==1 && !pointer_visible && !label_visible && !overlay_panel){
     browser_overlay_.reset();draw_key_.reset();return false;
   }
   if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
@@ -331,7 +331,13 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   if(background.size()==7&&background[0]=='#'&&background.find_first_not_of("0123456789abcdefABCDEF",1)==std::string::npos)
     rgb=std::stoul(background.substr(1),nullptr,16);
   glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,width_,height_);glClearColor(((rgb>>16)&255)/255.f,((rgb>>8)&255)/255.f,(rgb&255)/255.f,1);glClear(GL_COLOR_BUFFER_BIT);
-  if(external){glClearColor(0,0,0,0);glClear(GL_COLOR_BUFFER_BIT);}
+  if(external){
+    // Cover the live outgoing Cage surface with the stage colour. At the
+    // midpoint the nested incoming worker can take over against the same matte.
+    const float cover=1.f-blend.opacity;
+    glClearColor(((rgb>>16)&255)/255.f*cover,((rgb>>8)&255)/255.f*cover,(rgb&255)/255.f*cover,cover);
+    glClear(GL_COLOR_BUFFER_BIT);
+  }
   // Device setup can explicitly own the screen while playback sleeps. In its
   // absence sleep is black, including recent cursor and retained error UI.
   if(playback.state()["sleeping"]==true&&playback.overlay().is_null()){

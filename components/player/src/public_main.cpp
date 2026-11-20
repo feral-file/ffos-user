@@ -393,8 +393,9 @@ int main(int argc, char** argv) {
         const auto& old = *playback.visible();
         const auto* frames = frames_for(old.id);
         const auto duration = playback.state()["settings"].value("transitionMs", 650.0);
-        if (duration > 0 && frames && frames->shown.texture &&
-            frames->shown.display_revision == old.display_revision) {
+        const bool cage_outgoing=clients.contains(old.id) && clients.at(old.id)->direct();
+        const bool retained=frames && frames->shown.texture && frames->shown.display_revision==old.display_revision;
+        if (duration > 0 && (cage_outgoing || retained)) {
           // SVG, GLB and software documents follow the old embedded-view
           // fade-through-background path. Only native media overlaps.
           const bool sequential = clients.contains(old.id) || clients.contains(commit);
