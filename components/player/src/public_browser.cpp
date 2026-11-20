@@ -474,15 +474,13 @@ void PublicBrowser::poll() {
       }
     }
     ff_browser_server_poll(server_);
-    if (copy_pending_) {
-      if (presentation_.copy_ready(frames.capture)) {
-        frames.captured();
-        copy_pending_ = false;
-        if (!loaded_ || frames.count <= load_frame_) ff_browser_view_presented(view_);
-      }
-    } else if (!pending_host_serial_ &&
-               (!frames.pending || !loaded_ || frames.count <= load_frame_ ||
-                frames.capture.display_revision != occurrence_.display_revision)) {
+    // The blit and the final draw use the same GL context. Their GPU command
+    // order is sufficient for display. Only producer reuse needs a CPU-side
+    // fence check. The fence moves with its texture when FramePair swaps.
+    if (!pending_host_serial_ &&
+        (!frames.pending || !loaded_ || frames.count <= load_frame_ ||
+         frames.capture.display_revision != occurrence_.display_revision) &&
+        presentation_.copy_ready(frames.shown) && presentation_.copy_ready(frames.capture)) {
       ff_browser_frame frame{};
       auto result = ff_browser_view_frame(view_, &frame);
       require(result >= 0, "browser_acceleration",
@@ -505,7 +503,6 @@ void PublicBrowser::poll() {
         if (frames.pending) presentation_.coalesced_frame();
         frames.pending = false;
         presentation_.accelerated(frames.capture, dma, true);
-        copy_pending_ = true;
         ff_browser_view_frame_requested(view_);
         auto b = presentation_.bounds(occurrence_.display);
         frames.capture.display_revision =
@@ -515,6 +512,8 @@ void PublicBrowser::poll() {
                       frames.count + 1 > configuration_frame_))
                 ? occurrence_.display_revision
                 : 0;
+        frames.captured();
+        if (!loaded_ || frames.count <= load_frame_) ff_browser_view_presented(view_);
       }
     }
     int status;
