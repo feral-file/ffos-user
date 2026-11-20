@@ -67,6 +67,8 @@ flowchart LR
 | `hidden` | Overlay hidden; normal artwork playback. |
 | `factory_reset` | Factory reset staged (extension state, best-effort before reboot). |
 
+Every push except `hidden` also carries `version`, the installed build from `ff1-config.json` (read through `ff1config`, the same source as the OTA gate and the claim QR). The player shows it small in the bottom-right corner of every visible panel, so an old build is obvious at boot. The value is read once per process, so an OTA that rewrites the descriptor before the restart does not relabel the updating screen; players that predate the field ignore it.
+
 There is no durable `setup_phase` state file; these are transient narration intents. The live setup state a LAN client can read is the `provisioning` machine state, exposed as `setup_state` on `GET /api/status`.
 
 ---
