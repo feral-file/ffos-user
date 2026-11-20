@@ -31,7 +31,7 @@ class PublicBrowser {
   std::string resolved_native_mime;
   std::string cache_mode() const { return offline_ ? "isolated" : mixed_cache_ ? "mixed" : ""; }
   bool needs_compositor() const {
-    if(!direct() && resize_started_at_ && playback_.overlay().is_null() &&
+    if(!direct() && resize_started_at_ && !has_ready_frame() && playback_.overlay().is_null() &&
        !playback_.service_failure() && !playback_.thermal_hold() &&
        std::chrono::steady_clock::now()-*resize_started_at_>std::chrono::seconds(2))
       return true;
