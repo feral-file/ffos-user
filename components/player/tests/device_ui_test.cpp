@@ -39,6 +39,7 @@ int main(int argc,char** argv){
     check(landscape.width==portrait.width&&landscape.height==portrait.height,"Rotation inflated label dimensions");
     check(landscape.width<960&&landscape.timer_width>0&&landscape.timer_height==2,"Tombstone width/timer geometry");
     auto always=ff::render_tombstone(item,1920,1080,false);check(always.timer_width==0&&always.height<landscape.height,"Always-on label must omit countdown/gap");
+    check(always.width==267 && always.height==146,"Shipping 1080p plaque geometry must match for this fixture");
     item.playlist_title="Another exhibition";
     check(ff::render_tombstone(item,1920,1080,true).rgba==landscape.rgba,"A shipping tombstone has no separate exhibition line");
     item.item["resolvedManifest"]={{"metadata",{{"title",""},{"artists",ff::Json::array()}}}};

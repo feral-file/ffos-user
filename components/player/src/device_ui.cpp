@@ -80,6 +80,7 @@ struct Canvas {
 struct Text {
   PangoLayout* layout;
   int width=0,height=0;
+  double css_height=0;
   Text(cairo_t* cr,const std::string& markup,double size,double line_height,int max_width,bool center) {
     layout=pango_cairo_create_layout(cr);auto font=pango_font_description_from_string("PP Mori");
     // CSS keeps fractional glyph advances. Rounding each character pushes the
@@ -95,6 +96,9 @@ struct Text {
     pango_attr_list_insert(attrs,pango_attr_line_height_new_absolute(size*line_height*PANGO_SCALE));
     pango_layout_set_attributes(layout,attrs);pango_attr_list_unref(attrs);
     pango_layout_get_pixel_size(layout,&width,&height);
+    // Stack CSS line boxes before rasterization. Rounding each label separately
+    // adds a pixel to the plaque and shifts text and QR frames in long stacks.
+    css_height=pango_layout_get_line_count(layout)*size*line_height;
   }
   ~Text(){g_object_unref(layout);}
   void paint(cairo_t* cr,double x,double y){cairo_move_to(cr,x,y);pango_cairo_show_layout(cr,layout);}
@@ -120,7 +124,7 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
   std::vector<std::unique_ptr<Text>> layouts;double total=0;
   auto measure=[&](const std::vector<Block>& blocks){for(const auto& block:blocks){
     auto t=std::make_unique<Text>(canvas.cr,block.markup,block.size,block.line_height,text_width(block),true);
-    total+=block.gap+t->height;layouts.push_back(std::move(t));
+    total+=block.gap+t->css_height;layouts.push_back(std::move(t));
   }};
   measure(before);if(!qr.empty())total+=height*.05+qr_size+padding*2;measure(after);
   // Dense recovery copy must remain on-screen on square and portrait outputs.
@@ -130,7 +134,7 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
   cairo_set_source_rgb(canvas.cr,1,1,1);size_t i=0;double y=0;
   auto paint=[&](const std::vector<Block>& blocks){for(const auto& block:blocks){
     cairo_set_source_rgba(canvas.cr,1,1,1,block.opacity);
-    y+=block.gap;layouts[i]->paint(canvas.cr,-text_width(block)*.5,y);y+=layouts[i++]->height;
+    y+=block.gap;layouts[i]->paint(canvas.cr,-text_width(block)*.5,y);y+=layouts[i++]->css_height;
   }};
   paint(before);
   if(!qr.empty()){
@@ -273,14 +277,14 @@ UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed) {
   std::vector<std::string> blocks{(artists.empty()?"":escape(artists)+"\n")+"<b><i>"+escape(*label.title)+"</i></b>"};
   if(!o.curator.empty())blocks.push_back("<span foreground='#A0A0A0'>Curated by: "+escape(o.curator)+"</span>");
   std::vector<std::unique_ptr<Text>> layouts;int text_width=0;double total=0;
-  for(const auto& block:blocks){auto t=std::make_unique<Text>(measure.cr,block,size,1.4,max_width,false);text_width=std::max(text_width,t->width);total+=t->height;layouts.push_back(std::move(t));}
+  for(const auto& block:blocks){auto t=std::make_unique<Text>(measure.cr,block,size,1.4,max_width,false);text_width=std::max(text_width,t->width);total+=t->css_height;layouts.push_back(std::move(t));}
   const double timer=timed?std::max(1.0,scale):0;
   total+=padding*2+padding*(blocks.size()-1)+(timed?timer+padding:0);
   // Bound hostile/very long metadata. Normal labels use content-hugging width.
   Canvas canvas(std::max(1,int(std::ceil(text_width+padding*2))),std::max(1,std::min(height,int(std::ceil(total)))));
   cairo_set_source_rgb(canvas.cr,1,1,1);cairo_paint(canvas.cr);cairo_set_source_rgb(canvas.cr,0,0,0);
   double y=padding+(timed?timer+padding:0);
-  for(auto& layout:layouts){layout->paint(canvas.cr,padding,y);y+=layout->height+padding;}
+  for(auto& layout:layouts){layout->paint(canvas.cr,padding,y);y+=layout->css_height+padding;}
   auto result=canvas.pixels();
   if(timed){result.timer_x=std::round(padding);result.timer_y=std::round(padding);result.timer_width=std::max(1,result.width-2*result.timer_x);result.timer_height=std::max(1,int(std::round(timer)));}
   return result;
