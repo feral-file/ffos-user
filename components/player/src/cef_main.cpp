@@ -1,4 +1,5 @@
 #include "ff/cef_client.hpp"
+#include "ff/renderer_path.hpp"
 #include "ff/server.hpp"
 #include "ff/media_client.hpp"
 #include "ff/source_probe.hpp"
@@ -40,12 +41,13 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
   umask(0077);
   auto command=CefCommandLine::CreateCommandLine();command->InitFromArgv(argc,argv);
   std::string resources=command->GetSwitchValue("renderer-dir");
-  if(resources.empty())resources="/usr/share/ff-player-native/renderers";
   auto app=ff::renderer_app();CefMainArgs args(argc,argv);
   int child=CefExecuteProcess(args,app,nullptr);if(child>=0)return child;
   std::signal(SIGTERM,stop);std::signal(SIGINT,stop);std::signal(SIGPIPE,SIG_IGN);
   std::string state_path=command->GetSwitchValue("state-dir"),socket=command->GetSwitchValue("socket");
-  auto worker=(std::filesystem::canonical("/proc/self/exe").parent_path()/"media/ff-media-launch").string();
+  auto root=std::filesystem::canonical("/proc/self/exe").parent_path();
+  if(resources.empty())resources=ff::renderer_directory(root).string();
+  auto worker=(root/"media/ff-media-launch").string();
   if(command->HasSwitch("media-worker"))worker=command->GetSwitchValue("media-worker");
   if(state_path.empty()||socket.empty()){std::cerr<<"Required: --state-dir=PATH --socket=PATH; optional --renderer-dir=PATH\n";return 2;}
   bool initialized=false;

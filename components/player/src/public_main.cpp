@@ -1,4 +1,3 @@
-#include <poll.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -7,12 +6,13 @@
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <vector>
+#include <thread>
 
 #include "ff/artwork_fade.hpp"
 #include "ff/media_client.hpp"
 #include "ff/profile_gc.hpp"
 #include "ff/public_browser.hpp"
+#include "ff/renderer_path.hpp"
 #include "ff/server.hpp"
 namespace {
 volatile std::sig_atomic_t stopping = 0;
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
     auto worker = (root / "media/ff-media-launch").string(),
          launcher = (root / "ff-browser-launch").string();
     auto resources = options["--renderer-dir"];
-    if (resources.empty()) resources = "/usr/share/ff-player-native/renderers";
+    if (resources.empty()) resources = ff::renderer_directory(root).string();
     std::string browser_backend = "public-chromium";
     std::ifstream engine_manifest(std::filesystem::path(resources).parent_path() /
                                   "dependencies.json");
@@ -476,16 +476,9 @@ int main(int argc, char** argv) {
       ff::reap_media_workers();
       ff::reap_public_browsers();
     };
-    std::vector<pollfd> displays;
     while (!stopping) {
       frame();
-      // Wake for a browser commit or Cage feedback as soon as it arrives.
-      // The timeout still services protocol, timers, media and GPU fences.
-      displays.clear();
-      displays.push_back({presentation.display_fd(), POLLIN, 0});
-      for (const auto& entry : clients)
-        displays.push_back({entry.second->display_fd(), POLLIN, 0});
-      (void)poll(displays.data(), displays.size(), 4);
+      std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
     playback.release_input();
     clients.clear();

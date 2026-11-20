@@ -3,11 +3,9 @@ on:
   push:
     branches: ['codex/**']
     paths:
-      - 'components/player/src/cef*.cpp'
-      - 'components/player/include/ff/cef*.hpp'
-      - 'components/player/tools/cef-views-probe.cpp'
-      - 'components/player/maintenance/cef-trial.json'
-      - 'components/player/tools/build-cef-trial.sh'
+      - 'components/player/**'
+      - '!components/player/docs/**'
+      - '!components/player/README.md'
       - '.github/workflows/build-player-cef-trial.yaml'
   workflow_dispatch:
 permissions:

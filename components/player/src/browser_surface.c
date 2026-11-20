@@ -227,9 +227,6 @@ fail:
 int ff_browser_server_listen(struct ff_browser_server *s, const char *path) {
   return wl_display_add_socket(s->display, path);
 }
-int ff_browser_server_fd(struct ff_browser_server *s) {
-  return wl_event_loop_get_fd(wl_display_get_event_loop(s->display));
-}
 void ff_browser_server_poll(struct ff_browser_server *s) {
   wl_event_loop_dispatch(wl_display_get_event_loop(s->display), 0);
   wl_display_flush_clients(s->display);

@@ -59,4 +59,6 @@ dependencies["cefViews"] = {
 }
 manifest.write_text(json.dumps(dependencies, indent=2) + "\n")
 PYTHON
-tar -czf "$trial/ff-player-cef-linux.tar.gz" -C "$stage" .
+# Archive only the install tree. mktemp makes the staging root mode 0700,
+# which tar would otherwise apply to the installation prefix.
+tar -czf "$trial/ff-player-cef-linux.tar.gz" -C "$stage" ./usr
