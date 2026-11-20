@@ -109,7 +109,7 @@ void Presentation::activate() {
     require(SDL_GL_MakeCurrent(window_,nullptr)==0,"graphics_error",SDL_GetError());
   require(SDL_GL_MakeCurrent(window_,context_)==0,"graphics_error",SDL_GetError());
 }
-void Presentation::accelerated(Surface& surface, const DmaFrame& info, std::shared_ptr<void> producer_buffer) {
+void Presentation::accelerated(Surface& surface, const DmaFrame& info, std::shared_ptr<void> producer_buffer, bool direct_import) {
   activate();
   const auto started = std::chrono::steady_clock::now();
   require(info.count > 0 && info.count <= 4, "graphics_error", "Invalid DMA-BUF plane count");
@@ -142,7 +142,7 @@ void Presentation::accelerated(Surface& surface, const DmaFrame& info, std::shar
   // still require a copy before returning control to the producer.
   const bool rgb = format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_ARGB8888 ||
                    format == DRM_FORMAT_XBGR8888 || format == DRM_FORMAT_ABGR8888;
-  if (producer_buffer && rgb && info.count == 1 && info.visible.width == 0) {
+  if (direct_import && producer_buffer && rgb && info.count == 1 && info.visible.width == 0) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

@@ -511,7 +511,10 @@ void PublicBrowser::poll() {
         if (frames.pending) presentation_.coalesced_frame();
         frames.pending = false;
         std::shared_ptr<void> producer(ff_browser_view_lock_frame(view_), ff_browser_frame_unlock);
-        presentation_.accelerated(frames.capture, dma, std::move(producer));
+        // Chromium 158 drops embedded 4K H.264 frames when its buffers stay
+        // locked through display. The fenced blit releases them sooner. CEF
+        // Views 156 sustained the same clip with direct RGB sampling on FF1.
+        presentation_.accelerated(frames.capture, dma, std::move(producer), backend_ == "cef-views");
         ff_browser_view_frame_requested(view_);
         auto b = presentation_.bounds(occurrence_.display);
         frames.capture.display_revision =

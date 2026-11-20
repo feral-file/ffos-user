@@ -32,7 +32,8 @@ class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts);
   ~Presentation();
-  void accelerated(Surface& surface, const DmaFrame& info, std::shared_ptr<void> producer_buffer = {});
+  void accelerated(Surface& surface, const DmaFrame& info, std::shared_ptr<void> producer_buffer = {},
+                   bool direct_import = false);
   bool import_read_complete(const Surface& surface);
   bool copy_ready(Surface& surface);
   void coalesced_frame() { ++coalesced_frames_; }
