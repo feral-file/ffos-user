@@ -31,6 +31,10 @@ class PublicBrowser {
   std::string resolved_native_mime;
   std::string cache_mode() const { return offline_ ? "isolated" : mixed_cache_ ? "mixed" : ""; }
   bool needs_compositor() const {
+    if(!direct() && resize_started_at_ && playback_.overlay().is_null() &&
+       !playback_.service_failure() && !playback_.thermal_hold() &&
+       std::chrono::steady_clock::now()-*resize_started_at_>std::chrono::seconds(2))
+      return true;
     return direct() && (failed_ || !playback_.overlay().is_null() || playback_.service_failure() ||
            playback_.thermal_hold() || occurrence_.display!=initial_display_ ||
            (!has_ready_frame() && loaded_ && std::chrono::steady_clock::now()-loaded_at_>std::chrono::seconds(3)));
@@ -53,6 +57,7 @@ class PublicBrowser {
   uint64_t direct_frames_=0, last_presentation_ns_=0, navigation_load_ns_=0;
   Json initial_display_;
   std::chrono::steady_clock::time_point loaded_at_;
+  std::optional<std::chrono::steady_clock::time_point> resize_started_at_;
   double mouse_x_=0,mouse_y_=0;
   int writer_ = -1, reader_ = -1;
   std::string buffer_, session_, profile_, main_frame_, navigation_url_, document_url_, navigation_error_;

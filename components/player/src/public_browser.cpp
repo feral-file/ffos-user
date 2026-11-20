@@ -624,6 +624,15 @@ void PublicBrowser::update() {
   }
   auto b = presentation_.bounds(occurrence_.display);
   if(view_){
+    // Some CEF Views builds retain the old fullscreen buffer indefinitely.
+    // If no reflow reaches composition, reopen at the requested dimensions.
+    // A fresh worker begins with those dimensions and does not arm this timer.
+    if(b.width!=old_bounds.width || b.height!=old_bounds.height)
+      resize_started_at_=std::chrono::steady_clock::now();
+    const auto& composed=playback_.composition();
+    if(resize_started_at_ && composed.is_object() && composed.value("occurrence","")==id &&
+       composed.value("displayRevision",uint64_t(0))==occurrence_.display_revision)
+      resize_started_at_.reset();
     ff_browser_view_resize(view_, b.width, b.height);
     if(previous_revision!=occurrence_.display_revision &&
        b.width==old_bounds.width && b.height==old_bounds.height)ff_browser_view_redraw(view_);
