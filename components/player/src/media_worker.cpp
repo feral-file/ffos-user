@@ -214,6 +214,10 @@ class Worker {
         bool moved=false;int x=0,y=0;
         while(SDL_PollEvent(&event)){
           if(event.type==SDL_QUIT)return;
+          if(event.type==SDL_WINDOWEVENT &&
+             (event.window.event==SDL_WINDOWEVENT_EXPOSED ||
+              event.window.event==SDL_WINDOWEVENT_SIZE_CHANGED ||
+              event.window.event==SDL_WINDOWEVENT_SHOWN))pending=true;
           if(event.type==SDL_MOUSEMOTION && (event.motion.xrel || event.motion.yrel)){
             moved=true;x=event.motion.x;y=event.motion.y;
           }else if(event.type==SDL_MOUSEBUTTONDOWN || event.type==SDL_MOUSEBUTTONUP){
@@ -225,8 +229,16 @@ class Worker {
         if(!direct_reported_ && feedback_->latest().timestamp_ns){
           ff::send_media(channel,{{"event","property"},{"name","presentationPath"},{"value","cage"}});
           direct_reported_=true;
+          // A newly mapped fullscreen surface can receive its initial configure
+          // after the first swap. Still and one-frame movies have no next video
+          // update to repaint the now-visible drawable.
+          pending=true;
         }
-        SDL_GL_GetDrawableSize(window_,&width_,&height_);
+        int drawable_width=0,drawable_height=0;
+        SDL_GL_GetDrawableSize(window_,&drawable_width,&drawable_height);
+        if(drawable_width>0 && drawable_height>0 && (width_!=drawable_width || height_!=drawable_height)){
+          width_=drawable_width;height_=drawable_height;pending=true;
+        }
       }
       // update() must keep servicing mpv's resource requests even while the
       // exported frame waits for the host. Only the texture write waits.
