@@ -32,8 +32,9 @@ void reap_media_workers() {
 }
 MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurrence occurrence,
                          const std::string& worker, const std::string& cache_socket,
-                         const std::string& cache_mode)
+                         const std::string& cache_mode, ArtworkCache* artwork_cache)
     : id(occurrence.id),
+      artwork_cache_(artwork_cache),
       playback_(playback),
       presentation_(presentation),
       occurrence_(std::move(occurrence)),
@@ -74,7 +75,28 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
                           false, true),
             "policy_backpressure", "Cannot enqueue source policy");
   } else
-    start();
+    start_live();
+}
+void MediaClient::start_live() {
+  int fd = -1;
+  const auto url = source_override_.empty() ? occurrence_.item.at("source").get<std::string>() : source_override_;
+  if (artwork_cache_ && playback_.online()) {
+    warm_request_ = ArtworkCache::media_request(url, user_agent_, playback_.global_policy().at("localNetwork") == true);
+    if (!warm_request_.is_null()) {
+      fd = ArtworkCache::open_media(warm_request_.at("key"), playback_.global_policy().at("cache").at("maxAgeDays"));
+      if (fd >= 0) {
+        local_media_key_ = warm_request_.at("key").get<std::string>();
+        warm_request_ = nullptr;
+      }
+    }
+  }
+  try {
+    start(fd);
+  } catch (...) {
+    if (fd >= 0) close(fd);
+    throw;
+  }
+  if (fd >= 0) close(fd);
 }
 void MediaClient::start(int cached_fd) {
   int sockets[2];
@@ -113,21 +135,14 @@ void MediaClient::start(int cached_fd) {
          {"muted", playback_.state()["settings"].value("muted", false)}},
         cached_fd >= 0 ? std::vector<int>{cached_fd} : std::vector<int>{});
   } catch (...) {
-    kill(pid_, SIGKILL);
-    retiring.push_back(pid_);
-    close(socket_);
+    stop_worker();
     throw;
   }
 }
 MediaClient::~MediaClient() {
+  if (artwork_cache_) artwork_cache_->retire(id);
   if (cache_) cache_->active = false;
-  if (socket_ >= 0) close(socket_);
-  // Do not wait for decoder teardown on the product event loop. No durable
-  // data exists in the worker. SIGKILL also bounds a stuck third-party codec.
-  if (pid_ > 0) {
-    kill(pid_, SIGKILL);
-    retiring.push_back(pid_);
-  }
+  stop_worker();
   presentation_.destroy(frames.capture);
   presentation_.destroy(frames.shown);
 }
@@ -170,7 +185,7 @@ void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
               if (name == "user-agent") user_agent_ = field.value("value", user_agent_);
             }
         }
-        start();
+        start_live();
         received_ = std::chrono::steady_clock::now();
       } else {
         if (!reply.error.empty() && fallback_live()) return;
@@ -273,9 +288,7 @@ void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
     fail(error.what());
   }
 }
-void MediaClient::fail(const std::string& message) {
-  failed_ = true;
-  ready = false;
+void MediaClient::stop_worker() {
   if (pid_ > 0) {
     kill(pid_, SIGKILL);
     retiring.push_back(pid_);
@@ -285,6 +298,35 @@ void MediaClient::fail(const std::string& message) {
     close(socket_);
     socket_ = -1;
   }
+}
+void MediaClient::fail(const std::string& message) {
+  stop_worker();
+  ready = false;
+  if (!local_media_key_.empty()) {
+    // A separately fetched representation can pass HTTP validation and
+    // still fail to decode. Give this occurrence one normal live attempt.
+    ArtworkCache::discard_media(local_media_key_);
+    local_media_key_.clear();
+    if (playback_.online()) {
+      presentation_.destroy(frames.capture);
+      presentation_.destroy(frames.shown);
+      frames = {};
+      loaded_ = false;
+      controls_.clear();
+      status = Json::object();
+      presented_sequence_ = received_sequence_ = 0;
+      received_ = std::chrono::steady_clock::now();
+      try {
+        start();
+        return;
+      } catch (const std::exception& error) {
+        failed_ = true;
+        playback_.failed(id, error.what());
+        return;
+      }
+    }
+  }
+  failed_ = true;
   playback_.failed(id, message);
 }
 void MediaClient::controls(bool hold, const Json* stage,bool allow_direct) {
@@ -328,6 +370,10 @@ void MediaClient::did_present() {
     send_media(socket_, {{"method", "presented"}, {"sequence", received_sequence_}});
     presented_sequence_ = received_sequence_;
     frames.submitted();
+    if (!warm_request_.is_null() && playback_.desired() && playback_.desired()->id == id) {
+      artwork_cache_->warm(id, warm_request_);
+      warm_request_ = nullptr;
+    }
   } catch (const std::exception& error) {
     fail(error.what());
   }

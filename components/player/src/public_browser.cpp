@@ -1,7 +1,7 @@
 #include "ff/public_browser.hpp"
 
 #include <fcntl.h>
-#include <glib.h>
+#include "ff/artwork_cache.hpp"
 #include <linux/input-event-codes.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -123,21 +123,15 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attr, 0);
     const auto& permissions = p.global_policy();
-    std::string cache_key;
-    if (!offline_ && (source.starts_with("https://") || source.starts_with("http://"))) {
-      // Keep signed artwork URLs out of the launcher command line and path.
-      auto identity = std::string(permissions.at("localNetwork") == true ? "lan:" : "public:") + source;
-      auto digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256, identity.c_str(), identity.size());
-      if (digest) cache_key = digest;
-      g_free(digest);
-    }
+    auto cache_key = offline_ ? "" : ArtworkCache::browser_key(source, permissions.at("localNetwork") == true);
     auto cache_bytes = std::to_string(permissions.at("cache").at("maxBytes").get<int64_t>());
+    auto cache_days = std::to_string(permissions.at("cache").at("maxAgeDays").get<int>());
     char* args[] = {const_cast<char*>(launcher.c_str()), const_cast<char*>(profile_.c_str()),
                     const_cast<char*>(offline_ ? "offline" : "online"),
                     const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"),
                     const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),
                     const_cast<char*>(permissions.at("autoplay") == true ? "auto" : "gesture"),
-                    cache_key.data(), cache_bytes.data(), nullptr};
+                    cache_key.data(), cache_bytes.data(), cache_days.data(), nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);

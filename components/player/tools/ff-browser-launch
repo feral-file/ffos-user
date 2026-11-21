@@ -12,7 +12,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 browser_features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks
 wayland=()
 if [ "${4:-}" = cage ]; then
-  exec "$root/ff-cage-client" "$0" "$profile" "$2" "$3" filtered "${5:-public}" "${6:-auto}" "${7:-}" "${8:-1073741824}"
+  exec "$root/ff-cage-client" "$0" "$profile" "$2" "$3" filtered "${5:-public}" "${6:-auto}" "${7:-}" "${8:-1073741824}" "${9:-30}"
 elif [ "${4:-}" = filtered ]; then
   # Only the capability-filtered socket enters the browser namespace.
   case "$WAYLAND_DISPLAY" in /*) relay="$WAYLAND_DISPLAY";; *) relay="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY";; esac
@@ -35,12 +35,16 @@ cache_flags=()
 # can launch the same artwork twice; the second occurrence gets a cold cache.
 if [[ $2 == online && ${7:-} =~ ^[0-9a-f]{64}$ ]]; then
   directory="$HOME/.cache/player-artworks/$7"
-  if mkdir -p -m 700 "$directory" && exec 9<"$directory" && flock -n 9 &&
-     [[ "$directory" -ef /proc/self/fd/9 ]] && touch -c -- "$directory"; then
+  days=${9:-30}
+  if [[ $days =~ ^[1-9][0-9]{0,4}$ ]] && mkdir -p -m 700 "$directory" && exec 9<"$directory" && flock -n 9 &&
+     [[ "$directory" -ef /proc/self/fd/9 ]] && used=$(stat -c %Y -- "$directory") &&
+     (( EPOCHSECONDS - used < days * 86400 )) && touch -c -- "$directory"; then
     cap=${8:-1073741824}
     (( cap <= 67108864 )) || cap=67108864
     cache_mount=(--bind "$directory" /artwork-cache)
     cache_flags=(--disk-cache-dir=/artwork-cache --disk-cache-size="$cap")
+  else
+    exec 9<&-
   fi
 fi
 # Keep the lease in this waiting shell and close it before starting egress.

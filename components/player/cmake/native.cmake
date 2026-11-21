@@ -2,7 +2,7 @@ find_program(GO_EXECUTABLE go REQUIRED)
 set(EGRESS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/egress")
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ff-egress"
   COMMAND "${GO_EXECUTABLE}" build -o "${CMAKE_CURRENT_BINARY_DIR}/ff-egress" .
-  WORKING_DIRECTORY "${EGRESS_DIR}" DEPENDS egress/main.go egress/http.go egress/go.mod)
+  WORKING_DIRECTORY "${EGRESS_DIR}" DEPENDS egress/main.go egress/http.go egress/internal/netpolicy/dial.go egress/go.mod)
 add_custom_target(artwork-egress ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ff-egress")
 add_test(NAME artwork-egress COMMAND "${GO_EXECUTABLE}" test ./...)
 set_tests_properties(artwork-egress PROPERTIES WORKING_DIRECTORY "${EGRESS_DIR}")

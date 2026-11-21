@@ -525,12 +525,7 @@ func Bootstrap(
 	// spinning up the headless Chromium capturer/downloader owns (see
 	// mediacapture.go's package doc).
 	mediaCapturer := NewMediaCapturer(bodyClient, store, jsonWrapper, clockWrapper, opts.MaxDiskBytes, logger)
-	var notifier *Notifier
-	var observer ProgressObserver
-	if opts.Enabled {
-		notifier = NewNotifier(relayerClient, wsHandler, logger)
-		observer = notifier
-	}
+	notifier := NewNotifier(relayerClient, wsHandler, logger)
 	admissionOpts := AdmissionOptions{Clock: clockWrapper}
 	var sysMetricsSink func(raw []byte)
 	var admission AdmissionController
@@ -540,7 +535,7 @@ func Bootstrap(
 		admission = gate
 		sysMetricsSink = gate.Observe
 	}
-	svc := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, observer, admissionOpts, logger)
+	svc := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, admissionOpts, logger)
 	worker := svc.(*service)
 	worker.storage = storage
 	var observePlayback func([]dp1playlist.PlaylistItem, int, bool)

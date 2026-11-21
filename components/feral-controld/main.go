@@ -1086,10 +1086,12 @@ func initializeApp(
 		devicectl.SetBrowserSessionCleanup(executor, mintPairing, logger)
 	}
 
-	// The native playback cache runs independently of explicit Downloads.
-	// Only the configured Downloads feature exposes manual capture commands
-	// and starts the static server. Both use one store and GC fence.
-	var offlineCache, cacheWorker offlinecache.Service
+	// Offline cache. Disabled by default (see config.OfflineCacheConfig's
+	// doc on why it defaults off) — offlineCache/kioskReplay/staticServer
+	// stay nil in that case, and handler.go's/refresher's nil-guards
+	// mirror mintPairing's so the rest of the daemon behaves exactly as
+	// before this feature existed.
+	var offlineCache offlinecache.Service
 	// playbackObservers collects every consumer of the status poller's
 	// per-poll playback snapshot (the automatic playback cache, media
 	// health); one combined observer is installed below, before the poller
@@ -1109,23 +1111,20 @@ func initializeApp(
 	var offlineCacheAdmission offlinecache.AdmissionController
 	var offlineCacheStore offlinecache.Store
 	onchfsConfig := config.Get().OnchfsTuning(logger)
-	{
+	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
 			ocOpts, notifyRelayer, notifyWS, httpClient, webSocketDialer,
 			os, io, json, exec, clock, logger,
 		)
-		cacheWorker = ocRuntime.Service
-		if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
-			offlineCache = cacheWorker
-			offlineCacheStaticServer = ocRuntime.StaticServer
-			offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
-		}
+		offlineCache = ocRuntime.Service
 		kioskReplay = ocRuntime.KioskReplay
 		offlineCacheScopeLost = ocRuntime.ScopeLost
+		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 		offlineCacheChanged = ocRuntime.SetCacheChanged
+		offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
 		offlineCacheAdmission = ocRuntime.Admission
 		offlineCacheStore = ocRuntime.Store
 		if ocRuntime.ObservePlayback != nil {
@@ -1139,7 +1138,15 @@ func initializeApp(
 		}
 	}
 
-	// On-chain materialization shares the cache worker's publication fence.
+	// onchfs works (ffos-user#427). fxhash's gateway is gone, so the device
+	// reads these works from chain and serves them through the offline
+	// cache's replay. With the feature off, only the part of the cache that
+	// serves local artwork runs (BootstrapCore: store, static server,
+	// replay), lazily: it dials the kiosk only once an onchfs scope is first
+	// armed, so a device that never shows an onchfs work behaves as before.
+	// The Service, capture and the app's offline-cache commands stay off;
+	// offlineCache (the Service) remains nil and every guard keyed on it is
+	// unchanged.
 	var onchfsMaterializer *offlinecache.OnchfsMaterializer
 	// onchfsReady is set to the refresher's ForceRefresh once that exists:
 	// a work read in the background widens the replay scope on the next pass.
@@ -1147,6 +1154,18 @@ func initializeApp(
 	if onchfsConfig.Disabled {
 		logger.Info("onchfs reader disabled by config; onchfs works stay unplayable")
 	} else {
+		if offlineCacheStore == nil {
+			ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+			core, _ := offlinecache.BootstrapCore(ocOpts, httpClient, webSocketDialer, os, io, json, clock, logger, true)
+			kioskReplay = core.KioskReplay
+			offlineCacheScopeLost = core.ScopeLost
+			offlineCacheStore = core.Store
+			// core.StaticServer is deliberately not started: it serves only
+			// blobs past replay's 200 MB inline limit, an onchfs file is at
+			// most onchfs.MaxPlainFileBytes, and replay treats a server that
+			// is not listening as a miss. No new listening port on devices
+			// with the feature off.
+		}
 		overrides := map[string][]string{}
 		for chain, c := range onchfsConfig.Chains {
 			overrides[chain] = c.RPC
@@ -1158,13 +1177,14 @@ func initializeApp(
 		resolver := onchfs.NewResolver(onchfs.MergeEndpoints(overrides, logger), onchfs.NewHTTPClient(timeout), logger)
 		onchfsMaterializer = offlinecache.NewOnchfsMaterializer(offlinecache.OnchfsMaterializerConfig{
 			Store: offlineCacheStore, Resolver: resolver, Logger: logger, Base: context,
+			Standalone: offlineCache == nil,
 			// With a Service running, reclaiming space for an onchfs work
 			// goes through its ClearItem, whose GC is serialized with
 			// captures; standalone, the materializer collects itself.
-			Evict: evictThroughService(cacheWorker),
+			Evict: evictThroughService(offlineCache),
 			// The Service's clear epoch keeps a read in flight from
 			// restoring a work the app just cleared.
-			Fence: fenceThroughService(cacheWorker),
+			Fence: fenceThroughService(offlineCache),
 			OnReady: func() {
 				if f := onchfsReady.Load(); f != nil {
 					(*f)()
@@ -1229,11 +1249,10 @@ func initializeApp(
 	// not arm the retired kiosk CDP connection while admitting a phone cast.
 	if offlineCacheStore != nil {
 		kioskReplay = offlinecache.NewNativePlaybackCache(offlineCacheStore)
-		offlinecache.UseNativeReplay(cacheWorker)
+		offlinecache.UseNativeReplay(offlineCache)
 		offlineCacheScopeLost = nil
 	}
 	rawCmdHandler := commandrouter.New(executor, nativeCommands, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
-	commandrouter.SetPlaybackCacheLookup(rawCmdHandler, cacheWorker.HasReplayableItem)
 	wireNativeDefault(nativeCommands, rawCmdHandler)
 	commandrouter.SetNativeControls(rawCmdHandler, nativePlayer)
 	blockUnratedCurated := config.Get().ContentPolicyTuning(logger).BlockUnratedCurated
@@ -1292,8 +1311,8 @@ func initializeApp(
 	// hide what replay interception could show); the check is the same one
 	// the cast rescue uses, and only counts when kiosk replay is wired.
 	var mediaHealthReplayable func(string) bool
-	if kioskReplay != nil {
-		mediaHealthReplayable = func(source string) bool { return cacheWorker.HasReplayableItem(source) }
+	if offlineCache != nil && kioskReplay != nil {
+		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
 	}
 	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
 	// The probe sends the kiosk's own User-Agent (kiosk_useragent.go), read
@@ -1853,7 +1872,7 @@ func initializeApp(
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
 		UARewrite:                uaRewrite,
-		OfflineCacheService:      cacheWorker,
+		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
 		NativeCacheBroker:        nativeCacheBroker(offlineCacheStore, uaPolicy, mediaHealthSvc),
 		OfflineCacheNotifier:     offlineCacheNotifier,

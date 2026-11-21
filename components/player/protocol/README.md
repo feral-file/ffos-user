@@ -402,6 +402,16 @@ defaults. An invalid JSON document or invalid grant logs an error and loads the
 defaults. On first startup without the file, the player writes the default policy
 or migrates existing global grants from SQLite. An existing file takes precedence.
 
+Both workers use disposable storage under `~/.cache/player-artworks/`. CEF
+keeps an HTTP cache per source and LAN grant. For live libmpv playback the
+host opens a fresh local file if available. On a miss it streams immediately.
+After presentation a player-owned helper can fetch the complete media file
+at up to 2 MiB/s, using the same destination restrictions as the worker.
+Only complete, cacheable media responses with an explicit freshness lifetime
+are published. Removing the cache makes subsequent plays cold. The player
+sweeps idle entries by age, shared size and filesystem free space. A live
+browser holds its cache directory until the worker retires.
+
 The production player advertises `artworkPermissions.v1`. Controld can call
 `artworkPermissions.set` with a partial object such as `{"autoplay":true}`.
 The historical offscreen CEF diagnostic cannot enforce these grants and rejects these methods. Unspecified fields keep their saved values. Playlists and artwork cannot set

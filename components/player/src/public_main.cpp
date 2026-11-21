@@ -67,6 +67,7 @@ int main(int argc, char** argv) {
         false, options.contains("--diagnostic-presentation-timing"),
         (std::filesystem::path(resources).parent_path() / "fonts").string());
     std::map<std::string, std::unique_ptr<ff::PublicBrowser>> clients;
+    ff::ArtworkCache artwork_cache((root / "ff-artwork-cache").string());
     std::map<std::string, std::unique_ptr<ff::MediaClient>> media;
     struct Transition {
       std::string outgoing, incoming;
@@ -180,6 +181,7 @@ int main(int argc, char** argv) {
       const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
       playback.tick(now_ms, ff::wall_ms());
       server.poll();
+      artwork_cache.maintain(playback.global_policy().at("cache"));
       if (applied_permissions.at("cache") != playback.global_policy().at("cache"))
         applied_permissions["cache"] = playback.global_policy().at("cache");
       if (applied_permissions != playback.global_policy()) {
@@ -254,11 +256,12 @@ int main(int argc, char** argv) {
           desired && playback.connectivity_known() && desired->stage != "failed" &&
           !clients.contains(desired->id) && !media.contains(desired->id)) {
         try {
+          artwork_cache.stop_warming();
           auto cache_mode = resolve_source(*desired);
           if (cache_mode && ff::native_media(desired->item))
             media.emplace(desired->id,
                           std::make_unique<ff::MediaClient>(playback, presentation, *desired,
-                                                            worker, cache_socket, *cache_mode));
+                                                            worker, cache_socket, *cache_mode, &artwork_cache));
           else if (cache_mode)
             clients.emplace(
                 desired->id,
@@ -305,7 +308,7 @@ int main(int argc, char** argv) {
           try {
             media.emplace(
                 id, std::make_unique<ff::MediaClient>(playback, presentation, rendering, worker,
-                                                      cache_socket, cached_source));
+                                                      cache_socket, cached_source, &artwork_cache));
           } catch (const std::exception& e) {
             playback.failed(id, e.what());
           }

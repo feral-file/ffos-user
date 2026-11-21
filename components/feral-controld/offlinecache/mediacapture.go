@@ -280,11 +280,7 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	}
 	var freshUntil time.Time
 	if isAutomaticCapture(ctx) {
-		limit := readArtworkRetention().MaxBytes
-		if capBytes <= 0 || capBytes > limit {
-			capBytes = limit
-		}
-		if resp.ContentLength > capBytes {
+		if capBytes > 0 && resp.ContentLength > capBytes {
 			return Resource{}, ErrBlobTooLarge
 		}
 		freshUntil = automaticFreshUntil(resp.Header, c.clock.Now())

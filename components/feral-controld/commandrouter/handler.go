@@ -45,8 +45,7 @@ type handler struct {
 	mintPairing    mintpairing.Service
 	// offlineCache may be nil (feature disabled / not yet wired), mirroring
 	// the mintPairing nil-guard pattern above.
-	offlineCache      offlinecache.Service
-	hasReplayableItem func(...string) bool
+	offlineCache offlinecache.Service
 	// kioskReplay may be nil for the same reason as offlineCache above.
 	// Kept as a separate nilable dependency (rather than folded into
 	// offlineCache) because it is specifically about the kiosk's live CDP
@@ -405,23 +404,18 @@ func New(
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
-	var replayable func(...string) bool
-	if offlineCache != nil {
-		replayable = offlineCache.HasReplayableItem
-	}
 	return &handler{
-		hasReplayableItem: replayable,
-		executor:          executor,
-		player:            player,
-		dp1:               dp1,
-		statusPoller:      statusPoller,
-		mintPairing:       mintPairing,
-		offlineCache:      offlineCache,
-		kioskReplay:       kioskReplay,
-		scheduler:         scheduler,
-		json:              json,
-		logger:            logger,
-		asleep:            devicectl.PlayerCastWakeGate(executor),
+		executor:     executor,
+		player:       player,
+		dp1:          dp1,
+		statusPoller: statusPoller,
+		mintPairing:  mintPairing,
+		offlineCache: offlineCache,
+		kioskReplay:  kioskReplay,
+		scheduler:    scheduler,
+		json:         json,
+		logger:       logger,
+		asleep:       devicectl.PlayerCastWakeGate(executor),
 	}
 }
 
@@ -1291,7 +1285,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					// read as "nothing alive".
 					if len(probeResults) == len(sources) && dead == len(probeResults) {
 						switch {
-						case h.hasReplayableItem != nil && h.kioskReplay != nil && h.hasReplayableItem(sources...):
+						case h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(sources...):
 							// A definitively dead ORIGIN is not a dead CAST
 							// when the offline cache holds a prior capture:
 							// replay serves cached items regardless of origin
@@ -1358,7 +1352,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// removing the reachable witness must not turn those into Dead.
 				if removed && !rescuedByCache {
 					if deadResults, allDead := allSourcesDead(playlist, probeVerdicts); allDead {
-						if h.hasReplayableItem != nil && h.kioskReplay != nil && h.hasReplayableItem(playlistSources(playlist)...) {
+						if h.offlineCache != nil && h.kioskReplay != nil && h.offlineCache.HasReplayableItem(playlistSources(playlist)...) {
 							rescuedByCache = true
 							rescueProbeResults = deadResults
 							h.logger.Warn("displayPlaylist: the policy projection left only unreachable sources but cached captures exist; casting for offline replay",

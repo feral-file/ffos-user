@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include "ff/cache_client.hpp"
+#include "ff/artwork_cache.hpp"
 #include "ff/media_kind.hpp"
 #include "ff/presentation.hpp"
 
@@ -15,7 +16,7 @@ class MediaClient {
  public:
   MediaClient(Playback& playback, Presentation& presentation, Occurrence occurrence,
               const std::string& worker, const std::string& cache_socket = "",
-              const std::string& cache_mode = "");
+              const std::string& cache_mode = "", ArtworkCache* artwork_cache = nullptr);
   ~MediaClient();
   void poll(bool hold = false, const Json* stage = nullptr,bool allow_direct = false);
   void seek(double seconds);
@@ -28,6 +29,10 @@ class MediaClient {
   const std::string id;
 
  private:
+  ArtworkCache* artwork_cache_;
+  Json warm_request_;
+  std::string local_media_key_;
+  void stop_worker();
   Playback& playback_;
   Presentation& presentation_;
   Occurrence occurrence_;
@@ -40,6 +45,7 @@ class MediaClient {
   std::chrono::steady_clock::time_point received_ = std::chrono::steady_clock::now();
   void fail(const std::string& message);
   void controls(bool hold, const Json* stage,bool allow_direct);
+  void start_live();
   void start(int cached_fd = -1);
   std::string worker_, source_override_, user_agent_;
   bool policy_pending_ = false, mixed_cache_ = false;
