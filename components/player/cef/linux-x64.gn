@@ -1,0 +1,11 @@
+is_official_build = true
+use_sysroot = true
+symbol_level = 0
+chrome_pgo_phase = 0
+target_cpu = "x64"
+ozone_platform_wayland = true
+use_vaapi = true
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+enable_platform_hevc = true
+enable_hevc_parser_and_hw_decoder = true

@@ -1,0 +1,54 @@
+name: Build custom FF1 CEF
+on:
+  push:
+    branches: ['codex/native-player-custom-cef']
+    paths: ['components/player/**', '.github/workflows/build-player-custom-cef.yaml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: custom-cef-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cef:
+    runs-on: ${{ vars.CEF_BUILD_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the VA-API CEF SDK
+        run: bash components/player/cef/build-linux-x64.sh "$RUNNER_TEMP/ff-cef"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ff-player-custom-cef-sdk-linux-x86_64
+          path: ${{ runner.temp }}/ff-cef/artifact/
+          compression-level: 0
+          if-no-files-found: error
+  player:
+    needs: cef
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ff-player-custom-cef-sdk-linux-x86_64
+          path: ${{ runner.temp }}/ff-cef-sdk
+      - name: Build the native player toolchain image
+        run: docker build -t ff-native-build components/player
+      - name: Build and test the native player with the custom CEF SDK
+        run: |
+          docker run --rm -v "$PWD/components/player:/src" \
+            -v "$RUNNER_TEMP/ff-cef-sdk:/cef-sdk:ro" -e FF_CEF_ARTIFACT_DIR=/cef-sdk \
+            ff-native-build sh tools/build-ff1.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ff-player-custom-cef-linux-x86_64
+          path: |
+            components/player/build-ff1/ff-player-cef-linux.tar.gz
+            components/player/build-ff1/SHA256SUMS
+          compression-level: 0
+          if-no-files-found: error

@@ -3,11 +3,16 @@
 set -eu
 trial="$PWD/build-ff1"
 mkdir -p "$trial/sdk"
-archive="$trial/cef.tar.xz"
-pin=maintenance/cef-ff1.json
-url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$pin")
+if [ -n "${FF_CEF_ARTIFACT_DIR:-}" ]; then
+  archive="$FF_CEF_ARTIFACT_DIR/cef.tar.xz"
+  pin="$FF_CEF_ARTIFACT_DIR/cef.json"
+else
+  archive="$trial/cef.tar.xz"
+  pin=maintenance/cef-ff1.json
+  url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$pin")
+  curl --fail --location --retry 3 -o "$archive" "$url"
+fi
 digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$pin")
-curl --fail --location --retry 3 -o "$archive" "$url"
 echo "$digest  $archive" | sha256sum -c -
 tar -xf "$archive" -C "$trial/sdk" --strip-components=1
 python3 tools/fetch-dependencies.py --without-cef
