@@ -24,8 +24,7 @@ container=$(docker create --platform linux/amd64 \
         apt-get update
         apt-get install -y --no-install-recommends ca-certificates curl file git lsb-release python3 sudo xz-utils
         # Leave memory for the linker on the 16 GB Mac runner.
-        export NINJA_CORE_LIMIT=4
-        bash /recipe/build-linux-x64.sh /cef-work
+        FF_CEF_BUILD_JOBS=4 bash /recipe/build-linux-x64.sh /cef-work
         cp /cef-work/artifact/* /artifact/
     ')
 trap 'docker rm -fv "$container" >/dev/null' EXIT

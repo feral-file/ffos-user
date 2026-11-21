@@ -36,7 +36,13 @@ automate=(python3 "$work/automate-git.py" --download-dir="$work" --branch=8078
 src="$work/chromium/src"
 sudo "$src/build/install-build-deps.sh" --no-prompt --no-chromeos-fonts \
     --no-arm --no-nacl --no-backwards-compatible
-"${automate[@]}" --no-update --force-build --build-target=cefsimple \
+build_target=cefsimple
+if [[ -n "${FF_CEF_BUILD_JOBS:-}" ]]; then
+    [[ "$FF_CEF_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]]
+    # The pinned automate-git passes this string as arguments to autoninja.
+    build_target="-j $FF_CEF_BUILD_JOBS $build_target"
+fi
+"${automate[@]}" --no-update --force-build --build-target="$build_target" \
     --minimal-distrib-only --no-distrib-archive --no-distrib-docs --no-distrib-symbols \
     --distrib-subdir=ff-cef-sdk
 
