@@ -1154,6 +1154,8 @@ func (s *service) run(ctx context.Context) {
 	for {
 		if s.storage != nil && !s.clock.Now().Before(nextStorageCheck) {
 			s.pruneExpiredAutomatic()
+			_, browser := artworkPaths()
+			s.pruneArtworkRetention(readArtworkRetention(), browser)
 			s.enforceDiskLimit("", "")
 			nextStorageCheck = s.clock.Now().Add(time.Minute)
 		}
@@ -2568,6 +2570,10 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		s.notifyObserver(j.item.Source, terminal, rec.Coverage)
 	default:
 		s.notify(j.item.Source, terminal, rec.Coverage)
+	}
+	if automatic && s.storage != nil {
+		_, browser := artworkPaths()
+		s.pruneArtworkRetention(readArtworkRetention(), browser)
 	}
 	s.enforceDiskLimit(j.sourceKey, j.item.Source)
 	if s.onCacheChanged != nil {

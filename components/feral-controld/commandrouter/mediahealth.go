@@ -44,6 +44,14 @@ func SetMediaHealth(h Handler, svc MediaHealth, logger *zap.Logger) {
 	setter.setMediaHealth(svc)
 }
 
+// SetPlaybackCacheLookup lets cast preflight use automatic captures on
+// devices where explicit Download commands are disabled.
+func SetPlaybackCacheLookup(h Handler, lookup func(...string) bool) {
+	if target, ok := h.(*handler); ok {
+		target.hasReplayableItem = lookup
+	}
+}
+
 func (h *handler) setMediaHealth(svc MediaHealth) {
 	h.mediaHealth = svc
 }

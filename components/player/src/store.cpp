@@ -74,14 +74,25 @@ bool sync_parent_directory(const std::string& path) {
 
 Json default_global_policy() {
   return {{"autoplay", true}, {"localNetwork", false}, {"geolocation", false},
-          {"camera", false}, {"microphone", false}, {"notifications", false}};
+          {"camera", false}, {"microphone", false}, {"notifications", false},
+          {"cache", {{"maxAgeDays", 30}, {"maxBytes", 1073741824}}}};
 }
 }
 
 void validate_global_policy(const Json& policy) {
-  fields(policy, {"autoplay","localNetwork","geolocation","camera","microphone","notifications"});
-  for (const auto& [name, value] : policy.items())
+  fields(policy, {"autoplay","localNetwork","geolocation","camera","microphone","notifications","cache"});
+  for (const auto& [name, value] : policy.items()) {
+    if (name == "cache") {
+      fields(value, {"maxAgeDays", "maxBytes"});
+      for (const auto& [key, limit] : value.items()) {
+        const int64_t maximum = key == "maxAgeDays" ? 36500 : (1LL << 50);
+        require(limit.is_number_integer() && limit > 0 && limit <= maximum,
+                "invalid_params", "Invalid cache limit: " + key);
+      }
+      continue;
+    }
     require(value.is_boolean(), "invalid_params", "Expected boolean: " + name);
+  }
 }
 
 Json Store::load_global_policy(Json& playback_state) {
@@ -91,7 +102,7 @@ Json Store::load_global_policy(Json& playback_state) {
     if (playback_state.contains("artworkPermissions")) {
       const auto& legacy = playback_state.at("artworkPermissions");
       validate_global_policy(legacy);
-      policy.update(legacy);
+      policy.update(legacy, true);
     }
     require(save_global_policy(policy), "storage_unavailable", "Cannot sync global policy directory");
   } else {
@@ -110,7 +121,7 @@ Json Store::load_global_policy(Json& playback_state) {
       require(size < sizeof(buffer), "invalid_params", "Global policy exceeds 16 KiB");
       auto saved = parse(std::string_view(buffer, size));
       validate_global_policy(saved);
-      policy.update(saved);
+      policy.update(saved, true);
     } catch (const Error& e) {
       // Preserve the operator's file and discard the entire invalid grant set.
       std::cerr << policy_path_ << ": " << e.what() << "; using default permissions\n";

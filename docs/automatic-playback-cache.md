@@ -31,7 +31,7 @@ replay session already provide the necessary device boundaries.
 
 ## Policy
 
-With offline caching enabled, automatic playback caching is enabled by default.
+The native player warms reusable media after presentation even when explicit Downloads are disabled.
 `offlineCache.automaticPlaybackDisabled` opts out. The shared store is limited to
 50% of its filesystem (`maxDiskPercent`), additionally capped by a positive
 `maxDiskBytes`. Keep the larger of 5 GiB (`minFreeDiskBytes`) or 10% of the
@@ -65,7 +65,22 @@ not_cached, matching that answer. An explicit Download of an automatic
 entry, whether it joins an attempt in flight or recaptures a finished one,
 retains manual semantics and is reported like any download.
 
-Automatic entries require an explicit HTTP freshness lifetime. Honor no-store,
+The native player's `global-policy.json` adds a shared retention budget under
+`cache`. Defaults are 1 GiB and 30 days since use. Controld sweeps at startup,
+after automatic media publication, and once per idle minute. It can reclaim
+inactive entries earlier to maintain the filesystem free-space reserve. A
+transfer in progress or a live browser cache can temporarily exceed the
+retained-byte target. Explicit Downloads keep their own retention rules.
+
+For software works, the live CEF request context writes its HTTP cache under
+`~/.cache/player-artworks/`, partitioned by artwork source and LAN permission.
+Cookies and other profile state stay in the occurrence's disposable profile.
+Each browser uses at most a 64 MiB HTTP cache target. An overlapping occurrence
+falls back to its disposable profile if the persistent directory is busy.
+Automatic media stays in the existing offline store and reaches libmpv through
+the native broker's file descriptor handoff.
+
+Automatic media entries require an explicit HTTP freshness lifetime. Honor no-store,
 no-cache, private, Age and expiry, and decline request-dependent responses that
 the shared source-keyed store cannot represent. Require at least one hour of
 remaining freshness at response headers; shorter-lived media stays on normal

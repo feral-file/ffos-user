@@ -122,7 +122,8 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://origin.example/dead"}).Return(1, nil).Times(1)
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	commandrouter.SetPlaybackCacheLookup(ts.handler, mockService.HasReplayableItem)
 
 	playlistURL := "https://example.com/playlist.json"
 	expectDisplayPlaylistSuccess(ts, playlistURL,

@@ -137,7 +137,7 @@ schema={'$schema':'https://json-schema.org/draft/2020-12/schema','$id':'urn:fera
     'description':'Framing, UTF-8 byte/depth limits, duplicate-key rejection, deadlines, live identity and transition rules are specified in README.md and enforced by peers. JSON Schema integer accepts integral decimal lexemes; the wire additionally requires integer JSON lexemes for integer fields.',
     'oneOf':[ref('request'),ref('response'),ref('event')],
     '$defs':{'request':request,'response':response,'event':event,'snapshot':snapshot,'occurrence':occurrence,
-             'artworkPermissions':obj({name:boolean for name in ('autoplay','localNetwork','geolocation','camera','microphone','notifications')}),'settings':settings,'policy':policy,'display':display,'playlist':playlist,'item':item,
+             'artworkPermissions':obj({name:boolean for name in ('autoplay','localNetwork','geolocation','camera','microphone','notifications')} | {'cache':obj({'maxAgeDays':number(1,36500,True),'maxBytes':number(1,1<<50,True)})}),'settings':settings,'policy':policy,'display':display,'playlist':playlist,'item':item,
              'receipt':receipt,'hello':hello,'subscription':subscription,'record':record,'history':history,'scheduleOutcome':schedule_outcome,'recovery':recovery}}
 
 parser=argparse.ArgumentParser();parser.add_argument('--check',action='store_true');args=parser.parse_args()

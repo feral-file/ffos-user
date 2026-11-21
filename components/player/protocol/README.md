@@ -147,7 +147,7 @@ replay promise.
 | `media.seek` | `{occurrence,seconds}`; only the currently presented seekable native media; acceptance is not seek completion |
 | `settings.set` | Saved device settings. Framing is artwork/fit/fill and respects authored userOverrides; the authored DP-1 permissions map is merged per field. Effective snapshots preserve the original native boolean default and carry field exceptions in `overridePermissions`. |
 | `presentation.set` | `{occurrence,display:{scaling?,margin?,background?}}`; ephemeral preview on the currently selected AND presented occurrence; requires `presentation.v1`. A loading replacement or stale occurrence rejects; a locked field rejects the whole preview with `presentation_locked`. No implicit target. |
-| `artworkPermissions.get`, `artworkPermissions.set` | Read the device-wide artwork permissions with `{}` or patch boolean fields. The player atomically replaces `global-policy.json` before acknowledging them. A change restarts active artwork under the new grants. |
+| `artworkPermissions.get`, `artworkPermissions.set` | Read the device-wide artwork permissions with `{}` or patch boolean grants or the nested `cache.maxAgeDays` and `cache.maxBytes` limits (30 days since last use and 1 GiB shared by default). The player atomically replaces `global-policy.json` before acknowledging them. Grant changes restart active artwork. Cache-only updates apply during background maintenance. |
 | `policy.get`, `policy.set` | Query `{}` or set complete version-1 policy flags; controld retains trust and controller policy decisions |
 | `history.list`, `history.resolve` | List retained presented occurrences or resolve `{recordId}`; resolution does not play it |
 | `schedule.set` | `{playlist,context?,atMs}` or `{clear:true}`; one durable scheduled cast, executed by host |
@@ -409,6 +409,8 @@ these grants. No external controller command is wired to this API.
 
 | Field | Default | Effect |
 | --- | --- | --- |
+| cache.maxAgeDays | 30 | Reclaim automatic media and inactive browser caches after this many days since use. |
+| cache.maxBytes | 1073741824 | Retained asset budget shared by browser and media workers. Storage pressure can reclaim entries sooner. |
 | autoplay | true | Artwork can start audio and video without a phone click. Authored pause and device pause still apply. |
 | localNetwork | false | Online workers use public HTTP(S). Enabling this permits unicast LAN destinations through the same proxy. Host-local, link-local, multicast and offline access stay blocked. |
 | geolocation | false | Controls browser permission to request a position. |

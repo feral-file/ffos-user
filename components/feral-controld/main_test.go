@@ -1216,12 +1216,10 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.PlaylistScheduler)
 	assert.NotNil(t, app.Hub)
 
-	// offlineCacheConfig was nil, so the feature stays disabled: no Service
-	// and no static server. Kiosk replay exists anyway, for onchfs works
-	// (ffos-user#427), as the lazy core: it does not dial the kiosk until
-	// an onchfs scope is first armed.
+	// Automatic artwork caching starts with default settings. The loopback
+	// static server is only needed for explicit Downloads.
 	assert.NotNil(t, app.KioskReplay)
-	assert.Nil(t, app.OfflineCacheService)
+	assert.NotNil(t, app.OfflineCacheService)
 	assert.Nil(t, app.OfflineCacheStaticServer)
 
 	// Test all wrappers are initialized

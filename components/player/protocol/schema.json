@@ -1700,6 +1700,23 @@
         },
         "notifications": {
           "type": "boolean"
+        },
+        "cache": {
+          "type": "object",
+          "properties": {
+            "maxAgeDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 36500
+            },
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1125899906842624
+            }
+          },
+          "required": [],
+          "additionalProperties": false
         }
       },
       "required": [],

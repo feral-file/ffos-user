@@ -389,14 +389,18 @@ Json Playback::command(std::string_view method, const Json& p) {
   if (method == "artworkPermissions.set") {
     validate_global_policy(p);
     auto next = global_policy_;
-    next.update(p);
-    bool changed = next != global_policy_;
+    next.update(p, true);
+    auto grants = next;
+    grants["cache"] = global_policy_.at("cache");
+    bool changed = grants != global_policy_;
+    bool cache_changed = next.at("cache") != global_policy_.at("cache");
     const bool durable = store_.save_global_policy(next);
+    global_policy_ = std::move(next);
     if (changed) {
-      global_policy_ = std::move(next);
       presented_.reset();
       select();
     }
+    if (cache_changed && !changed) ++revision_;
     // Once rename succeeds, even a directory-sync error must retire old grants.
     require(durable, "storage_unavailable", "Global policy applied but directory sync failed; retry the update");
     return {{"outcome", changed && selected_ ? "accepted" : "applied"}, {"generation", generation_},

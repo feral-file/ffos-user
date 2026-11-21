@@ -48,10 +48,14 @@ int main(int argc, char** argv) {
             "Legacy grant moves to the global file and leaves SQLite");
       fails([&]{p.command("artworkPermissions.set", {{"geolocation","yes"}});}, "invalid_params");
       fails([&]{p.command("artworkPermissions.set", {{"playlistId","x"}});}, "invalid_params");
+      check(grants["cache"] == ff::Json{{"maxAgeDays",30},{"maxBytes",1073741824}}, "Legacy policy inherits cache limits");
+      fails([&]{p.command("artworkPermissions.set", {{"cache",{{"maxBytes",-1}}}});}, "invalid_params");
+      p.command("artworkPermissions.set", {{"cache",{{"maxAgeDays",14}}}});
       p.command("artworkPermissions.set", {{"notifications",true}});
     }
     {
       ff::Store store(path); ff::Playback p(store); p.tick(1000, ff::wall_ms());
+      check(p.global_policy()["cache"] == ff::Json{{"maxAgeDays",14},{"maxBytes",1073741824}}, "Partial cache patch survives restart");
       check(p.snapshot()["artworkPermissions"]["notifications"] == true, "Global grant survives restart");
       fails([&]{ff::Store second_owner(path);},"storage_in_use");
       p.command("connectivity.set", {{"online",false}});

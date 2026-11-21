@@ -108,6 +108,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
 #endif
   if(profile.empty()){std::cerr<<"A private browser profile is required\n";return 2;}
   CefSettings settings;CefString(&settings.root_cache_path)=std::filesystem::absolute(profile).string();
+  if(command->HasSwitch("disk-cache-dir")) CefString(&settings.cache_path)=(std::filesystem::absolute(profile)/"Default").string();
   if(!CefInitialize(args,settings,app,nullptr))return 1;
   std::signal(SIGTERM,stop);std::signal(SIGINT,stop);
   CefRunMessageLoop();CefShutdown();return 0;

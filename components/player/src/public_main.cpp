@@ -180,6 +180,8 @@ int main(int argc, char** argv) {
       const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
       playback.tick(now_ms, ff::wall_ms());
       server.poll();
+      if (applied_permissions.at("cache") != playback.global_policy().at("cache"))
+        applied_permissions["cache"] = playback.global_policy().at("cache");
       if (applied_permissions != playback.global_policy()) {
         // Even outgoing, preloaded and backdrop workers must lose the old grants.
         transition.reset();
