@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the deployable CEF, glycin and libmpv runtime in the Linux toolchain.
+# Build the deployable CEF and libmpv runtime in the Linux toolchain.
 set -eu
 trial="$PWD/build-ff1"
 mkdir -p "$trial/sdk"

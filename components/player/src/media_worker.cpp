@@ -1,5 +1,5 @@
+#include "ff/display.hpp"
 #include "ff/media_ipc.hpp"
-#include "ff/raster.hpp"
 #include "ff/presentation_feedback.hpp"
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
@@ -36,7 +36,6 @@ void command(mpv_handle* player, const std::vector<std::string>& words) {
 class Worker {
  public:
   ~Worker() {
-    raster_.reset();
     feedback_.reset();
     if(render_)mpv_render_context_free(render_);
     if(player_)mpv_terminate_destroy(player_);
@@ -63,10 +62,6 @@ class Worker {
       ff::require(SDL_GL_SetSwapInterval(0)==0,"media_graphics",SDL_GetError());
       feedback_=std::make_unique<ff::PresentationFeedback>(window_,true);
     }
-    if(config.value("nativeRaster",false)){
-      if(cached_fd>=0){cached_fd_=dup(cached_fd);ff::require(cached_fd_>=0,"cache_file","Cannot retain image fd");}
-      raster_=std::make_unique<ff::Raster>(ff::string_field(config,"source",16384),cached_fd_,config.value("httpUserAgent",""));
-    }else{
     player_=mpv_create();ff::require(player_!=nullptr,"media_backend","Cannot allocate libmpv");
     for(auto [key,value]:{std::pair{"config","no"},{"input-default-bindings","no"},
         {"input-vo-keyboard","no"},{"input-terminal","no"},{"terminal","no"},{"osd-level","0"},
@@ -101,7 +96,6 @@ class Worker {
     // Enabling this before render-context creation races libmpv's VO startup.
     // Audio still gets a compositable surface in front of the host matte.
     property(player_,"force-window","yes");
-    }
     if(!direct){
       glGenTextures(1,&texture_);glBindTexture(GL_TEXTURE_2D,texture_);
       glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width_,height_,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
@@ -111,7 +105,6 @@ class Worker {
       ff::require(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE,"media_graphics","Media FBO incomplete");
     }
     controls(config);
-    if(raster_){ff::send_media(channel,{{"event","initialized"}});return;}
     auto source=ff::string_field(config,"source",16384);
     ff::require(cached_fd>=0||source.starts_with("https://")||source.starts_with("http://")||source.starts_with("data:"),"media_source","Expected HTTP(S), inline media, or a broker-opened cached file");
     if(cached_fd>=0){cached_fd_=dup(cached_fd);ff::require(cached_fd_>=0,"cache_file","Cannot retain cached media descriptor");source="fd://"+std::to_string(cached_fd_);}
@@ -120,12 +113,6 @@ class Worker {
   }
   void controls(const ff::Json& p) {
     if(p.contains("directOutput"))want_direct_=p.at("directOutput").get<bool>();
-    if(raster_){
-      paused_=p.value("paused",paused_);
-      if(p.contains("display") && (display_.is_null() || display_revision_!=p.value("displayRevision",uint64_t(1)))){
-        display_=p.at("display");display_revision_=p.value("displayRevision",uint64_t(1));configuration_dirty_=true;
-      }
-    }
     if(player_ && p.contains("paused"))property(player_,"pause",p.at("paused").get<bool>()?"yes":"no");
     if(player_ && p.contains("volume"))property(player_,"volume",std::to_string(std::clamp(p.at("volume").get<double>(),0.0,1.0)*100));
     if(player_ && p.contains("muted"))property(player_,"mute",p.at("muted").get<bool>()?"yes":"no");
@@ -250,11 +237,6 @@ class Worker {
       }
       // update() must keep servicing mpv's resource requests even while the
       // exported frame waits for the host. Only the texture write waits.
-      if(raster_ && raster_->update(paused_,display_.value("loop",true))){
-        if(!raster_loaded_){ff::send_media(channel,{{"event","loaded"}});raster_loaded_=true;}
-        pending=true;
-      }
-      if(raster_ && raster_->take_ended())ff::send_media(channel,{{"event","ended"}});
       if(render_ && render_update.exchange(false))pending |= bool(mpv_render_context_update(render_)&MPV_RENDER_UPDATE_FRAME);
       if(!feedback_&&!in_flight&&pending_width_>0&&(pending_width_!=width_||pending_height_!=height_)){
         // Never change storage while the host still owns an exported frame.
@@ -264,7 +246,7 @@ class Worker {
       // Set filtering before advertising a frame at the new display revision.
       // Paused videos also repaint when mpv acknowledges the last scaler change.
       if(player_ && (pending||configuration_dirty_))configure_scaler();
-      if(configuration_tags_.empty()&&(pending||configuration_dirty_)&&!in_flight&&(!raster_||raster_loaded_)){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
+      if(configuration_tags_.empty()&&(pending||configuration_dirty_)&&!in_flight){draw(++sequence);pending=false;configuration_dirty_=false;in_flight=!feedback_;}
     }
   }
  private:
@@ -287,12 +269,9 @@ class Worker {
   void draw(uint64_t sequence) {
     // Host composition samples the top row at v=0, matching CEF DMA-BUFs.
     // MPV's additional Y flip would invert video while leaving native UI upright.
-    if(raster_)raster_->draw(feedback_?0:fbo_,width_,height_,display_,bool(feedback_));
-    else{
     mpv_opengl_fbo target{static_cast<int>(feedback_?0:fbo_),width_,height_,feedback_?0:GL_RGBA8};int flip=feedback_?1:0;
     mpv_render_param params[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
     check(mpv_render_context_render(render_,params),"render media frame");
-    }
     if(feedback_){
       // In direct mode mpv owns the visible window. There is no exported
       // texture to acknowledge and no native host between the worker and Cage.
@@ -323,13 +302,12 @@ class Worker {
   std::unique_ptr<ff::PresentationFeedback> feedback_;
   SDL_Window* window_=nullptr;SDL_GLContext context_=nullptr;
   mpv_handle* player_=nullptr;mpv_render_context* render_=nullptr;
-  std::unique_ptr<ff::Raster> raster_;
   ff::Json display_=ff::Json::object();
   std::vector<std::string> default_scalers_;
   int source_width_=0,source_height_=0,source_rotation_=0;
   bool hard_edges_=false;
   std::optional<bool> want_direct_;
-  bool raster_loaded_=false,paused_=false,direct_reported_=false;
+  bool direct_reported_=false;
   std::string last_error_;
   int cached_fd_=-1;
   int width_=0,height_=0;GLuint texture_=0,fbo_=0;

@@ -101,7 +101,6 @@ void MediaClient::start(int cached_fd) {
     send_media(
         socket_,
         {{"method", "initialize"},
-         {"nativeRaster", native_raster(occurrence_.item)},
          {"source", source_override_.empty() ? occurrence_.item["source"] : Json(source_override_)},
          {"httpUserAgent", user_agent_},
          {"width", bounds.width},
@@ -256,8 +255,7 @@ void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
         loaded_ && surface.frames > 0 && surface.display_revision == render_revision_;
     require(std::chrono::steady_clock::now() - received_ < std::chrono::seconds(5),
             "media_unresponsive", "Media worker stopped responding for 5 seconds");
-    if(native_raster(occurrence_.item))status["decoder"]="glycin";
-    status["backend"] = native_raster(occurrence_.item) ? "native-raster" : "native-media";
+    status["backend"] = "native-media";
     status["workerPid"] = pid_;
     status["importedFrames"] = frames.count;
     status["surfaceWidth"] = surface.width;

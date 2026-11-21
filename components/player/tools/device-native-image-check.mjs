@@ -21,8 +21,8 @@ try{
  await c.call('settings.set',{tombstone:'off',durationSeconds:null,background:'#ffffff',framing:'artwork'});
  for(const fixture of fixtures){
   const receipt=await c.call('playback.replace',{playlist:{items:[{...fixture,id:fixture.name,title:fixture.name,duration:0,display:{scaling:'fit',margin:0,background:'#ffffff'}}]}});
-  let state;for(let i=0;i<200;i++){state=await c.call('state.get');if(state.selected?.stage==='failed')throw Error(state.selected.error);if(state.presented?.id===receipt.occurrence&&state.media?.backend==='native-raster')break;await delay(100);}
-  assert.equal(state.presented?.id,receipt.occurrence);assert.equal(state.media?.backend,'native-raster');
+  let state;for(let i=0;i<200;i++){state=await c.call('state.get');if(state.selected?.stage==='failed')throw Error(state.selected.error);if(state.presented?.id===receipt.occurrence&&state.media?.backend==='native-media')break;await delay(100);}
+  assert.equal(state.presented?.id,receipt.occurrence);assert.equal(state.media?.backend,'native-media');
   await delay(1100);state=await c.call('state.get');
   const samples=fixture.name==='animated-gif'?6:1;
   if(samples>1){

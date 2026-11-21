@@ -6,7 +6,7 @@ SQLite state, labels, device panels, cursor routing and worker recovery.
 
 | Artwork | Worker |
 | --- | --- |
-| Raster image, including animated GIF and AVIF | Sandboxed libglycin loader, native GL presentation |
+| Raster image, including animated GIF and AVIF | Sandboxed libmpv worker, native GL presentation |
 | Direct video and audio | libmpv with FFmpeg, VA-API when supported, software decode otherwise |
 | SVG, website and software artwork | CEF Views, original document URL |
 | glTF and GLB | CEF Views with the bundled model-viewer |
@@ -144,8 +144,7 @@ Chromium comparison workflow produces `ff-player-chromium-linux-x86_64`.
 
 CEF has its own FF1 archive digest. FFmpeg and mpv source digests live in
 `dependencies.json`. The Cage relay builds from a verified wl-proxy revision
-and its Cargo.lock. Ubuntu build packages for glycin are pinned in the
-Dockerfile. The installed `ffos-worker-packages.lock` records the device
+and its Cargo.lock. The installed `ffos-worker-packages.lock` records the device
 packages independently. Before qualifying a device image, run this from
 the installed `/usr/share/ff-player-native` directory:
 
