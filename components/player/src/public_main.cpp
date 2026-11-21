@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
         false, options.contains("--diagnostic-presentation-timing"),
         (std::filesystem::path(resources).parent_path() / "fonts").string());
     std::map<std::string, std::unique_ptr<ff::PublicBrowser>> clients;
-    ff::ArtworkCache artwork_cache((root / "ff-artwork-cache").string());
+    ff::ArtworkCache artwork_cache((root / "ff-egress").string());
     std::map<std::string, std::unique_ptr<ff::MediaClient>> media;
     struct Transition {
       std::string outgoing, incoming;

@@ -1,8 +1,12 @@
 #pragma once
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
 #include <string>
-#include <vector>
-#include <sys/types.h>
+#include <thread>
+
 #include "ff/json.hpp"
 
 namespace ff {
@@ -10,28 +14,35 @@ namespace ff {
 // per-source browser directory, and never sees the shared player cache.
 class ArtworkCache {
  public:
-  explicit ArtworkCache(std::string helper);
+  struct Media {
+    std::string url, user_agent, key;
+    bool lan;
+  };
+  explicit ArtworkCache(std::string egress);
   ~ArtworkCache();
   ArtworkCache(const ArtworkCache&) = delete;
   ArtworkCache& operator=(const ArtworkCache&) = delete;
   void maintain(const Json& policy);
-  void warm(const std::string& owner, const Json& request);
+  void warm(const std::string& owner, const Media& media);
   void stop_warming();
   void retire(const std::string& owner);
-  static Json media_request(const std::string& url, const std::string& user_agent, bool lan);
+  static std::optional<Media> media_request(const std::string& url, const std::string& user_agent,
+                                            bool lan);
   static std::string browser_key(const std::string& url, bool lan);
   static void discard_media(const std::string& key);
   static int open_media(const std::string& key, int64_t max_age_days);
 
  private:
-  struct Job { int socket = -1; pid_t pid = -1; };
-  void launch(Job& job, const Json& request);
-  void stop(Job& job);
-  static void reap(Job& job);
-  std::string helper_, owner_;
+  void run();
+  const std::string egress_;
+  std::string owner_;
   Json policy_;
-  Job fill_, sweep_;
-  std::vector<pid_t> retired_;
+  std::optional<Media> pending_;
+  std::mutex mutex_;
+  std::condition_variable wake_;
+  std::atomic<uint64_t> generation_{0};
+  bool sweep_ = false, stopping_ = false;
   std::chrono::steady_clock::time_point next_sweep_{};
+  std::thread worker_;
 };
-}
+}  // namespace ff

@@ -405,7 +405,7 @@ or migrates existing global grants from SQLite. An existing file takes precedenc
 Both workers use disposable storage under `~/.cache/player-artworks/`. CEF
 keeps an HTTP cache per source and LAN grant. For live libmpv playback the
 host opens a fresh local file if available. On a miss it streams immediately.
-After presentation a player-owned helper can fetch the complete media file
+After presentation the native host can fetch the complete media file
 at up to 2 MiB/s, using the same destination restrictions as the worker.
 Only complete, cacheable media responses with an explicit freshness lifetime
 are published. Removing the cache makes subsequent plays cold. The player

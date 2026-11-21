@@ -30,7 +30,7 @@ class MediaClient {
 
  private:
   ArtworkCache* artwork_cache_;
-  Json warm_request_;
+  std::optional<ArtworkCache::Media> warm_request_;
   std::string local_media_key_;
   void stop_worker();
   Playback& playback_;

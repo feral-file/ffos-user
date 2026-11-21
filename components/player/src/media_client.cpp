@@ -82,11 +82,11 @@ void MediaClient::start_live() {
   const auto url = source_override_.empty() ? occurrence_.item.at("source").get<std::string>() : source_override_;
   if (artwork_cache_ && playback_.online()) {
     warm_request_ = ArtworkCache::media_request(url, user_agent_, playback_.global_policy().at("localNetwork") == true);
-    if (!warm_request_.is_null()) {
-      fd = ArtworkCache::open_media(warm_request_.at("key"), playback_.global_policy().at("cache").at("maxAgeDays"));
+    if (warm_request_) {
+      fd = ArtworkCache::open_media(warm_request_->key, playback_.global_policy().at("cache").at("maxAgeDays"));
       if (fd >= 0) {
-        local_media_key_ = warm_request_.at("key").get<std::string>();
-        warm_request_ = nullptr;
+        local_media_key_ = warm_request_->key;
+        warm_request_.reset();
       }
     }
   }
@@ -370,9 +370,9 @@ void MediaClient::did_present() {
     send_media(socket_, {{"method", "presented"}, {"sequence", received_sequence_}});
     presented_sequence_ = received_sequence_;
     frames.submitted();
-    if (!warm_request_.is_null() && playback_.desired() && playback_.desired()->id == id) {
-      artwork_cache_->warm(id, warm_request_);
-      warm_request_ = nullptr;
+    if (warm_request_ && playback_.desired() && playback_.desired()->id == id) {
+      artwork_cache_->warm(id, *warm_request_);
+      warm_request_.reset();
     }
   } catch (const std::exception& error) {
     fail(error.what());

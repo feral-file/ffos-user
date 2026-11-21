@@ -11,18 +11,13 @@ add_library(ff_browser_surface src/browser_surface.c)
 target_include_directories(ff_browser_surface PUBLIC include)
 target_link_libraries(ff_browser_surface PUBLIC PkgConfig::WLR)
 target_compile_options(ff_browser_surface PRIVATE -Wall -Wextra -Werror)
-add_executable(ff-player-native src/public_main.cpp src/artwork_cache.cpp src/public_browser.cpp src/profile_gc.cpp src/presentation.cpp src/media_client.cpp)
+add_executable(artwork-cache-tests tests/artwork_cache_test.cpp)
+target_link_libraries(artwork-cache-tests PRIVATE ff_artwork_cache)
+add_test(NAME artwork-cache COMMAND artwork-cache-tests)
+add_executable(ff-player-native src/public_main.cpp src/public_browser.cpp src/profile_gc.cpp src/presentation.cpp src/media_client.cpp)
 target_include_directories(ff-player-native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-target_link_libraries(ff-player-native PRIVATE ff_presentation_feedback ff_core ff_device_ui ff_media_ipc ff_browser_surface ff_cache_client PkgConfig::NATIVE PkgConfig::CURL dl)
+target_link_libraries(ff-player-native PRIVATE ff_artwork_cache ff_presentation_feedback ff_core ff_device_ui ff_media_ipc ff_browser_surface ff_cache_client PkgConfig::NATIVE PkgConfig::CURL dl)
 install(TARGETS ff-player-native RUNTIME DESTINATION lib/ff-player-native)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ff-artwork-cache"
-  COMMAND "${GO_EXECUTABLE}" build -o "${CMAKE_CURRENT_BINARY_DIR}/ff-artwork-cache" ./cmd/ff-artwork-cache
-  WORKING_DIRECTORY "${EGRESS_DIR}"
-  DEPENDS egress/go.mod egress/internal/netpolicy/dial.go egress/cmd/ff-artwork-cache/main.go
-          egress/cmd/ff-artwork-cache/retention.go egress/cmd/ff-artwork-cache/media.go)
-add_custom_target(artwork-cache-helper ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ff-artwork-cache")
-add_dependencies(ff-player-native artwork-cache-helper)
-install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/ff-artwork-cache" DESTINATION lib/ff-player-native)
 install(PROGRAMS tools/ff-browser-launch DESTINATION lib/ff-player-native)
 
 option(FF_PACKAGE_CEF_VIEWS "Package the FF1 CEF Views worker" OFF)
