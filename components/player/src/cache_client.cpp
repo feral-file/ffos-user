@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <ctime>
+#include <charconv>
+#include <algorithm>
 
 #include <condition_variable>
 #include <thread>
@@ -90,25 +92,36 @@ struct Pool {
     }
     auto method = query.value("method", "");
     require(method == "GET" || method == "HEAD", "bundle", "Unsupported replay method");
+    std::string range;
     for (const auto& [name, value] : query.at("headers").items()) {
+      if (!g_ascii_strcasecmp(name.c_str(), "Range")) range = value.get<std::string>();
       if (value != "" && (!g_ascii_strcasecmp(name.c_str(), "Authorization") ||
-                          !g_ascii_strcasecmp(name.c_str(), "Cookie") || !g_ascii_strcasecmp(name.c_str(), "Range")))
+                          !g_ascii_strcasecmp(name.c_str(), "Cookie")))
         throw Error("bundle", "Request variant requires live origin");
     }
     const Json* found = nullptr;
-    for (const auto& resource : record.at("resources")) {
-      if (resource.at("url") == url && resource.value("method", "GET") == "GET") {
-        require(!found, "bundle", "Ambiguous capture entry");
-        found = &resource;
+    for (int hop = 0; hop < 16; ++hop) {
+      found = nullptr;
+      for (const auto& resource : record.at("resources")) {
+        if (resource.at("url") == url && resource.value("method", "GET") == "GET") {
+          require(!found, "bundle", "Ambiguous capture entry");
+          found = &resource;
+        }
       }
-    }
-    require(found, "bundle", "Resource absent from capture");
-    if (record.value("automatic", false)) {
-      auto until = found->value("freshUntil", "");
-      auto expiry = g_date_time_new_from_iso8601(until.c_str(), nullptr);
-      bool fresh = expiry && g_date_time_to_unix(expiry) > std::time(nullptr);
-      if (expiry) g_date_time_unref(expiry);
-      require(fresh, "bundle", "Cached resource expired");
+      require(found, "bundle", "Resource absent from capture");
+      if (record.value("automatic", false)) {
+        auto expiry = g_date_time_new_from_iso8601(found->value("freshUntil", "").c_str(), nullptr);
+        bool fresh = expiry && g_date_time_to_unix(expiry) > std::time(nullptr);
+        if (expiry) g_date_time_unref(expiry);
+        require(fresh, "bundle", "Cached resource expired");
+      }
+      if (!job.open_file || !found->contains("redirectTo")) break;
+      char* target = g_uri_resolve_relative(url.c_str(), found->at("redirectTo").get_ref<const std::string&>().c_str(),
+                                            G_URI_FLAGS_ENCODED, nullptr);
+      require(target, "bundle", "Invalid capture redirect");
+      url = target;
+      g_free(target);
+      require(hop < 15, "bundle", "Too many capture redirects");
     }
     // Controld's older manifests omit CSP and repeated response headers.
     // They can supply native media bytes, but never synthesize a browser response.
@@ -126,7 +139,35 @@ struct Pool {
     require(hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == hash.npos, "bundle", "Invalid blob digest");
     auto blob = root / "blobs" / hash;
     auto size = std::filesystem::file_size(blob);
-    require(job.open_file || size <= body_limit, "bundle", "Browser resource exceeds replay limit");
+    uintmax_t first = 0, end = size;
+    if (!job.open_file && !range.empty()) {
+      require(range.starts_with("bytes=") && range.find(',') == range.npos, "bundle", "Unsupported range");
+      auto dash = range.find('-', 6);
+      require(dash != range.npos && size > 0, "bundle", "Invalid range");
+      auto number = [](std::string_view text) {
+        uintmax_t value = 0;
+        auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+        require(ec == std::errc{} && ptr == text.data()+text.size(), "bundle", "Invalid byte offset");
+        return value;
+      };
+      if (dash == 6) first = size - std::min(size, number(range.substr(7)));
+      else {
+        first = number(range.substr(6, dash - 6));
+        if (dash + 1 < range.size()) end = std::min(size - 1, number(range.substr(dash + 1))) + 1;
+      }
+      require(first < end, "bundle", "Unsatisfiable range");
+      end = first + std::min<uintmax_t>(end-first, body_limit);
+      auto& fields = reply.metadata["headers"];
+      for (auto it=fields.begin(); it!=fields.end();) {
+        auto name=it->value("name", "");
+        if (!g_ascii_strcasecmp(name.c_str(),"Content-Length") || !g_ascii_strcasecmp(name.c_str(),"Content-Range")) it=fields.erase(it);
+        else ++it;
+      }
+      fields.push_back({{"name","Content-Range"},{"value","bytes "+std::to_string(first)+"-"+std::to_string(end-1)+"/"+std::to_string(size)}});
+      fields.push_back({{"name","Content-Length"},{"value",std::to_string(end-first)}});
+      reply.metadata["status"]=206;
+    } else if (reply.metadata.at("status") == 206) reply.metadata["status"]=200;
+    require(job.open_file || end-first <= body_limit, "bundle", "Browser resource exceeds replay limit");
     std::ifstream body(blob, std::ios::binary);
     require(body.good(), "bundle", "Cannot open captured resource");
     std::unique_ptr<GChecksum, decltype(&g_checksum_free)> digest(g_checksum_new(G_CHECKSUM_SHA256), g_checksum_free);
@@ -138,7 +179,9 @@ struct Pool {
       bytes += n;
       require(bytes <= size, "bundle", "Blob changed during read");
       g_checksum_update(digest.get(), reinterpret_cast<const guchar*>(block), n);
-      if (!job.open_file) reply.body.append(block, n);
+      auto begin = std::max<uintmax_t>(first, bytes - n);
+      auto finish = std::min<uintmax_t>(end, bytes);
+      if (!job.open_file && finish > begin) reply.body.append(block + (begin - (bytes - n)), finish - begin);
     }
     require(body.eof() && bytes == size && hash == g_checksum_get_string(digest.get()), "bundle", "Capture checksum mismatch");
     if (job.open_file) {
