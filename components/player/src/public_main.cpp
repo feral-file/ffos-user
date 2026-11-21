@@ -19,7 +19,7 @@ namespace {
 volatile std::sig_atomic_t stopping = 0;
 void stop(int) { stopping = 1; }
 }  // namespace
-int main(int argc, char** argv) {
+extern "C" int ff_host(int argc, char** argv) {
   umask(0077);
   std::signal(SIGTERM, stop);
   std::signal(SIGINT, stop);
@@ -48,8 +48,8 @@ int main(int argc, char** argv) {
     ff::Protocol protocol(playback);
     ff::Server server(socket, protocol);
     auto root = std::filesystem::canonical("/proc/self/exe").parent_path();
-    auto worker = (root / "media/ff-media-launch").string(),
-         launcher = (root / "ff-browser-launch").string();
+    auto worker = (root / "ff-player-native").string(),
+         launcher = (root / "ff-player-native").string();
     auto resources = options["--renderer-dir"];
     if (resources.empty()) resources = ff::renderer_directory(root).string();
     std::string browser_backend = "public-chromium";
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
         false, options.contains("--diagnostic-presentation-timing"),
         (std::filesystem::path(resources).parent_path() / "fonts").string());
     std::map<std::string, std::unique_ptr<ff::PublicBrowser>> clients;
-    ff::ArtworkCache artwork_cache((root / "ff-egress").string());
+    ff::ArtworkCache artwork_cache((root / "ff-player-native").string());
     std::map<std::string, std::unique_ptr<ff::MediaClient>> media;
     struct Transition {
       std::string outgoing, incoming;

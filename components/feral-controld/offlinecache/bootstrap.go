@@ -26,7 +26,7 @@ import (
 // zero-config behavior.
 const (
 	DefaultRootDir             = "/home/feralfile/.cache/offline-artworks"
-	DefaultHeadlessBinaryPath  = "/usr/lib/ff-player-native/engine/chrome"
+	DefaultHeadlessBinaryPath  = "/usr/bin/chromium"
 	DefaultHeadlessUserDataDir = "/home/feralfile/.cache/offline-artworks-headless-profile"
 	// DefaultHeadlessDebugPort is distinct from the kiosk's 9222 so the
 	// two Chromium processes (capture vs. player surface) never collide.

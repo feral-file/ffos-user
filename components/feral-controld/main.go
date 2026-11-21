@@ -19,8 +19,6 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/cdphealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
@@ -98,11 +96,7 @@ type app struct {
 	Math       wrapper.Math
 
 	// Components
-	CDP cdp.CDP
-	// CDPHealthMonitor reports a sustained CDP disconnect to feral-watchdog
-	// over DBus (ffos-user#356); see package cdphealth's doc for why this
-	// is report-only and must never itself restart chromium-kiosk.
-	CDPHealthMonitor  *cdphealth.Monitor
+
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
 	Mediator          mediator.Mediator
@@ -940,7 +934,6 @@ func initializeApp(
 
 	// Components
 	// CDP
-	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
 	// One kiosk screenshot capturer: the hub's /api/screenshot and the media
 	// health wall capture share its single flight, so they never capture at
 	// once.
@@ -1857,8 +1850,6 @@ func initializeApp(
 		Random:                   randomizer,
 		Exec:                     exec,
 		Math:                     math,
-		CDP:                      cdp,
-		CDPHealthMonitor:         cdphealth.New(cdp, dbusClient, clock, logger),
 		Relayer:                  relayer,
 		DBus:                     dbusClient,
 		Mediator:                 mediator,
@@ -1900,7 +1891,6 @@ func initializeTestApp(
 	random wrapper.Randomizer,
 	exec wrapper.Exec,
 	math wrapper.Math,
-	cdp cdp.CDP,
 	relayer relayer.Relayer,
 	dbus dbus.DBus,
 	deviceStatus status.DeviceStatus,
@@ -1926,7 +1916,6 @@ func initializeTestApp(
 		Random:            random,
 		Exec:              exec,
 		Math:              math,
-		CDP:               cdp,
 		Relayer:           relayer,
 		DBus:              dbus,
 		Mediator:          mediator,

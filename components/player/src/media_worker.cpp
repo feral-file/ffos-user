@@ -322,7 +322,7 @@ class Worker {
   bool configuration_dirty_=false;
 };
 }
-int main() {
+extern "C" int ff_decode(int, char**) {
   // Media faults and unbounded allocation are contained in this process.
   // Namespace/filesystem restrictions are applied by the launcher separately.
   prctl(PR_SET_PDEATHSIG,SIGKILL);prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);

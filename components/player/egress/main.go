@@ -15,7 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
-	"runtime"
+
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,7 +30,6 @@ func socketpair(kind int) ([2]int, error) {
 
 // Linux parent-death signals follow the thread that spawned the child.
 // Keep launch and exec on the process leader, including across worker exec.
-func init() { runtime.LockOSThread() }
 
 func daemon(mode string, files ...*os.File) error {
 	self, err := os.Executable()
@@ -296,16 +295,16 @@ func relay() error {
 	}
 }
 
-func main() {
-	if len(os.Args) < 2 {
+func run(args []string) {
+	if len(args) < 2 {
 		log.Fatal("missing mode")
 	}
 	var err error
-	switch os.Args[1] {
+	switch args[1] {
 	case "host", "host-lan", "inside":
-		err = launch(os.Args[1], os.Args[2:])
+		err = launch(args[1], args[2:])
 	case "serve", "serve-lan":
-		allowLAN = os.Args[1] == "serve-lan"
+		allowLAN = args[1] == "serve-lan"
 		err = (&http.Server{Handler: http.HandlerFunc(proxy), ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 65536}).Serve(channels{3})
 	case "relay":
 		err = relay()

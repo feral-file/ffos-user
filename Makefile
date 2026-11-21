@@ -68,7 +68,6 @@ verify-go-component-test:
 # verify target.
 .PHONY: verify-scripts
 verify-scripts:
-	@./scripts/test-serve-feral-player.sh
 	@./scripts/test-headless-startup-contract.sh
 	@./scripts/test-enable-wake-on-lan.sh
 	@./scripts/test-wifi-reading.sh

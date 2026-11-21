@@ -41,6 +41,7 @@ jobs:
           path: |
             components/player/build-ff1/ff-player-cef-linux.tar.gz
             components/player/build-ff1/SHA256SUMS
+            components/player/build-ff1/installed-executables.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

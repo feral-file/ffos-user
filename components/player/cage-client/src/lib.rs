@@ -123,15 +123,23 @@ impl WpPresentationFeedbackHandler for Feedback {
         let _=self.0.send(&timestamp.to_ne_bytes());
     }
 }
-fn main() -> Result<(),Box<dyn Error>> {
+fn run() -> Result<(),Box<dyn Error>> {
     // Duplicate with CLOEXEC and close FD 5 before starting the artwork process.
     let inherited=unsafe {UnixDatagram::from_raw_fd(5)};
     let host=Arc::new(inherited.try_clone()?);
     drop(inherited);
     host.set_nonblocking(true)?;
     let server=SimpleProxy::new(Baseline::ALL_OF_THEM)?;
-    let mut args=env::args_os().skip(1);
+    let mut args=env::args_os().skip(2);
     Command::new(args.next().ok_or("missing browser launcher")?).args(args)
         .with_wayland_display(server.display()).spawn_and_forward_exit_code()?;
     Err(Box::new(server.run(||Display(host.clone()))))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ff_wayland(_argc: i32, _argv: *const *const std::ffi::c_char) -> i32 {
+    match run() {
+        Ok(()) => 0,
+        Err(e) => { eprintln!("Wayland relay: {e}"); 1 }
+    }
 }

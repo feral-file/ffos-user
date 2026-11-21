@@ -97,7 +97,7 @@ class App final : public CefApp,public CefBrowserProcessHandler {
  private: IMPLEMENT_REFCOUNTING(App);
 };
 }
-NO_STACK_PROTECTOR int main(int argc,char** argv){
+extern "C" NO_STACK_PROTECTOR int ff_browser(int argc,char** argv){
   umask(0077);CefMainArgs args(argc,argv);CefRefPtr<App> app=new App;
   int child=CefExecuteProcess(args,app,nullptr);if(child>=0)return child;
   auto command=CefCommandLine::CreateCommandLine();command->InitFromArgv(argc,argv);

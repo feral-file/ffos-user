@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 wl-proxy = { path = "../../wl-proxy", features = ["protocol-presentation_time", "protocol-xdg_shell", "protocol-linux_dmabuf_v1", "protocol-linux_drm_syncobj_v1", "protocol-viewporter", "protocol-fractional_scale_v1", "protocol-single_pixel_buffer_v1", "protocol-xdg_output_unstable_v1", "protocol-xdg_decoration_unstable_v1", "protocol-cursor_shape_v1"] }
+
+[lib]
+name = "ff_wayland"
+crate-type = ["cdylib"]

@@ -81,8 +81,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     bool cage=allow_direct && backend_=="cef-views" && !decoration_ && !debugger && !bundled_ &&
               playback_.overlay().is_null() && !playback_.service_failure() &&
               (!playback_.visible() || playback_.state()["settings"].value("transitionMs",0.0)==0) &&
-              bounds.width==presentation_.width() && bounds.height==presentation_.height() &&
-              std::filesystem::exists(std::filesystem::path(launcher).parent_path()/"ff-cage-client");
+              bounds.width==presentation_.width() && bounds.height==presentation_.height();
     int feedback_child=-1, admission_child=-1;
     if(cage){
       int pair[2];
@@ -126,7 +125,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     auto cache_key = offline_ ? "" : ArtworkCache::browser_key(source, permissions.at("localNetwork") == true);
     auto cache_bytes = std::to_string(permissions.at("cache").at("maxBytes").get<int64_t>());
     auto cache_days = std::to_string(permissions.at("cache").at("maxAgeDays").get<int>());
-    char* args[] = {const_cast<char*>(launcher.c_str()), const_cast<char*>(profile_.c_str()),
+    char* args[] = {const_cast<char*>(launcher.c_str()), const_cast<char*>("--launch-browser"), const_cast<char*>(profile_.c_str()),
                     const_cast<char*>(offline_ ? "offline" : "online"),
                     const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"),
                     const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),

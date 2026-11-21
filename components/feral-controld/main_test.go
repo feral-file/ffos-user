@@ -78,7 +78,6 @@ type testSetup struct {
 	mockStateManager *mocks.MockStateManager
 
 	// Mocked components
-	mockCDP          *mocks.MockCDP
 	mockRelayer      *mocks.MockRelayer
 	mockDBus         *mocks.MockDBus
 	mockMediator     *mocks.MockMediator
@@ -116,7 +115,6 @@ func setup(t *testing.T) *testSetup {
 		cancel:           cancel,
 		logger:           l,
 		mockStateManager: mocks.NewMockStateManager(ctrl),
-		mockCDP:          mocks.NewMockCDP(ctrl),
 		mockRelayer:      mocks.NewMockRelayer(ctrl),
 		mockDBus:         mocks.NewMockDBus(ctrl),
 		mockMediator:     mocks.NewMockMediator(ctrl),
@@ -165,7 +163,6 @@ func setup(t *testing.T) *testSetup {
 		ts.mockRandom,
 		ts.mockExec,
 		ts.mockMath,
-		ts.mockCDP,
 		ts.mockRelayer,
 		ts.mockDBus,
 		ts.mockDeviceStatus,
@@ -1203,7 +1200,6 @@ func TestInitializeApp(t *testing.T) {
 		t.Fatal("app.Cancel did not cancel app.Ctx")
 	}
 
-	assert.NotNil(t, app.CDP)
 	assert.NotNil(t, app.Relayer)
 	assert.NotNil(t, app.DBus)
 	assert.NotNil(t, app.Mediator)
@@ -1273,7 +1269,6 @@ func TestInitializeTestApp(t *testing.T) {
 	ctx := context.Background()
 
 	// Create minimal mocks for testing
-	mockCDP := mocks.NewMockCDP(ctrl)
 	mockRelayer := mocks.NewMockRelayer(ctrl)
 	mockDBus := mocks.NewMockDBus(ctrl)
 	mockMediator := mocks.NewMockMediator(ctrl)
@@ -1310,7 +1305,6 @@ func TestInitializeTestApp(t *testing.T) {
 		mockRandom,
 		mockExec,
 		mockMath,
-		mockCDP,
 		mockRelayer,
 		mockDBus,
 		mockDeviceStatus,
@@ -1327,7 +1321,6 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.Equal(t, ctx, app.Ctx)
-	assert.Equal(t, mockCDP, app.CDP)
 	assert.Equal(t, mockRelayer, app.Relayer)
 	assert.Equal(t, mockDBus, app.DBus)
 	assert.Equal(t, mockMediator, app.Mediator)

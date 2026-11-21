@@ -20,7 +20,7 @@ sh tools/build-media.sh
 export PKG_CONFIG_PATH="$PWD/build-media/prefix/lib/pkgconfig:$PKG_CONFIG_PATH"
 export LD_LIBRARY_PATH="$PWD/build-media/prefix/lib:$PWD/build-presentation/prefix/lib"
 cmake -S . -B "$trial/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DFF_WITH_PUBLIC=ON -DFF_WITH_CEF=ON -DFF_PACKAGE_CEF_VIEWS=ON -DCEF_ROOT="$trial/sdk" -DCMAKE_INSTALL_PREFIX=/usr
+  -DFF_WITH_CEF=ON -DCEF_ROOT="$trial/sdk" -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build "$trial/build" -j3
 ctest --test-dir "$trial/build" --output-on-failure
 stage=$(mktemp -d "$trial/stage.XXXXXX")
@@ -32,21 +32,13 @@ strip --strip-unneeded "$stage/usr/lib/ff-player-native/libcef.so"
 sandbox="$stage/usr/lib/ff-player-native/chrome-sandbox"
 test "$(stat -c %u:%g "$sandbox")" = 0:0
 chmod 4755 "$sandbox"
-# bwrap exposes only engine/ to artwork. Hard links let both the offscreen
-# host and the windowed worker use the exact same CEF binaries on disk.
 root="$stage/usr/lib/ff-player-native"
 sh tools/build-cage-client.sh
-install -m755 build-cage-client/target/release/ff-cage-client "$root/ff-cage-client"
+install -m644 build-cage-client/target/release/libff_wayland.so "$root/"
 for license in LICENSE-MIT LICENSE-APACHE; do
   install -Dm644 "build-cage-client/licenses/$license" "$stage/usr/share/licenses/ff-player-native/wl-proxy/$license"
 done
 install -m644 maintenance/ffos-worker-packages.lock "$stage/usr/share/ff-player-native/"
-mkdir "$root/engine"
-for src in "$trial/sdk/Release/"* "$trial/sdk/Resources/"*; do
-  name=$(basename "$src")
-  cp -al "$root/$name" "$root/engine/$name"
-done
-ln "$root/ff-cef-views-engine" "$root/engine/chrome"
 python3 - "$stage/usr/share/ff-player-native/dependencies.json" "$pin" <<'PYTHON'
 import json
 from pathlib import Path
@@ -61,6 +53,14 @@ dependencies["cefViews"] = {
 }
 manifest.write_text(json.dumps(dependencies, indent=2) + "\n")
 PYTHON
+# Inspect the installed tree, including executable scripts outside lib/.
+find "$stage/usr" -type f -perm /111 | sort | sed "s|$stage||" > "$trial/installed-executables.txt"
+while IFS= read -r executable; do
+  case "$executable" in
+    /usr/lib/ff-player-native/ff-player-native|/usr/lib/ff-player-native/chrome-sandbox|/usr/lib/ff-player-native/chrome_crashpad_handler|*.so|*.so.*) ;;
+    *) echo "Unexpected executable: $executable" >&2; exit 1 ;;
+  esac
+done < "$trial/installed-executables.txt"
 # Archive only the install tree. mktemp makes the staging root mode 0700,
 # which tar would otherwise apply to the installation prefix.
 tar -czf "$trial/ff-player-cef-linux.tar.gz" -C "$stage" ./usr

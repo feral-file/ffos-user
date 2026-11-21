@@ -74,18 +74,9 @@ pacman recipe. Chromium's sandbox remains enabled. Bubblewrap separates each
 browser profile and private Wayland socket from the host's state, D-Bus and
 command socket. Online browser and decoder workers reach public HTTP(S) through the artwork proxy. It requires iproute2 on the host. Offline workers have no live network.
 
-The old CEF backend is an explicit `FF_WITH_CEF=ON` rollback/diagnostic build,
-named `ff-player-cef-rollback`; it is not the production target. Do not activate
-two normal playback owners. The offscreen diagnostic cannot enforce the global artwork permissions. For extensionless media, provide an explicit MIME type so it can select the native decoder without probing the source. See the [local broker contract](protocol/CACHE.md).
-
 ## Isolated device test
 
-Use separate state and socket directories. The socket parent must be owned by
-the runtime UID and mode 0700. Do not point this build at an existing Chromium
-profile. `tools/legacy-export.mjs` exports through the old player's live storage
-APIs. `tools/migrate-legacy.py` validates and atomically imports into a new native
-state directory; see [migration and rollback](docs/MIGRATION.md) for supported
-records, refusal cases and the still-incomplete coordinated activation.
+Use a fresh state directory and a socket directory owned by the runtime UID with mode 0700.
 
 ```sh
 AMD_DEBUG=nodcc SDL_VIDEODRIVER=wayland \
