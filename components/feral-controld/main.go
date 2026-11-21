@@ -114,7 +114,10 @@ type app struct {
 	MintPairing       mintpairing.Service
 	// KioskReplay, OfflineCacheService, and OfflineCacheStaticServer may
 	// all be nil (feature disabled via config.OfflineCacheConfig).
-	KioskReplay              offlinecache.KioskReplay
+	KioskReplay offlinecache.KioskReplay
+	// ReplayInternet is the internet verdict kiosk replay's remembered-scope
+	// restore is gated on (see internetVerdict). Nil when replay is not wired.
+	ReplayInternet           *internetVerdict
 	OfflineCacheService      offlinecache.Service
 	OfflineCacheStaticServer offlinecache.StaticServer
 	// OfflineCacheNotifier's shutdown (its background WS-delivery worker,
@@ -445,6 +448,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Logger.Error("Failed to get connectivity status", zap.Error(err))
 	} else {
 		app.Logger.Info("Connectivity status", zap.Bool("connected", connected))
+		// The mediator applies no verdict until the first connectivity edge
+		// or cold probe, which on a boot can come after the kiosk attaches;
+		// this read is the one answer available before CDP starts below.
+		if app.ReplayInternet != nil {
+			app.ReplayInternet.seed(connected)
+		}
 	}
 	// Single snapshot: relayer_ready and topic_id must come from the SAME
 	// write, not two separate GetState() field reads racing a concurrent
@@ -650,9 +659,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// no page JS: it arms Fetch interception on offlinecache's own CDP
 		// socket, and it must be armed as early as possible so the reloaded
 		// document's asset requests are intercepted rather than escaping to
-		// the live network. Its COMPANION half — re-applying the previously
-		// enabled item scope, which does need a hydrated page to resolve what
-		// is playing — is the "replay-scope-resync" reconciler instead; see
+		// the live network. While the device is known to have no internet it
+		// also re-arms the scope remembered on disk from the last successful
+		// sync, which is what serves a kept work to the first load after a
+		// boot with no network. Its COMPANION half —
+		// syncing scope to what is actually playing, which does need a
+		// hydrated page — is the "replay-scope-resync" reconciler instead; see
 		// replayScopeResyncReconciler for why splitting them is load-bearing.
 		//
 		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
@@ -784,6 +796,51 @@ func resolveMDNSDeviceInfo(os wrapper.OS, json wrapper.JSON, claim state.ClaimIn
 	}
 }
 
+// internetVerdict holds sys-monitord's internet-reachability answer for kiosk
+// replay: unknown until the startup read (seed) or the mediator's first
+// applied verdict (observe), then the latest one. Replay restores its
+// remembered scope on a kiosk attach only while this says offline; unknown
+// reads as "not offline", so a failed startup read keeps the attach exactly
+// as it was before the remembered scope existed.
+type internetVerdict struct{ state atomic.Int32 }
+
+const (
+	internetUnknown int32 = iota
+	internetOnline
+	internetOffline
+)
+
+func internetState(connected bool) int32 {
+	if connected {
+		return internetOnline
+	}
+	return internetOffline
+}
+
+// observe records an applied verdict; it always wins.
+func (v *internetVerdict) observe(connected bool) { v.state.Store(internetState(connected)) }
+
+// seed records the startup read unless a verdict already arrived.
+func (v *internetVerdict) seed(connected bool) {
+	v.state.CompareAndSwap(internetUnknown, internetState(connected))
+}
+
+func (v *internetVerdict) offline() bool { return v.state.Load() == internetOffline }
+
+// restoredScopeDropper is kiosk replay's optional "internet is back" seam,
+// named here because initializeApp's local `context` shadows the package.
+type restoredScopeDropper interface {
+	DropRestoredScope(ctx context.Context)
+}
+
+// attachContext and restoredScopeNotifier name kiosk replay's optional
+// "remembered scope armed" seam, for the same reason.
+type attachContext = context.Context
+
+type restoredScopeNotifier interface {
+	SetOnScopeRestored(notify func(ctx context.Context))
+}
+
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
 	logger.Info("Getting connectivity status")
 
@@ -854,7 +911,10 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // This is the half of the reconnect resync that cannot run inline on the CDP
 // connect callback next to AttachOnReconnect. AttachOnReconnect resets scope
 // (a new top-level socket starts with Fetch disabled — see replayer.attachRoot)
-// and deliberately does not re-apply it; something must call SyncPlaylist.
+// and, only with no internet, re-arms the scope remembered from the last
+// successful sync as a pass-through-on-miss head start
+// (offlinecache/replayscope.go); the scope
+// for what is actually on screen still needs something to call SyncPlaylist.
 // ForceRefresh is that something, but the pass it triggers resolves what is
 // playing via statusPoller.FetchPlayerStatus, which evaluates
 // window.handleCDPRequest in the page. Fired inline at connect time that
@@ -865,9 +925,9 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // the resync exists to close. As a reconciler it runs once the new document
 // has installed its command handler, so the status fetch can actually answer.
 //
-// Nothing is lost by deferring it: scope is disabled between attach and
-// handler-ready either way, so assets fetched in that window miss
-// interception regardless of when this runs.
+// Nothing is lost by deferring it: between attach and handler-ready scope is
+// off (or, with no internet, only the remembered scope is armed) either way,
+// so the window is the same regardless of when this runs.
 //
 // Known residual, deliberately accepted: the generation-ready worker gates on
 // StageHandler, which proves window.handleCDPRequest is INSTALLED, not that
@@ -1353,6 +1413,39 @@ func initializeApp(
 		poller.SetSeriesPlaybackSource(seriesPlaybackSource)
 	} else {
 		logger.Warn("Command handler does not support series playback status wiring")
+	}
+	// Kiosk replay restores its remembered scope on attach only while the
+	// device is known to have no internet (feral-file/feral-file#3635); it
+	// reads the same applied verdict media health does, plus the startup
+	// read in run(). Type-asserted like the other optional seams, so the
+	// KioskReplay interface and its mocks stay as they are.
+	var replayInternet *internetVerdict
+	if sink, ok := kioskReplay.(interface{ SetOffline(func() bool) }); ok {
+		replayInternet = &internetVerdict{}
+		internetObservers = append(internetObservers, replayInternet.observe)
+		sink.SetOffline(replayInternet.offline)
+		// A scope restored while offline is dropped once internet is back,
+		// after the verdict above is recorded so no later attach restores
+		// it again. Off the mediator's goroutine: it waits for the playback
+		// lock and sends to the kiosk.
+		// The kiosk's first load of the work on a no-network start runs
+		// before replay can be armed, and fails; once the remembered scope
+		// is in force, ask the player to load it again rather than leave
+		// the screen black until the player's own retry 15s later.
+		// The callback's context ends at the next kiosk attach, so a
+		// refresh still waiting on the player never reaches a later page.
+		if notifier, ok := kioskReplay.(restoredScopeNotifier); ok {
+			notifier.SetOnScopeRestored(func(attachCtx attachContext) {
+				go devicectl.RefreshArtworkAfterReplayRestore(attachCtx, executor, logger)
+			})
+		}
+		if dropper, ok := kioskReplay.(restoredScopeDropper); ok {
+			internetObservers = append(internetObservers, func(connected bool) {
+				if connected {
+					go dropper.DropRestoredScope(context)
+				}
+			})
+		}
 	}
 	// Media health (#304, #392, docs/media-health.md): the cast-time L0 pass
 	// replaces the former source preflight — a displayPlaylist whose every
@@ -1952,6 +2045,7 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
+		ReplayInternet:           replayInternet,
 		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
