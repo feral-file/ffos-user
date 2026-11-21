@@ -232,6 +232,22 @@ void PublicBrowser::message(const Json& m) {
       send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
       send("Target.setAutoAttach",
            {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
+      if (!bundled_ && occurrence_.display.value("autoPlay", true)) {
+        // The Chromium switch permits play() without a gesture. Pages that
+        // omit the autoplay attribute still need an initial play request.
+        send("Page.addScriptToEvaluateOnNewDocument",
+             {{"worldName", "ff-artwork-autoplay"}, {"source", R"JS(
+               (() => {
+                 if (window !== window.top) return;
+                 const attempted = new WeakSet();
+                 document.addEventListener('canplay', ({target: video}) => {
+                   if (!(video instanceof HTMLVideoElement) || attempted.has(video)) return;
+                   attempted.add(video);
+                   if (video.paused) video.play().catch(() => {});
+                 }, true);
+               })();
+             )JS"}}, child);
+      }
       send("Runtime.runIfWaitingForDebugger", {}, child);
       send("Page.navigate",
            {{"url", bundled_ ? Json(bundle_prefix_ +

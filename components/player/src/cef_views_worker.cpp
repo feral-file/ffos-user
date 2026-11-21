@@ -2,6 +2,8 @@
 // inherited engine pipes. A probe profile loads the fixed benchmark directly.
 #include "include/cef_app.h"
 #include "include/cef_client.h"
+#include "include/cef_dialog_handler.h"
+#include "include/cef_permission_handler.h"
 #include "include/cef_command_line.h"
 #include "include/cef_task.h"
 #include "include/views/cef_browser_view.h"
@@ -20,9 +22,33 @@
 namespace {
 volatile std::sig_atomic_t stopping=0;
 void stop(int){stopping=1;}
-class Client final : public CefClient,public CefLifeSpanHandler {
+class Client final : public CefClient,public CefLifeSpanHandler,
+                     public CefPermissionHandler, public CefDialogHandler {
  public:
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override{return this;}
+  CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
+  CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+
+  bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>,
+                                      const CefString&, uint32_t,
+                                      CefRefPtr<CefMediaAccessCallback> callback) override {
+    callback->Cancel();
+    return true;
+  }
+
+  bool OnShowPermissionPrompt(CefRefPtr<CefBrowser>, uint64_t, const CefString&,
+                              uint32_t, CefRefPtr<CefPermissionPromptCallback> callback) override {
+    callback->Continue(CEF_PERMISSION_RESULT_DENY);
+    return true;
+  }
+
+  bool OnFileDialog(CefRefPtr<CefBrowser>, FileDialogMode, const CefString&, const CefString&,
+                    const std::vector<CefString>&, const std::vector<CefString>&,
+                    const std::vector<CefString>&, CefRefPtr<CefFileDialogCallback> callback) override {
+    callback->Cancel();
+    return true;
+  }
+
   // This process owns one artwork. A popup must never take the display or
   // trigger the main window's shutdown path when the host dismisses it.
   bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString&,
