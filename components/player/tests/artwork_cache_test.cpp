@@ -14,6 +14,15 @@
 #include <fstream>
 #include <iostream>
 
+// Keep the retention tests independent of the build machine's free space.
+extern "C" int __wrap_statvfs(const char*, struct statvfs* st) {
+  *st = {};
+  st->f_frsize = 4096;
+  st->f_blocks = 8U << 20;
+  st->f_bavail = 4U << 20;
+  return 0;
+}
+
 namespace fs = std::filesystem;
 namespace {
 void check(bool condition, const char* description) {
