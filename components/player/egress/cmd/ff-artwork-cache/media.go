@@ -82,9 +82,6 @@ func fill(ctx context.Context, root string, r request, client *http.Client) erro
 	if err != nil {
 		return err
 	}
-	if req.URL.User != nil || (req.URL.Scheme != "https" && req.URL.Scheme != "http") {
-		return nil
-	}
 	req.Header.Set("User-Agent", r.UserAgent)
 	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)

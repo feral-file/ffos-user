@@ -489,10 +489,14 @@ void PublicBrowser::poll() {
       } else {
         ++cache_hits_;
         cache_coverage_ = reply.metadata.value("complete", false);
+        // Locally replayed bytes already have an owner. Only live HTTP
+        // responses should populate the browser's disposable artwork cache.
+        auto headers = reply.metadata.at("headers");
+        headers.push_back({{"name", "Cache-Control"}, {"value", "no-store"}});
         send("Fetch.fulfillRequest",
              {{"requestId", reply.request},
               {"responseCode", reply.metadata.at("status")},
-              {"responseHeaders", reply.metadata.at("headers")},
+              {"responseHeaders", headers},
               {"body", base64(reply.body)}},
              reply.session);
       }

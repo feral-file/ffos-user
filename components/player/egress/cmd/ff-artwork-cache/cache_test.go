@@ -108,3 +108,18 @@ func TestSharedRetention(t *testing.T) {
 		t.Fatalf("expired browser retained: %v", err)
 	}
 }
+
+func TestLocalSourcesNeverTouchCache(t *testing.T) {
+	for _, source := range []string{"/home/feralfile/art.mp4", "./art.mp4", "file:///home/feralfile/art.mp4", "fd://3", "data:image/png;base64,AA==", "ff-render://bundle/setup-artwork/index.html"} {
+		t.Run(source, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "cache")
+			r := request{Key: strings.Repeat("a", 64), URL: source, MaxBytes: 100, MaxAgeDays: 30}
+			if err := run(context.Background(), root, r, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatalf("local source touched cache: %v", err)
+			}
+		})
+	}
+}

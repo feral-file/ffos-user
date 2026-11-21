@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -47,6 +48,15 @@ func main() {
 }
 
 func run(ctx context.Context, root string, r request, client *http.Client) error {
+	if r.Key != "" {
+		u, err := url.Parse(r.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+			return nil
+		}
+		if !validKey(r.Key) {
+			return errors.New("invalid cache key")
+		}
+	}
 	media := filepath.Join(root, "media")
 	if err := os.MkdirAll(media, 0700); err != nil {
 		return err
@@ -71,9 +81,6 @@ func run(ctx context.Context, root string, r request, client *http.Client) error
 	if r.Key == "" {
 		_, err = prune(root, r, 0, time.Now())
 		return err
-	}
-	if !validKey(r.Key) {
-		return errors.New("invalid cache key")
 	}
 	return fill(ctx, root, r, client)
 }
