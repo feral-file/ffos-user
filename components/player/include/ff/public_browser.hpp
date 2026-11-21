@@ -98,7 +98,12 @@ class PublicBrowser {
   uint64_t compositor_gpu_passes_ = 0;
   bool health_pending_ = false;
   std::chrono::steady_clock::time_point health_at_ = std::chrono::steady_clock::now();
-  size_t cache_pending_ = 0;
+  struct PausedRequest {
+    std::string session, request;
+    Json query;
+  };
+  std::deque<PausedRequest> cache_queue_;
+  bool cache_reading_ = false;
   uint64_t cache_hits_ = 0, cache_misses_ = 0, unsupported_worker_targets_ = 0;
   std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
   void send(const std::string&, Json = Json::object(), const std::string& session = "",

@@ -1,5 +1,5 @@
 [Unit]
 Description=Native player command socket is ready
 # Legacy unit name retained for diagnostics/rollback; this target pulls in no
-# services. player-ready-check.sh starts it after hello + health.get. The kiosk
+# services. The kiosk starts it after hello + health.get. The kiosk
 # stops it on exit. Controld and watchdog run independently on headless devices.

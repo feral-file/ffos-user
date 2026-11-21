@@ -10,7 +10,7 @@
 #   1. Every user shell script parses (bash -n).
 #   2. feral-controld runs unconditionally: started --no-block by
 #      .start-services.sh and never tied to chromium-ready.target.
-#   3. chromium-ready.target stays a pure signal owned by player-ready-check.sh.
+#   3. chromium-ready.target stays a pure signal owned by the kiosk readiness probe.
 #   4. start-kiosk.sh keeps the rotation retry and its wait_for_display gate
 #      waits until some DRM connector reads "connected" — "unknown" counts as
 #      no-display (FF1's amdgpu reports it persistently on empty connectors;
@@ -240,7 +240,7 @@ assert_contains "$units_dir/chromium-kiosk.service" \
 
 # The native runtime has no web app bundle cache to purge.
 assert_contains "$kiosk_script" '/usr/lib/ff-player-native/ff-player-native'
-assert_contains "$kiosk_script" 'player-ready-check.sh &'
+assert_contains "$kiosk_script" 'signal_player_ready &'
 assert_not_contains "$kiosk_script" 'exec /usr/bin/chromium'
 assert_not_contains "$units_dir/chromium-kiosk.service" 'Requires=feral-player.service'
 assert_not_contains "$start_services" 'start "feral-player.service"'

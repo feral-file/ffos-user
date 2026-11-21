@@ -351,13 +351,12 @@ void PublicBrowser::message(const Json& m) {
                   {"headers", network.value("headers", Json::object())}};
     if (mixed_cache_ && !offline_ && !local_chain)
       mixed_requests_[session + "\n" + request] = query;
-    if (cache_pending_ >= 64 ||
-        !cache_request(cache_, bundle_root_, session, request, query, false, false, capture_)) {
-      send("Fetch.failRequest", {{"requestId", request}, {"errorReason", "InsufficientResources"}},
-           session);
-      fail("Resource/policy request queue exceeded its limit");
-    } else
-      ++cache_pending_;
+    if (cache_queue_.size() + cache_reading_ >= 64) {
+      mixed_requests_.erase(session + "\n" + request);
+      send("Fetch.failRequest", {{"requestId", request}, {"errorReason", "InsufficientResources"}}, session);
+    } else {
+      cache_queue_.push_back({session, request, std::move(query)});
+    }
   } else if (method == "Network.requestWillBeSent" && session == session_ &&
              p.contains("redirectResponse")) {
     if (p.at("redirectResponse").value("url", "") == navigation_url_)
@@ -490,9 +489,22 @@ void PublicBrowser::poll() {
       buffer_.erase(0, end + 1);
       message(value);
     }
-    auto cached = cache_->take();
+    // Only materialize one archived response at a time. A 32 MiB range
+    // expands to almost 43 MiB on the pipe; drain it before admitting the
+    // next response so parallel fetches cannot exhaust the output budget.
+    if (!cache_reading_ && !cache_queue_.empty() && queued_bytes_ < 1024 * 1024) {
+      auto& next = cache_queue_.front();
+      if (cache_request(cache_, bundle_root_, next.session, next.request, next.query, false, false, capture_)) {
+        cache_reading_ = true;
+      } else {
+        mixed_requests_.erase(next.session + "\n" + next.request);
+        send("Fetch.failRequest", {{"requestId", next.request}, {"errorReason", "InsufficientResources"}}, next.session);
+      }
+      cache_queue_.pop_front();
+    }
+    auto cached = queued_bytes_ < 1024 * 1024 ? cache_->take() : std::deque<CacheReply>{};
     for (auto& reply : cached) {
-      if (cache_pending_) --cache_pending_;
+      cache_reading_ = false;
       const auto mixed_key = reply.session + "\n" + reply.request;
       if (reply.error.empty() && reply.metadata.contains("nativeMime") &&
           reply.session == session_ && !bundled_) {
