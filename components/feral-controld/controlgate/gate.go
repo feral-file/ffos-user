@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 )
 
 // Wire is the §10 reply object on both routes: {"v":1,"jwe":"<compact>"}.
@@ -35,6 +36,8 @@ type Gate struct {
 	handler commandrouter.Handler
 	logger  *zap.Logger
 
+	screen          screenshot.Capturer
+	screenSlot      chan struct{}
 	publisher       *Publisher
 	onOwnerEnrolled func()
 	onReleased      func()
@@ -44,7 +47,7 @@ type Gate struct {
 // New builds a gate over auth that executes admitted commands on handler
 // (the storm-gated router, the same one plaintext commands use).
 func New(auth *control.Authority, handler commandrouter.Handler, logger *zap.Logger) *Gate {
-	return &Gate{auth: auth, handler: handler, logger: logger}
+	return &Gate{auth: auth, handler: handler, logger: logger, screenSlot: make(chan struct{}, 1)}
 }
 
 // Authority returns the underlying authority.
@@ -154,7 +157,12 @@ func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin c
 	g.logger.Info("Control request admitted",
 		zap.String("command", adm.Command), zap.String("controller", adm.Principal.ControllerID),
 		zap.String("role", string(adm.Principal.Role)))
-	reply, err := g.execute(ctx, adm)
+	var reply string
+	if adm.Command == control.CmdCaptureScreenshot {
+		reply, err = g.captureScreenshot(ctx, adm, origin)
+	} else {
+		reply, err = g.execute(ctx, adm)
+	}
 	if err != nil {
 		// Only an entropy/encoding failure gets here: nothing can be
 		// encrypted, so the caller gets a public error.

@@ -824,7 +824,7 @@ func TestHandleScreenshot_SuccessWithCustomBounds(t *testing.T) {
 	assert.Equal(t, screenshot.Bounds{Width: 800, Height: 800}, ts.capturer.bounds)
 	assert.Equal(t, "image/png", w.Header().Get("Content-Type"))
 	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
-	assert.Equal(t, "chromium-cdp", w.Header().Get("X-FF1-Capture-Source"))
+	assert.Equal(t, "wayland-compositor", w.Header().Get("X-FF1-Capture-Source"))
 	assert.Equal(t, "800", w.Header().Get("X-FF1-Screenshot-Width"))
 	assert.Equal(t, "450", w.Header().Get("X-FF1-Screenshot-Height"))
 	assert.Equal(t, "abc123", w.Header().Get("X-FF1-Capture-SHA256"))

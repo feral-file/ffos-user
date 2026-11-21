@@ -14,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
@@ -129,11 +130,12 @@ func (c *controlWiring) notificationHandles(r relayer.Relayer, w ws.WS, logger *
 
 // wire plugs the gate into the hub, the mediator and the executor.
 func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler, r relayer.Relayer, w ws.WS,
-	h hub.Hub, m mediator.Mediator, executor devicectl.Executor, logger *zap.Logger) {
+	h hub.Hub, m mediator.Mediator, executor devicectl.Executor, screen screenshot.Capturer, logger *zap.Logger) {
 	if c == nil {
 		return
 	}
 	gate := controlgate.New(c.auth, handler, logger)
+	gate.SetScreenshotCapturer(screen)
 	publisher := controlgate.NewPublisher(r, w, logger)
 	gate.SetPublisher(publisher)
 	gates := []*controlgate.Gate{gate}
