@@ -210,6 +210,20 @@ void PublicBrowser::fail(const std::string& error) {
   if (!decoration_ && !retry_selected) playback_.failed(id, error);
   if (pid_ > 0) kill(-pid_, SIGKILL);
 }
+void PublicBrowser::continue_live(const std::string& request, const std::string& session, const Json& network) {
+  auto url = network.at("url").get<std::string>();
+  auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, url);
+  Json params = {{"requestId", request}};
+  if (route.url != url) params["url"] = route.url;
+  if (!route.user_agent.empty()) {
+    Json headers = Json::array();
+    for (const auto& [name,value] : network.at("headers").items())
+      if (strcasecmp(name.c_str(), "User-Agent")) headers.push_back({{"name",name},{"value",value}});
+    headers.push_back({{"name","User-Agent"},{"value",route.user_agent}});
+    params["headers"] = headers;
+  }
+  send("Fetch.continueRequest", params, session);
+}
 void PublicBrowser::message(const Json& m) {
   if (m.contains("id")) {
     auto it = replies_.find(m["id"].get<uint64_t>());
@@ -316,17 +330,7 @@ void PublicBrowser::message(const Json& m) {
     const bool local_chain = virtual_cache_source(url);
     const bool replay = capture_replay_ || local_chain || mixed_cache_;
     if (!replay) {
-      auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, url);
-      Json params = {{"requestId", request}};
-      if (route.url != url) params["url"] = route.url;
-      if (!route.user_agent.empty()) {
-        Json headers = Json::array();
-        for (const auto& [name,value] : network.at("headers").items())
-          if (strcasecmp(name.c_str(), "User-Agent")) headers.push_back({{"name",name},{"value",value}});
-        headers.push_back({{"name","User-Agent"},{"value",route.user_agent}});
-        params["headers"] = headers;
-      }
-      send("Fetch.continueRequest", params, session);
+      continue_live(request, session, network);
       return;
     }
     Json query = {{"source", occurrence_.item.at("source")},
@@ -336,7 +340,7 @@ void PublicBrowser::message(const Json& m) {
     if (mixed_cache_ && !offline_ && !local_chain)
       mixed_requests_[session + "\n" + request] = query;
     if (cache_pending_ >= 64 ||
-        !cache_request(cache_, bundle_root_, session, request, query, false, !replay)) {
+        !cache_request(cache_, bundle_root_, session, request, query)) {
       send("Fetch.failRequest", {{"requestId", request}, {"errorReason", "InsufficientResources"}},
            session);
       fail("Resource/policy request queue exceeded its limit");
@@ -478,21 +482,6 @@ void PublicBrowser::poll() {
     for (auto& reply : cached) {
       if (cache_pending_) --cache_pending_;
       const auto mixed_key = reply.session + "\n" + reply.request;
-      if (reply.policy) {
-        mixed_requests_.erase(mixed_key);
-        Json params = {{"requestId", reply.request}};
-        // Ordinary playback can continue through a controld restart. A policy
-        // outage keeps the original request; it never invents a replacement.
-        if (reply.error.empty()) {
-          params["url"] = reply.metadata.at("requestUrl");
-          if (reply.metadata.contains("requestHeaders") &&
-              !reply.metadata["requestHeaders"].empty())
-            params["headers"] = reply.metadata["requestHeaders"];
-        }
-        send("Fetch.continueRequest", params, reply.session);
-        continue;
-      }
-
       if (reply.error.empty() && reply.metadata.contains("nativeMime") &&
           reply.session == session_ && !bundled_) {
         Json classified = occurrence_.item;
@@ -506,10 +495,7 @@ void PublicBrowser::poll() {
       if (!reply.error.empty() && mixed_requests_.contains(mixed_key)) {
         auto query = std::move(mixed_requests_.at(mixed_key));
         mixed_requests_.erase(mixed_key);
-        require(
-            cache_request(cache_, bundle_root_, reply.session, reply.request, query, false, true),
-            "cache_backpressure", "Live fallback policy queue exceeded its limit");
-        ++cache_pending_;
+        continue_live(reply.request, reply.session, query);
         ++cache_misses_;
         continue;
       }

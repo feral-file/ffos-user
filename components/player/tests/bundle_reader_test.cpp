@@ -52,6 +52,6 @@ int main() {
   record["automatic"]=false;
   record["resources"][1].erase("browserPolicyVersion");
   std::ofstream(record_file)<<record;
-  check(!read(url,empty,false,true).metadata.contains("replayMode"));
+  check(!read(url,empty,false,true).error.empty());
   fs::remove_all(root);
 }

@@ -48,7 +48,7 @@ class MediaClient {
   void start_live();
   void start(int cached_fd = -1);
   std::string worker_, source_override_, user_agent_;
-  bool policy_pending_ = false, mixed_cache_ = false;
+  bool mixed_cache_ = false;
   std::string bundle_root_;
   bool fallback_live();
   std::shared_ptr<CacheInbox> cache_;

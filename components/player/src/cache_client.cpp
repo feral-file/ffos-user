@@ -90,7 +90,10 @@ struct Pool {
       if (!entry) return;
       auto type = entry->value("contentType", "");
       if (type.empty()) type = entry->value("sniffedContentType", "");
-      if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) return;
+      if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
+        require(record.value("automatic", false), "bundle", "Downloaded browser capture needs recapture for original response headers");
+        return;
+      }
       reply.metadata["replayMode"] = record.value("automatic", false) ? "mixed" : "isolated";
       return;
     }

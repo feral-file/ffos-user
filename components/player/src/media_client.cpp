@@ -163,15 +163,8 @@ bool MediaClient::fallback_live() {
   if (!mixed_cache_ || !playback_.online() || virtual_cache_source(occurrence_.item.at("source")))
     return false;
   mixed_cache_ = false;
-  policy_pending_ = true;
-  std::cerr << "Automatic native cache unavailable; retrying approved live source\n";
-  require(cache_request(cache_, bundle_root_, "", id,
-                        {{"source", occurrence_.item.at("source")},
-                         {"url", occurrence_.item.at("source")},
-                         {"method", "GET"},
-                         {"headers", Json::object()}},
-                        false, true),
-          "policy_backpressure", "Cannot enqueue live fallback policy");
+  start_live();
+  received_ = std::chrono::steady_clock::now();
   return true;
 }
 void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
@@ -186,43 +179,27 @@ void MediaClient::poll(bool hold, const Json* stage,bool allow_direct) {
         return;
       }
       auto& reply = replies.front();
-      if (policy_pending_) {
-        policy_pending_ = false;
-        if (reply.error.empty()) {
-          source_override_ = reply.metadata.value("requestUrl", "");
-          if (reply.metadata.contains("requestHeaders"))
-            for (const auto& field : reply.metadata["requestHeaders"]) {
-              auto name = field.value("name", "");
-              std::transform(name.begin(), name.end(), name.begin(),
-                             [](unsigned char c) { return std::tolower(c); });
-              if (name == "user-agent") user_agent_ = field.value("value", user_agent_);
-            }
-        }
-        start_live();
-        received_ = std::chrono::steady_clock::now();
-      } else {
-        if (!reply.error.empty() && fallback_live()) return;
-        require(reply.error.empty(), "cache_unavailable", reply.error);
-        auto path = reply.metadata.at("path").get<std::string>();
-        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-        if (fd < 0 && fallback_live()) return;
-        require(fd >= 0, "cache_unavailable", "Cached media was removed before it could be opened");
-        struct stat info{};
-        if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
-            info.st_size != reply.metadata.at("size")) {
-          close(fd);
-          if (fallback_live()) return;
-          throw Error("cache_integrity", "Cached media inode or size changed");
-        }
-        try {
-          start(fd);
-        } catch (...) {
-          close(fd);
-          throw;
-        }
+      if (!reply.error.empty() && fallback_live()) return;
+      require(reply.error.empty(), "cache_unavailable", reply.error);
+      auto path = reply.metadata.at("path").get<std::string>();
+      int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+      if (fd < 0 && fallback_live()) return;
+      require(fd >= 0, "cache_unavailable", "Cached media was removed before it could be opened");
+      struct stat info{};
+      if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) ||
+          info.st_size != reply.metadata.at("size")) {
         close(fd);
-        received_ = std::chrono::steady_clock::now();
+        if (fallback_live()) return;
+        throw Error("cache_integrity", "Cached media inode or size changed");
       }
+      try {
+        start(fd);
+      } catch (...) {
+        close(fd);
+        throw;
+      }
+      close(fd);
+      received_ = std::chrono::steady_clock::now();
     }
     for (int n = 0; n < 64; ++n) {
       auto packet = receive_media(socket_);
