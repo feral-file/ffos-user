@@ -21,17 +21,12 @@ var (
 	config     *Config
 )
 
-type CDPConfig struct {
-	Endpoint string `json:"endpoint"`
-}
-
 type VmagentConfig struct {
 	URL string `json:"url"`
 }
 
 // Config represents the configuration for the watchdog daemon
 type Config struct {
-	CDPConfig     *CDPConfig           `json:"cdp"`
 	SentryConfig  *logger.SentryConfig `json:"sentry"`
 	VmagentConfig *VmagentConfig       `json:"vmagent"`
 }
@@ -53,11 +48,6 @@ func LoadConfig(logger *zap.Logger) error {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return fmt.Errorf("failed to parse config file: %w", err)
-	}
-
-	// Set default endpoint if not provided
-	if c.CDPConfig == nil || c.CDPConfig.Endpoint == "" {
-		return fmt.Errorf("cdp_endpoint is not provided")
 	}
 
 	config = &c

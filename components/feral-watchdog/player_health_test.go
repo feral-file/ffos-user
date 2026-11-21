@@ -81,14 +81,11 @@ func TestNativeHealthValidatesProtocolNotArtwork(t *testing.T) {
 	}
 }
 
-func TestNativeMonitorIgnoresRetiredCDPReport(t *testing.T) {
-	m := NewChromiumMonitor("unused", zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
-	m.SetCDPStuck(true)
-	require.False(t, m.cdpStuck)
+func TestHealthySocketResetsRestartBudget(t *testing.T) {
+	path := useFallbackStateFile(t, CHROMIUM_MAX_FALLBACK_REBOOTS)
+	m := NewChromiumMonitor(zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	m.probe = func(context.Context) error { return nil }
 	require.NoError(t, m.check(context.Background()))
 	require.True(t, m.hasEverConnected)
-	// Unlike an HTTP /json/version reply, this probe has exercised exactly
-	// the host command event loop. No second daemon confirmation is needed.
-	require.True(t, m.cdpConfirmedHealthy)
+	require.NoFileExists(t, path)
 }

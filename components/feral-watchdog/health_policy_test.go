@@ -12,10 +12,9 @@ import (
 // Existing recovery-policy fixtures use an HTTP server as a controllable probe.
 // Production always probes the native command socket; it never calls CDP.
 func newHTTPPolicyTestMonitor(endpoint string, logger *zap.Logger, handler *CommandHandler) *ChromiumMonitor {
-	m := NewChromiumMonitor(endpoint, logger, handler)
-	m.nativeProtocol = false
+	m := NewChromiumMonitor(logger, handler)
 	m.probe = func(ctx context.Context) error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.cdpEndpoint+"/json/version", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/json/version", nil)
 		if err != nil {
 			return err
 		}

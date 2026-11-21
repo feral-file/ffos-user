@@ -16,7 +16,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-watchdog/logger"
-	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
 )
 
 const (
@@ -134,15 +133,11 @@ func main() {
 	})
 	defer gpuHandler.GracefulShutdown(ctx)
 
-	// Chromium monitor is constructed before the mediator so the mediator
-	// can route feral-controld's EVENT_CDP_STUCK signal to it
-	// (ffos-user#356) — this daemon stays the sole place that decides to
-	// restart chromium-kiosk.service or reboot.
-	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
+	chromiumMonitor := NewChromiumMonitor(log, commandHandler)
 	defer chromiumMonitor.Stop()
 
 	// Initialize mediator
-	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, chromiumMonitor, log)
+	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, log)
 	mediator.Start()
 	defer mediator.Stop()
 
@@ -198,12 +193,4 @@ func main() {
 	}
 
 	log.Info("feral-watchdog daemon shutdown complete")
-}
-
-func initCDPBestEffort(ctx context.Context, cdpClient cdp.ClientInterface, log *zap.Logger) bool {
-	if err := cdpClient.Init(ctx); err != nil {
-		log.Warn("CDP init unavailable; watchdog will retry on demand", zap.Error(err))
-		return false
-	}
-	return true
 }
