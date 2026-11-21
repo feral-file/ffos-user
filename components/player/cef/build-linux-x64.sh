@@ -43,9 +43,10 @@ sudo "$src/build/install-build-deps.sh" --no-prompt --no-chromeos-fonts \
 sdk="$src/cef/binary_distrib/ff-cef-sdk_minimal"
 grep -Fx "#define CEF_VERSION \"$version\"" "$sdk/include/cef_version.h"
 args="$src/out/Release_GN_x64/args.gn"
+# CEF writes assignments without spaces around the equals sign.
 while IFS= read -r setting; do
     grep -Fx "$setting" "$args"
-done < "$recipe/linux-x64.gn"
+done < <(sed 's/ = /=/' "$recipe/linux-x64.gn")
 test -s "$sdk/Release/libcef.so"
 test -x "$sdk/Release/chrome-sandbox"
 test -s "$sdk/Resources/icudtl.dat"
