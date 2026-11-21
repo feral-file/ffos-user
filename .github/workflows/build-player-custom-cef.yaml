@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   cef:
-    runs-on: ${{ fromJSON(vars.CEF_BUILD_RUNNER && toJSON(vars.CEF_BUILD_RUNNER) || '["self-hosted","macOS"]') }}
+    runs-on: ${{ vars.CEF_BUILD_RUNNER || 'self-hosted' }}
     timeout-minutes: 1440
     steps:
       - uses: actions/checkout@v4

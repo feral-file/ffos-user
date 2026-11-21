@@ -5,8 +5,8 @@ x64 SDK with Wayland, VA-API, and H.264/AAC and HEVC support. CEF's compatibilit
 file pins Chromium. GitHub Actions fetches the source into the runner's temporary
 directory. A player checkout contains only the recipe and build settings.
 
-The custom CEF workflow tries a self-hosted macOS runner using Docker's
-`linux/amd64` guest. Docker must already be running. The container uses Linux
+The custom CEF workflow requests the `self-hosted` label. On macOS it uses
+Docker's `linux/amd64` guest. Docker must already be running. The container uses Linux
 storage for the Chromium checkout and build. The preflight checks for 8 GiB
 of guest RAM and the build recipe requires 150 GiB of free guest disk space.
 On Apple silicon, Docker needs x64 translation enabled. A shared runner group
