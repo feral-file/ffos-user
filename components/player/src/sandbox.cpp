@@ -123,7 +123,9 @@ int launch_sandbox(int argc, char** argv) {
                     "--setenv", "SDL_VIDEODRIVER", "wayland", "--setenv", "SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR", "0",
                     "--setenv", "LD_LIBRARY_PATH", (root / "media").string(), "--setenv", "MALLOC_ARENA_MAX", "2",
                     "--setenv", "HOME", "/tmp"});
-      if (online) append(args, {"--setenv", "http_proxy", "http://127.0.0.1:17873"});
+      // libmpv uses libcurl, which selects its proxy by URL scheme.
+      if (online) append(args, {"--setenv", "http_proxy", "http://127.0.0.1:17873",
+                                "--setenv", "https_proxy", "http://127.0.0.1:17873"});
       append(child, {self, "--decode"});
     }
     args.insert(args.end(), child.begin(), child.end());

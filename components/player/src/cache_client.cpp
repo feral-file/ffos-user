@@ -98,7 +98,7 @@ struct Pool {
       return;
     }
     auto method = query.value("method", "");
-    require(method == "GET" || method == "HEAD", "bundle", "Unsupported replay method");
+    require(method == "GET" || method == "HEAD" || method == "OPTIONS", "bundle", "Unsupported replay method");
     std::string range;
     for (const auto& [name, value] : query.at("headers").items()) {
       if (!g_ascii_strcasecmp(name.c_str(), "Range")) range = value.get<std::string>();
@@ -109,12 +109,20 @@ struct Pool {
     const Json* found = nullptr;
     for (int hop = 0; hop < 16; ++hop) {
       found = nullptr;
+      const Json* head_fallback = nullptr;
       for (const auto& resource : record.at("resources")) {
-        if (resource.at("url") == url && resource.value("method", "GET") == "GET") {
+        if (resource.at("url") != url) continue;
+        auto captured_method = resource.value("method", "GET");
+        if (method == "HEAD" && captured_method == "GET") {
+          require(!head_fallback, "bundle", "Ambiguous GET for HEAD fallback");
+          head_fallback = &resource;
+        }
+        if (captured_method == method) {
           require(!found, "bundle", "Ambiguous capture entry");
           found = &resource;
         }
       }
+      if (!found) found = head_fallback;
       require(found, "bundle", "Resource absent from capture");
       if (record.value("automatic", false)) {
         auto expiry = g_date_time_new_from_iso8601(found->value("freshUntil", "").c_str(), nullptr);
@@ -133,7 +141,7 @@ struct Pool {
     // Controld's older manifests omit CSP and repeated response headers.
     // They can supply native media bytes, but never synthesize a browser response.
     auto mime = found->value("contentType", found->value("sniffedContentType", ""));
-    if (!job.open_file && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
+    if (!job.open_file && method == "GET" && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
       reply.metadata = {{"nativeMime", mime}};
       return;
     }
@@ -141,7 +149,7 @@ struct Pool {
     auto headers = found->value("headerFields", Json::array());
     reply.metadata = {{"status", found->value("status", 200)}, {"headers", headers},
                       {"complete", record.at("coverage").value("complete", false)}};
-    if (found->contains("redirectTo") || method == "HEAD") return;
+    if (found->contains("redirectTo") || method == "HEAD" || method == "OPTIONS") return;
     auto hash = found->at("sha256").get<std::string>();
     require(hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == hash.npos, "bundle", "Invalid blob digest");
     auto blob = root / "blobs" / hash;

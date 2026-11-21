@@ -30,9 +30,9 @@ int main() {
                  {"freshUntil","2099-01-01T00:00:00Z"},{"redirectTo","work/clip.mp4"}};
   Json record={{"item",{{"source",url}}},{"coverage",{{"complete",true}}},
                {"resources",Json::array({document,clip})},{"automatic",true}};
-  auto read=[&](std::string target,Json headers,bool file,bool policy) {
+  auto read=[&](std::string target,Json headers,bool file,bool policy,std::string method="GET") {
     auto inbox=std::make_shared<ff::CacheInbox>();
-    check(ff::cache_request(inbox,root,"session","request",{{"source",url},{"url",target},{"method","GET"},{"headers",headers}},file,policy));
+    check(ff::cache_request(inbox,root,"session","request",{{"source",url},{"url",target},{"method",method},{"headers",headers}},file,policy));
     for(int i=0;i<500;++i) {
       auto replies=inbox->take();
       if(!replies.empty()) return replies.front();
@@ -48,6 +48,16 @@ int main() {
   check(part.error.empty() && part.metadata.at("status")==206 && part.body=="ampl");
   auto past=read(asset,{{"Range","bytes=12-"}},false,false);
   check(past.error.empty() && past.metadata.at("status")==416 && past.body.empty());
+  check(read(asset,empty,false,false,"HEAD").body.empty());
+  for (auto method : {"HEAD", "OPTIONS"}) {
+    auto captured = clip;
+    captured["method"] = method;
+    captured["status"] = 204;
+    record["resources"].push_back(captured);
+    std::ofstream(record_file)<<record;
+    auto response = read(asset,empty,false,false,method);
+    check(response.error.empty() && response.metadata.at("status")==204 && response.body.empty());
+  }
   record["resources"][1]["freshUntil"]="2001-01-01T00:00:00Z";
   std::ofstream(record_file)<<Json{{"automaticCacheVersion",1},{"record",record}};
   check(!read(url,empty,false,true).metadata.contains("replayMode"));
