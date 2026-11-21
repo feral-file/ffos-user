@@ -8,7 +8,7 @@ ordinary Cage session runs one playback host. On homelab the legacy
 
 | Input | Rendering path |
 | --- | --- |
-| JPEG, PNG, AVIF and other raster images | libglycin in the media worker, with a separate sandboxed format loader |
+| JPEG, PNG, AVIF and other raster images | libmpv and FFmpeg in the sandboxed media worker |
 | Direct video or audio | libmpv with FFmpeg. VA-API depends on the stream profile and dimensions. |
 | SVG, web and software artwork | Windowed CEF Views. The host authorizes the initial window after the main document loads. |
 | GLB/glTF | CEF with the bundled model-viewer and its resource policy |
@@ -23,9 +23,7 @@ to preserve document state. Embedded HTML video remains inside CEF.
 ## Device and procedure
 
 Test hardware was homelab, Radeon 680M, FFOS 3.0.0, Linux 6.18.38-2-lts,
-Cage 0.3.1, HDMI-A-1 at 1920×1920 and 60 Hz. The device provides glycin
-2.1.5-2. The pinned FFOS snapshot's libheif package provides its AVIF/HEIF
-loader dependency. The media worker uses libmpv 0.42.0 and FFmpeg 8.1.3.
+Cage 0.3.1, HDMI-A-1 at 1920×1920 and 60 Hz. The earlier raster measurements below used glycin 2.1.5-2 and the device libheif package. The media worker uses libmpv 0.42.0 and FFmpeg 8.1.3.
 The CEF SDK is 156.0.8 with Chromium 156.0.8078.48.
 
 ```sh

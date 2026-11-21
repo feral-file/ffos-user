@@ -4,7 +4,7 @@ The comparison target is [shipping ff-player 3.0.1](https://github.com/feral-fil
 
 | Operation | Owner and behavior |
 | --- | --- |
-| Fit and fill | The host resolves the authored display settings, per-field permissions, per-occurrence adjustment and saved framing choice. Glycin and libmpv use the same destination geometry. Fit preserves the full frame with a matte. Fill crops at the center. |
+| Fit and fill | The host resolves the authored display settings, per-field permissions, per-occurrence adjustment and saved framing choice. The libmpv worker applies those settings to images and videos. Fit preserves the full frame with a matte. Fill crops at the center. |
 | Display rotation | Controld persists the mount orientation and changes Cage's output transform. This rotates the picture, pointer and labels together. The workers still honor image EXIF and video orientation metadata. |
 | Tombstone | The host uses the bundled PP Mori faces for artist, bold italic title and optional curator. Always-on and timed modes use the shipping bottom-left plaque. The timed mode includes a countdown. |
 | QR and pairing | The host paints the dimmer, instructions and code over the artwork, including over a directly presented CEF surface. Setup owns its optional animated backdrop. A separate QR worker would duplicate lifecycle and focus handling. |

@@ -102,6 +102,7 @@ void MediaClient::start(int cached_fd) {
         socket_,
         {{"method", "initialize"},
          {"source", source_override_.empty() ? occurrence_.item["source"] : Json(source_override_)},
+         {"rasterImage", native_raster(occurrence_.item)},
          {"httpUserAgent", user_agent_},
          {"width", bounds.width},
          {"height", bounds.height},
