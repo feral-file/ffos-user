@@ -50,7 +50,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& bundle_root, const std::string& resources,
                              const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
-                             bool render_ahead, bool allow_direct, Json streams)
+                             bool render_ahead, bool allow_direct, Json streams, std::shared_ptr<const Json> capture)
     : id(o.id),
       backend_(backend),
       max_submissions_(render_ahead ? 2 : 1),
@@ -72,7 +72,11 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
   try {
     std::filesystem::create_directories(profile_);
     auto source = occurrence_.item.at("source").get<std::string>();
-    streams_ = std::move(streams);
+    capture_ = std::move(capture);
+    // Online mixed-mode misses must reach the live origin without passing
+    // through a registered capture handler. Large GETs use the live path in
+    // that mode; offline and explicitly isolated occurrences use the stream.
+    if (offline_) streams_ = std::move(streams);
     if (!streams_.empty()) {
       // The launcher reads this file before entering the fresh sandbox.
       std::ofstream index(profile_ + "/stream-index.json");
@@ -348,7 +352,7 @@ void PublicBrowser::message(const Json& m) {
     if (mixed_cache_ && !offline_ && !local_chain)
       mixed_requests_[session + "\n" + request] = query;
     if (cache_pending_ >= 64 ||
-        !cache_request(cache_, bundle_root_, session, request, query)) {
+        !cache_request(cache_, bundle_root_, session, request, query, false, false, capture_)) {
       send("Fetch.failRequest", {{"requestId", request}, {"errorReason", "InsufficientResources"}},
            session);
       fail("Resource/policy request queue exceeded its limit");

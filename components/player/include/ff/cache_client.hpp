@@ -10,6 +10,7 @@ struct CacheReply {
   std::string session, request, error;
   bool policy = false;
   Json metadata;
+  std::shared_ptr<const Json> capture;
   std::string body;
 };
 struct CacheInbox {
@@ -27,6 +28,6 @@ struct CacheInbox {
 };
 bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& socket,
                    const std::string& session, const std::string& request, const Json& params,
-                   bool open_file = false, bool policy = false);
+                   bool open_file = false, bool policy = false, std::shared_ptr<const Json> capture = {});
 std::string base64(const std::string& bytes);
 }  // namespace ff

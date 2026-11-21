@@ -33,6 +33,7 @@ struct Job {
   std::shared_ptr<CacheInbox> inbox;
   std::string root, session, request, payload;
   bool open_file = false, policy = false;
+  std::shared_ptr<const Json> capture;
 };
 struct Pool {
   std::mutex mutex;
@@ -58,19 +59,23 @@ struct Pool {
     auto source = query.at("source").get<std::string>();
     auto url = query.at("url").get<std::string>();
     auto root = std::filesystem::path(job.root);
-    char* key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, source.data(), source.size());
-    auto path = root / "items" / (std::string(key) + ".json");
-    g_free(key);
     reply.metadata = {{"requestUrl", url}};
     if (job.policy && url != source) return;
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream && errno == ENOENT && job.policy) return;
-    require(stream.good() && std::filesystem::file_size(path) <= 16 * 1024 * 1024, "bundle", "Cannot read capture manifest");
-    auto manifest = Json::parse(stream);
-    const bool wrapped = manifest.value("automaticCacheVersion", 0) != 0;
-    if (wrapped) require(manifest.at("automaticCacheVersion") == 1 && manifest.contains("record") &&
-                         manifest.at("record").value("automatic", false), "bundle", "Unsupported automatic capture");
-    const auto& record = wrapped ? manifest.at("record") : manifest;
+    auto capture = job.capture;
+    if (!capture) {
+      char* key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, source.data(), source.size());
+      auto path = root / "items" / (std::string(key) + ".json");
+      g_free(key);
+      std::ifstream stream(path, std::ios::binary);
+      if (!stream && errno == ENOENT && job.policy) return;
+      require(stream.good() && std::filesystem::file_size(path) <= 16 * 1024 * 1024, "bundle", "Cannot read capture manifest");
+      auto manifest = Json::parse(stream);
+      const bool wrapped = manifest.value("automaticCacheVersion", 0) != 0;
+      if (wrapped) require(manifest.at("automaticCacheVersion") == 1 && manifest.contains("record") &&
+                           manifest.at("record").value("automatic", false), "bundle", "Unsupported automatic capture");
+      capture = std::make_shared<Json>(wrapped ? std::move(manifest.at("record")) : std::move(manifest));
+    }
+    const auto& record = *capture;
     require(record.at("item").at("source") == source, "bundle", "Capture identity mismatch");
     if (job.policy) {
       const Json* entry = nullptr;
@@ -119,6 +124,9 @@ struct Pool {
         }
         if (!streams.empty()) reply.metadata["streams"] = std::move(streams);
       }
+      // The occurrence keeps the manifest that authorized its read-only mounts.
+      // A concurrent capture publishes a new representation for the next play.
+      reply.capture = std::move(capture);
       reply.metadata["replayMode"] = record.value("automatic", false) ? "mixed" : "isolated";
       return;
     }
@@ -280,7 +288,7 @@ Pool& pool() {
 }  // namespace
 bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& root,
                    const std::string& session, const std::string& request, const Json& params,
-                   bool open_file, bool policy) {
+                   bool open_file, bool policy, std::shared_ptr<const Json> capture) {
   static Pool policies(2);
   auto& p = policy ? policies : pool();
   auto payload = params.dump();
@@ -290,7 +298,7 @@ bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& 
   std::lock_guard inbox_lock(inbox->mutex);
   if (!inbox->active || inbox->outstanding >= 64) return false;
   ++inbox->outstanding;
-  p.queue.push_back({inbox, root, session, request, std::move(payload), open_file, policy});
+  p.queue.push_back({inbox, root, session, request, std::move(payload), open_file, policy, std::move(capture)});
   p.ready.notify_one();
   return true;
 }
