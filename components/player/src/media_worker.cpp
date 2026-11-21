@@ -76,7 +76,10 @@ class Worker {
         {"demuxer-max-bytes","64MiB"},{"demuxer-max-back-bytes","16MiB"},{"cache-on-disk","no"},
         {"tls-verify","yes"},{"network-timeout","15"},{"load-unsafe-playlists","no"},{"sub-auto","no"},{"audio-file-auto","no"},
         {"demuxer-lavf-o","protocol_whitelist=[http,https,tcp,tls,crypto,data,file,fd]"}})option(player_,key,value);
-    if(config.value("rasterImage",false))option(player_,"vd-lavc-o","max_pixels=100000000");
+    if(config.value("rasterImage",false)){
+      option(player_,"vd-lavc-o","max_pixels=100000000");
+      option(player_,"aid","no");
+    }
     if(auto agent=config.value("httpUserAgent","");!agent.empty())option(player_,"user-agent",agent.c_str());
     check(mpv_initialize(player_),"initialize libmpv");
     for(auto name:{"scale","dscale"}){

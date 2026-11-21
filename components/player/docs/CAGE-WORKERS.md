@@ -13,6 +13,8 @@ ordinary Cage session runs one playback host. On homelab the legacy
 | SVG, web and software artwork | Windowed CEF Views. The host authorizes the initial window after the main document loads. |
 | GLB/glTF | CEF with the bundled model-viewer and its resource policy |
 
+The libmpv trial preserves PNG transparency. On homelab the auxiliary-alpha AVIF fixture renders opaque blue, so transparent AVIF parity remains open.
+
 A stable fullscreen media worker submits its own Wayland buffers to Cage. The
 host requests composited frames when it owns the label, cursor, margins or a
 transition. CEF uses a capability-filtered Wayland relay to send its buffers
