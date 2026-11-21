@@ -239,11 +239,50 @@ void PublicBrowser::message(const Json& m) {
              {{"worldName", "ff-artwork-autoplay"}, {"source", R"JS(
                (() => {
                  if (window !== window.top) return;
+                 const whistlegraphs =
+                   location.origin === 'https://cdn.artworks.feralfile.io' &&
+                   location.pathname.startsWith('/previews/');
+                 const deckSelector = '.card-deck';
                  const attempted = new WeakSet();
                  document.addEventListener('canplay', ({target: video}) => {
                    if (!(video instanceof HTMLVideoElement) || attempted.has(video)) return;
+                   if (whistlegraphs && video.closest(deckSelector)?.querySelector('#card-play')) return;
                    attempted.add(video);
                    if (video.paused) video.play().catch(() => {});
+                 }, true);
+                 if (!whistlegraphs) return;
+
+                 // Wait for the artwork module to register its card handlers.
+                 // Dispatch DOM events without granting browser user activation.
+                 document.addEventListener('load', ({target: script}) => {
+                   if (!(script instanceof HTMLScriptElement)) return;
+                   const url = new URL(script.src, location.href);
+                   if (url.origin !== location.origin ||
+                       url.pathname !== location.pathname +
+                         'aesthetic.computer/disks/whistlegraph/whistlegraph-cards.js') return;
+                   const deck = script.parentElement?.querySelector(deckSelector);
+                   if (!deck || attempted.has(deck)) return;
+                   attempted.add(deck);
+                   const deadline = performance.now() + 30000;
+                   function start() {
+                     const overlay = deck.querySelector('#card-play');
+                     if (!overlay || overlay.classList.contains('played')) return;
+                     const card = deck.querySelector('.card-view.active[data-type="video"] .card');
+                     const video = card?.querySelector('video');
+                     if (!video || !video.paused) return;
+                     const rect = card.getBoundingClientRect();
+                     const clientX = rect.left + rect.width / 2;
+                     const clientY = rect.top + rect.height / 2;
+                     if (!deck.classList.contains('loading') && video.readyState >= 3 &&
+                         document.elementFromPoint(clientX, clientY) === card) {
+                       const pointer = {bubbles: true, isPrimary: true, clientX, clientY};
+                       card.dispatchEvent(new PointerEvent('pointerdown', pointer));
+                       card.dispatchEvent(new PointerEvent('pointerup', pointer));
+                     } else if (performance.now() < deadline) {
+                       setTimeout(start, 100);
+                     }
+                   }
+                   start();
                  }, true);
                })();
              )JS"}}, child);
