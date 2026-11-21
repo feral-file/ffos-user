@@ -11,14 +11,18 @@ concurrency:
   cancel-in-progress: true
 jobs:
   cef:
-    runs-on: ${{ vars.CEF_BUILD_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 350
+    runs-on: ${{ fromJSON(vars.CEF_BUILD_RUNNER && toJSON(vars.CEF_BUILD_RUNNER) || '["self-hosted","macOS"]') }}
+    timeout-minutes: 1440
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Build the VA-API CEF SDK
+        if: runner.os == 'Linux'
         run: bash components/player/cef/build-linux-x64.sh "$RUNNER_TEMP/ff-cef"
+      - name: Build the VA-API CEF SDK in Linux on macOS
+        if: runner.os == 'macOS'
+        run: bash components/player/cef/build-on-macos-ci.sh "$RUNNER_TEMP/ff-cef/artifact"
       - uses: actions/upload-artifact@v4
         with:
           name: ff-player-custom-cef-sdk-linux-x86_64

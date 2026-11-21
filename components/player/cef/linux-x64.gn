@@ -4,6 +4,7 @@ symbol_level = 0
 chrome_pgo_phase = 0
 target_cpu = "x64"
 ozone_platform_wayland = true
+enable_vulkan = true
 use_vaapi = true
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
