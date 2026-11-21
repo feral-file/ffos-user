@@ -139,9 +139,6 @@ func setup(t *testing.T) *testSetup {
 
 	// Create test config
 	ts.config = &config.Config{
-		CDPConfig: &config.CDPConfig{
-			Endpoint: "http://localhost:9222",
-		},
 		RelayerConfig: &config.RelayerConfig{
 			Endpoint: "wss://test.relay.com",
 			APIKey:   "test-api-key",
@@ -1148,7 +1145,6 @@ func TestInitializeApp(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1182,7 +1178,7 @@ func TestInitializeApp(t *testing.T) {
 	// fixes (#296) leaves those artworks permanently unrenderable. A nil
 	// here would mean the fix ships switched off for exactly the fleet that
 	// needs it.
-	assert.NotNil(t, app.UARewrite, "kiosk User-Agent rewrite must default ON with absent config")
+	assert.NotNil(t, app.GatewayPolicy, "kiosk User-Agent rewrite must default ON with absent config")
 
 	// The app context is the daemon-lifetime context handed to long-lived
 	// components (hub, claim flow); Cancel must cancel exactly it, or those
@@ -1238,7 +1234,6 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1430,7 +1425,6 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1448,7 +1442,7 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 	)
 	defer app.Cancel()
 
-	assert.Nil(t, app.UARewrite)
+	assert.Nil(t, app.GatewayPolicy)
 }
 
 // A host list in which NO entry is usable must degrade to the default scope,
@@ -1463,7 +1457,6 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1485,7 +1478,7 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 	// Every entry was unusable, so there is no operator scope left to
 	// honor and the rewrite lands on the built-in defaults — the same
 	// place an entirely unreadable config block lands.
-	assert.NotNil(t, app.UARewrite, "an unusable host list must degrade to the default scope, not to no rewrite")
+	assert.NotNil(t, app.GatewayPolicy, "an unusable host list must degrade to the default scope, not to no rewrite")
 }
 
 // The realistic operator edit is APPENDING a newly hostile gateway, and
@@ -1499,7 +1492,6 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1520,7 +1512,7 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 	defer app.Cancel()
 
 	require.NotNil(t, app)
-	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
+	assert.NotNil(t, app.GatewayPolicy, "one bad entry must not disable the whole rewrite")
 }
 
 // Native reconnect must not introduce a second scheduler or replay a playlist.

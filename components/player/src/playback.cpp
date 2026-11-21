@@ -1,3 +1,4 @@
+#include "ff/media_kind.hpp"
 #include "ff/playback.hpp"
 #include "ff/input.hpp"
 #include "ff/overlay.hpp"
@@ -210,7 +211,7 @@ void Playback::validate_playlist(const Json& playlist) const {
     optional_text(item,"mimeType",256);
     for(auto key:{"id","title","slug","license","ref","refHash"})optional_text(item,key);
     auto source = string_field(item, "source", 16384);
-    require(source.starts_with("https://") || source.starts_with("http://") || source.starts_with("data:") || source.starts_with("ipfs://") || source.starts_with("onchfs://"), "playlist_invalid", "Unsupported artwork URL scheme");
+    require(source.starts_with("https://") || source.starts_with("http://") || source.starts_with("data:") || source.starts_with("ipfs://") || source.starts_with("onchfs://") || (!local_artwork_name(source).empty() && native_media(item)), "playlist_invalid", "Unsupported artwork URL scheme");
     if (item.contains("contentRating")) require(item["contentRating"].is_string(), "playlist_invalid", "contentRating must be a string");
     if (item.contains("contentReasons")) {
       require(item["contentReasons"].is_array(), "playlist_invalid", "contentReasons must be an array");
@@ -421,12 +422,28 @@ Json Playback::command(std::string_view method, const Json& p) {
     return update_playlist(params,plan);
   }
   if (method == "connectivity.set") {
-    fields(p,{"online"});bool was_online=online_;online_=boolean(p,"online");connectivity_known_=true;
+    fields(p,{"online", "sources"});
+    const bool online = boolean(p, "online");
+    bool sources_changed = false;
+    if (p.contains("sources")) {
+      const auto& sources = p.at("sources");
+      fields(sources, {"bundleRoot", "gatewayHosts", "gateway", "userAgent"});
+      require(string_field(sources, "bundleRoot", 4096).starts_with("/"), "invalid_params", "Expected an absolute bundle directory");
+      optional_text(sources, "gateway", 4096);
+      optional_text(sources, "userAgent", 1024);
+      if (sources.contains("gatewayHosts")) {
+        require(sources["gatewayHosts"].is_array() && sources["gatewayHosts"].size() <= 1024, "invalid_params", "Invalid gateway host list");
+        for (const auto& host : sources["gatewayHosts"]) require(host.is_string() && host.get_ref<const std::string&>().size() <= 253, "invalid_params", "Invalid gateway host");
+      }
+      sources_changed = connectivity_known_ && sources != artwork_sources_;
+      artwork_sources_ = sources;
+    }
+    bool was_online=online_;online_=online;connectivity_known_=true;
     // An offline edge replaces the browser network namespace. Keep the old
     // presentation until the isolated replacement has a frame. An online edge
     // only retries failed/incomplete replay; healthy works keep their state.
     bool incomplete_offline=!media_status_.is_null()&&media_status_.value("offline",false)&&(media_status_.value("cacheMisses",uint64_t{0})>0||media_status_.value("unsupportedWorkerTargets",uint64_t{0})>0);
-    if(selected_&&((was_online&&!online_)||(!was_online&&online_&&(selected_->stage=="failed"||incomplete_offline)))){clear_recovery();select(true);}
+    if(selected_&&(sources_changed||(was_online&&!online_)||(!was_online&&online_&&(selected_->stage=="failed"||incomplete_offline)))){clear_recovery();select(true);}
     ++revision_;return {{"outcome","applied"}};
   }
   if (method == "overlay.set") {

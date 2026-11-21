@@ -2,7 +2,7 @@ package offlinecache
 
 import (
 	"context"
-	"strings"
+
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,38 +43,9 @@ func (n *nativePlaybackCache) SyncPlaylist(ctx context.Context, sources []string
 		if err != nil {
 			continue
 		}
-		if nativeReplayRecordReady(record) {
+		if !record.Automatic || record.freshForPlayback(time.Now()) {
 			count++
 		}
 	}
 	return count, nil
-}
-
-func nativeReplayRecordReady(record *ItemRecord) bool {
-	var entry *Resource
-	for i := range record.Resources {
-		r := &record.Resources[i]
-		if r.EffectiveMethod() == "GET" && (r.URL == record.Item.Source || r.URL == record.Entry) {
-			entry = r
-			break
-		}
-	}
-	if entry == nil || !entry.freshAt(time.Now()) {
-		return false
-	}
-	mime := strings.ToLower(entry.ProbeContentType())
-	if (strings.HasPrefix(mime, "image/") && !strings.HasPrefix(mime, "image/svg")) || strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "audio/") {
-		return true
-	}
-	for _, r := range record.Resources {
-		if r.BrowserPolicyVersion != 2 || !r.freshAt(time.Now()) {
-			return false
-		}
-	}
-	return entry.BrowserPolicyVersion == 2
-}
-func UseNativeReplay(target Service) {
-	if service, ok := target.(*service); ok {
-		service.nativeReplay = true
-	}
 }

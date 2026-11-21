@@ -685,6 +685,39 @@
               "properties": {
                 "online": {
                   "type": "boolean"
+                },
+                "sources": {
+                  "type": "object",
+                  "properties": {
+                    "bundleRoot": {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+                    },
+                    "gateway": {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "description": "Wire limit is 4096 UTF-8 bytes, additionally enforced by peers."
+                    },
+                    "userAgent": {
+                      "type": "string",
+                      "maxLength": 1024,
+                      "description": "Wire limit is 1024 UTF-8 bytes, additionally enforced by peers."
+                    },
+                    "gatewayHosts": {
+                      "type": "array",
+                      "maxItems": 1024,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 253,
+                        "description": "Wire limit is 253 UTF-8 bytes, additionally enforced by peers."
+                      }
+                    }
+                  },
+                  "required": [
+                    "bundleRoot"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -1935,7 +1968,7 @@
           "type": "string",
           "maxLength": 16384,
           "description": "Wire limit is 16384 UTF-8 bytes, additionally enforced by peers.",
-          "pattern": "^(https?://|data:|ipfs://|onchfs://)"
+          "pattern": "^(https?://|data:|ipfs://|onchfs://|(?:file://)?/home/feralfile/artworks/)"
         },
         "id": {
           "type": "string",

@@ -440,6 +440,11 @@ func BootstrapCore(
 	}
 	store = &publishGuardStore{Store: store}
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
+	// Local bundles are opened by the native host. Cast admission still
+	// serializes playlist changes and checks capture availability.
+	if opts.KioskCDPEndpoint == "" {
+		return Core{Store: store, StaticServer: staticServer, KioskReplay: NewNativePlaybackCache(store)}, storage
+	}
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, constants.WEBAPP_URL, jsonWrapper, logger)
 	// The concrete replayer implements the scope-lost setter, but Replayer
 	// deliberately does not declare it (see ScopeLostRegistrar). Asserted

@@ -26,7 +26,11 @@ func (c *Client) SetConnectivity(ctx context.Context, online bool) error {
 		var receipt struct {
 			Outcome string `json:"outcome"`
 		}
-		err := c.Call(ctx, "connectivity.set", map[string]any{"online": online}, &receipt, nil)
+		params := map[string]any{"online": online}
+		if c.Sources != nil {
+			params["sources"] = c.Sources
+		}
+		err := c.Call(ctx, "connectivity.set", params, &receipt, nil)
 		var remote *RemoteError
 		if errors.As(err, &remote) && remote.Code == "stale_generation" && attempt == 0 {
 			continue

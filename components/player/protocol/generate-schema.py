@@ -38,7 +38,7 @@ policy=obj({'version':{'const':1},'showMatureContent':boolean,'strictPersonal':b
 display={'type':'object','properties':{'scaling':enum('fit','fill','stretch','auto'),
     'margin':{'anyOf':[number(0,16384),{'type':'string','maxLength':96,'description':'One to four nonnegative CSS lengths, parsed and range-checked by the host.'}]},
     'background':text(64),'autoPlay':boolean,'loop':boolean,'imageRendering':enum('auto','pixelated'),'userOverrides':{'anyOf':[boolean,{'type':'object','additionalProperties':boolean}]}},'additionalProperties':True}
-item={'type':'object','required':['source'],'properties':{'source':{**text(16384),'pattern':'^(https?://|data:|ipfs://|onchfs://)'},
+item={'type':'object','required':['source'],'properties':{'source':{**text(16384),'pattern':'^(https?://|data:|ipfs://|onchfs://|(?:file://)?/home/feralfile/artworks/)'},
     **{key:text() for key in ('id','title','slug','license','ref','refHash')},'mimeType':text(256),'duration':{'type':'number','minimum':0},
     'contentRating':{'type':'string'},'contentReasons':{'type':'array','items':{'type':'string'}},'display':ref('display'),
     'inlineManifest':{'type':'object'},'resolvedManifest':{'type':'object'},'override':{'type':'object'},'metadata':{'type':'object'}},
@@ -70,7 +70,7 @@ methods={
     'presentation.set':obj({'occurrence':identifier,'display':obj({'scaling':display['properties']['scaling'],'margin':display['properties']['margin'],'background':settings['properties']['background']})},('occurrence','display')),
     'artworkPermissions.set':ref('artworkPermissions'),'settings.set':ref('settings'),'policy.set':ref('policy'),
     'health.set':{**obj({'thermal':boolean,'serviceFailure':boolean}),'minProperties':1},
-    'connectivity.set':obj({'online':boolean},('online',)),
+    'connectivity.set':obj({'online':boolean,'sources':obj({'bundleRoot':text(4096),'gateway':text(4096),'userAgent':text(1024),'gatewayHosts':{'type':'array','maxItems':1024,'items':text(253)}},('bundleRoot',))},('online',)),
     'overlay.set':obj({'owner':enum('setup','pairing','recovery'),'state':identifier,'fields':{'type':'object','additionalProperties':True}},('owner','state')),
     'input.dispatch':{'oneOf':inputs},
 }

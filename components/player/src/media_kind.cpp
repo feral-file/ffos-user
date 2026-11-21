@@ -1,6 +1,12 @@
 #include "ff/media_kind.hpp"
 #include <algorithm>
 namespace ff {
+std::string local_artwork_name(const std::string& source) {
+  auto path = source.starts_with("file:///") ? source.substr(7) : source;
+  if (!path.starts_with(local_artworks)) return {};
+  return path.substr(sizeof(local_artworks) - 1);
+}
+
 bool virtual_cache_source(const std::string& source) {
   auto scheme=source.find("://");if(scheme==std::string::npos)return false;
   auto start=scheme+3;auto end=source.find_first_of("/:?#",start);

@@ -1,4 +1,0 @@
-{
-  "request":{"source":"https://artist.example/work","url":"https://artist.example/work","method":"GET","headers":{}},
-  "policyResponse":{"version":1,"status":200,"headers":[],"size":0,"sha256":"","complete":false,"requestUrl":"https://artist.example/work"}
-}

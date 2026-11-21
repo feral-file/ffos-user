@@ -16,7 +16,16 @@ import (
 // persistent connection and bounded handshake. Keeping the connection alive
 // preserves held input across commands; disconnect releases it in the host.
 // A transport timeout discards the stream and is never an automatic replay.
+type ArtworkSources struct {
+	BundleRoot   string   `json:"bundleRoot"`
+	GatewayHosts []string `json:"gatewayHosts,omitempty"`
+	UserAgent    string   `json:"userAgent,omitempty"`
+	Gateway      string   `json:"gateway,omitempty"`
+}
+
 type Client struct {
+	// Sources is configured before starting the connectivity reconciler.
+	Sources      *ArtworkSources
 	Path         string
 	Name         string
 	lane         chan struct{}

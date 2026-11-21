@@ -152,7 +152,7 @@ replay promise.
 | `history.list`, `history.resolve` | List retained presented occurrences or resolve `{recordId}`; resolution does not play it |
 | `schedule.set` | `{playlist,context?,atMs}` or `{clear:true}`; one durable scheduled cast, executed by host |
 | `boot.set` | Store/clear boot intent; boot execution/recovery is still being completed |
-| `connectivity.set` | `{online}`; controld's connectivity observation; no renderer can declare device connectivity |
+| `connectivity.set` | `{online, sources?}`; controld's connectivity observation, offline bundle directory, and configured gateway routing; no renderer can declare device connectivity |
 | `overlay.set` | `{owner,state,fields?}`; owner setup/pairing/recovery; only matching owner may hide an overlay; focus/input released on show |
 | `input.dispatch` | Occurrence-fenced input; one connection owns held state; disconnect releases it. The host owns pointer coordinates, buttons and physical keys. See the event forms below. |
 

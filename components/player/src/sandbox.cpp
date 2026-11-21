@@ -102,6 +102,7 @@ int launch_sandbox(int argc, char** argv) {
                      "--enable-unsafe-webgpu", "--use-angle=vulkan", "--disable-vulkan-surface",
                      "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks",
                      "--user-data-dir=/profile", "--remote-debugging-pipe"});
+      if (std::string_view(argv[4]) == "debug") append(child, {"--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"});
       if (online) append(child, {"--proxy-server=http://127.0.0.1:17873", "--proxy-bypass-list=<-loopback>"});
       if (mode == "filtered") child.push_back("--ff-direct-cage");
       child.push_back(std::string_view(argv[7]) == "auto" ? "--autoplay-policy=no-user-gesture-required"

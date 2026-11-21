@@ -795,7 +795,6 @@ func (q *jobQueue) removeItems(keys map[string]bool) []captureJob {
 }
 
 type service struct {
-	nativeReplay     bool // immutable after bootstrap; browser response-policy qualification
 	storage          *storagePolicy
 	automatic        *playbackCache
 	onCacheChanged   func()
@@ -3263,12 +3262,6 @@ func (s *service) HasReplayableItem(sources ...string) bool {
 		if !ok {
 			continue
 		}
-		if s.nativeReplay {
-			rec, err := s.store.LoadItem(key)
-			if err != nil || !nativeReplayRecordReady(rec) {
-				continue
-			}
-		}
 		if item.State == StateReady || item.State == StatePartial {
 			return true
 		}
@@ -3574,19 +3567,12 @@ func (s *service) itemStatus(key, sourceHint string, withBytes, hideAutomatic bo
 	// re-download attempt over an existing ready/partial capture should
 	// still report that earlier successful capture, not "failed".
 	state := stateFromCoverage(rec.Coverage)
-	nativeQualified := !s.nativeReplay || nativeReplayRecordReady(rec)
-	if !nativeQualified {
-		state = StatePartial
-	}
 	status := ItemStatus{
 		Source:           rec.Item.Source,
 		State:            state,
 		Percent:          percentForState(state),
-		CoverageComplete: rec.Coverage.Complete && nativeQualified,
+		CoverageComplete: rec.Coverage.Complete,
 		Reason:           truncateReason(rec.Coverage.Reason),
-	}
-	if !nativeQualified {
-		status.Reason = "Recapture required to preserve browser response policies"
 	}
 	if withBytes {
 		status.Bytes = s.recordBytes(rec)

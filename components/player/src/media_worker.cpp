@@ -325,6 +325,7 @@ class Worker {
 extern "C" int ff_decode(int, char**) {
   // Media faults and unbounded allocation are contained in this process.
   // Namespace/filesystem restrictions are applied by the launcher separately.
+  prctl(PR_SET_NAME,"ff-media-worker",0,0,0);
   prctl(PR_SET_PDEATHSIG,SIGKILL);prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);
   rlimit limit{3ULL*1024*1024*1024,3ULL*1024*1024*1024};setrlimit(RLIMIT_AS,&limit);
   std::signal(SIGPIPE,SIG_IGN);

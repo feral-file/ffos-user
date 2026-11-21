@@ -12,6 +12,11 @@
 namespace ff {
 // The host owns these jobs. A renderer receives only its media fd or its
 // per-source browser directory, and never sees the shared player cache.
+struct ArtworkRoute {
+  std::string url, user_agent;
+};
+ArtworkRoute artwork_route(const Json& sources, const std::string& url);
+
 class ArtworkCache {
  public:
   struct Media {

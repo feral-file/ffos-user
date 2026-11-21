@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	go_os "os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -119,21 +118,9 @@ type app struct {
 	// the narrower ProgressObserver interface, which has no Close method —
 	// see offlinecache.Runtime.Notifier's doc.
 	OfflineCacheNotifier *offlinecache.Notifier
-	NativeCacheBroker    *offlinecache.NativeBroker
-	// UARewrite rewrites the outgoing User-Agent for the configured
-	// artwork origins (#296). Independent of the offline cache above: the
-	// bug it fixes has nothing to do with caching, so it must run on a
-	// device with offlineCache off. Nil only when explicitly disabled via
-	// gatewayUserAgent.enabled=false, or when its policy failed to build.
-	UARewrite *uarewrite.Interceptor
-	// MediaHealthObserver reports the kiosk's artwork-frame navigations
-	// (their HTTP status) to the media-health store over its own passive
-	// CDP session (#392). Nil when media health or the observer is
-	// disabled. Re-attached on every kiosk reconnect like UARewrite, and
-	// closed with it.
-	MediaHealthObserver *offlinecache.KioskNavigationObserver
-	Hub                 hub.Hub
-	LinkChecker         *status.LinkChecker
+	GatewayPolicy        *uarewrite.Policy
+	Hub                  hub.Hub
+	LinkChecker          *status.LinkChecker
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
@@ -217,7 +204,6 @@ func main() {
 	// Initialize app
 	app := initializeApp(
 		finalLogger,
-		config.CDPConfig.Endpoint,
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
 		logger.StreamEndpoint(streamConfig),
@@ -514,13 +500,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.MintPairing.Stop()
 	}
 
-	if app.NativeCacheBroker != nil {
-		go func() {
-			if err := app.NativeCacheBroker.Run(ctx, filepath.Join(filepath.Dir(playerlink.SocketPath()), "cache.sock")); err != nil {
-				app.Logger.Error("Native cache broker stopped", zap.Error(err))
-			}
-		}()
-	}
 	// Start offline cache (job-queue worker + loopback static server for
 	// large cached assets) when config.OfflineCacheConfig.Enabled. Both
 	// are best-effort: a start failure here must not crash controld, since
@@ -607,34 +586,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	if app.Session != nil {
 		go app.Session.Run(ctx)
 	}
-
-	// The rewrite interceptor owns a SEPARATE websocket to the kiosk plus the
-	// read-pump goroutine draining it, neither of which app.CDP.Close above
-	// touches. Without this the connection and that goroutine outlive run()
-	// on every shutdown path, which is both a leak and a divergence from how
-	// every other long-lived component here is torn down.
-	//
-	// Deferred after the CDP close so it runs BEFORE it (defers unwind in
-	// reverse): the interceptor's session is the more derived of the two, and
-	// closing it while the daemon's own CDP client is still up keeps teardown
-	// ordered from the outside in.
-	defer func() {
-		if app.UARewrite == nil {
-			return
-		}
-		if err := app.UARewrite.Close(); err != nil {
-			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
-		}
-	}()
-	// Same ownership rule for the navigation observer's session.
-	defer func() {
-		if app.MediaHealthObserver == nil {
-			return
-		}
-		if err := app.MediaHealthObserver.Close(); err != nil {
-			app.Logger.Warn("Failed to close the media-health navigation observer session", zap.Error(err))
-		}
-	}()
 
 	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
 
@@ -890,7 +841,6 @@ func onAwakeHook(scheduler playlistschedule.Scheduler, executor devicectl.Execut
 // initializeApp initializes the app with real dependencies
 func initializeApp(
 	logger *zap.Logger,
-	cdpEndpoint string,
 	relayerEndpoint string,
 	relayerAPIKey string,
 	logStreamEndpoint string,
@@ -1095,7 +1045,6 @@ func initializeApp(
 	// ONE observer seam, so a fan-out is installed once below.
 	var internetObservers []func(connected bool)
 	var kioskReplay offlinecache.KioskReplay
-	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
@@ -1105,14 +1054,13 @@ func initializeApp(
 	var offlineCacheStore offlinecache.Store
 	onchfsConfig := config.Get().OnchfsTuning(logger)
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
-		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, "")
 		ocRuntime := offlinecache.Bootstrap(
 			ocOpts, notifyRelayer, notifyWS, httpClient, webSocketDialer,
 			os, io, json, exec, clock, logger,
 		)
 		offlineCache = ocRuntime.Service
 		kioskReplay = ocRuntime.KioskReplay
-		offlineCacheScopeLost = ocRuntime.ScopeLost
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
@@ -1148,10 +1096,9 @@ func initializeApp(
 		logger.Info("onchfs reader disabled by config; onchfs works stay unplayable")
 	} else {
 		if offlineCacheStore == nil {
-			ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+			ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, "")
 			core, _ := offlinecache.BootstrapCore(ocOpts, httpClient, webSocketDialer, os, io, json, clock, logger, true)
 			kioskReplay = core.KioskReplay
-			offlineCacheScopeLost = core.ScopeLost
 			offlineCacheStore = core.Store
 			// core.StaticServer is deliberately not started: it serves only
 			// blobs past replay's 200 MB inline limit, an onchfs file is at
@@ -1203,7 +1150,6 @@ func initializeApp(
 	// The rejected entries are logged at Error individually because on a
 	// headless device this log is the only place the operator's mistake
 	// is visible at all.
-	var uaRewrite *uarewrite.Interceptor
 	// uaPolicy is the same policy, kept for the media health probe so it
 	// dials the wire the kiosk would (nil when the rewrite is off).
 	var uaPolicy *uarewrite.Policy
@@ -1227,9 +1173,6 @@ func initializeApp(
 				zap.Error(err))
 		} else {
 			uaPolicy = policy
-			uaRewrite = uarewrite.NewInterceptor(
-				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, clock, logger,
-			)
 		}
 	}
 
@@ -1238,13 +1181,6 @@ func initializeApp(
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
-	// Per-occurrence resource requests go through the native cache broker. Do
-	// not arm the retired kiosk CDP connection while admitting a phone cast.
-	if offlineCacheStore != nil {
-		kioskReplay = offlinecache.NewNativePlaybackCache(offlineCacheStore)
-		offlinecache.UseNativeReplay(offlineCache)
-		offlineCacheScopeLost = nil
-	}
 	rawCmdHandler := commandrouter.New(executor, nativeCommands, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
 	wireNativeDefault(nativeCommands, rawCmdHandler)
 	commandrouter.SetNativeControls(rawCmdHandler, nativePlayer)
@@ -1312,19 +1248,7 @@ func initializeApp(
 	// from the kiosk's DevTools endpoint for the app's lifetime.
 	kioskUA := newNativeKioskUserAgent(nativePlayer, logger)
 	go kioskUA.Run(context)
-	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, nil, logger)
-	var mediaHealthObserver *offlinecache.KioskNavigationObserver
-	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
-		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
-	}
-	if mediaHealthSvc != nil && uaRewrite != nil {
-		// The kiosk loads a content-addressed work through the gateway the
-		// probe found serving it, so the verdict and the wall agree (#392,
-		// gateway fallback). Installed before the interceptor's first
-		// attach (run()'s onConnect hook).
-		gateways := mediahealth.NewGateways(mediaHealthCfg.IPFSGateways, mediaHealthCfg.ArweaveGateways)
-		uaRewrite.SetGatewayOverride(mediaHealthSvc.GatewayOverride, uarewrite.OverrideFetchPatterns(gateways.ArweaveHosts()))
-	}
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaPolicy != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, nil, logger)
 	if mediaHealthSvc != nil {
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
 		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
@@ -1356,7 +1280,7 @@ func initializeApp(
 		var renderer mediahealth.Renderer
 		if offlineCacheRendererFactory != nil {
 			var routing offlinecache.MediaHealthRouting
-			if uaRewrite != nil && uaPolicy != nil {
+			if uaPolicy != nil {
 				routing = offlinecache.MediaHealthRouting{Policy: uaPolicy, Override: mediaHealthSvc.GatewayOverride, SlashBareCID: true}
 			}
 			renderer = offlineCacheRendererFactory(routing)
@@ -1477,23 +1401,6 @@ func initializeApp(
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
 		// Same generation fence for the refresher's force casts.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
-	}
-
-	// Replay saturation invalidates Fetch-interception scope exactly the way
-	// a kiosk restart does: retireOnSaturation closes the root CDP session so
-	// the page stops hanging, which also means a fail_closed scope is
-	// enforced by nothing until something re-arms it. Without this the
-	// "something" is only this refresher's periodic pass, up to
-	// PLAYLIST_REFRESH_INTERVAL away, with the artwork silently served from
-	// the live network for that whole window. ForceRefresh is the same
-	// recovery the onConnect hook below already uses for the identical
-	// problem — best-effort acceleration rather than a bound (see
-	// docs/offline-artwork-capture.md for the paths that still fall back to
-	// the periodic tick). Wired here rather than in offlinecache.Bootstrap
-	// because the refresher depends on KioskReplay and so cannot exist until
-	// after that call.
-	if offlineCacheScopeLost != nil {
-		offlineCacheScopeLost.SetOnScopeLost(playlistRefresher.ForceRefresh)
 	}
 
 	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
@@ -1698,6 +1605,13 @@ func initializeApp(
 	// mirroring setupui's park discipline above.
 	// Host connectivity is independent of CDP/page generations and reconnects
 	// with the native process. Remaining legacy consumers are migrated separately.
+	sources := &playerlink.ArtworkSources{BundleRoot: offlinecache.OptionsFromConfig(offlineCacheConfig, "").RootDir}
+	if uaPolicy != nil {
+		sources.GatewayHosts = uaPolicy.Hosts()
+		sources.UserAgent = uaPolicy.UserAgent()
+		sources.Gateway = uaPolicy.ReplacementGateway()
+	}
+	nativePlayer.Sources = sources
 	mediator.SetConnectivityPlayer(nativePlayer)
 	// Generation re-check seams (§4): a moved generation across an
 	// in-flight setSleepMode send or CDP command reply means the ack may not
@@ -1839,7 +1753,6 @@ func initializeApp(
 		Cancel:                   cancelApp,
 		Logger:                   logger,
 		MediaHealth:              mediaHealthSvc,
-		MediaHealthObserver:      mediaHealthObserver,
 		Clock:                    clock,
 		OS:                       os,
 		Signal:                   signal,
@@ -1862,10 +1775,9 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
-		UARewrite:                uaRewrite,
+		GatewayPolicy:            uaPolicy,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
-		NativeCacheBroker:        nativeCacheBroker(offlineCacheStore, uaPolicy, mediaHealthSvc),
 		OfflineCacheNotifier:     offlineCacheNotifier,
 		Hub:                      hub,
 		LinkChecker:              linkChecker,
@@ -1945,36 +1857,4 @@ func fenceThroughService(svc offlinecache.Service) offlinecache.ClearFence {
 		return nil
 	}
 	return svc
-}
-
-func nativeCacheBroker(store offlinecache.Store, policy *uarewrite.Policy, health *mediahealth.Service) *offlinecache.NativeBroker {
-	broker := offlinecache.NewNativeBroker(store)
-	broker.Policy = func(raw string, headers map[string]string) (string, []offlinecache.HeaderField) {
-		target := raw
-		if policy != nil && health != nil {
-			referrer := ""
-			for name, value := range headers {
-				if strings.EqualFold(name, "Referer") {
-					referrer = value
-					break
-				}
-			}
-			if override, ok := health.GatewayOverride(raw, referrer); ok {
-				return override, nil
-			}
-		}
-		if policy != nil && policy.Matches(raw) {
-			if rewritten, ok := policy.RewriteURL(raw); ok {
-				target = rewritten
-			} else {
-				fields := []offlinecache.HeaderField{}
-				for _, field := range policy.RewriteHeaders(headers) {
-					fields = append(fields, offlinecache.HeaderField{Name: field["name"], Value: field["value"]})
-				}
-				return target, fields
-			}
-		}
-		return target, nil
-	}
-	return broker
 }

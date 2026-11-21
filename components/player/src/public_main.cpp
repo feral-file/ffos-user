@@ -130,7 +130,7 @@ extern "C" int ff_host(int argc, char** argv) {
                   "unsupported", "This media source is not seekable");
       it->second->seek(seconds);
     });
-    const auto cache_socket = (std::filesystem::path(socket).parent_path() / "cache.sock").string();
+    std::string bundle_root;
     struct SourceResolution {
       std::string id;
       std::shared_ptr<ff::CacheInbox> inbox;
@@ -138,14 +138,14 @@ extern "C" int ff_host(int argc, char** argv) {
       std::chrono::steady_clock::time_point started;
     } resolution;
     auto resolve_source = [&](const ff::Occurrence& occurrence) -> std::optional<std::string> {
-      if (!playback.online() ||
-          occurrence.item.at("source").get<std::string>().starts_with("data:"))
+      if (occurrence.item.at("source").get<std::string>().starts_with("data:") ||
+          !ff::local_artwork_name(occurrence.item.at("source")).empty())
         return "";
       if (resolution.id != occurrence.id) {
         if (resolution.inbox) resolution.inbox->active = false;
         resolution = {occurrence.id, std::make_shared<ff::CacheInbox>(), std::nullopt,
                       std::chrono::steady_clock::now()};
-        if (!ff::cache_request(resolution.inbox, cache_socket, "", occurrence.id,
+        if (!ff::cache_request(resolution.inbox, bundle_root, "", occurrence.id,
                                {{"source", occurrence.item.at("source")},
                                 {"url", occurrence.item.at("source")},
                                 {"method", "GET"},
@@ -181,6 +181,7 @@ extern "C" int ff_host(int argc, char** argv) {
       const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
       playback.tick(now_ms, ff::wall_ms());
       server.poll();
+      bundle_root = playback.artwork_sources().value("bundleRoot", "/home/feralfile/.cache/offline-artworks");
       artwork_cache.maintain(playback.global_policy().at("cache"));
       if (applied_permissions.at("cache") != playback.global_policy().at("cache"))
         applied_permissions["cache"] = playback.global_policy().at("cache");
@@ -223,7 +224,7 @@ extern "C" int ff_host(int argc, char** argv) {
                 std::make_unique<ff::PublicBrowser>(
                     playback, presentation, decoration, launcher,
                     state_path + "/browser/" + ff::uuid(),
-                    (std::filesystem::path(socket).parent_path() / "cache.sock").string(),
+                    bundle_root,
                     resources, browser_backend, true));
           } catch (const std::exception& e) {
             backdrop_id.clear();
@@ -261,14 +262,14 @@ extern "C" int ff_host(int argc, char** argv) {
           if (cache_mode && ff::native_media(desired->item))
             media.emplace(desired->id,
                           std::make_unique<ff::MediaClient>(playback, presentation, *desired,
-                                                            worker, cache_socket, *cache_mode, &artwork_cache));
+                                                            worker, bundle_root, *cache_mode, &artwork_cache));
           else if (cache_mode)
             clients.emplace(
                 desired->id,
                 std::make_unique<ff::PublicBrowser>(
                     playback, presentation, *desired, launcher,
                     state_path + "/browser/" + ff::uuid(),
-                    (std::filesystem::path(socket).parent_path() / "cache.sock").string(),
+                    bundle_root,
                     resources, browser_backend, false, options.contains("--diagnostic-engine-debugger"),
                     *cache_mode, options.contains("--diagnostic-browser-render-ahead"), composed_browser_id!=desired->id));
         } catch (const std::exception& e) {
@@ -308,7 +309,7 @@ extern "C" int ff_host(int argc, char** argv) {
           try {
             media.emplace(
                 id, std::make_unique<ff::MediaClient>(playback, presentation, rendering, worker,
-                                                      cache_socket, cached_source, &artwork_cache));
+                                                      bundle_root, cached_source, &artwork_cache));
           } catch (const std::exception& e) {
             playback.failed(id, e.what());
           }

@@ -1,8 +1,10 @@
 #include "ff/cache_client.hpp"
+#include "ff/media_kind.hpp"
 
-#include <curl/curl.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <glib.h>
+#include <filesystem>
+#include <fstream>
+#include <ctime>
 
 #include <condition_variable>
 #include <thread>
@@ -27,7 +29,7 @@ namespace {
 constexpr size_t body_limit = 32 * 1024 * 1024;
 struct Job {
   std::shared_ptr<CacheInbox> inbox;
-  std::string socket, session, request, payload;
+  std::string root, session, request, payload;
   bool open_file = false, policy = false;
 };
 struct Pool {
@@ -37,7 +39,6 @@ struct Pool {
   std::vector<std::jthread> workers;
   bool stopping = false;
   explicit Pool(int count) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
     for (int n = 0; n < count; ++n) workers.emplace_back([this] { run(); });
   }
   ~Pool() {
@@ -46,32 +47,86 @@ struct Pool {
       stopping = true;
     }
     ready.notify_all();
+    for (auto& worker : workers) worker.join();
   }
-  static size_t receive(char* data, size_t a, size_t b, void* context) {
-    auto& result = *static_cast<std::string*>(context);
-    size_t bytes = a * b;
-    if (bytes > body_limit + 256 * 1024 - result.size()) return 0;
-    result.append(data, bytes);
-    return bytes;
-  }
-  static curl_socket_t open_socket(void* context, curlsocktype, struct curl_sockaddr* address) {
-    if (address->family != AF_UNIX) return CURL_SOCKET_BAD;
-    auto fd = socket(AF_UNIX, address->socktype | SOCK_CLOEXEC, address->protocol);
-    *static_cast<curl_socket_t*>(context) = fd;
-    return fd;
-  }
-  static int peer(void* context, char*, char*, int, int) {
-    auto fd = *static_cast<curl_socket_t*>(context);
-    struct ucred credentials{};
-    socklen_t length = sizeof(credentials);
-    return fd != CURL_SOCKET_BAD &&
-                   getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) == 0 &&
-                   credentials.uid == geteuid()
-               ? CURL_PREREQFUNC_OK
-               : CURL_PREREQFUNC_ABORT;
-  }
-  static int progress(void* context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-    return static_cast<CacheInbox*>(context)->active ? 0 : 1;
+  // The offline capture store publishes immutable content-addressed blobs and
+  // atomically replaces its item manifests. Read them as local artwork inputs.
+  static void load(const Job& job, CacheReply& reply) {
+    auto query = Json::parse(job.payload);
+    auto source = query.at("source").get<std::string>();
+    auto url = query.at("url").get<std::string>();
+    auto root = std::filesystem::path(job.root);
+    char* key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, source.data(), source.size());
+    auto path = root / "items" / (std::string(key) + ".json");
+    g_free(key);
+    reply.metadata = {{"requestUrl", url}};
+    if (job.policy && url != source) return;
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream && errno == ENOENT && job.policy) return;
+    require(stream.good() && std::filesystem::file_size(path) <= 16 * 1024 * 1024, "bundle", "Cannot read capture manifest");
+    auto record = Json::parse(stream);
+    require(record.at("item").at("source") == source, "bundle", "Capture identity mismatch");
+    if (job.policy) {
+      reply.metadata["replayMode"] = record.value("automatic", false) ? "mixed" : "isolated";
+      return;
+    }
+    auto method = query.value("method", "");
+    require(method == "GET" || method == "HEAD", "bundle", "Unsupported replay method");
+    for (const auto& [name, value] : query.at("headers").items()) {
+      if (value != "" && (!g_ascii_strcasecmp(name.c_str(), "Authorization") ||
+                          !g_ascii_strcasecmp(name.c_str(), "Cookie") || !g_ascii_strcasecmp(name.c_str(), "Range")))
+        throw Error("bundle", "Request variant requires live origin");
+    }
+    const Json* found = nullptr;
+    for (const auto& resource : record.at("resources")) {
+      if (resource.at("url") == url && resource.value("method", "GET") == "GET") {
+        require(!found, "bundle", "Ambiguous capture entry");
+        found = &resource;
+      }
+    }
+    require(found, "bundle", "Resource absent from capture");
+    if (record.value("automatic", false)) {
+      auto until = found->value("freshUntil", "");
+      auto expiry = g_date_time_new_from_iso8601(until.c_str(), nullptr);
+      bool fresh = expiry && g_date_time_to_unix(expiry) > std::time(nullptr);
+      if (expiry) g_date_time_unref(expiry);
+      require(fresh, "bundle", "Cached resource expired");
+    }
+    // Controld's older manifests omit CSP and repeated response headers.
+    // They can supply native media bytes, but never synthesize a browser response.
+    auto mime = found->value("contentType", found->value("sniffedContentType", ""));
+    if (!job.open_file && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
+      reply.metadata = {{"nativeMime", mime}};
+      return;
+    }
+    require(job.open_file || found->value("browserPolicyVersion", 0) == 2, "bundle", "Browser capture requires recapture for original response headers");
+    auto headers = found->value("headerFields", Json::array());
+    reply.metadata = {{"status", found->value("status", 200)}, {"headers", headers},
+                      {"complete", record.at("coverage").value("complete", false)}};
+    if (found->contains("redirectTo") || method == "HEAD") return;
+    auto hash = found->at("sha256").get<std::string>();
+    require(hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == hash.npos, "bundle", "Invalid blob digest");
+    auto blob = root / "blobs" / hash;
+    auto size = std::filesystem::file_size(blob);
+    require(job.open_file || size <= body_limit, "bundle", "Browser resource exceeds replay limit");
+    std::ifstream body(blob, std::ios::binary);
+    require(body.good(), "bundle", "Cannot open captured resource");
+    std::unique_ptr<GChecksum, decltype(&g_checksum_free)> digest(g_checksum_new(G_CHECKSUM_SHA256), g_checksum_free);
+    char block[65536];
+    size_t bytes = 0;
+    while (job.inbox->active && body) {
+      body.read(block, sizeof(block));
+      auto n = body.gcount();
+      bytes += n;
+      require(bytes <= size, "bundle", "Blob changed during read");
+      g_checksum_update(digest.get(), reinterpret_cast<const guchar*>(block), n);
+      if (!job.open_file) reply.body.append(block, n);
+    }
+    require(body.eof() && bytes == size && hash == g_checksum_get_string(digest.get()), "bundle", "Capture checksum mismatch");
+    if (job.open_file) {
+      reply.metadata["path"] = blob.string();
+      reply.metadata["size"] = size;
+    }
   }
   void run() {
     while (true) {
@@ -88,56 +143,11 @@ struct Pool {
       reply.session = job.session;
       reply.policy = job.policy;
       reply.request = job.request;
-      std::string data;
-      auto handle = curl_easy_init();
-      if (!handle) {
-        reply.error = "cache allocation failed";
-      } else {
-        curl_easy_setopt(handle, CURLOPT_UNIX_SOCKET_PATH, job.socket.c_str());
-        curl_easy_setopt(handle, CURLOPT_URL,
-                         job.policy      ? "http://localhost/v1/policy"
-                         : job.open_file ? "http://localhost/v1/open"
-                                         : "http://localhost/v1/replay");
-        curl_easy_setopt(handle, CURLOPT_PROXY, "");
-        curl_socket_t connected_socket = CURL_SOCKET_BAD;
-        curl_easy_setopt(handle, CURLOPT_OPENSOCKETFUNCTION, open_socket);
-        curl_easy_setopt(handle, CURLOPT_OPENSOCKETDATA, &connected_socket);
-        curl_easy_setopt(handle, CURLOPT_PREREQFUNCTION, peer);
-        curl_easy_setopt(handle, CURLOPT_PREREQDATA, &connected_socket);
-        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, job.payload.data());
-        curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, curl_off_t(job.payload.size()));
-        curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, receive);
-        curl_easy_setopt(handle, CURLOPT_WRITEDATA, &data);
-        curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, job.open_file ? 30000L : 5000L);
-        curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, 500L);
-        curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, progress);
-        curl_easy_setopt(handle, CURLOPT_XFERINFODATA, job.inbox.get());
-        curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
-        auto result = curl_easy_perform(handle);
-        long status = 0;
-        curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
-        curl_easy_cleanup(handle);
-        if (result != CURLE_OK || status != 200)
-          reply.error = "cache unavailable (HTTP " + std::to_string(status) + ", " +
-                        curl_easy_strerror(result) + ")";
-        else
-          try {
-            require(data.size() >= 4, "cache_protocol", "Truncated resource response");
-            uint32_t length = 0;
-            for (int i = 0; i < 4; ++i) length = (length << 8) | uint8_t(data[i]);
-            require(length <= 128 * 1024 && data.size() >= 4 + length, "cache_protocol",
-                    "Invalid resource metadata length");
-            reply.metadata = Json::parse(data.substr(4, length));
-            require(reply.metadata.at("version") == 1, "cache_protocol", "Cache version mismatch");
-            reply.body = data.substr(4 + length);
-            require(reply.body.size() <= body_limit &&
-                        (job.open_file ? (reply.body.empty() && reply.metadata.contains("path"))
-                                       : reply.body.size() == reply.metadata.at("size")),
-                    "cache_limit", "Resource body length mismatch or over 32 MiB");
-          } catch (const std::exception& e) {
-            reply.error = e.what();
-          }
+      try {
+        load(job, reply);
+      } catch (const std::exception& e) {
+        reply.body.clear();
+        reply.error = e.what();
       }
       if (job.inbox->active) {
         std::lock_guard lock(job.inbox->mutex);
@@ -157,7 +167,7 @@ Pool& pool() {
   return instance;
 }
 }  // namespace
-bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& socket,
+bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& root,
                    const std::string& session, const std::string& request, const Json& params,
                    bool open_file, bool policy) {
   static Pool policies(2);
@@ -169,7 +179,7 @@ bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& 
   std::lock_guard inbox_lock(inbox->mutex);
   if (!inbox->active || inbox->outstanding >= 64) return false;
   ++inbox->outstanding;
-  p.queue.push_back({inbox, socket, session, request, std::move(payload), open_file, policy});
+  p.queue.push_back({inbox, root, session, request, std::move(payload), open_file, policy});
   p.ready.notify_one();
   return true;
 }

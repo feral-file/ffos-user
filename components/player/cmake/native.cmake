@@ -1,8 +1,8 @@
 find_program(GO_EXECUTABLE go REQUIRED)
 set(EGRESS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/egress")
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so"
-  COMMAND "${GO_EXECUTABLE}" build -buildmode=c-shared -o "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so" .
-  WORKING_DIRECTORY "${EGRESS_DIR}" DEPENDS egress/main.go egress/http.go egress/entry.go egress/go.mod)
+  COMMAND "${GO_EXECUTABLE}" build -buildmode=c-shared -ldflags=-extldflags=-Wl,-soname,libff_network.so -o "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so" .
+  WORKING_DIRECTORY "${EGRESS_DIR}" DEPENDS egress/main.go egress/http.go egress/routing.go ../feral-controld/contentpath/path.go ../feral-controld/contentpath/cid.go egress/entry.go egress/go.mod)
 add_custom_target(artwork-egress ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so")
 add_test(NAME artwork-egress COMMAND "${GO_EXECUTABLE}" test ./...)
 set_tests_properties(artwork-egress PROPERTIES WORKING_DIRECTORY "${EGRESS_DIR}")
@@ -16,7 +16,8 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so" DESTINATION lib/ff-
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 add_library(ff_cache_client src/cache_client.cpp)
-target_link_libraries(ff_cache_client PUBLIC ff_core PkgConfig::CURL)
+pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
+target_link_libraries(ff_cache_client PUBLIC ff_core PkgConfig::GLIB)
 pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET sdl2 egl glesv2 libdrm pangocairo pangoft2 fontconfig libqrencode wayland-client wayland-egl)
 add_library(ff_artwork_cache src/artwork_cache.cpp)
 target_link_libraries(ff_artwork_cache PUBLIC ff_core PkgConfig::CURL PkgConfig::NATIVE)
@@ -67,7 +68,3 @@ target_link_libraries(ff_device_ui PUBLIC ff_core PkgConfig::NATIVE)
 add_executable(device-ui-tests tests/device_ui_test.cpp)
 target_link_libraries(device-ui-tests PRIVATE ff_device_ui)
 add_test(NAME device-ui COMMAND device-ui-tests ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts ${CMAKE_CURRENT_BINARY_DIR}/ui-evidence)
-add_executable(cache-client-tests tests/cache_client_test.cpp)
-target_link_libraries(cache-client-tests PRIVATE ff_cache_client)
-add_test(NAME cache-client COMMAND cache-client-tests ${CMAKE_CURRENT_SOURCE_DIR}/protocol/cache-fixtures.json)
-set_tests_properties(cache-client PROPERTIES TIMEOUT 15)

@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
   try {
     ff::ArtworkCache cache(fs::canonical("/proc/self/exe").string());
     for (auto local : {"/local/art", "./art", "file:///local/art", "fd://3", "data:image/png,1",
-                       "ff-render://bundle/x"}) {
+                       "ff-render://bundle/x", "http://127.0.0.1:8082/blobs/a", "https://localhost/bundle", "http://[::1]/art"}) {
       check(!ff::ArtworkCache::media_request(local, "", false), "local media was cacheable");
       check(ff::ArtworkCache::browser_key(local, false).empty(), "local browser cache key");
     }

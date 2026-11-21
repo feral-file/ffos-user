@@ -15,7 +15,7 @@ void reap_media_workers();
 class MediaClient {
  public:
   MediaClient(Playback& playback, Presentation& presentation, Occurrence occurrence,
-              const std::string& worker, const std::string& cache_socket = "",
+              const std::string& worker, const std::string& bundle_root = "",
               const std::string& cache_mode = "", ArtworkCache* artwork_cache = nullptr);
   ~MediaClient();
   void poll(bool hold = false, const Json* stage = nullptr,bool allow_direct = false);
@@ -49,7 +49,7 @@ class MediaClient {
   void start(int cached_fd = -1);
   std::string worker_, source_override_, user_agent_;
   bool policy_pending_ = false, mixed_cache_ = false;
-  std::string cache_socket_;
+  std::string bundle_root_;
   bool fallback_live();
   std::shared_ptr<CacheInbox> cache_;
 };

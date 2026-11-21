@@ -3,6 +3,8 @@
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <spawn.h>
+#include <linux/openat2.h>
+#include <sys/syscall.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -31,7 +33,7 @@ void reap_media_workers() {
   }
 }
 MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurrence occurrence,
-                         const std::string& worker, const std::string& cache_socket,
+                         const std::string& worker, const std::string& bundle_root,
                          const std::string& cache_mode, ArtworkCache* artwork_cache)
     : id(occurrence.id),
       artwork_cache_(artwork_cache),
@@ -39,12 +41,30 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
       presentation_(presentation),
       occurrence_(std::move(occurrence)),
       worker_(worker) {
-  cache_socket_ = cache_socket;
+  bundle_root_ = bundle_root;
   mixed_cache_ = cache_mode == "mixed";
   auto engine = playback_.snapshot().value("engine", Json::object());
   if (engine.is_object()) user_agent_ = engine.value("userAgent", "");
-  if (occurrence_.item.at("source").get<std::string>().starts_with("data:")) {
-    int fd = inline_media_fd(occurrence_.item.at("source"));
+  const auto source = occurrence_.item.at("source").get<std::string>();
+  const auto name = local_artwork_name(source);
+  if (!name.empty() || source.starts_with("data:")) {
+    int fd;
+    if (name.empty()) {
+      fd = inline_media_fd(source);
+    } else {
+      int root = open(local_artworks, O_DIRECTORY | O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+      require(root >= 0, "local_media", "Cannot open local artwork directory");
+      open_how how{};
+      how.flags = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
+      how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
+      fd = syscall(SYS_openat2, root, name.c_str(), &how, sizeof(how));
+      close(root);
+      struct stat info{};
+      if (fd < 0 || fstat(fd, &info) || !S_ISREG(info.st_mode)) {
+        if (fd >= 0) close(fd);
+        throw Error("local_media", "Expected a regular file under the local artwork directory");
+      }
+    }
     try {
       start(fd);
     } catch (...) {
@@ -52,35 +72,28 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
       throw;
     }
     close(fd);
-  } else if (!cache_socket.empty() &&
-             (!cache_mode.empty() || !playback_.online() ||
+  } else if (!bundle_root.empty() &&
+             (!cache_mode.empty() ||
               virtual_cache_source(occurrence_.item.at("source"))) &&
              !occurrence_.item.at("source").get<std::string>().starts_with("data:")) {
     cache_ = std::make_shared<CacheInbox>();
-    require(cache_request(cache_, cache_socket, "", id,
+    require(cache_request(cache_, bundle_root, "", id,
                           {{"source", occurrence_.item.at("source")},
                            {"url", occurrence_.item.at("source")},
                            {"method", "GET"},
                            {"headers", Json::object()}},
                           true),
             "cache_backpressure", "Cannot enqueue cached media open");
-  } else if (!cache_socket.empty()) {
-    cache_ = std::make_shared<CacheInbox>();
-    policy_pending_ = true;
-    require(cache_request(cache_, cache_socket, "", id,
-                          {{"source", occurrence_.item.at("source")},
-                           {"url", occurrence_.item.at("source")},
-                           {"method", "GET"},
-                           {"headers", Json::object()}},
-                          false, true),
-            "policy_backpressure", "Cannot enqueue source policy");
   } else
     start_live();
 }
 void MediaClient::start_live() {
   int fd = -1;
-  const auto url = source_override_.empty() ? occurrence_.item.at("source").get<std::string>() : source_override_;
-  if (artwork_cache_ && playback_.online()) {
+  auto route = artwork_route(playback_.artwork_sources(), occurrence_.item.at("source"));
+  source_override_ = route.url;
+  if (!route.user_agent.empty()) user_agent_ = route.user_agent;
+  const auto& url = route.url;
+  if (artwork_cache_) {
     warm_request_ = ArtworkCache::media_request(url, user_agent_, playback_.global_policy().at("localNetwork") == true);
     if (warm_request_) {
       fd = ArtworkCache::open_media(warm_request_->key, playback_.global_policy().at("cache").at("maxAgeDays"));
@@ -109,7 +122,7 @@ void MediaClient::start(int cached_fd) {
   posix_spawn_file_actions_adddup2(&actions, sockets[1], 3);
   if (sockets[1] != 3) posix_spawn_file_actions_addclose(&actions, sockets[1]);
   char* args[] = {const_cast<char*>(worker_.c_str()), const_cast<char*>("--launch-media"),
-                  const_cast<char*>(cached_fd >= 0 ? "--offline" : playback_.global_policy().at("localNetwork") == true ? "--lan" : "--public"), nullptr};
+                  const_cast<char*>(cached_fd >= 0 || !playback_.online() ? "--offline" : playback_.global_policy().at("localNetwork") == true ? "--lan" : "--public"), nullptr};
   auto rc = posix_spawn(&pid_, worker_.c_str(), &actions, nullptr, args, environ);
   posix_spawn_file_actions_destroy(&actions);
   close(sockets[1]);
@@ -152,7 +165,7 @@ bool MediaClient::fallback_live() {
   mixed_cache_ = false;
   policy_pending_ = true;
   std::cerr << "Automatic native cache unavailable; retrying approved live source\n";
-  require(cache_request(cache_, cache_socket_, "", id,
+  require(cache_request(cache_, bundle_root_, "", id,
                         {{"source", occurrence_.item.at("source")},
                          {"url", occurrence_.item.at("source")},
                          {"method", "GET"},
@@ -370,7 +383,7 @@ void MediaClient::did_present() {
     send_media(socket_, {{"method", "presented"}, {"sequence", received_sequence_}});
     presented_sequence_ = received_sequence_;
     frames.submitted();
-    if (warm_request_ && playback_.desired() && playback_.desired()->id == id) {
+    if (warm_request_ && playback_.online() && playback_.desired() && playback_.desired()->id == id) {
       artwork_cache_->warm(id, *warm_request_);
       warm_request_.reset();
     }

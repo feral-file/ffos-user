@@ -15,7 +15,9 @@ add_executable(artwork-cache-tests tests/artwork_cache_test.cpp)
 target_link_libraries(artwork-cache-tests PRIVATE ff_artwork_cache)
 target_link_options(artwork-cache-tests PRIVATE -Wl,--wrap=statvfs)
 add_test(NAME artwork-cache COMMAND artwork-cache-tests)
-add_library(ff_host SHARED src/public_main.cpp src/public_browser.cpp src/profile_gc.cpp src/presentation.cpp src/media_client.cpp)
+add_library(ff_host SHARED src/gateway.cpp src/public_main.cpp src/public_browser.cpp src/profile_gc.cpp src/presentation.cpp src/media_client.cpp)
+add_dependencies(ff_host artwork-egress)
+target_link_libraries(ff_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so")
 target_include_directories(ff_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(ff_host PRIVATE ff_artwork_cache ff_presentation_feedback ff_core ff_device_ui ff_media_ipc ff_browser_surface ff_cache_client PkgConfig::NATIVE PkgConfig::CURL dl)
 add_executable(ff-player-native src/player_main.cpp src/sandbox.cpp)
@@ -33,6 +35,6 @@ install(FILES protocol/schema.json protocol/README.md DESTINATION share/ff-playe
 
 
 set(FF_PRESENTATION_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/build-presentation/prefix" CACHE PATH "Pinned private compositor libraries")
-set_target_properties(ff_host PROPERTIES INSTALL_RPATH "$ORIGIN/presentation")
+set_target_properties(ff_host PROPERTIES INSTALL_RPATH "$ORIGIN;$ORIGIN/presentation")
 install(DIRECTORY "${FF_PRESENTATION_PREFIX}/lib/" DESTINATION lib/ff-player-native/presentation FILES_MATCHING PATTERN "libwlroots-0.20.so*")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/wlroots-0.20.0/LICENSE" DESTINATION share/licenses/ff-player-native RENAME wlroots.txt)

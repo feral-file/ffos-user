@@ -44,7 +44,22 @@ std::string media_path(const std::string& key) {
   return std::string(home) + "/.cache/player-artworks/media/" + key;
 }
 bool http_url(const std::string& url) {
-  return url.starts_with("https://") || url.starts_with("http://");
+  if (!url.starts_with("https://") && !url.starts_with("http://")) return false;
+  auto parsed = curl_url();
+  if (!parsed) return false;
+  char* name = nullptr;
+  bool eligible = !curl_url_set(parsed, CURLUPART_URL, url.c_str(), 0) &&
+                  !curl_url_get(parsed, CURLUPART_HOST, &name, 0);
+  if (eligible) {
+    std::string host(name);
+    std::transform(host.begin(), host.end(), host.begin(), [](unsigned char c){ return g_ascii_tolower(c); });
+    if (host.ends_with('.')) host.pop_back();
+    eligible = host != "localhost" && !host.ends_with(".localhost") && host != "[::1]" &&
+               !host.starts_with("127.") && host != "ff-player.internal" && !host.ends_with(".onchfs.invalid");
+  }
+  curl_free(name);
+  curl_url_cleanup(parsed);
+  return eligible;
 }
 }  // namespace
 std::string ArtworkCache::browser_key(const std::string& url, bool lan) {

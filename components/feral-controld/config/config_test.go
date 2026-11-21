@@ -107,9 +107,6 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 		Unmarshal([]byte(configData), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			cfg := v.(*config.Config)
-			cfg.CDPConfig = &config.CDPConfig{
-				Endpoint: "http://localhost:9222",
-			}
 			cfg.RelayerConfig = &config.RelayerConfig{
 				Endpoint: "wss://relay.feralfile.com",
 				APIKey:   "test-api-key",
@@ -128,7 +125,6 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	// Verify
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	assert.Equal(t, "http://localhost:9222", result.CDPConfig.Endpoint)
 	assert.Equal(t, "wss://relay.feralfile.com", result.RelayerConfig.Endpoint)
 	assert.Equal(t, "test-api-key", result.RelayerConfig.APIKey)
 	assert.Equal(t, "test", result.LogStreamingConfig(ts.logger).Environment)
@@ -214,9 +210,6 @@ func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
 		Unmarshal([]byte(configData), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			cfg := v.(*config.Config)
-			cfg.CDPConfig = &config.CDPConfig{
-				Endpoint: "http://localhost:9222",
-			}
 			cfg.RelayerConfig = &config.RelayerConfig{}
 			return nil
 		}).
@@ -323,10 +316,8 @@ func TestConfigManager_Get_InitialCall(t *testing.T) {
 	result := cm.Get()
 
 	assert.NotNil(t, result)
-	assert.NotNil(t, result.CDPConfig)
 	assert.NotNil(t, result.RelayerConfig)
 	assert.Nil(t, result.LogStreaming)
-	assert.Empty(t, result.CDPConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.APIKey)
 }
@@ -359,9 +350,6 @@ func TestConfigManager_Get_AfterLoad(t *testing.T) {
 		Unmarshal([]byte(configData), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			cfg := v.(*config.Config)
-			cfg.CDPConfig = &config.CDPConfig{
-				Endpoint: "http://localhost:9222",
-			}
 			cfg.RelayerConfig = &config.RelayerConfig{
 				Endpoint: "wss://relay.feralfile.com",
 			}
@@ -379,7 +367,6 @@ func TestConfigManager_Get_AfterLoad(t *testing.T) {
 	// Get should return the same config
 	result := ts.cm.Get()
 	assert.Equal(t, loadedConfig, result)
-	assert.Equal(t, "http://localhost:9222", result.CDPConfig.Endpoint)
 	assert.Equal(t, "wss://relay.feralfile.com", result.RelayerConfig.Endpoint)
 }
 
@@ -405,10 +392,8 @@ func TestConfigManager_ConcurrentGet(t *testing.T) {
 	for range numGoroutines {
 		result := <-results
 		assert.NotNil(t, result)
-		assert.NotNil(t, result.CDPConfig)
 		assert.NotNil(t, result.RelayerConfig)
 		assert.Nil(t, result.LogStreaming)
-		assert.Empty(t, result.CDPConfig.Endpoint)
 		assert.Empty(t, result.RelayerConfig.Endpoint)
 		configs = append(configs, result)
 	}
@@ -416,8 +401,6 @@ func TestConfigManager_ConcurrentGet(t *testing.T) {
 	// Verify all results are identical (due to mutex protection)
 	firstConfig := configs[0]
 	for i, cfg := range configs {
-		assert.Equal(t, firstConfig.CDPConfig.Endpoint, cfg.CDPConfig.Endpoint,
-			"concurrent Get %d: CDP endpoint mismatch", i)
 		assert.Equal(t, firstConfig.RelayerConfig.Endpoint, cfg.RelayerConfig.Endpoint,
 			"concurrent Get %d: relayer endpoint mismatch", i)
 	}
@@ -453,9 +436,6 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 		Unmarshal([]byte(configData), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			cfg := v.(*config.Config)
-			cfg.CDPConfig = &config.CDPConfig{
-				Endpoint: "http://concurrent-test:9222",
-			}
 			cfg.RelayerConfig = &config.RelayerConfig{
 				Endpoint: "wss://concurrent-relay.test.com",
 			}
@@ -491,14 +471,11 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 	// Verify all results are identical (due to mutex protection and caching)
 	firstConfig := loadedConfigs[0]
 	for i, loadedConfig := range loadedConfigs {
-		assert.Equal(t, firstConfig.CDPConfig.Endpoint, loadedConfig.CDPConfig.Endpoint,
-			"concurrent load %d: CDP endpoint mismatch", i)
 		assert.Equal(t, firstConfig.RelayerConfig.Endpoint, loadedConfig.RelayerConfig.Endpoint,
 			"concurrent load %d: relayer endpoint mismatch", i)
 	}
 
 	// Verify the expected values
-	assert.Equal(t, "http://concurrent-test:9222", firstConfig.CDPConfig.Endpoint)
 	assert.Equal(t, "wss://concurrent-relay.test.com", firstConfig.RelayerConfig.Endpoint)
 }
 
@@ -531,9 +508,6 @@ func TestConfig_Load_Success(t *testing.T) {
 		Unmarshal([]byte(configData), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			cfg := v.(*config.Config)
-			cfg.CDPConfig = &config.CDPConfig{
-				Endpoint: "http://global-test:9222",
-			}
 			cfg.RelayerConfig = &config.RelayerConfig{}
 			return nil
 		}).
@@ -546,7 +520,6 @@ func TestConfig_Load_Success(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	assert.Equal(t, "http://global-test:9222", result.CDPConfig.Endpoint)
 
 	// Verify MAC info is populated as a map
 	assert.NotNil(t, result.MACInfo)
@@ -561,10 +534,8 @@ func TestConfig_Get_Success(t *testing.T) {
 	result := config.Get()
 
 	assert.NotNil(t, result)
-	assert.NotNil(t, result.CDPConfig)
 	assert.NotNil(t, result.RelayerConfig)
 	assert.Nil(t, result.LogStreaming)
-	assert.Empty(t, result.CDPConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.Endpoint)
 }
 

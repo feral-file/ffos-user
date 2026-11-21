@@ -12,6 +12,7 @@
 #include <csignal>
 #include <ctime>
 #include <cstring>
+#include <strings.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -46,7 +47,7 @@ void reap_public_browsers() {
 }
 PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
-                             const std::string& cache_socket, const std::string& resources,
+                             const std::string& bundle_root, const std::string& resources,
                              const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
                              bool render_ahead, bool allow_direct)
     : id(o.id),
@@ -58,10 +59,11 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
       profile_(profile),
       offline_(!p.online() || cache_mode == "isolated" ||
                virtual_cache_source(occurrence_.item.at("source"))),
-      cache_socket_(cache_socket) {
+      bundle_root_(bundle_root) {
   initial_display_=occurrence_.display;
   resources_ = resources;
   mixed_cache_ = cache_mode == "mixed";
+  capture_replay_ = cache_mode == "isolated";
   restart_on_online_ = !p.online() && cache_mode != "isolated" &&
                        !virtual_cache_source(occurrence_.item.at("source"));
   decoration_ = decoration;
@@ -122,7 +124,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attr, 0);
     const auto& permissions = p.global_policy();
-    auto cache_key = offline_ ? "" : ArtworkCache::browser_key(source, permissions.at("localNetwork") == true);
+    auto cache_key = !cache_mode.empty() ? "" : ArtworkCache::browser_key(source, permissions.at("localNetwork") == true);
     auto cache_bytes = std::to_string(permissions.at("cache").at("maxBytes").get<int64_t>());
     auto cache_days = std::to_string(permissions.at("cache").at("maxAgeDays").get<int>());
     char* args[] = {const_cast<char*>(launcher.c_str()), const_cast<char*>("--launch-browser"), const_cast<char*>(profile_.c_str()),
@@ -243,7 +245,7 @@ void PublicBrowser::message(const Json& m) {
       send("Page.enable", {}, child);
       send("Network.enable", {}, child);
       send("Page.setLifecycleEventsEnabled", {{"enabled", true}}, child);
-      send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
+      if (bundled_ || mixed_cache_ || capture_replay_ || playback_.artwork_sources().contains("gatewayHosts")) send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
       send("Target.setAutoAttach",
            {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
       send("Runtime.runIfWaitingForDebugger", {}, child);
@@ -269,7 +271,7 @@ void PublicBrowser::message(const Json& m) {
             "unverified.");
       }
       if (type == "iframe")
-        send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
+        if (bundled_ || mixed_cache_ || capture_replay_ || playback_.artwork_sources().contains("gatewayHosts")) send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
       if (type == "iframe")
         send("Target.setAutoAttach",
              {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
@@ -291,7 +293,21 @@ void PublicBrowser::message(const Json& m) {
       return;
     }
     const bool local_chain = virtual_cache_source(url);
-    const bool replay = offline_ || local_chain || mixed_cache_;
+    const bool replay = capture_replay_ || local_chain || mixed_cache_;
+    if (!replay) {
+      auto route = artwork_route(playback_.artwork_sources(), url);
+      Json params = {{"requestId", request}};
+      if (route.url != url) params["url"] = route.url;
+      if (!route.user_agent.empty()) {
+        Json headers = Json::array();
+        for (const auto& [name,value] : network.at("headers").items())
+          if (strcasecmp(name.c_str(), "User-Agent")) headers.push_back({{"name",name},{"value",value}});
+        headers.push_back({{"name","User-Agent"},{"value",route.user_agent}});
+        params["headers"] = headers;
+      }
+      send("Fetch.continueRequest", params, session);
+      return;
+    }
     Json query = {{"source", occurrence_.item.at("source")},
                   {"url", url},
                   {"method", network.value("method", "GET")},
@@ -299,7 +315,7 @@ void PublicBrowser::message(const Json& m) {
     if (mixed_cache_ && !offline_ && !local_chain)
       mixed_requests_[session + "\n" + request] = query;
     if (cache_pending_ >= 64 ||
-        !cache_request(cache_, cache_socket_, session, request, query, false, !replay)) {
+        !cache_request(cache_, bundle_root_, session, request, query, false, !replay)) {
       send("Fetch.failRequest", {{"requestId", request}, {"errorReason", "InsufficientResources"}},
            session);
       fail("Resource/policy request queue exceeded its limit");
@@ -470,7 +486,7 @@ void PublicBrowser::poll() {
         auto query = std::move(mixed_requests_.at(mixed_key));
         mixed_requests_.erase(mixed_key);
         require(
-            cache_request(cache_, cache_socket_, reply.session, reply.request, query, false, true),
+            cache_request(cache_, bundle_root_, reply.session, reply.request, query, false, true),
             "cache_backpressure", "Live fallback policy queue exceeded its limit");
         ++cache_pending_;
         ++cache_misses_;

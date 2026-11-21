@@ -2,9 +2,9 @@ name: Build FF1 player
 on:
   push:
     branches: [develop, 'codex/**']
-    paths: ['components/player/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
+    paths: ['components/player/**', 'components/feral-controld/contentpath/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
   pull_request:
-    paths: ['components/player/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
+    paths: ['components/player/**', 'components/feral-controld/contentpath/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/player/docs/**', '!components/player/README.md', '.github/workflows/build-player.yaml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -21,7 +21,7 @@ jobs:
         run: docker build -t ff-native-build components/player
       - name: Build and test Cage host, CEF and native media workers
         run: |
-          docker run --rm -v "$PWD/components/player:/src" ff-native-build sh tools/build-ff1.sh
+          docker run --rm -v "$PWD/components:/workspace/components" -w /workspace/components/player ff-native-build sh tools/build-ff1.sh
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.0'

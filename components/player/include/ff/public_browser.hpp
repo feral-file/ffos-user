@@ -15,7 +15,7 @@ namespace ff {
 class PublicBrowser {
  public:
   PublicBrowser(Playback&, Presentation&, Occurrence, const std::string& launcher,
-                const std::string& profile, const std::string& cache_socket,
+                const std::string& profile, const std::string& bundle_root,
                 const std::string& resources, const std::string& backend, bool decoration = false, bool debugger = false,
                 const std::string& cache_mode = "", bool render_ahead = false, bool allow_direct = true);
   ~PublicBrowser();
@@ -82,14 +82,14 @@ class PublicBrowser {
     std::chrono::steady_clock::time_point submitted;
   };
   std::deque<Submission> submissions_;
-  bool mixed_cache_ = false, restart_on_online_ = false;
+  bool capture_replay_ = false, mixed_cache_ = false, restart_on_online_ = false;
   std::map<std::string, Json> mixed_requests_;
   bool loaded_ = false, failed_ = false, offline_ = false, cache_coverage_ = false,
        bundled_ = false;
   std::string bundle_prefix_, resources_ = "/usr/share/ff-player-native/renderers";
   uint64_t configured_revision_ = 0, configuration_frame_ = 0;
   bool bundled_request(const Json&, const std::string&);
-  std::string cache_socket_;
+  std::string bundle_root_;
   std::shared_ptr<CacheInbox> cache_ = std::make_shared<CacheInbox>();
   uint64_t compositor_gpu_passes_ = 0;
   bool health_pending_ = false;
