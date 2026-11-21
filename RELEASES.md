@@ -19,6 +19,35 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.1.0.native.20261121.11 — full-image Development trial
+
+This image pairs the native kiosk session with its socket-only daemons. Native
+images poll the branch's `native/os/$arch` package index. Existing legacy
+images stay on their original index until a full-image update installs the new
+session and pacman configuration.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | 30ff01607b3abf692955c26927ad55528695f8e0 |
+| ffos_user_ref | a10199351137c576efe341df14ba8cb3196d818e |
+| version | 3.1.0.native.20261121.11 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| soak-test | false |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The workflow extracted the finished ISO and checked its installed packages,
+kiosk startup and package index. SHA-256 is `05333758ac1caff2aeec1c1c8b108cf7bdcbbfb22ba65d2cb26904f27209cd39`.
+[Development build](https://github.com/feral-file/ffos/actions/runs/44883887023) ·
+[Signed Development image](https://ffosdev.feralfile.com/archlinux/codex/native-player/FF1-dev-3.1.0.native.20261121.11.iso).
+
+Homelab retained its existing OS. Its in-place trial used the signed player,
+controld and watchdog packages from the same workflow. The isolated pacman
+upgrade replaced `feral-player` with `ff-player-native`.
+
 ## 3.1.0.native.20261121.3 — full-image Development trial
 
 The kiosk session, native player package, controld and watchdog change together.

@@ -1,4 +1,9 @@
-# Native player migration — implementation in progress
+# Native player migration history
+
+These notes follow the implementation in chronological order. For the shipped
+process layout, Unix socket boundary, cache ownership and mapping of former CDP
+consumers, see the [native cutover guide](../components/player/docs/MIGRATION.md).
+The [release ledger](../RELEASES.md) records the pinned Development image.
 
 Ordinary casts, source refresh, runtime-instance recovery, setup/pairing,
 sleep, input, history and watchdog now use `components/player` over native IPC.
