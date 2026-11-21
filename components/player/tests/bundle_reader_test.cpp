@@ -30,7 +30,7 @@ int main() {
                  {"freshUntil","2099-01-01T00:00:00Z"},{"redirectTo","work/clip.mp4"}};
   Json record={{"item",{{"source",url}}},{"coverage",{{"complete",true}}},
                {"resources",Json::array({document,clip})},{"automatic",true}};
-  auto read=[&](std::string target,Json headers,bool file,bool policy,std::string method="GET",std::shared_ptr<const Json> capture={}) {
+  auto read=[&](std::string target,Json headers,bool file,bool policy,std::string method="GET",std::shared_ptr<const ff::CaptureSnapshot> capture={}) {
     auto inbox=std::make_shared<ff::CacheInbox>();
     check(ff::cache_request(inbox,root,"session","request",{{"source",url},{"url",target},{"method",method},{"headers",headers}},file,policy,capture));
     for(int i=0;i<500;++i) {
@@ -77,6 +77,11 @@ int main() {
   auto pinned = read(asset,empty,false,false,"GET",policy.capture);
   check(pinned.metadata.at("headers").empty());
   check(!read(asset,empty,false,false).metadata.at("headers").empty());
+  fs::remove(root/"blobs"/digest(bytes));
+  auto delayed = read(asset,empty,true,false,"GET",policy.capture);
+  check(delayed.error.empty() && fs::exists(delayed.metadata.at("path").get<std::string>()));
+  auto delayed_part = read(asset,{{"Range","bytes=1-4"}},false,false,"GET",policy.capture);
+  check(delayed_part.body=="ampl");
   record["resources"][1]["freshUntil"]="2001-01-01T00:00:00Z";
   std::ofstream(record_file)<<Json{{"automaticCacheVersion",1},{"record",record}};
   check(!read(url,empty,false,true).metadata.contains("replayMode"));

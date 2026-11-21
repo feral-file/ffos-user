@@ -1,5 +1,8 @@
 #include "ff/cache_client.hpp"
 #include "ff/media_kind.hpp"
+#include "ff/profile_gc.hpp"
+#include <sys/stat.h>
+#include <set>
 
 #include <glib.h>
 #include <filesystem>
@@ -12,6 +15,9 @@
 #include <thread>
 #include <vector>
 namespace ff {
+CaptureSnapshot::~CaptureSnapshot() {
+  if (!root.empty()) retire_browser_profile(root);
+}
 std::string base64(const std::string& bytes) {
   static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   std::string result;
@@ -33,8 +39,48 @@ struct Job {
   std::shared_ptr<CacheInbox> inbox;
   std::string root, session, request, payload;
   bool open_file = false, policy = false;
-  std::shared_ptr<const Json> capture;
+  std::shared_ptr<const CaptureSnapshot> capture;
 };
+// Hardlinks retain inodes without copying artwork bytes. Keep the lease on
+// the blob filesystem even when the operator uses a separate cache mount.
+std::string pin_blobs(const std::filesystem::path& store, const Json& record,
+                      const std::shared_ptr<CacheInbox>& owner) {
+  namespace fs = std::filesystem;
+  auto absolute = fs::canonical(store);
+  auto parent = absolute.parent_path();
+  struct stat store_stat{}, parent_stat{};
+  require(!stat(absolute.c_str(), &store_stat) && !stat(parent.c_str(), &parent_stat),
+          "bundle", "Cannot locate capture filesystem");
+  auto leases = store_stat.st_dev == parent_stat.st_dev
+      ? parent / ("." + absolute.filename().string() + "-player-leases")
+      : absolute / ".player-leases";
+  // One kiosk owns the product socket. Retire leftovers from its previous
+  // process once per store, before exposing any current occurrence paths.
+  static std::mutex mutex;
+  static std::set<fs::path> initialized;
+  {
+    std::lock_guard lock(mutex);
+    if (initialized.insert(leases).second) sweep_browser_profiles(leases.string());
+  }
+  auto lease = leases / uuid();
+  auto blobs = lease / "blobs";
+  fs::create_directories(blobs);
+  try {
+    for (const auto& resource : record.at("resources")) {
+      require(owner->active, "bundle", "Artwork selection was cancelled");
+      auto hash = resource.value("sha256", "");
+      if (hash.size() != 64 || hash.find_first_not_of("0123456789abcdef") != hash.npos) continue;
+      std::error_code error;
+      fs::create_hard_link(absolute / "blobs" / hash, blobs / hash, error);
+      if (error && error != std::errc::file_exists && error != std::errc::no_such_file_or_directory)
+        throw fs::filesystem_error("Cannot retain captured blob", blobs / hash, error);
+    }
+  } catch (...) {
+    retire_browser_profile(lease.string());
+    throw;
+  }
+  return lease.string();
+}
 struct Pool {
   std::mutex mutex;
   std::condition_variable ready;
@@ -62,6 +108,7 @@ struct Pool {
     reply.metadata = {{"requestUrl", url}};
     if (job.policy && url != source) return;
     auto capture = job.capture;
+    std::shared_ptr<CaptureSnapshot> loaded;
     if (!capture) {
       char* key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, source.data(), source.size());
       auto path = root / "items" / (std::string(key) + ".json");
@@ -73,9 +120,12 @@ struct Pool {
       const bool wrapped = manifest.value("automaticCacheVersion", 0) != 0;
       if (wrapped) require(manifest.at("automaticCacheVersion") == 1 && manifest.contains("record") &&
                            manifest.at("record").value("automatic", false), "bundle", "Unsupported automatic capture");
-      capture = std::make_shared<Json>(wrapped ? std::move(manifest.at("record")) : std::move(manifest));
+      loaded = std::make_shared<CaptureSnapshot>();
+      loaded->record = wrapped ? std::move(manifest.at("record")) : std::move(manifest);
+      capture = loaded;
     }
-    const auto& record = *capture;
+    const auto& record = capture->record;
+    if (!capture->root.empty()) root = capture->root;
     require(record.at("item").at("source") == source, "bundle", "Capture identity mismatch");
     if (job.policy) {
       const Json* entry = nullptr;
@@ -99,6 +149,8 @@ struct Pool {
         require(record.value("automatic", false), "bundle", "Downloaded browser capture needs recapture for original response headers");
         return;
       }
+      if (loaded) loaded->root = pin_blobs(root, record, job.inbox);
+      root = capture->root;
       // Large browser GETs use an original-origin CEF stream. Only the
       // current artwork's captured blobs may enter its private mount namespace.
       if (browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
@@ -186,6 +238,7 @@ struct Pool {
     auto hash = found->at("sha256").get<std::string>();
     require(hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == hash.npos, "bundle", "Invalid blob digest");
     auto blob = root / "blobs" / hash;
+    reply.capture = capture;
     auto size = std::filesystem::file_size(blob);
     uintmax_t first = 0, end = size;
     auto& fields = reply.metadata["headers"];
@@ -288,7 +341,7 @@ Pool& pool() {
 }  // namespace
 bool cache_request(const std::shared_ptr<CacheInbox>& inbox, const std::string& root,
                    const std::string& session, const std::string& request, const Json& params,
-                   bool open_file, bool policy, std::shared_ptr<const Json> capture) {
+                   bool open_file, bool policy, std::shared_ptr<const CaptureSnapshot> capture) {
   static Pool policies(2);
   auto& p = policy ? policies : pool();
   auto payload = params.dump();

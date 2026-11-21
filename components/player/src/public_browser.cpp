@@ -50,7 +50,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& bundle_root, const std::string& resources,
                              const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
-                             bool render_ahead, bool allow_direct, Json streams, std::shared_ptr<const Json> capture)
+                             bool render_ahead, bool allow_direct, Json streams, std::shared_ptr<const CaptureSnapshot> capture)
     : id(o.id),
       backend_(backend),
       max_submissions_(render_ahead ? 2 : 1),
@@ -145,7 +145,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                     const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"),
                     const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),
                     const_cast<char*>(permissions.at("autoplay") == true ? "auto" : "gesture"),
-                    cache_key.data(), cache_bytes.data(), cache_days.data(), const_cast<char*>(bundle_root_.c_str()), nullptr};
+                    cache_key.data(), cache_bytes.data(), cache_days.data(), const_cast<char*>((capture_ ? capture_->root : bundle_root_).c_str()), nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);

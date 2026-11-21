@@ -16,7 +16,8 @@ class MediaClient {
  public:
   MediaClient(Playback& playback, Presentation& presentation, Occurrence occurrence,
               const std::string& worker, const std::string& bundle_root = "",
-              const std::string& cache_mode = "", ArtworkCache* artwork_cache = nullptr);
+              const std::string& cache_mode = "", ArtworkCache* artwork_cache = nullptr,
+              std::shared_ptr<const CaptureSnapshot> capture = {});
   ~MediaClient();
   void poll(bool hold = false, const Json* stage = nullptr,bool allow_direct = false);
   void seek(double seconds);

@@ -15,7 +15,7 @@ set_tests_properties(artwork-public-route PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so" DESTINATION lib/ff-player-native)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
-add_library(ff_cache_client src/cache_client.cpp)
+add_library(ff_cache_client src/cache_client.cpp src/profile_gc.cpp)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 target_link_libraries(ff_cache_client PUBLIC ff_core PkgConfig::GLIB)
 add_executable(bundle-reader-tests tests/bundle_reader_test.cpp)

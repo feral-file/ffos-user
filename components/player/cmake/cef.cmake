@@ -15,6 +15,10 @@ install(FILES third_party/color-name/LICENSE DESTINATION share/licenses/ff-playe
 install(FILES protocol/schema.json protocol/README.md DESTINATION share/ff-player-native/protocol)
 
 add_library(ff_browser SHARED src/cef_views_worker.cpp)
+# libcef_dll_wrapper is built without RTTI. Resolve every role symbol at
+# link time so a successful package can actually enter the browser role.
+target_compile_options(ff_browser PRIVATE -fno-rtti)
+target_link_options(ff_browser PRIVATE -Wl,-z,defs)
 target_include_directories(ff_browser PRIVATE "${CEF_ROOT}" vendor)
 target_link_libraries(ff_browser PRIVATE PkgConfig::GLIB)
 target_link_libraries(ff_browser PRIVATE libcef_dll_wrapper "${CEF_ROOT}/Release/libcef.so")

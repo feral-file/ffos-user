@@ -12,7 +12,8 @@ and fall back to live artwork requests under the current network policy.
 Legacy media blobs remain playable. A downloaded HTML capture that lacks the
 original response headers requires recapture before its scripts can execute.
 
-An occurrence pins its capture manifest. An atomic recapture takes effect on
+An occurrence pins its capture manifest and holds temporary hardlinks to the available blobs.
+Retiring the occurrence releases those links. An atomic recapture takes effect on
 the next play. Mixed online playback fetches large full GETs live so a cache
 miss always reaches the selected gateway.
 

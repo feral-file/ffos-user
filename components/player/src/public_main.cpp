@@ -137,14 +137,13 @@ extern "C" int ff_host(int argc, char** argv) {
       std::optional<std::string> mode;
       std::chrono::steady_clock::time_point started;
       ff::Json streams;
-      std::shared_ptr<const ff::Json> capture;
+      std::shared_ptr<const ff::CaptureSnapshot> capture;
     } resolution;
     auto resolve_source = [&](const ff::Occurrence& occurrence) -> std::optional<std::string> {
       if (occurrence.item.at("source").get<std::string>().starts_with("data:") ||
           !ff::local_artwork_name(occurrence.item.at("source")).empty())
         return "";
       if (resolution.id != occurrence.id) {
-        if (resolution.inbox) resolution.inbox->active = false;
         resolution = {occurrence.id, std::make_shared<ff::CacheInbox>(), std::nullopt,
                       std::chrono::steady_clock::now()};
         if (!ff::cache_request(resolution.inbox, bundle_root, "", occurrence.id,
@@ -257,6 +256,10 @@ extern "C" int ff_host(int argc, char** argv) {
         return;
       }
       input_state.flush();
+      if (resolution.inbox && (!playback.desired() || playback.desired()->id != resolution.id)) {
+        resolution.inbox->active = false;
+        resolution = {};
+      }
       if (auto desired = playback.desired();
           desired && playback.connectivity_known() && desired->stage != "failed" &&
           !clients.contains(desired->id) && !media.contains(desired->id)) {
@@ -266,7 +269,7 @@ extern "C" int ff_host(int argc, char** argv) {
           if (cache_mode && ff::native_media(desired->item))
             media.emplace(desired->id,
                           std::make_unique<ff::MediaClient>(playback, presentation, *desired,
-                                                            worker, bundle_root, *cache_mode, &artwork_cache));
+                                                            worker, bundle_root, *cache_mode, &artwork_cache, resolution.capture));
           else if (cache_mode)
             clients.emplace(
                 desired->id,
@@ -311,11 +314,12 @@ extern "C" int ff_host(int argc, char** argv) {
           playback.release_input();
           auto id = it->first;
           auto cached_source = client.cache_mode();
+          auto capture = client.capture();
           it = clients.erase(it);
           try {
             media.emplace(
                 id, std::make_unique<ff::MediaClient>(playback, presentation, rendering, worker,
-                                                      bundle_root, cached_source, &artwork_cache));
+                                                      bundle_root, cached_source, &artwork_cache, std::move(capture)));
           } catch (const std::exception& e) {
             playback.failed(id, e.what());
           }

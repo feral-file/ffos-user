@@ -34,7 +34,8 @@ void reap_media_workers() {
 }
 MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurrence occurrence,
                          const std::string& worker, const std::string& bundle_root,
-                         const std::string& cache_mode, ArtworkCache* artwork_cache)
+                         const std::string& cache_mode, ArtworkCache* artwork_cache,
+                         std::shared_ptr<const CaptureSnapshot> capture)
     : id(occurrence.id),
       artwork_cache_(artwork_cache),
       playback_(playback),
@@ -82,7 +83,7 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
                            {"url", occurrence_.item.at("source")},
                            {"method", "GET"},
                            {"headers", Json::object()}},
-                          true),
+                          true, false, std::move(capture)),
             "cache_backpressure", "Cannot enqueue cached media open");
   } else
     start_live();
