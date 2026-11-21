@@ -3,9 +3,19 @@
 #include <cstdlib>
 
 extern "C" char* ff_gateway_url(const char*, const char*);
+extern "C" char* ff_observed_gateway_url(const char*, const char*, const char*);
 namespace ff {
-ArtworkRoute artwork_route(const Json& sources, const std::string& url) {
+ArtworkRoute artwork_route(const Json& sources, const Json& item, const std::string& url) {
   ArtworkRoute result{url, ""};
+  if (item.contains("ffObservedGateway") && item.at("ffObservedGateway").is_string()) {
+    char* observed = ff_observed_gateway_url(item.at("source").get_ref<const std::string&>().c_str(),
+        item.at("ffObservedGateway").get_ref<const std::string&>().c_str(), url.c_str());
+    if (observed) {
+      result.url = observed;
+      std::free(observed);
+      return result;
+    }
+  }
   if (!sources.contains("gatewayHosts")) return result;
   GUri* uri = g_uri_parse(url.c_str(), G_URI_FLAGS_ENCODED, nullptr);
   if (!uri) return result;

@@ -29,9 +29,10 @@ type Player interface {
 }
 
 type Native struct {
-	Player  Player
-	Logger  *zap.Logger
-	Default func(context.Context, bool) (interface{}, error)
+	GatewayOverride func(string, string) (string, bool)
+	Player          Player
+	Logger          *zap.Logger
+	Default         func(context.Context, bool) (interface{}, error)
 }
 
 type fenceKey struct{}
@@ -91,7 +92,7 @@ func (h *Native) Send(ctx context.Context, command commands.Command) (interface{
 	if err != nil || state.Validate() != nil {
 		return controlFailure("unavailable", "Native player state is unavailable; no command was sent")
 	}
-	method, params, err := castOperation(command)
+	method, params, err := castOperationWithRoutes(command, h.GatewayOverride)
 	if err != nil {
 		return controlFailure("invalid_params", err.Error())
 	}
@@ -123,6 +124,10 @@ func (h *Native) Send(ctx context.Context, command commands.Command) (interface{
 }
 
 func castOperation(command commands.Command) (string, map[string]any, error) {
+	return castOperationWithRoutes(command, nil)
+}
+
+func castOperationWithRoutes(command commands.Command, lookup func(string, string) (string, bool)) (string, map[string]any, error) {
 	args := command.Arguments
 	switch command.Type {
 	case commands.CMD_SET_CONTENT_POLICY:
@@ -167,6 +172,13 @@ func castOperation(command commands.Command) (string, map[string]any, error) {
 		items, _ := playlist["items"].([]any)
 		for _, raw := range items {
 			item, _ := raw.(map[string]any)
+			// Only the local media-health store may supply an observed route.
+			delete(item, "ffObservedGateway")
+			if source, ok := item["source"].(string); ok && lookup != nil {
+				if target, ok := lookup(source, ""); ok {
+					item["ffObservedGateway"] = target
+				}
+			}
 			if value, exists := item["displayAt"]; exists && value != nil {
 				text, ok := value.(string)
 				if !ok {

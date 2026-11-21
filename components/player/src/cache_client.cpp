@@ -67,6 +67,24 @@ struct Pool {
     auto record = Json::parse(stream);
     require(record.at("item").at("source") == source, "bundle", "Capture identity mismatch");
     if (job.policy) {
+      const Json* entry = nullptr;
+      bool browser_ready = true;
+      for (const auto& resource : record.at("resources")) {
+        if (resource.value("method", "GET") == "GET" &&
+            (resource.value("url", "") == source || resource.value("url", "") == record.value("entry", source)))
+          entry = &resource;
+        if (resource.value("browserPolicyVersion", 0) != 2) browser_ready = false;
+        if (record.value("automatic", false)) {
+          auto expiry = g_date_time_new_from_iso8601(resource.value("freshUntil", "").c_str(), nullptr);
+          bool fresh = expiry && g_date_time_to_unix(expiry) > std::time(nullptr);
+          if (expiry) g_date_time_unref(expiry);
+          if (!fresh) return;
+        }
+      }
+      if (!entry) return;
+      auto type = entry->value("contentType", "");
+      if (type.empty()) type = entry->value("sniffedContentType", "");
+      if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) return;
       reply.metadata["replayMode"] = record.value("automatic", false) ? "mixed" : "isolated";
       return;
     }

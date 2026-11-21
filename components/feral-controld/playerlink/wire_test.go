@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,15 +79,21 @@ func TestCPPInteroperability(t *testing.T) {
 
 func startCPPHost(t *testing.T) string {
 	t.Helper()
-	binary := os.Getenv("FF_NATIVE_CORE")
-	if binary == "" {
-		t.Skip("set FF_NATIVE_CORE to compiled ff-player-core for cross-language test")
-	}
 	directory, err := os.MkdirTemp("", "ff-interop-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socket, _ := launchCPPHost(t, directory)
+	return socket
+}
+
+func launchCPPHost(t *testing.T, directory string) (string, func()) {
+	t.Helper()
+	binary := os.Getenv("FF_NATIVE_CORE")
+	if binary == "" {
+		t.Skip("set FF_NATIVE_CORE to compiled ff-player-core for cross-language test")
+	}
 	socket := filepath.Join(directory, "player.sock")
 	command := exec.Command(binary, filepath.Join(directory, "state.sqlite"), socket) //nolint:gosec // G204: explicit test executable supplied by the build, no shell or network input.
 	var output bytes.Buffer
@@ -94,14 +101,47 @@ func startCPPHost(t *testing.T) string {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
+	stop := sync.OnceFunc(func() { _ = command.Process.Kill(); _ = command.Wait() })
+	t.Cleanup(stop)
 	for i := 0; i < 100; i++ {
-		if _, err := os.Stat(socket); err == nil {
+		if conn, err := net.DialTimeout("unix", socket, time.Millisecond*50); err == nil {
+			_ = conn.Close()
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return socket
+	return socket, stop
+}
+
+func TestCPPHostRestart(t *testing.T) {
+	directory, err := os.MkdirTemp("", "ff-restart-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socket, stop := launchCPPHost(t, directory)
+	client := New(socket)
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	before, err := client.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := map[string]any{"items": []any{map[string]any{"source": "https://example.org/restart"}}}
+	if err := client.Call(ctx, "playback.replace", map[string]any{"playlist": list}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	launchCPPHost(t, directory)
+	// The first read may discover the closed stream. Reconcile with a fresh read.
+	after, err := client.Snapshot(ctx)
+	if err != nil {
+		after, err = client.Snapshot(ctx)
+	}
+	if err != nil || after.Instance == before.Instance || !bytes.Contains(after.Playlist, []byte("https://example.org/restart")) {
+		t.Fatalf("restart lost the playlist or session: %v, %+v", err, after)
+	}
 }
 
 func testCPPPlayback(t *testing.T, ctx context.Context, client *Client, before Snapshot) {

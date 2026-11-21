@@ -15,7 +15,7 @@ namespace ff {
 struct ArtworkRoute {
   std::string url, user_agent;
 };
-ArtworkRoute artwork_route(const Json& sources, const std::string& url);
+ArtworkRoute artwork_route(const Json& sources, const Json& item, const std::string& url);
 
 class ArtworkCache {
  public:

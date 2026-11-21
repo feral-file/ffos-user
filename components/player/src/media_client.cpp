@@ -89,7 +89,7 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
 }
 void MediaClient::start_live() {
   int fd = -1;
-  auto route = artwork_route(playback_.artwork_sources(), occurrence_.item.at("source"));
+  auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, occurrence_.item.at("source"));
   source_override_ = route.url;
   if (!route.user_agent.empty()) user_agent_ = route.user_agent;
   const auto& url = route.url;

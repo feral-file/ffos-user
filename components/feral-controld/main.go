@@ -1250,6 +1250,7 @@ func initializeApp(
 	go kioskUA.Run(context)
 	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaPolicy != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, nil, logger)
 	if mediaHealthSvc != nil {
+		nativeCommands.GatewayOverride = mediaHealthSvc.GatewayOverride
 		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
 		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
 		status.SetItemHealthSource(poller, mediaHealthSvc.ItemHealths)

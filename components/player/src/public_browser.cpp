@@ -1,6 +1,7 @@
 #include "ff/public_browser.hpp"
 
 #include <fcntl.h>
+#include <glib.h>
 #include "ff/artwork_cache.hpp"
 #include <linux/input-event-codes.h>
 #include <spawn.h>
@@ -235,6 +236,26 @@ void PublicBrowser::message(const Json& m) {
   auto method = m.value("method", "");
   const auto p = m.value("params", Json::object());
   auto session = m.value("sessionId", "");
+  auto enable_interception = [&](const std::string& child) {
+    Json patterns = Json::array();
+    if (bundled_ || mixed_cache_ || capture_replay_) {
+      patterns.push_back({{"urlPattern", "*"}});
+    } else {
+      auto hosts = playback_.artwork_sources().value("gatewayHosts", Json::array());
+      if (occurrence_.item.contains("ffObservedGateway")) {
+        auto source = occurrence_.item.at("source").get<std::string>();
+        auto uri = g_uri_parse(source.c_str(), G_URI_FLAGS_ENCODED, nullptr);
+        if (uri && g_uri_get_host(uri)) hosts.push_back(g_uri_get_host(uri));
+        if (uri) g_uri_unref(uri);
+      }
+      for (const auto& host : hosts) {
+        auto authority = host.get<std::string>();
+        patterns.push_back({{"urlPattern", "*://" + authority + "/*"}});
+        patterns.push_back({{"urlPattern", "*://" + authority + ":*/*"}});
+      }
+    }
+    if (!patterns.empty()) send("Fetch.enable", {{"patterns", patterns}}, child);
+  };
   if (method == "Page.javascriptDialogOpening") {
     send("Page.handleJavaScriptDialog", {{"accept", false}}, session);
   } else if (method == "Target.attachedToTarget") {
@@ -245,7 +266,7 @@ void PublicBrowser::message(const Json& m) {
       send("Page.enable", {}, child);
       send("Network.enable", {}, child);
       send("Page.setLifecycleEventsEnabled", {{"enabled", true}}, child);
-      if (bundled_ || mixed_cache_ || capture_replay_ || playback_.artwork_sources().contains("gatewayHosts")) send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
+      enable_interception(child);
       send("Target.setAutoAttach",
            {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
       send("Runtime.runIfWaitingForDebugger", {}, child);
@@ -271,7 +292,7 @@ void PublicBrowser::message(const Json& m) {
             "unverified.");
       }
       if (type == "iframe")
-        if (bundled_ || mixed_cache_ || capture_replay_ || playback_.artwork_sources().contains("gatewayHosts")) send("Fetch.enable", {{"patterns", Json::array({{{"urlPattern", "*"}}})}}, child);
+        enable_interception(child);
       if (type == "iframe")
         send("Target.setAutoAttach",
              {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
@@ -295,7 +316,7 @@ void PublicBrowser::message(const Json& m) {
     const bool local_chain = virtual_cache_source(url);
     const bool replay = capture_replay_ || local_chain || mixed_cache_;
     if (!replay) {
-      auto route = artwork_route(playback_.artwork_sources(), url);
+      auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, url);
       Json params = {{"requestId", request}};
       if (route.url != url) params["url"] = route.url;
       if (!route.user_agent.empty()) {
