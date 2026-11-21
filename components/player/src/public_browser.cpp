@@ -236,6 +236,13 @@ void PublicBrowser::continue_live(const std::string& request, const std::string&
   }
   send("Fetch.continueRequest", params, session);
 }
+bool PublicBrowser::continue_mixed_request(const std::string& session, const std::string& request) {
+  auto pending = mixed_requests_.extract(session + "\n" + request);
+  if (pending.empty()) return false;
+  ++cache_misses_;
+  continue_live(request, session, pending.mapped());
+  return true;
+}
 void PublicBrowser::message(const Json& m) {
   if (m.contains("id")) {
     auto it = replies_.find(m["id"].get<uint64_t>());
@@ -352,7 +359,7 @@ void PublicBrowser::message(const Json& m) {
     if (mixed_cache_ && !offline_ && !local_chain)
       mixed_requests_[session + "\n" + request] = query;
     if (cache_queue_.size() + cache_reading_ >= 64) {
-      mixed_requests_.erase(session + "\n" + request);
+      if (continue_mixed_request(session, request)) return;
       send("Fetch.failRequest", {{"requestId", request}, {"errorReason", "InsufficientResources"}}, session);
     } else {
       cache_queue_.push_back({session, request, std::move(query)});
@@ -496,8 +503,7 @@ void PublicBrowser::poll() {
       auto& next = cache_queue_.front();
       if (cache_request(cache_, bundle_root_, next.session, next.request, next.query, false, false, capture_)) {
         cache_reading_ = true;
-      } else {
-        mixed_requests_.erase(next.session + "\n" + next.request);
+      } else if (!continue_mixed_request(next.session, next.request)) {
         send("Fetch.failRequest", {{"requestId", next.request}, {"errorReason", "InsufficientResources"}}, next.session);
       }
       cache_queue_.pop_front();
@@ -526,13 +532,7 @@ void PublicBrowser::poll() {
         }
         reply.error = "Capture changed while the browser was running";
       }
-      if (!reply.error.empty() && mixed_requests_.contains(mixed_key)) {
-        auto query = std::move(mixed_requests_.at(mixed_key));
-        mixed_requests_.erase(mixed_key);
-        continue_live(reply.request, reply.session, query);
-        ++cache_misses_;
-        continue;
-      }
+      if (!reply.error.empty() && continue_mixed_request(reply.session, reply.request)) continue;
       mixed_requests_.erase(mixed_key);
       if (!reply.error.empty()) {
         ++cache_misses_;

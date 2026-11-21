@@ -108,6 +108,7 @@ class PublicBrowser {
   std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
   void send(const std::string&, Json = Json::object(), const std::string& session = "",
             std::function<void(const Json&)> reply = {});
+  bool continue_mixed_request(const std::string& session, const std::string& request);
   void continue_live(const std::string& request, const std::string& session, const Json& network);
   void message(const Json&);
   void fail(const std::string&);
