@@ -58,6 +58,20 @@ int main() {
     auto response = read(asset,empty,false,false,method);
     check(response.error.empty() && response.metadata.at("status")==204 && response.body.empty());
   }
+  auto large = clip;
+  const std::string large_hash(64, 'a');
+  const std::string large_url = url + "/large.bin";
+  large["url"] = large_url;
+  large["sha256"] = large_hash;
+  large["contentType"] = "application/octet-stream";
+  std::ofstream(root/"blobs"/large_hash).put('x');
+  fs::resize_file(root/"blobs"/large_hash, 40 * 1024 * 1024);
+  record["resources"].push_back(large);
+  std::ofstream(record_file)<<record;
+  auto stream = read(large_url,empty,false,false);
+  check(stream.body.empty() && stream.metadata.at("streamHash")==large_hash);
+  auto policy = read(url,empty,false,true);
+  check(policy.metadata.at("streams").at(large_url).at("hash")==large_hash);
   record["resources"][1]["freshUntil"]="2001-01-01T00:00:00Z";
   std::ofstream(record_file)<<Json{{"automaticCacheVersion",1},{"record",record}};
   check(!read(url,empty,false,true).metadata.contains("replayMode"));

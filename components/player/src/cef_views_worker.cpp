@@ -1,6 +1,7 @@
 // Single native Wayland browser view. The FF1 host owns navigation over its
 // inherited engine pipes. A probe profile loads the fixed benchmark directly.
 #include "include/cef_app.h"
+#include "capture_stream.hpp"
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
 #include "include/cef_task.h"
@@ -82,6 +83,17 @@ class App final : public CefApp,public CefBrowserProcessHandler {
  public:
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override{return this;}
   void OnContextInitialized() override{
+    std::ifstream index("/streams/index.json");
+    if (index) {
+      CefRefPtr<CaptureFactory> factory = new CaptureFactory(nlohmann::json::parse(index));
+      auto context = CefRequestContext::GetGlobalContext();
+      if (!context->RegisterSchemeHandlerFactory("https", "", factory) ||
+          !context->RegisterSchemeHandlerFactory("http", "", factory)) {
+        std::cerr << "Cannot register captured response streams\n";
+        CefQuitMessageLoop();
+        return;
+      }
+    }
     CefBrowserSettings settings;
     const char* initial_url="about:blank";
 #ifdef FF_VIEWS_BENCHMARK

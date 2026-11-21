@@ -17,7 +17,7 @@ class PublicBrowser {
   PublicBrowser(Playback&, Presentation&, Occurrence, const std::string& launcher,
                 const std::string& profile, const std::string& bundle_root,
                 const std::string& resources, const std::string& backend, bool decoration = false, bool debugger = false,
-                const std::string& cache_mode = "", bool render_ahead = false, bool allow_direct = true);
+                const std::string& cache_mode = "", bool render_ahead = false, bool allow_direct = true, Json streams = Json::object());
   ~PublicBrowser();
   void poll();
   void input(const Json&);
@@ -58,6 +58,7 @@ class PublicBrowser {
   bool window_admitted_=false;
   uint64_t direct_frames_=0, last_presentation_ns_=0, navigation_load_ns_=0;
   Json initial_display_;
+  Json streams_;
   std::chrono::steady_clock::time_point loaded_at_;
   std::optional<std::chrono::steady_clock::time_point> resize_started_at_;
   double mouse_x_=0,mouse_y_=0;

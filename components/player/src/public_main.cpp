@@ -136,6 +136,7 @@ extern "C" int ff_host(int argc, char** argv) {
       std::shared_ptr<ff::CacheInbox> inbox;
       std::optional<std::string> mode;
       std::chrono::steady_clock::time_point started;
+      ff::Json streams;
     } resolution;
     auto resolve_source = [&](const ff::Occurrence& occurrence) -> std::optional<std::string> {
       if (occurrence.item.at("source").get<std::string>().starts_with("data:") ||
@@ -165,6 +166,7 @@ extern "C" int ff_host(int argc, char** argv) {
           auto mode = reply.metadata.value("replayMode", "");
           ff::require(mode.empty() || mode == "isolated" || mode == "mixed", "cache_protocol",
                       "Unknown artwork cache mode");
+          resolution.streams = reply.metadata.value("streams", ff::Json::object());
           resolution.mode = (mode == "isolated" || mode == "mixed") ? mode : "";
         } else if (std::chrono::steady_clock::now() - resolution.started > std::chrono::seconds(6))
           throw ff::Error("cache_policy_unavailable", "Timed out resolving artwork cache mode");
@@ -271,7 +273,8 @@ extern "C" int ff_host(int argc, char** argv) {
                     state_path + "/browser/" + ff::uuid(),
                     bundle_root,
                     resources, browser_backend, false, options.contains("--diagnostic-engine-debugger"),
-                    *cache_mode, options.contains("--diagnostic-browser-render-ahead"), composed_browser_id!=desired->id));
+                    *cache_mode, options.contains("--diagnostic-browser-render-ahead"), composed_browser_id!=desired->id,
+                    cache_mode->empty() ? ff::Json::object() : resolution.streams));
         } catch (const std::exception& e) {
           playback.failed(desired->id, e.what());
         }

@@ -50,7 +50,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& bundle_root, const std::string& resources,
                              const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
-                             bool render_ahead, bool allow_direct)
+                             bool render_ahead, bool allow_direct, Json streams)
     : id(o.id),
       backend_(backend),
       max_submissions_(render_ahead ? 2 : 1),
@@ -72,6 +72,14 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
   try {
     std::filesystem::create_directories(profile_);
     auto source = occurrence_.item.at("source").get<std::string>();
+    streams_ = std::move(streams);
+    if (!streams_.empty()) {
+      // The launcher reads this file before entering the fresh sandbox.
+      std::ofstream index(profile_ + "/stream-index.json");
+      index << streams_;
+      index.close();
+      require(!index.fail(), "bundle", "Cannot stage capture stream index");
+    }
     auto path = source.substr(0, source.find_first_of("?#"));
     std::transform(path.begin(), path.end(), path.begin(),
                    [](unsigned char c) { return std::tolower(c); });
@@ -133,7 +141,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                     const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"),
                     const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),
                     const_cast<char*>(permissions.at("autoplay") == true ? "auto" : "gesture"),
-                    cache_key.data(), cache_bytes.data(), cache_days.data(), nullptr};
+                    cache_key.data(), cache_bytes.data(), cache_days.data(), const_cast<char*>(bundle_root_.c_str()), nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
@@ -491,6 +499,16 @@ void PublicBrowser::poll() {
         // The host replaces this browser with a network-isolated native worker.
         // Legacy response bytes/headers never execute in an artist document.
         continue;
+      }
+      if (reply.metadata.contains("streamHash")) {
+        const auto url = reply.metadata.at("url").get<std::string>();
+        if (streams_.contains(url) && streams_.at(url).at("hash") == reply.metadata.at("streamHash")) {
+          mixed_requests_.erase(mixed_key);
+          ++cache_hits_;
+          send("Fetch.continueRequest", {{"requestId", reply.request}}, reply.session);
+          continue;
+        }
+        reply.error = "Capture changed while the browser was running";
       }
       if (!reply.error.empty() && mixed_requests_.contains(mixed_key)) {
         auto query = std::move(mixed_requests_.at(mixed_key));

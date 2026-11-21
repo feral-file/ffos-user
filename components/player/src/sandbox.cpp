@@ -1,3 +1,6 @@
+#include <json.hpp>
+#include <fstream>
+#include <set>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -65,7 +68,7 @@ int launch_sandbox(int argc, char** argv) {
     const std::string self = fs::canonical("/proc/self/exe");
     const fs::path root = fs::path(self).parent_path();
     bool browser = std::string_view(argv[1]) == "--launch-browser";
-    if ((browser && argc != 11) || (!browser && argc != 3)) return 2;
+    if ((browser && argc != 12) || (!browser && argc != 3)) return 2;
     bool online = browser ? std::string_view(argv[3]) == "online" : std::string_view(argv[2]) != "--offline";
     bool lan = browser ? std::string_view(argv[6]) == "lan" : std::string_view(argv[2]) == "--lan";
     std::string mode = browser ? argv[5] : "";
@@ -90,6 +93,21 @@ int launch_sandbox(int argc, char** argv) {
     int lease = -1;
     if (browser) {
       append(args, {"--bind", argv[2], "/profile", "--setenv", "AMD_DEBUG", "nodcc"});
+      auto index = fs::path(argv[2]) / "stream-index.json";
+      if (fs::exists(index)) {
+        // Each mount holds one immutable captured object. The store, other
+        // artworks and the index's original writable name stay outside /streams.
+        auto resources = nlohmann::json::parse(std::ifstream(index));
+        std::set<std::string> mounted;
+        append(args, {"--ro-bind", index.string(), "/streams/index.json",
+                      "--ro-bind", index.string(), "/profile/stream-index.json"});
+        for (const auto& resource : resources) {
+          auto hash = resource.at("hash").get<std::string>();
+          if (hash.size()!=64 || hash.find_first_not_of("0123456789abcdef")!=hash.npos) return 2;
+          if (mounted.insert(hash).second)
+            append(args, {"--ro-bind", (fs::path(argv[11]) / "blobs" / hash).string(), "/streams/" + hash});
+        }
+      }
       if (mode == "filtered") {
         fs::path relay = fs::path(env("XDG_RUNTIME_DIR")) / env("WAYLAND_DISPLAY");
         append(args, {"--ro-bind", relay.string(), "/display/wayland", "--setenv", "WAYLAND_DISPLAY", "/display/wayland"});

@@ -94,6 +94,31 @@ struct Pool {
         require(record.value("automatic", false), "bundle", "Downloaded browser capture needs recapture for original response headers");
         return;
       }
+      // Large browser GETs use an original-origin CEF stream. Only the
+      // current artwork's captured blobs may enter its private mount namespace.
+      if (browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
+        Json streams = Json::object();
+        for (const auto& resource : record.at("resources")) {
+          auto hash = resource.value("sha256", "");
+          if (resource.value("method", "GET") != "GET" || hash.size() != 64 ||
+              hash.find_first_not_of("0123456789abcdef") != hash.npos || resource.contains("redirectTo")) continue;
+          std::error_code error;
+          auto size = std::filesystem::file_size(root / "blobs" / hash, error);
+          if (error || size <= body_limit) continue;
+          auto target = resource.at("url").get<std::string>();
+          require(!streams.contains(target), "bundle", "Ambiguous streamed resource");
+          int64_t until = 0;
+          if (record.value("automatic", false)) {
+            auto expiry = g_date_time_new_from_iso8601(resource.at("freshUntil").get_ref<const std::string&>().c_str(), nullptr);
+            if (!expiry) continue;
+            until = g_date_time_to_unix(expiry);
+            g_date_time_unref(expiry);
+          }
+          streams[target] = {{"hash", hash}, {"until", until}, {"status", resource.value("status", 200)},
+                             {"mime", resource.value("contentType", "")}, {"headers", resource.value("headerFields", Json::array())}};
+        }
+        if (!streams.empty()) reply.metadata["streams"] = std::move(streams);
+      }
       reply.metadata["replayMode"] = record.value("automatic", false) ? "mixed" : "isolated";
       return;
     }
@@ -188,7 +213,11 @@ struct Pool {
       fields.push_back({{"name","Content-Length"},{"value",std::to_string(end-first)}});
       reply.metadata["status"]=206;
     } else if (reply.metadata.at("status") == 206) reply.metadata["status"]=200;
-    require(job.open_file || end-first <= body_limit, "bundle", "Browser resource exceeds replay limit");
+    if (!job.open_file && end-first > body_limit) {
+      reply.metadata["streamHash"] = hash;
+      reply.metadata["url"] = url;
+      return;
+    }
     std::ifstream body(blob, std::ios::binary);
     require(body.good(), "bundle", "Cannot open captured resource");
     std::unique_ptr<GChecksum, decltype(&g_checksum_free)> digest(g_checksum_new(G_CHECKSUM_SHA256), g_checksum_free);

@@ -15,7 +15,8 @@ install(FILES third_party/color-name/LICENSE DESTINATION share/licenses/ff-playe
 install(FILES protocol/schema.json protocol/README.md DESTINATION share/ff-player-native/protocol)
 
 add_library(ff_browser SHARED src/cef_views_worker.cpp)
-target_include_directories(ff_browser PRIVATE "${CEF_ROOT}")
+target_include_directories(ff_browser PRIVATE "${CEF_ROOT}" vendor)
+target_link_libraries(ff_browser PRIVATE PkgConfig::GLIB)
 target_link_libraries(ff_browser PRIVATE libcef_dll_wrapper "${CEF_ROOT}/Release/libcef.so")
 set_target_properties(ff_browser PROPERTIES BUILD_RPATH "${CEF_ROOT}/Release" INSTALL_RPATH "$ORIGIN")
 install(TARGETS ff_browser LIBRARY DESTINATION lib/ff-player-native)

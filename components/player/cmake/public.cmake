@@ -21,6 +21,7 @@ target_link_libraries(ff_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/libff_network
 target_include_directories(ff_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(ff_host PRIVATE ff_artwork_cache ff_presentation_feedback ff_core ff_device_ui ff_media_ipc ff_browser_surface ff_cache_client PkgConfig::NATIVE PkgConfig::CURL dl)
 add_executable(ff-player-native src/player_main.cpp src/sandbox.cpp)
+target_include_directories(ff-player-native PRIVATE vendor)
 target_link_libraries(ff-player-native PRIVATE dl)
 install(TARGETS ff-player-native RUNTIME DESTINATION lib/ff-player-native)
 install(TARGETS ff_host LIBRARY DESTINATION lib/ff-player-native)

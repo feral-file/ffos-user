@@ -1,19 +1,18 @@
 # Native player architecture and ownership
 
-Current public-engine ownership and device evidence are in [PUBLIC-ENGINE.md](PUBLIC-ENGINE.md).
-This document retains the broader migration/acceptance boundaries; older CEF
-implementation notes below describe the explicit rollback backend.
+The current runtime and socket migration are documented in [MIGRATION.md](MIGRATION.md).
+The earlier browser experiments are recorded in [PUBLIC-ENGINE.md](PUBLIC-ENGINE.md).
 
 ```mermaid
 flowchart LR
   Phone[Phone / CLI / LAN / relayer] --> Control[feral-controld]
   Control -->|versioned Unix socket| Host[C++ playback host]
   Host --> UI[Native device UI and GPU composition]
-  Host --> Browser[Separate public Chromium: software / SVG / bundled GLB]
+  Host --> Browser[CEF worker: software / SVG / bundled GLB]
   Host -->|private bounded FD channel| Media[Sandboxed native raster / video / audio worker]
   Media -->|DMA-BUF frames| UI
   Browser -->|retained DMA-BUF frames| UI
-  Cache[Controld cache / isolated capture] -->|documented resource socket| Browser
+  Cache[Controld offline store] -->|local manifests and verified blobs| Host
   Watchdog[Watchdog / systemd] -->|process recovery| Host
 ```
 
