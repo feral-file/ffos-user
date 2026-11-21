@@ -66,7 +66,11 @@ struct Pool {
     std::ifstream stream(path, std::ios::binary);
     if (!stream && errno == ENOENT && job.policy) return;
     require(stream.good() && std::filesystem::file_size(path) <= 16 * 1024 * 1024, "bundle", "Cannot read capture manifest");
-    auto record = Json::parse(stream);
+    auto manifest = Json::parse(stream);
+    const bool wrapped = manifest.value("automaticCacheVersion", 0) != 0;
+    if (wrapped) require(manifest.at("automaticCacheVersion") == 1 && manifest.contains("record") &&
+                         manifest.at("record").value("automatic", false), "bundle", "Unsupported automatic capture");
+    const auto& record = wrapped ? manifest.at("record") : manifest;
     require(record.at("item").at("source") == source, "bundle", "Capture identity mismatch");
     if (job.policy) {
       const Json* entry = nullptr;
