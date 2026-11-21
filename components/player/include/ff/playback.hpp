@@ -122,7 +122,7 @@ class Playback {
   Json update_playlist(const Json& params,const Json& plan = nullptr);
   bool apply_pending_update();
   void update_order(Json& next, int index) const;
-  Json display(const Json& item, const Json& defaults, const Json& adjustment = Json::object()) const;
+  void refresh_display(Occurrence& occurrence);
   bool allowed(const Json& item, const Json& state) const;
   void validate_playlist(const Json& playlist) const;
   void validate_state() const;

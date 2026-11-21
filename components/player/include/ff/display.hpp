@@ -2,6 +2,11 @@
 #include "ff/json.hpp"
 
 namespace ff {
+// Resolve admitted display layers for one occurrence, in DP-1 precedence order.
+Json resolve_display(const Json& settings, const Json& defaults, const Json& item,
+                     const Json& adjustment = Json::object());
+bool allows_display_override(const Json& display, const std::string& field);
+
 struct Bounds { int x, y, width, height; };
 // DP1 percentage padding is vh vertically and vw horizontally. Keep at least
 // one pixel available even for an authored margin larger than half the output.

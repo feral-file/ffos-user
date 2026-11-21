@@ -26,11 +26,6 @@ void optional_text(const Json& p,const char* key,size_t limit=4096){
   if(p.contains(key))require(p[key].is_string()&&p[key].get_ref<const std::string&>().size()<=limit,
     "playlist_invalid",std::string("Invalid text field: ")+key);
 }
-bool allows_override(const Json& display,const std::string& field){
-  const auto permissions=display.find("overridePermissions");
-  if(permissions!=display.end() && permissions->contains(field))return permissions->at(field).get<bool>();
-  return display.value("userOverrides",true);
-}
 void validate_display(const Json& p){
   require(p.is_object(),"playlist_invalid","Display must be an object");
   if(p.contains("userOverrides")){
@@ -223,31 +218,10 @@ void Playback::validate_playlist(const Json& playlist) const {
     for (auto key : {"override", "inlineManifest", "resolvedManifest"}) if(item.contains(key))validate_layer(item[key]);
   }
 }
-Json Playback::display(const Json& item, const Json& defaults, const Json& adjustment) const {
-  Json result = {{"scaling", state_["settings"].value("scaling", "fit")}, {"margin", state_["settings"].value("margin",Json(0))}, {"background", state_["settings"].value("background","#000000")}, {"autoPlay", true}, {"loop", true}, {"userOverrides", true}};
-  // The native v1 snapshot exposes a boolean default for older controllers.
-  // Preserve DP-1's authored per-field exceptions separately across layers.
-  const auto merge = [&](const Json& layer) {
-    for(const auto& [field,value]:layer.items()){
-      if(field=="userOverrides" && value.is_object()){
-        if(!result.contains("overridePermissions"))result["overridePermissions"]=Json::object();
-        result["overridePermissions"].update(value);
-      }else if(field!="overridePermissions"){
-        if(field=="userOverrides")result.erase("overridePermissions");
-        result[field]=value;
-      }
-    }
-  };
-  merge(defaults.value("display", Json::object()));
-  merge(item.value("inlineManifest", Json::object()).value("controls", Json::object()).value("display", Json::object()));
-  // resolvedManifest is supplied by controld after its bounded fetch/hash check.
-  merge(item.value("resolvedManifest", Json::object()).value("controls", Json::object()).value("display", Json::object()));
-  merge(item.value("override", Json::object()).value("display", Json::object()));
-  merge(item.value("display", Json::object()));
-  for(const auto& [field,value]:adjustment.items())if(allows_override(result,field))result[field]=value;
-  auto framing=state_["settings"].value("framing","artwork");
-  if(allows_override(result,"scaling")&&framing!="artwork")result["scaling"]=framing;
-  return result;
+void Playback::refresh_display(Occurrence& occurrence) {
+  occurrence.display = resolve_display(state_["settings"], occurrence.defaults, occurrence.item,
+                                       occurrence.adjustment);
+  ++occurrence.display_revision;
 }
 void Playback::release_input() { if (input_) input_({{"kind", "releaseAll"}}); }
 void Playback::clear_recovery() {
@@ -272,7 +246,7 @@ void Playback::select(bool recovering,bool skipping_failure) {
     auto next = state_; next["index"] = index = static_cast<int>(found - items.begin()); persist(std::move(next));
   }
   auto defaults=state_["playlist"].value("defaults",Json::object());
-  selected_ = Occurrence{uuid(), items[index], display(items[index],defaults), index, generation_, "loading", "", false,
+  selected_ = Occurrence{uuid(), items[index], resolve_display(state_["settings"], defaults, items[index]), index, generation_, "loading", "", false,
     defaults,state_["context"].get<std::string>(),state_["playlist"].value("title",""),state_["playlist"].value("curator",""),
     state_["playlist"],state_.value("playlistUrl", ""),cast_id_};
   if(!recovering)autoplay_hold_ = !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoPlay", true);
@@ -495,9 +469,10 @@ Json Playback::command(std::string_view method, const Json& p) {
             "stale_occurrence", "Presentation is still transitioning");
     require(p.contains("display"),"invalid_params","Missing presentation settings");
     auto adjustment=p["display"];fields(adjustment,{"scaling","margin","background"});validate_display(adjustment);
-    for(const auto& field:adjustment.items())require(allows_override(selected_->display,field.key()),"presentation_locked","Artwork locks "+field.key());
+    for(const auto& field:adjustment.items())require(allows_display_override(selected_->display,field.key()),"presentation_locked","Artwork locks "+field.key());
     auto colors=adjustment;colors.erase("margin");validate_settings(colors);
-    selected_->adjustment.update(adjustment);selected_->display=display(selected_->item,selected_->defaults,selected_->adjustment);++selected_->display_revision;
+    selected_->adjustment.update(adjustment);
+    refresh_display(*selected_);
     presented_->adjustment=selected_->adjustment;presented_->display=selected_->display;presented_->display_revision=selected_->display_revision;
     ++revision_;
     return {{"outcome","accepted"},{"generation",generation_},{"revision",revision_},{"occurrence",id},{"acceptedCompositionRevision",composition_revision_}};
@@ -571,8 +546,8 @@ Json Playback::command(std::string_view method, const Json& p) {
   }
   if (method == "playback.pause") autoplay_hold_ = false;
   if (method == "settings.set") {
-    if(selected_){selected_->display=display(selected_->item,selected_->defaults,selected_->adjustment);++selected_->display_revision;}
-    if(presented_){presented_->display=display(presented_->item,presented_->defaults,presented_->adjustment);++presented_->display_revision;}
+    if (selected_) refresh_display(*selected_);
+    if (presented_) refresh_display(*presented_);
   }
   if (generation) { ++generation_; cast_id_=uuid(); }
   if (reselection) select();
@@ -674,7 +649,7 @@ void Playback::failed(const std::string& id, std::string reason) {
 }
 double Playback::duration() const {
   if (!selected_) return 0;
-  if (selected_->display.value("loop", true) && allows_override(selected_->display,"duration") && state_["settings"].contains("durationSeconds") && !state_["settings"]["durationSeconds"].is_null())
+  if (selected_->display.value("loop", true) && allows_display_override(selected_->display,"duration") && state_["settings"].contains("durationSeconds") && !state_["settings"]["durationSeconds"].is_null())
     return state_["settings"]["durationSeconds"].get<double>();
   return selected_->item.value("duration", 0.0);
 }
