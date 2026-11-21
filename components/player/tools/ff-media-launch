@@ -6,11 +6,10 @@ media_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 media_runtime=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}
 media_display=${WAYLAND_DISPLAY:-wayland-0}
 case "$media_display" in */*|.*) echo 'Expected a relative Wayland socket name' >&2; exit 1;; esac
-network="--share-net"
-if [ "${1:-}" = "--offline" ]; then network=""; fi
+offline=${1:-}
 # Cage owns fullscreen presentation. Client decorations initialize a redundant
 # GTK renderer and can crash in libdecor during Wayland window configuration.
-set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all $network --clearenv \
+set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-all --clearenv \
   --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
   --proc /proc --dev /dev --dev-bind /dev/dri /dev/dri --tmpfs /tmp \
   --ro-bind /sys/devices /sys/devices --ro-bind /sys/dev/char /sys/dev/char --ro-bind /sys/class/drm /sys/class/drm \
@@ -30,4 +29,9 @@ if [ -S "$media_runtime/pulse/native" ]; then
   set -- "$@" --ro-bind "$media_runtime/pulse/native" "$media_runtime/pulse/native" \
     --setenv PULSE_SERVER "unix:$media_runtime/pulse/native"
 fi
-exec "$@" /app/ff-media-worker
+if [ "$offline" = "--offline" ]; then
+  exec "$@" /app/ff-media-worker
+fi
+case "$offline" in --lan) broker=host-lan;; --public|"") broker=host;; *) exit 2;; esac
+exec "$media_dir/../ff-egress" "$broker" "$@" --ro-bind "$media_dir/../ff-egress" /ff-egress \
+  --setenv http_proxy http://127.0.0.1:17873 /ff-egress inside /app/ff-media-worker

@@ -167,7 +167,7 @@ func (c *Client) Close() error {
 
 func readOnly(method string) bool {
 	switch method {
-	case "state.get", "health.get", "policy.get", "history.list", "history.resolve":
+	case "state.get", "health.get", "artworkPermissions.get", "policy.get", "history.list", "history.resolve":
 		return true
 	default:
 		return false

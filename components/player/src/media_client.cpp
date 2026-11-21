@@ -87,7 +87,7 @@ void MediaClient::start(int cached_fd) {
   posix_spawn_file_actions_adddup2(&actions, sockets[1], 3);
   if (sockets[1] != 3) posix_spawn_file_actions_addclose(&actions, sockets[1]);
   char* args[] = {const_cast<char*>(worker_.c_str()),
-                  cached_fd >= 0 ? const_cast<char*>("--offline") : nullptr, nullptr};
+                  const_cast<char*>(cached_fd >= 0 ? "--offline" : playback_.global_policy().at("localNetwork") == true ? "--lan" : "--public"), nullptr};
   auto rc = posix_spawn(&pid_, worker_.c_str(), &actions, nullptr, args, environ);
   posix_spawn_file_actions_destroy(&actions);
   close(sockets[1]);

@@ -9,19 +9,20 @@ import {diagnosticSession} from './diagnostic-cdp.mjs';
 let [socket,endpoint,output]=process.argv.slice(2);
 if(!socket||!endpoint||!output)throw new Error('usage: device-controller-input-check.mjs SOCKET CDP-URL OUTPUT');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const fixture='data:text/html;base64,'+(await fs.readFile(new URL('../tests/input.html',import.meta.url))).toString('base64');
 const evidence={startedAt:new Date().toISOString(),physicalOutputVerified:false,checks:[]};
 const client=await connectNative(socket,'controller-input-fixture');let observer,diagnostic;
 try{
  await client.call('connectivity.set',{online:true});
- const receipt=await client.call('playback.replace',{playlist:{id:'controld-input-test',items:[{source:'http://127.0.0.1:18990/input.html',duration:0,display:{margin:40,userOverrides:false}}]}});
+ const receipt=await client.call('playback.replace',{playlist:{id:'controld-input-test',items:[{source:fixture,duration:0,display:{margin:40,userOverrides:false}}]}});
  let state;
  for(let i=0;i<150;i++){state=await client.call('state.get');if(state.presented?.id===receipt.occurrence)break;await delay(100);}
  assert.equal(state.presented?.id,receipt.occurrence);
- if(endpoint==='public'){diagnostic=await publicDiagnostic(receipt.occurrence);endpoint=diagnostic.endpoint;}
+ if(endpoint==='public'){diagnostic=await publicDiagnostic(receipt.occurrence,state.media.browserPid);endpoint=diagnostic.endpoint;}
  await client.call('input.dispatch',{occurrence:receipt.occurrence,kind:'move',x:200,y:200});
  client.close();await delay(200);
  const targets=await(await fetch(`${endpoint}/json`)).json();
- const target=targets.find(t=>t.type==='page'&&t.url==='http://127.0.0.1:18990/input.html');assert.ok(target);
+ const target=targets.find(t=>t.type==='page'&&t.url===fixture);assert.ok(target);
  const address=new URL(target.webSocketDebuggerUrl);address.host=new URL(endpoint).host;
  observer=await diagnosticSession(address.href);
  await new Promise((resolve,reject)=>{

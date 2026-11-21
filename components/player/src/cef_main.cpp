@@ -2,7 +2,6 @@
 #include "ff/renderer_path.hpp"
 #include "ff/server.hpp"
 #include "ff/media_client.hpp"
-#include "ff/source_probe.hpp"
 #include "include/cef_request_context.h"
 #include "include/cef_task.h"
 #include <chrono>
@@ -57,7 +56,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
     std::ifstream boot_file("/proc/sys/kernel/random/boot_id");std::string boot_id;std::getline(boot_file,boot_id);
     ff::require(!boot_id.empty(),"boot_identity","Cannot read Linux boot identity");
     playback.system_boot(boot_id);
-    ff::Protocol protocol(playback);ff::Server server(socket,protocol);
+    ff::Protocol protocol(playback, false);ff::Server server(socket,protocol);
     CefSettings settings;settings.windowless_rendering_enabled=true;
     CefString(&settings.root_cache_path)=std::filesystem::absolute(state_path+"/cef").string();
     CefString(&settings.log_file)=state_path+"/cef.log";
@@ -74,8 +73,6 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
       ff::Presentation presentation(command->HasSwitch("diagnostic-cpu"),!timing_path.empty(),(std::filesystem::path(resources).parent_path()/"fonts").string());
       std::map<std::string,CefRefPtr<ff::ArtworkClient>> clients;
       std::map<std::string,std::unique_ptr<ff::MediaClient>> media;
-      std::string probe_id;
-      CefRefPtr<ff::SourceProbe> source_probe;
       ff::InputState input_state([&](const ff::Json& event){
         if(auto it=clients.find(event.at("target").get<std::string>());it!=clients.end())it->second->input(event);
       });
@@ -132,24 +129,8 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         }
         if(!presentation.events([&](const ff::Json& event){try{if(event.value("kind","")=="releaseAll" || (playback.overlay().is_null()&&(!playback.desired()||playback.desired()->stage!="failed")))input(event);}catch(const std::exception& e){std::cerr<<"input: "<<e.what()<<'\n';}})){stopping=1;return;}
         input_state.flush();
-        const auto wanted=playback.desired()?playback.desired()->id:std::string{};
-        if(probe_id!=wanted){
-          if(source_probe)source_probe->cancel();
-          source_probe=nullptr;probe_id=wanted;
-          if(auto desired=playback.desired();desired&&!ff::native_media(desired->item)&&ff::renderer_url(*desired)==desired->item["source"].get<std::string>()&&(desired->item.value("mimeType","").empty()||desired->item.value("mimeType","")=="application/octet-stream")){
-            const auto url=desired->item["source"].get<std::string>();
-            if(url.starts_with("https://")||url.starts_with("http://"))source_probe=ff::SourceProbe::Start(url);
-          }
-        }
-        if(source_probe&&source_probe->finished()&&source_probe->mime().empty()){
-          if(auto desired=playback.desired();desired&&desired->stage!="failed")
-            playback.failed(desired->id,"Cannot determine artwork response type: metadata request failed or timed out");
-        }
-        if(auto desired=playback.desired();desired&&desired->stage!="failed"&&!clients.contains(desired->id)&&!media.contains(desired->id)&&(!source_probe||source_probe->finished())){
+        if(auto desired=playback.desired();desired&&desired->stage!="failed"&&!clients.contains(desired->id)&&!media.contains(desired->id)){
           auto rendering=*desired;
-          // Classification is transient transport metadata, never an edit to
-          // the persisted/signed document or a renderer success observation.
-          if(source_probe&&!source_probe->mime().empty())rendering.item["mimeType"]=source_probe->mime();
           if(ff::native_media(rendering.item)){
             try{media.emplace(desired->id,std::make_unique<ff::MediaClient>(playback,presentation,rendering,worker));}
             catch(const std::exception& error){playback.failed(desired->id,error.what());}
@@ -163,7 +144,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
           CefBrowserSettings browser_settings;browser_settings.windowless_frame_rate=60;browser_settings.background_color=CefColorSetARGB(255,0,0,0);
           // A fresh non-shared request context isolates cookies/cache/storage.
           // CEF may still share renderer/GPU processes: this is not a process guarantee.
-          CefRequestContextSettings context_settings;auto context=source_probe?source_probe->context():CefRequestContext::CreateContext(context_settings,nullptr);
+          CefRequestContextSettings context_settings;auto context=CefRequestContext::CreateContext(context_settings,nullptr);
           if(bundled)ff::register_renderer_resources(context,resources);
           auto client=CefRefPtr<ff::ArtworkClient>(new ff::ArtworkClient(playback,presentation,rendering,bundled,false,adaptive_clock));
           if(CefBrowserHost::CreateBrowser(window,client,url,browser_settings,nullptr,context))clients.emplace(desired->id,client);
@@ -229,7 +210,7 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         }
         if(!stopping)return true;
         if(!closing){
-          closing=true;playback.release_input();media.clear();if(source_probe)source_probe->cancel();source_probe=nullptr;
+          closing=true;playback.release_input();media.clear();
           for(auto& [id,client]:clients)client->close();
           close_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
         }

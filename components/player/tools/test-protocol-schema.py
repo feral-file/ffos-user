@@ -63,6 +63,8 @@ with tempfile.TemporaryDirectory(prefix='ff-schema-') as directory:
                 ('playback.select', {'index': 0}, 'receipt'),
                 ('playback.mode', {'loop': 'one', 'shuffle': True}, 'receipt'),
                 ('settings.set', {'durationSeconds': None, 'volume': .5, 'rotation': 90}, 'receipt'),
+                ('artworkPermissions.get', {}, 'artworkPermissions'),
+                ('artworkPermissions.set', {'notifications': False}, 'receipt'),
                 ('policy.get', {}, 'policy'),
                 ('policy.set', {'version': 1, 'showMatureContent': True, 'strictPersonal': False, 'blockUnratedCurated': False}, 'receipt'),
                 ('history.list', {}, 'history'),

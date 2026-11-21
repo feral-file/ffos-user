@@ -172,6 +172,7 @@ int main(int argc, char** argv) {
       return resolution.mode;
     };
     std::string backdrop_id;
+    auto applied_permissions = playback.global_policy();
     bool backdrop_attempted = false;
     int64_t backdrop_fade_at = 0;
     auto frame = [&] {
@@ -179,6 +180,16 @@ int main(int argc, char** argv) {
       const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
       playback.tick(now_ms, ff::wall_ms());
       server.poll();
+      if (applied_permissions != playback.global_policy()) {
+        // Even outgoing, preloaded and backdrop workers must lose the old grants.
+        transition.reset();
+        stage_fading = false;
+        clients.clear();
+        media.clear();
+        backdrop_id.clear();
+        backdrop_attempted = false;
+        applied_permissions = playback.global_policy();
+      }
       if (transition &&
           (!playback.desired() || playback.desired()->id != transition->incoming ||
            playback.desired()->display_revision != transition->incoming_revision ||

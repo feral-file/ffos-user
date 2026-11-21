@@ -10,18 +10,19 @@ import {connectNative} from './native-client.mjs';
 const publicMode=diagnosticURL==='public';
 const connect = () => connectNative(socketPath, 'native-input-check');
 const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
+const fixture='data:text/html;base64,'+(await fs.readFile(new URL('../tests/input.html',import.meta.url))).toString('base64');
 const evidence={startedAt:new Date().toISOString(),checks:[]};
 let client=await connect(),observer,diagnostic;
 async function cast(){
   const receipt=await client.call('playback.replace',{playlist:{id:'input-test',title:'Native input verification',items:[
-    {source:'http://127.0.0.1:18990/input.html',duration:0,display:{margin:40,userOverrides:false}}]}});
+    {source:fixture,duration:0,display:{margin:40,userOverrides:false}}]}});
   for(let count=0;count<150;count++){
     const state=await client.call('state.get');
     if(state.presented?.id===receipt.occurrence){
       await delay(300);
-      if(publicMode){diagnostic?.close();diagnostic=await publicDiagnostic(state.presented.id);diagnosticURL=diagnostic.endpoint;}
+      if(publicMode){diagnostic?.close();diagnostic=await publicDiagnostic(state.presented.id,state.media.browserPid);diagnosticURL=diagnostic.endpoint;}
       const targets=await (await fetch(`${diagnosticURL}/json`)).json();
-      const target=targets.find(t=>t.url==='http://127.0.0.1:18990/input.html'&&t.type==='page');
+      const target=targets.find(t=>t.url===fixture&&t.type==='page');
       assert.ok(target,'diagnostic artwork target exists');
       const ws=new URL(target.webSocketDebuggerUrl),endpoint=new URL(diagnosticURL);ws.host=endpoint.host;
       observer=await diagnosticSession(ws.href);return state.presented.id;

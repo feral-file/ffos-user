@@ -46,6 +46,7 @@ class Playback {
   void ended(const std::string& occurrence);
   const std::optional<Occurrence>& desired() const { return selected_; }
   const std::optional<Occurrence>& visible() const { return presented_; }
+  const Json& global_policy() const { return global_policy_; }
   const Json& state() const { return state_; }
   uint64_t generation() const { return generation_; }
   uint64_t revision() const { return revision_; }
@@ -77,6 +78,7 @@ class Playback {
  private:
   Store& store_;
   Json state_;
+  Json global_policy_;
   std::string instance_ = uuid();
   std::string cast_id_ = uuid();
   uint64_t generation_ = 1, revision_ = 1;

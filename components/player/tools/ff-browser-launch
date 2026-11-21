@@ -3,7 +3,7 @@ set -euo pipefail
 # Only inherited pipes 3/4 and a private Wayland socket enter the browser. No player
 # socket, home, D-Bus or compositor socket pathname is mounted into its namespace.
 profile=$1
-case "${2:-}" in online) network=(--share-net);; offline) network=();; *) exit 2;; esac
+case "${2:-}" in online|offline) ;; *) exit 2;; esac
 debug=()
 if [ "${3:-normal}" = "debug" ]; then debug=(--remote-debugging-port=0 --remote-debugging-address=127.0.0.1); fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -12,22 +12,32 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 browser_features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks
 wayland=()
 if [ "${4:-}" = cage ]; then
-  exec "$root/ff-cage-client" "$0" "$profile" "$2" "$3" filtered
+  exec "$root/ff-cage-client" "$0" "$profile" "$2" "$3" filtered "${5:-public}" "${6:-auto}"
 elif [ "${4:-}" = filtered ]; then
   # Only the capability-filtered socket enters the browser namespace.
   case "$WAYLAND_DISPLAY" in /*) relay="$WAYLAND_DISPLAY";; *) relay="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY";; esac
   wayland=(--ro-bind "$relay" /display/wayland --setenv WAYLAND_DISPLAY /display/wayland)
   debug+=(--ff-direct-cage)
 fi
-exec /usr/bin/bwrap --die-with-parent --new-session --unshare-all "${network[@]}" --clearenv \
+outer=()
+inner=()
+proxy=()
+if [ "$2" = online ]; then
+  case "${5:-public}" in public) broker=host;; lan) broker=host-lan;; *) exit 2;; esac
+  outer=("$root/ff-egress" "$broker")
+  inner=(/ff-egress inside)
+  proxy=(--proxy-server=http://127.0.0.1:17873 '--proxy-bypass-list=<-loopback>')
+fi
+case "${6:-auto}" in auto) autoplay=no-user-gesture-required;; gesture) autoplay=user-gesture-required;; *) exit 2;; esac
+exec "${outer[@]}" /usr/bin/bwrap --die-with-parent --new-session --unshare-all --clearenv \
  --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib /lib64 \
  --proc /proc --dev /dev --dev-bind /dev/dri /dev/dri --tmpfs /tmp \
  --ro-bind /sys/devices /sys/devices --ro-bind /sys/dev/char /sys/dev/char --ro-bind /sys/class/drm /sys/class/drm \
  --ro-bind /etc/ssl /etc/ssl --ro-bind /etc/ca-certificates /etc/ca-certificates \
  --ro-bind /etc/fonts /etc/fonts --ro-bind /etc/resolv.conf /etc/resolv.conf --ro-bind /etc/hosts /etc/hosts \
- --ro-bind "$root/engine" /engine --bind "$profile" /profile \
+ --ro-bind "$root/ff-egress" /ff-egress --ro-bind "$root/engine" /engine --bind "$profile" /profile \
  --setenv LANG C.UTF-8 --setenv WAYLAND_DISPLAY /profile/wayland --setenv AMD_DEBUG nodcc \
- "${wayland[@]}" /engine/chrome --ozone-platform=wayland --kiosk --no-first-run --no-default-browser-check \
+ "${wayland[@]}" "${inner[@]}" /engine/chrome "${proxy[@]}" --ozone-platform=wayland --kiosk --no-first-run --no-default-browser-check \
  --disable-extensions --disable-background-networking --disable-dev-shm-usage \
- --deny-permission-prompts --test-type=gpu --autoplay-policy=no-user-gesture-required --enable-gpu --enable-unsafe-webgpu --use-angle=vulkan --enable-features="$browser_features" \
+ --deny-permission-prompts --test-type=gpu --autoplay-policy="$autoplay" --enable-gpu --enable-unsafe-webgpu --use-angle=vulkan --enable-features="$browser_features" \
  --disable-vulkan-surface --user-data-dir=/profile --remote-debugging-pipe "${debug[@]}" about:blank

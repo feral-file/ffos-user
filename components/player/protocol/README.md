@@ -147,6 +147,7 @@ replay promise.
 | `media.seek` | `{occurrence,seconds}`; only the currently presented seekable native media; acceptance is not seek completion |
 | `settings.set` | Saved device settings. Framing is artwork/fit/fill and respects authored userOverrides; the authored DP-1 permissions map is merged per field. Effective snapshots preserve the original native boolean default and carry field exceptions in `overridePermissions`. |
 | `presentation.set` | `{occurrence,display:{scaling?,margin?,background?}}`; ephemeral preview on the currently selected AND presented occurrence; requires `presentation.v1`. A loading replacement or stale occurrence rejects; a locked field rejects the whole preview with `presentation_locked`. No implicit target. |
+| `artworkPermissions.get`, `artworkPermissions.set` | Read the device-wide artwork permissions with `{}` or patch boolean fields. The player atomically replaces `global-policy.json` before acknowledging them. A change restarts active artwork under the new grants. |
 | `policy.get`, `policy.set` | Query `{}` or set complete version-1 policy flags; controld retains trust and controller policy decisions |
 | `history.list`, `history.resolve` | List retained presented occurrences or resolve `{recordId}`; resolution does not play it |
 | `schedule.set` | `{playlist,context?,atMs}` or `{clear:true}`; one durable scheduled cast, executed by host |
@@ -391,3 +392,33 @@ IPC. Existing screenshot authorization/invitation guards remain: the raw HTTP
 endpoint is unavailable on enrolled devices. Authorized local diagnostics may
 call the capture backend. Artwork-only health classification remains unavailable
 until a native composition-aware classifier exists.
+
+### Global artwork permissions
+
+The player stores its device-wide grants in `~/.state/player/global-policy.json`
+beside `state.sqlite`. The JSON object uses the fields below. API changes apply
+immediately; direct file edits apply at player startup. Missing fields use the
+defaults. An invalid JSON document or invalid grant logs an error and loads the
+defaults. On first startup without the file, the player writes the default policy
+or migrates existing global grants from SQLite. An existing file takes precedence.
+
+The production player advertises `artworkPermissions.v1`. Controld can call
+`artworkPermissions.set` with a partial object such as `{"autoplay":true}`.
+The historical offscreen CEF diagnostic cannot enforce these grants and rejects these methods. Unspecified fields keep their saved values. Playlists and artwork cannot set
+these grants. No external controller command is wired to this API.
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| autoplay | true | Artwork can start audio and video without a phone click. Authored pause and device pause still apply. |
+| localNetwork | false | Online workers use public HTTP(S). Enabling this permits unicast LAN destinations through the same proxy. Host-local, link-local, multicast and offline access stay blocked. |
+| geolocation | false | Controls browser permission to request a position. |
+| camera, microphone | false | Controls browser capture permission. A grant still requires an available capture device inside the sandbox. |
+| notifications | false | Controls browser notification permission. Delivery depends on platform support. |
+
+This follows Firefox's autoplay and device-permission categories and Chromium's
+permission descriptors. On FF1 the decision applies across artworks. The browser
+answers without a permission dialog. Ordinary rendering, animation, public
+subresources and sound remain available. Other capabilities that require a
+chooser or a permission prompt keep the kiosk's existing restrictions.
+[Firefox permissions](https://support.mozilla.org/en-US/kb/firefox-page-info-window)
+and [Chrome permissions](https://developer.chrome.com/docs/privacy-security/permissions-policy).

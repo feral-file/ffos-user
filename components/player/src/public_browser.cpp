@@ -121,9 +121,12 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attr, 0);
+    const auto& permissions = p.global_policy();
     char* args[] = {const_cast<char*>(launcher.c_str()), const_cast<char*>(profile_.c_str()),
                     const_cast<char*>(offline_ ? "offline" : "online"),
-                    const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"), nullptr};
+                    const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"),
+                    const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),
+                    const_cast<char*>(permissions.at("autoplay") == true ? "auto" : "gesture"), nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
@@ -133,7 +136,14 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     close(child_write);
     require(rc == 0, "browser_spawn", "Cannot launch public Chromium: " + std::to_string(rc));
     send("Browser.setDownloadBehavior", {{"behavior", "deny"}});
-    send("Browser.resetPermissions");
+    auto set_permission = [&](const char* name, bool allowed) {
+      send("Browser.setPermission", {{"permission", {{"name", name}}},
+                                     {"setting", allowed ? "granted" : "denied"}});
+    };
+    for (auto name : {"geolocation","camera","microphone","notifications"})
+      set_permission(name, permissions.at(name).get<bool>());
+    set_permission("local-network", permissions.at("localNetwork").get<bool>());
+    set_permission("loopback-network", false);
     send("Browser.getVersion", Json::object(), "",
          [this](const Json& value) { playback_.engine_status(value); });
     send("Target.setAutoAttach",

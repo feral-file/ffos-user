@@ -1,6 +1,9 @@
 #include "ff/store.hpp"
 #include <sqlite3.h>
 #include <memory>
+#include <cstdio>
+#include <cerrno>
+#include <iostream>
 #include <filesystem>
 #include <fcntl.h>
 #include <sys/file.h>
@@ -20,6 +23,7 @@ Json initial_state() {
 }
 Store::Store(const std::string& path) {
   auto canonical=std::filesystem::weakly_canonical(path).string();
+  policy_path_ = std::filesystem::path(canonical).parent_path() / "global-policy.json";
   lock_=open((canonical+".lock").c_str(),O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
   require(lock_>=0,"storage_unavailable","Cannot open persistent-state ownership lock");
   struct stat lock_stat{};
@@ -58,6 +62,95 @@ Json Store::load() {
   require(result.is_object() && result.value("version", 0) == 1, "storage_version", "Unsupported persistent-state version; preserve database for rollback");
   return result;
 }
+namespace {
+bool sync_parent_directory(const std::string& path) {
+  auto directory = std::filesystem::path(path).parent_path();
+  int parent = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (parent < 0) return false;
+  bool synced = fsync(parent) == 0;
+  close(parent);
+  return synced;
+}
+
+Json default_global_policy() {
+  return {{"autoplay", true}, {"localNetwork", false}, {"geolocation", false},
+          {"camera", false}, {"microphone", false}, {"notifications", false}};
+}
+}
+
+void validate_global_policy(const Json& policy) {
+  fields(policy, {"autoplay","localNetwork","geolocation","camera","microphone","notifications"});
+  for (const auto& [name, value] : policy.items())
+    require(value.is_boolean(), "invalid_params", "Expected boolean: " + name);
+}
+
+Json Store::load_global_policy(Json& playback_state) {
+  auto policy = default_global_policy();
+  int fd = open(policy_path_.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0 && errno == ENOENT) {
+    if (playback_state.contains("artworkPermissions")) {
+      const auto& legacy = playback_state.at("artworkPermissions");
+      validate_global_policy(legacy);
+      policy.update(legacy);
+    }
+    require(save_global_policy(policy), "storage_unavailable", "Cannot sync global policy directory");
+  } else {
+    require(fd >= 0, "storage_unavailable", "Cannot open " + policy_path_);
+    auto close_file = [](FILE* stream) { fclose(stream); };
+    std::unique_ptr<FILE, decltype(close_file)> file(fdopen(fd, "r"), close_file);
+    if (!file) close(fd);
+    require(bool(file), "storage_unavailable", "Cannot read " + policy_path_);
+    struct stat info{};
+    require(fstat(fd, &info) == 0 && S_ISREG(info.st_mode), "storage_unavailable",
+            "Expected a regular file at " + policy_path_);
+    char buffer[16385];
+    size_t size = fread(buffer, 1, sizeof(buffer), file.get());
+    require(!ferror(file.get()), "storage_unavailable", "Read failed for " + policy_path_);
+    try {
+      require(size < sizeof(buffer), "invalid_params", "Global policy exceeds 16 KiB");
+      auto saved = parse(std::string_view(buffer, size));
+      validate_global_policy(saved);
+      policy.update(saved);
+    } catch (const Error& e) {
+      // Preserve the operator's file and discard the entire invalid grant set.
+      std::cerr << policy_path_ << ": " << e.what() << "; using default permissions\n";
+    }
+  }
+  // Publish the file first. A restart between writes will prefer that file
+  // and repeat only the SQLite cleanup.
+  if (playback_state.erase("artworkPermissions")) {
+    require(sync_parent_directory(policy_path_), "storage_unavailable", "Cannot sync migrated global policy");
+    save(playback_state);
+  }
+  return policy;
+}
+
+bool Store::save_global_policy(const Json& policy) {
+  const auto contents = policy.dump(2) + "\n";
+  auto temporary = policy_path_ + ".XXXXXX";
+  int fd = mkstemp(temporary.data());
+  require(fd >= 0, "storage_unavailable", "Cannot create temporary global policy file");
+  try {
+    size_t offset = 0;
+    while (offset < contents.size()) {
+      auto n = write(fd, contents.data() + offset, contents.size() - offset);
+      if (n < 0 && errno == EINTR) continue;
+      require(n > 0, "storage_unavailable", "Cannot write global policy");
+      offset += static_cast<size_t>(n);
+    }
+    require(fsync(fd) == 0, "storage_unavailable", "Cannot sync global policy");
+    auto status = close(fd);
+    fd = -1;
+    require(status == 0 && rename(temporary.c_str(), policy_path_.c_str()) == 0,
+            "storage_unavailable", "Cannot publish global policy");
+  } catch (...) {
+    if (fd >= 0) close(fd);
+    unlink(temporary.c_str());
+    throw;
+  }
+  return sync_parent_directory(policy_path_);
+}
+
 void Store::save(const Json& state) {
   std::string text = state.dump();
   require(text.size() <= max_frame, "storage_limit", "Persistent state exceeds 4 MiB");

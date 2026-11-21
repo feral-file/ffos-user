@@ -9,7 +9,7 @@ export async function publicDiagnostic(occurrence,launcherPid) {
  const args=['-o','UserKnownHostsFile=/tmp/ff-player-native-known-hosts','-o','BatchMode=yes','-i',process.env.HOME+'/.ssh/id_ed25519'];
  const {stdout}=await promisify(execFile)('ssh',[...args,host,'cat',`${root}/${occurrence}/DevToolsActivePort`]);
  let remote=Number(stdout.split('\n')[0]);assert(remote>0&&remote<65536);let proxy;
- if(process.env.FF_ENGINE_NETNS==='1'){
+ {
   assert(Number.isInteger(launcherPid)&&launcherPid>1);
   proxy=spawn('ssh',[...args,host,'sudo','-n','python3','/tmp/ff-diagnostic-netns-proxy.py',String(launcherPid),String(remote)],{stdio:['pipe','pipe','inherit']});
   remote=await new Promise((resolve,reject)=>{let data='';const timer=setTimeout(()=>{proxy.kill();reject(Error('Namespace proxy timeout'));},5000);proxy.stdout.on('data',part=>{data+=part;if(data.includes('\n')){clearTimeout(timer);resolve(Number(data.split('\n')[0]));}});proxy.on('exit',()=>reject(Error('Namespace proxy closed')));});assert(remote>0&&remote<65536);

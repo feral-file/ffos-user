@@ -79,6 +79,14 @@ legacy policy captures are explicit failures/notices. Browser fulfillment has a
 without base64 or full-file buffering. Software with larger browser dependencies
 still needs a streaming fulfillment engine extension before portfolio acceptance.
 
+Production browser and media workers run in private network namespaces. Online
+workers reach HTTP(S) through an occurrence-local proxy. The host proxy resolves
+absolute hostnames, rejects non-public addresses, and dials the checked IP only
+when Linux selects a default route. More-specific routes (including routed LAN
+prefixes) fail closed by default. The global localNetwork grant permits unicast LAN routes. Offline workers have no proxy. The player applies saved browser grants before navigation. Geolocation defaults to denied. An Internet server still sees the
+device's public IP. Operator CDP diagnostics use the namespace relay in
+`tools/diagnostic-netns-proxy.py` installed as `/tmp/ff-diagnostic-netns-proxy.py`.
+
 Offline namespaces prevent silent live fallback. Runtime status exposes cache
 hits/misses/coverage, and a native notice reaches both the screen and controld's
 external status projection. A real online edge can restart a failed/incomplete

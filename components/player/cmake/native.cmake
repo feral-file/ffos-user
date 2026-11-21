@@ -1,3 +1,18 @@
+find_program(GO_EXECUTABLE go REQUIRED)
+set(EGRESS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/egress")
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ff-egress"
+  COMMAND "${GO_EXECUTABLE}" build -o "${CMAKE_CURRENT_BINARY_DIR}/ff-egress" .
+  WORKING_DIRECTORY "${EGRESS_DIR}" DEPENDS egress/main.go egress/http.go egress/go.mod)
+add_custom_target(artwork-egress ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ff-egress")
+add_test(NAME artwork-egress COMMAND "${GO_EXECUTABLE}" test ./...)
+set_tests_properties(artwork-egress PROPERTIES WORKING_DIRECTORY "${EGRESS_DIR}")
+add_test(NAME artwork-network-namespace COMMAND "${Python3_EXECUTABLE}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/egress_sandbox_test.py" "${CMAKE_CURRENT_BINARY_DIR}/ff-egress")
+set_tests_properties(artwork-network-namespace PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
+add_test(NAME artwork-public-route COMMAND bash
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/egress_public_route_test.sh" "${CMAKE_CURRENT_BINARY_DIR}/ff-egress")
+set_tests_properties(artwork-public-route PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 35)
+install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/ff-egress" DESTINATION lib/ff-player-native)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 add_library(ff_cache_client src/cache_client.cpp)

@@ -33,9 +33,12 @@ Json Protocol::receive(Connection& connection, const Json& r) {
       connection.negotiated = true;
       result = {{"version", 1}, {"instance", playback_.instance()}, {"maxFrameBytes", max_frame}, {"receiptWindow", 1024},
                 {"capabilities", {"playback", "playback.update.v1", "presentation.v1", "settings", "overlays", "overlay.setup.v1", "history", "schedule", "input", "snapshots"}}, {"snapshot", playback_.snapshot()}};
+      if (artwork_permissions_) result["capabilities"].push_back("artworkPermissions.v1");
     } else {
       require(connection.negotiated, "not_negotiated", "Send hello first");
-      const bool query = method == "state.get" || method == "health.get" || method == "history.list" || method == "history.resolve" || method == "policy.get" || method == "state.subscribe";
+      if (method == "artworkPermissions.get" || method == "artworkPermissions.set")
+        require(artwork_permissions_, "unsupported", "This backend cannot enforce artwork permissions");
+      const bool query = method == "state.get" || method == "health.get" || method == "history.list" || method == "history.resolve" || method == "artworkPermissions.get" || method == "policy.get" || method == "state.subscribe";
       require(r.contains("deadlineMs") && r["deadlineMs"].is_number_integer(), "invalid_params", "deadlineMs is required");
       auto deadline = r["deadlineMs"].get<int64_t>(); auto now = wall_ms();
       require(deadline >= now && deadline <= now + 30000, "deadline_exceeded", "Deadline expired or exceeds 30 seconds");

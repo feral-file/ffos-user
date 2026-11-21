@@ -32,9 +32,27 @@ int main(int argc, char** argv) {
       bool valid = true; try { ff::parse(fixture["wire"].get<std::string>()); } catch (const ff::Error&) { valid = false; }
       check(valid == fixture["valid"], "Shared parsing fixture failed");
     }
-    auto path = std::filesystem::temp_directory_path() / ("ff-native-test-" + ff::uuid() + ".sqlite");
+    auto directory = std::filesystem::temp_directory_path() / ("ff-native-test-" + ff::uuid());
+    std::filesystem::create_directory(directory);
+    auto path = directory / "state.sqlite";
+    {
+      ff::Store store(path);
+      auto old = ff::initial_state();
+      old["artworkPermissions"] = {{"camera", true}};
+      store.save(old);
+      ff::Playback p(store);
+      auto grants = p.command("artworkPermissions.get", ff::Json::object());
+      check(grants.at("autoplay") == true && grants.at("localNetwork") == false &&
+            grants.at("geolocation") == false, "Old devices inherit kiosk defaults");
+      check(grants.at("camera") == true && !store.load().contains("artworkPermissions"),
+            "Legacy grant moves to the global file and leaves SQLite");
+      fails([&]{p.command("artworkPermissions.set", {{"geolocation","yes"}});}, "invalid_params");
+      fails([&]{p.command("artworkPermissions.set", {{"playlistId","x"}});}, "invalid_params");
+      p.command("artworkPermissions.set", {{"notifications",true}});
+    }
     {
       ff::Store store(path); ff::Playback p(store); p.tick(1000, ff::wall_ms());
+      check(p.snapshot()["artworkPermissions"]["notifications"] == true, "Global grant survives restart");
       fails([&]{ff::Store second_owner(path);},"storage_in_use");
       p.command("connectivity.set", {{"online",false}});
       p.command("overlay.set", {{"owner","setup"},{"state","connecting"}});
@@ -146,8 +164,27 @@ int main(int argc, char** argv) {
       ff::Store store(path); ff::Playback p(store); check(p.desired().has_value() && !p.visible(), "Restart restores intent without fabricated presentation");
       p.tick(999999999, ff::wall_ms()); check(p.desired()->stage == "loading", "Boot clock does not cause immediate timeout");
     }
-    std::filesystem::remove(path); std::filesystem::remove(path.string() + "-wal"); std::filesystem::remove(path.string() + "-shm");
-    std::filesystem::remove(path.string()+".lock");
+    {
+      std::ofstream(directory/"global-policy.json") << R"({"localNetwork":true})";
+      ff::Store store(path);
+      auto interrupted = store.load();
+      interrupted["artworkPermissions"] = {{"notifications",true}};
+      store.save(interrupted);
+      ff::Playback p(store);
+      check(!store.load().contains("artworkPermissions"), "Restart finishes interrupted SQLite cleanup");
+      check(p.global_policy().at("localNetwork") && !p.global_policy().at("notifications"),
+            "Manual edit replaces saved grants on restart");
+    }
+    {
+      std::ofstream(directory/"global-policy.json") << R"({"localNetwork":true,"camera":1})";
+      ff::Store store(path); ff::Playback p(store);
+      check(!p.global_policy().at("localNetwork"), "Invalid file discards all optional grants");
+      std::filesystem::remove(directory/"global-policy.json");
+      std::filesystem::create_directory(directory/"global-policy.json");
+      fails([&]{p.command("artworkPermissions.set", {{"localNetwork",true}});}, "storage_unavailable");
+      check(!p.global_policy().at("localNetwork"), "Failed publication cannot grant access");
+    }
+    std::filesystem::remove_all(directory);
     std::cout << checks << " checks passed\n";
   } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
 }

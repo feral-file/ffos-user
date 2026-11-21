@@ -132,6 +132,7 @@ Playback::Playback(Store& store) : store_(store), state_(store.load()) {
   // Schema-v1 settings are optional overrides. Materialize known defaults in
   // snapshots without resetting any saved value or requiring an eager write.
   auto settings = expected["settings"]; settings.update(state_["settings"]); state_["settings"] = std::move(settings);
+  global_policy_ = store_.load_global_policy(state_);
   if (!state_["stopped"].get<bool>() && !state_["sleeping"].get<bool>()) select();
 }
 void Playback::validate_state() const {
@@ -273,7 +274,7 @@ void Playback::select(bool recovering,bool skipping_failure) {
   selected_ = Occurrence{uuid(), items[index], display(items[index],defaults), index, generation_, "loading", "", false,
     defaults,state_["context"].get<std::string>(),state_["playlist"].value("title",""),state_["playlist"].value("curator",""),
     state_["playlist"],state_.value("playlistUrl", ""),cast_id_};
-  if(!recovering)autoplay_hold_ = !selected_->display.value("autoPlay", true);
+  if(!recovering)autoplay_hold_ = !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoPlay", true);
   selected_at_ = now_;
 }
 bool Playback::media_paused(const std::string& occurrence) const {
@@ -383,7 +384,24 @@ Json Playback::command(std::string_view method, const Json& p) {
     ++revision_;
     return {{"outcome","applied"},{"generation",generation_},{"revision",revision_}};
   }
+  if (method == "artworkPermissions.get") { fields(p, {}); return global_policy_; }
   if (method == "policy.get") { fields(p, {}); return state_["policy"]; }
+  if (method == "artworkPermissions.set") {
+    validate_global_policy(p);
+    auto next = global_policy_;
+    next.update(p);
+    bool changed = next != global_policy_;
+    const bool durable = store_.save_global_policy(next);
+    if (changed) {
+      global_policy_ = std::move(next);
+      presented_.reset();
+      select();
+    }
+    // Once rename succeeds, even a directory-sync error must retire old grants.
+    require(durable, "storage_unavailable", "Global policy applied but directory sync failed; retry the update");
+    return {{"outcome", changed && selected_ ? "accepted" : "applied"}, {"generation", generation_},
+            {"revision", revision_}, {"occurrence", selected_ ? Json(selected_->id) : Json(nullptr)}};
+  }
   if (method == "playback.update") {
     if(!p.contains("activationTimes"))return update_playlist(p);
     fields(p,{"items","context","retireBlockedCurrent","activationTimes"});
@@ -566,6 +584,7 @@ Json Playback::snapshot() const {
           {"presentedPlaylistUrl", presented_ ? presented_->playlist_url : ""},
           {"stopped", state_["stopped"]}, {"sleeping", state_["sleeping"]}, {"paused", state_["paused"]},
           {"playlist", state_["playlist"]}, {"playlistUrl", state_.value("playlistUrl", "")},
+          {"artworkPermissions", global_policy_},
           {"loop", state_["loop"]}, {"shuffle", state_["shuffle"]}, {"settings", state_["settings"]},
           {"context", state_["context"]}, {"overlay", overlay()}, {"online", online_}, {"connectivityKnown",connectivity_known_}, {"media",media_status_}, {"mediaPaused",media_paused()},
           {"schedule",state_["schedule"]},{"scheduleOutcome",state_.value("scheduleOutcome",Json(nullptr))},

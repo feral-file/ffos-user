@@ -58,7 +58,7 @@ inputs[0]['allOf']=[{'if':{'required':['referenceWidth']},'then':{'not':{'anyOf'
 
 methods={
     'hello':obj({'client':identifier,'versions':{'type':'array','minItems':1,'maxItems':16,'items':number(1,65535,True)}},('client','versions')),
-    **{name:empty for name in ('state.get','health.get','state.subscribe','policy.get','history.list','playback.refresh','playback.stop','playback.cancel')},
+    **{name:empty for name in ('state.get','health.get','state.subscribe','artworkPermissions.get','policy.get','history.list','playback.refresh','playback.stop','playback.cancel')},
     'history.resolve':obj({'recordId':identifier},('recordId',)),
     'playback.replace':obj({'playlist':ref('playlist'),'index':number(0,4096,True),'context':context,'playlistUrl':text(16384),'boot':boolean,'onlyIfNoPlaylist':boolean,'activationTimes':{'type':'array','maxItems':4096,'items':nullable({'type':'integer'})}},('playlist',)),
     'playback.update':obj({'items':{'type':'array','maxItems':4096,'items':ref('item')},'context':context,'retireBlockedCurrent':boolean,'activationTimes':{'type':'array','maxItems':4096,'items':nullable({'type':'integer'})}},('items',)),
@@ -68,7 +68,7 @@ methods={
     'playback.mode':obj({'loop':enum('none','playlist','one'),'shuffle':boolean}),
     'media.seek':obj({'occurrence':identifier,'seconds':number(0,86400000)},('occurrence','seconds')),
     'presentation.set':obj({'occurrence':identifier,'display':obj({'scaling':display['properties']['scaling'],'margin':display['properties']['margin'],'background':settings['properties']['background']})},('occurrence','display')),
-    'settings.set':ref('settings'),'policy.set':ref('policy'),
+    'artworkPermissions.set':ref('artworkPermissions'),'settings.set':ref('settings'),'policy.set':ref('policy'),
     'health.set':{**obj({'thermal':boolean,'serviceFailure':boolean}),'minProperties':1},
     'connectivity.set':obj({'online':boolean},('online',)),
     'overlay.set':obj({'owner':enum('setup','pairing','recovery'),'state':identifier,'fields':{'type':'object','additionalProperties':True}},('owner','state')),
@@ -87,7 +87,7 @@ for name in ('schedule.set','boot.set'):
 
 request=obj({'v':{'const':1},'id':identifier,'method':{'type':'string','enum':list(methods)},'params':{'type':'object'},
     'instance':identifier,'generation':uint,'ifRevision':uint,'deadlineMs':{'type':'integer'},'key':identifier},('v','id','method'))
-queries=('state.get','health.get','state.subscribe','policy.get','history.list','history.resolve')
+queries=('state.get','health.get','state.subscribe','artworkPermissions.get','policy.get','history.list','history.resolve')
 request['allOf']=[
     {'if':{'properties':{'method':{'not':{'const':'hello'}}}},'then':{'required':['deadlineMs']}},
     {'if':{'properties':{'method':{'not':enum('hello',*queries)}}},'then':{'required':['instance','generation','key']}},
@@ -104,7 +104,7 @@ snapshot=obj({'instance':identifier,'generation':uint,'revision':uint,'host':enu
     'composition':nullable(obj({'occurrence':identifier,'revision':uint,'displayRevision':uint,'display':ref('display')},('occurrence','revision','displayRevision','display'))),
     'playlist':nullable(ref('playlist')),'playlistUrl':{'type':'string'},'presentedPlaylist':nullable(ref('playlist')),'presentedPlaylistUrl':{'type':'string'},
     'stopped':boolean,'sleeping':boolean,'paused':boolean,'mediaPaused':boolean,'loop':enum('none','playlist','one'),'shuffle':boolean,
-    'online':boolean,'context':context,'settings':ref('settings'),'overlay':nullable({'type':'object'}),'media':nullable({'type':'object'}),
+    'artworkPermissions':ref('artworkPermissions'),'online':boolean,'context':context,'settings':ref('settings'),'overlay':nullable({'type':'object'}),'media':nullable({'type':'object'}),
     'schedule':nullable({'type':'object'}),'scheduleOutcome':nullable(ref('scheduleOutcome')),'recovery':ref('recovery'),
     'pendingUpdate':nullable(obj({'id':identifier,'itemCount':number(0,4096,True)},('id','itemCount'))),
     'updateOutcome':nullable(obj({'id':identifier,'outcome':enum('deferred','applied','failed'),'contentBlocked':boolean},('id','outcome','contentBlocked'))),
@@ -137,7 +137,7 @@ schema={'$schema':'https://json-schema.org/draft/2020-12/schema','$id':'urn:fera
     'description':'Framing, UTF-8 byte/depth limits, duplicate-key rejection, deadlines, live identity and transition rules are specified in README.md and enforced by peers. JSON Schema integer accepts integral decimal lexemes; the wire additionally requires integer JSON lexemes for integer fields.',
     'oneOf':[ref('request'),ref('response'),ref('event')],
     '$defs':{'request':request,'response':response,'event':event,'snapshot':snapshot,'occurrence':occurrence,
-             'settings':settings,'policy':policy,'display':display,'playlist':playlist,'item':item,
+             'artworkPermissions':obj({name:boolean for name in ('autoplay','localNetwork','geolocation','camera','microphone','notifications')}),'settings':settings,'policy':policy,'display':display,'playlist':playlist,'item':item,
              'receipt':receipt,'hello':hello,'subscription':subscription,'record':record,'history':history,'scheduleOutcome':schedule_outcome,'recovery':recovery}}
 
 parser=argparse.ArgumentParser();parser.add_argument('--check',action='store_true');args=parser.parse_args()

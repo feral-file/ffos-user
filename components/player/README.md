@@ -44,7 +44,7 @@ It must never be installed as the production presentation service.
 The tested native environment is recorded in `docs/evidence/homelab-packages.txt`:
 FFOS 3.0.0, Linux x86-64, GCC 16.1.1, CMake 4.4.0, Meson 1.11.2 and Ninja 1.13.2.
 Use the FFOS pacman snapshot `2026/07/13`. Required build packages include
-`gcc make cmake ninja meson pkgconf python-jinja nasm sdl2-compat libass
+`gcc go make cmake ninja meson pkgconf python-jinja nasm sdl2-compat libass
 qrencode sqlite pango libdrm libglvnd wayland wayland-protocols gnutls libva libpulse lcms2 curl libdisplay-info`.
 The package inventory is evidence of the tested environment, not yet a fully
 reproduced clean-image toolchain lock. The FF1 CEF artifact uses the separately documented GitHub build.
@@ -72,11 +72,11 @@ not replace FFOS system graphics/media packages.
 The browser's `engine/chrome_sandbox` is installed root:root, mode 4755 by the
 pacman recipe. Chromium's sandbox remains enabled. Bubblewrap separates each
 browser profile and private Wayland socket from the host's state, D-Bus and
-command socket. Offline browser/decoder processes have no live network.
+command socket. Online browser and decoder workers reach public HTTP(S) through the artwork proxy. It requires iproute2 on the host. Offline workers have no live network.
 
 The old CEF backend is an explicit `FF_WITH_CEF=ON` rollback/diagnostic build,
 named `ff-player-cef-rollback`; it is not the production target. Do not activate
-two normal playback owners. See the [local broker contract](protocol/CACHE.md).
+two normal playback owners. The offscreen diagnostic cannot enforce the global artwork permissions. For extensionless media, provide an explicit MIME type so it can select the native decoder without probing the source. See the [local broker contract](protocol/CACHE.md).
 
 ## Isolated device test
 
