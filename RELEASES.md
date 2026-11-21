@@ -19,30 +19,28 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
-## 3.1.0-native.1 — full-image development declaration (not dispatched)
+## 3.1.0.native.20261121.3 — full-image Development trial
 
-Native cutover changes binaries and user session/unit files. The current
-component uses pinned public Chromium158, a private wlroots0.20 compositor and
-native raster/media workers; the session delegates engine flags to its launcher. Never ship this as
-a package-only update. The feature branches target develop; Anh owns promotion.
-No PR, promotion or publishing workflow was opened/triggered for this task.
+The kiosk session, native player package, controld and watchdog change together.
+The player hosts codec-enabled CEF 156 and libmpv under Cage. The image builds
+the runtime from the selected ffos-user revision or consumes its tested artifact.
+The image verification step checks the selected native package in the ISO filesystem.
 
-Prepared parameters for a human after native image/portfolio acceptance:
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | b95fc0ab44d6472682ebfa240a2bc9dc35aec9c2 |
+| ffos_user_ref | 8fe7305b28c8e58da7ce3ae695cf148b9410c0d7 |
+| version | 3.1.0.native.20261121.3 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| soak-test | false |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
 
-```sh
-gh workflow run build-image-to-cf.yml -R feral-file/ffos --ref codex/native-player \
-  -f version=3.1.0-native.1 -f ffos_user_ref=codex/native-player \
-  -f ff_player_ref=07805905f85d16a143bc9f409cb41a8df14c356e -f environment=Development \
-  -f pacman_snapshot=latest -f dev_iso=true -f soak-test=false \
-  -f update_min_version=false -f update_required_version=false -f update_recovery_version=false
-```
-
-Pin feature refs to reviewed commits before dispatch. This is coordination
-evidence, not a claim that an image was built. The image pipeline still needs
-native package production wired before this produces a usable native image.
-The legacy ff_player_ref is retained for rollback packaging. See
-`components/player/docs/CUTOVER.md` for acceptance gaps. Human promotion follows
-develop → staging → release; production publishing remains human-operated.
+The homelab trial stages files directly and has a separate rollback backup.
+[Development workflow run](https://github.com/feral-file/ffos/actions/runs/44879156913).
 
 ## 3.0.1 — full-image (paired with the ffos release)
 
