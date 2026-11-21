@@ -327,16 +327,7 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		return Resource{}, fmt.Errorf("write blob: %w", err)
 	}
 
-	rawHeaders := map[string]string{}
-	for name, values := range resp.Header {
-		rawHeaders[name] = strings.Join(values, "\n")
-	}
-	fields, supported := browserReplayHeaders(rawHeaders)
-	policyVersion := 0
-	if supported {
-		policyVersion = 2
-	}
-	return Resource{BrowserPolicyVersion: policyVersion, HeaderFields: fields,
+	resource := Resource{
 		FreshUntil: freshUntil,
 		URL:        sourceURL,
 		Status:     go_http.StatusOK,
@@ -357,7 +348,9 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		// must be replayed alongside the body or Chromium's own CORS
 		// enforcement can reject an otherwise byte-correct replay.
 		Headers: filterReplayableHeaders(headerFirstValues(resp.Header)),
-	}, nil
+	}
+	resource.captureBodyHeaders(resp)
+	return resource, nil
 }
 
 // headerFirstValues flattens an http.Header (which allows repeated

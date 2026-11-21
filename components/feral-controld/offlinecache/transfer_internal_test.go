@@ -130,7 +130,7 @@ func TestResourceTransfer_StalledBodyIsCutOffPromptly(t *testing.T) {
 	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	start := time.Now()
-	_, _, err := c.fetchAndStoreBody(context.Background(), srv.URL+"/wedged.bin", go_http.MethodGet, 0)
+	_, _, err := c.fetchAndStoreBody(context.Background(), &Resource{URL: srv.URL + "/wedged.bin"}, go_http.MethodGet, 0)
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "an origin that goes silent mid-body must fail, not hang")
@@ -151,7 +151,7 @@ func TestResourceTransfer_CeilingBoundsATrickleThatNeverStalls(t *testing.T) {
 	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	start := time.Now()
-	_, _, err := c.fetchAndStoreBody(context.Background(), srv.URL+"/trickle.bin", go_http.MethodGet, 0)
+	_, _, err := c.fetchAndStoreBody(context.Background(), &Resource{URL: srv.URL + "/trickle.bin"}, go_http.MethodGet, 0)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)

@@ -46,6 +46,8 @@ int main() {
   check(read(url,empty,true,false).metadata.at("path")== (root/"blobs"/digest(bytes)).string());
   auto part=read(asset,{{"Range","bytes=1-4"}},false,false);
   check(part.error.empty() && part.metadata.at("status")==206 && part.body=="ampl");
+  auto past=read(asset,{{"Range","bytes=12-"}},false,false);
+  check(past.error.empty() && past.metadata.at("status")==416 && past.body.empty());
   record["resources"][1]["freshUntil"]="2001-01-01T00:00:00Z";
   std::ofstream(record_file)<<Json{{"automaticCacheVersion",1},{"record",record}};
   check(!read(url,empty,false,true).metadata.contains("replayMode"));

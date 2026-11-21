@@ -147,6 +147,14 @@ struct Pool {
     auto blob = root / "blobs" / hash;
     auto size = std::filesystem::file_size(blob);
     uintmax_t first = 0, end = size;
+    auto& fields = reply.metadata["headers"];
+    if (!job.open_file) {
+      for (auto it=fields.begin(); it!=fields.end();) {
+        auto name=it->value("name", "");
+        if (!g_ascii_strcasecmp(name.c_str(),"Content-Length") || !g_ascii_strcasecmp(name.c_str(),"Content-Range")) it=fields.erase(it);
+        else ++it;
+      }
+    }
     if (!job.open_file && !range.empty()) {
       require(range.starts_with("bytes=") && range.find(',') == range.npos, "bundle", "Unsupported range");
       auto dash = range.find('-', 6);
@@ -162,14 +170,12 @@ struct Pool {
         first = number(range.substr(6, dash - 6));
         if (dash + 1 < range.size()) end = std::min(size - 1, number(range.substr(dash + 1))) + 1;
       }
-      require(first < end, "bundle", "Unsatisfiable range");
-      end = first + std::min<uintmax_t>(end-first, body_limit);
-      auto& fields = reply.metadata["headers"];
-      for (auto it=fields.begin(); it!=fields.end();) {
-        auto name=it->value("name", "");
-        if (!g_ascii_strcasecmp(name.c_str(),"Content-Length") || !g_ascii_strcasecmp(name.c_str(),"Content-Range")) it=fields.erase(it);
-        else ++it;
+      if (first >= end) {
+        reply.metadata["status"]=416;
+        fields.push_back({{"name","Content-Range"},{"value","bytes */"+std::to_string(size)}});
+        return;
       }
+      end = first + std::min<uintmax_t>(end-first, body_limit);
       fields.push_back({{"name","Content-Range"},{"value","bytes "+std::to_string(first)+"-"+std::to_string(end-1)+"/"+std::to_string(size)}});
       fields.push_back({{"name","Content-Length"},{"value",std::to_string(end-first)}});
       reply.metadata["status"]=206;

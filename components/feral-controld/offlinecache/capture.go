@@ -708,7 +708,7 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 				result = append(result, res)
 				continue
 			}
-			hash, size, fetchErr := c.fetchAndStoreBody(ctx, res.URL, method, capBytes)
+			hash, size, fetchErr := c.fetchAndStoreBody(ctx, &res, method, capBytes)
 			if fetchErr != nil {
 				failureReasons = append(failureReasons, fmt.Sprintf("fetch_failed:%s", res.URL))
 			} else {
@@ -758,7 +758,8 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 // on-disk size alongside its hash so the caller can charge the budget
 // for the real bytes written, not the (possibly much larger) reserved
 // cap.
-func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, capBytes int64) (string, int64, error) {
+func (c *capturer) fetchAndStoreBody(ctx context.Context, resource *Resource, method string, capBytes int64) (string, int64, error) {
+	url := resource.URL
 	req, err := c.fetchClient.NewRequest(method, url, nil)
 	if err != nil {
 		return "", 0, err
@@ -783,6 +784,9 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, ca
 	hash, err := c.store.WriteBlob(transfer.Body(resp.Body), capBytes)
 	if err != nil {
 		return "", 0, err
+	}
+	if resource.BrowserPolicyVersion == 2 {
+		resource.captureBodyHeaders(resp)
 	}
 	size, err := c.store.BlobSize(hash)
 	if err != nil {

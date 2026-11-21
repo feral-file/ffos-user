@@ -1,6 +1,8 @@
 package offlinecache
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -22,4 +24,18 @@ func TestBrowserHeadersKeepEachSecurityPolicy(t *testing.T) {
 		_, ok = browserReplayHeaders(raw)
 		require.False(t, ok)
 	}
+}
+
+func TestRefetchedBodyOwnsBrowserPolicy(t *testing.T) {
+	const source = "https://example.test/work"
+	resource := Resource{URL: source, BrowserPolicyVersion: 2, HeaderFields: []HeaderField{{"Content-Security-Policy", "script-src 'nonce-old'"}}}
+	req := httptest.NewRequest("GET", source, nil)
+	resp := &http.Response{StatusCode: 200, Request: req, Header: http.Header{"Content-Security-Policy": {"script-src 'nonce-new'"}}}
+	resource.captureBodyHeaders(resp)
+	require.Equal(t, 2, resource.BrowserPolicyVersion)
+	require.Equal(t, []HeaderField{{"Content-Security-Policy", "script-src 'nonce-new'"}}, resource.HeaderFields)
+	resp.Request = httptest.NewRequest("GET", "https://another.test/work", nil)
+	resource.captureBodyHeaders(resp)
+	require.Zero(t, resource.BrowserPolicyVersion)
+	require.Empty(t, resource.HeaderFields)
 }

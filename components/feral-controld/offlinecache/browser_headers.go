@@ -54,3 +54,21 @@ func browserReplayHeaders(raw map[string]string) ([]HeaderField, bool) {
 	}
 	return fields, supported
 }
+
+// HTTP-refetched bytes must carry the policy of that same response. A redirect
+// to another URL cannot be flattened into a browser document at the old origin.
+func (r *Resource) captureBodyHeaders(resp *http.Response) {
+	r.BrowserPolicyVersion = 0
+	r.HeaderFields = nil
+	if resp.Request == nil || resp.Request.URL == nil || resp.Request.URL.String() != r.URL || resp.StatusCode != http.StatusOK {
+		return
+	}
+	raw := make(map[string]string, len(resp.Header))
+	for name, vs := range resp.Header {
+		raw[name] = strings.Join(vs, "\n")
+	}
+	if fields, ok := browserReplayHeaders(raw); ok {
+		r.BrowserPolicyVersion = 2
+		r.HeaderFields = fields
+	}
+}
