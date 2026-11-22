@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -814,34 +813,55 @@ func TestFontsServeEmbeddedFaces(t *testing.T) {
 	}
 }
 
-// TestSetupCSSServed: every template now links /setup.css instead of carrying
-// its own <style> block, so the route must serve real CSS (not bounce to the
-// captive-probe redirect) and every page must actually reference it.
-func TestSetupCSSServed(t *testing.T) {
-	_, ts, client := newTestServer(t, Config{APSSID: "FF1-abc"})
-
-	resp, err := client.Get(ts.URL + "/setup.css")
-	require.NoError(t, err)
-	body, readErr := io.ReadAll(resp.Body)
-	require.NoError(t, readErr)
-	_ = resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "text/css; charset=utf-8", resp.Header.Get("Content-Type"))
-	assert.Equal(t, "max-age=3600", resp.Header.Get("Cache-Control"))
-	assert.Contains(t, string(body), "PP Mori")
-
-	// Every template must link the shared sheet — checked against the embedded
-	// sources rather than by rendering each route, so a future page cannot
-	// slip in unstyled regardless of how it is reached.
-	names, err := fs.Glob(assets, "templates/*.html")
-	require.NoError(t, err)
-	require.NotEmpty(t, names)
-	for _, name := range names {
-		raw, readErr := assets.ReadFile(name)
-		require.NoError(t, readErr)
-		assert.Contains(t, string(raw), `href="/setup.css"`, name)
-		assert.NotContains(t, string(raw), "<style>", name)
+// A join or rescan stops the portal after sending HTML. Each rendered page
+// must carry its styling even if the phone cannot make another asset request.
+func TestPagesCarrySetupStyles(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		reject bool
+	}{
+		{"picker", http.MethodGet, "/", false},
+		{"connecting", http.MethodPost, "/connect", false},
+		{"rescan confirmation", http.MethodGet, "/rescan", false},
+		{"rescanning", http.MethodPost, "/rescan", false},
+		{"join rejected", http.MethodPost, "/connect", true},
+		{"rescan rejected", http.MethodPost, "/rescan", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reject := func() error {
+				if tt.reject {
+					return errors.New("device is busy")
+				}
+				return nil
+			}
+			s := NewServer(Config{
+				APSSID: "FF1-abc",
+				Scan:   func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
+				Join:   func(JoinRequest) error { return reject() },
+				Rescan: reject,
+			})
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader("ssid=HomeNet"))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+			body := w.Body.String()
+			_, after, found := strings.Cut(body, "<style>")
+			require.True(t, found, "styling must arrive in the HTML response")
+			css, _, found := strings.Cut(after, "</style>")
+			require.True(t, found)
+			assert.Contains(t, css, "color-scheme: dark")
+			assert.Contains(t, css, "background: #0a0a0b")
+			assert.Contains(t, css, "color: #f5f5f6")
+			assert.Contains(t, css, "[hidden] { display: none !important; }")
+			assert.Contains(t, css, "button.primary")
+			assert.Contains(t, css, "a.cancel")
+			assert.NotContains(t, body, `rel="stylesheet"`)
+			assert.NotContains(t, body, "ZgotmplZ", "CSS must survive template context escaping")
+			assert.Equal(t, 1, strings.Count(body, "<style>"))
+		})
 	}
 }
 
@@ -904,11 +924,10 @@ func TestTrafficObservedCountsEveryRequest(t *testing.T) {
 		TrafficObserved:  func(ClientKind, string) { count(&traffic)() },
 	})
 
-	// The asset routes ride along: a browser auto-fetching the stylesheet or a
-	// font proves a device is attached but is never a human action.
+	// Font requests prove a device is attached but are never a human action.
 	for _, path := range []string{
 		"/", "/generate_204", "/hotspot-detect.html",
-		"/setup.css", "/fonts/PPMori-Regular.woff2",
+		"/fonts/PPMori-Regular.woff2", "/fonts/PPMori-Bold.woff2",
 	} {
 		resp, err := client.Get(ts.URL + path)
 		require.NoError(t, err)
