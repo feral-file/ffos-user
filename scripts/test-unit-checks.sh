@@ -28,18 +28,27 @@ grep -Fq "chmod +x /home/feralfile/scripts/unit-checks.sh" "$file_permissions" |
 base_bin="$tmp_dir/base"
 fake_bin="$tmp_dir/bin"
 mkdir -p "$base_bin" "$fake_bin"
-for tool in bash env cat cut date gawk grep head id jq mkdir mktemp rm sed tail tee timeout tr; do
+for tool in bash env cat cut date gawk grep head jq mkdir mktemp od rm sed tail tee timeout touch tr; do
   path=$(command -v "$tool") || fail "the test needs $tool"
   ln -s "$path" "$base_bin/$tool"
 done
 # No check may wait on the clock here.
 printf '#!/bin/sh\nexit 0\n' > "$base_bin/sleep"
-chmod +x "$base_bin/sleep"
+# FF_TEST_UID=0 is the live ISO: root, with a feralfile user to play sound as.
+cat > "$base_bin/id" <<'EOF'
+#!/bin/sh
+case "$*" in
+  -u) echo "${FF_TEST_UID:-1000}" ;;
+  "-u feralfile") echo 1000 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$base_bin/sleep" "$base_bin/id"
 
 stub() { cat > "$fake_bin/$1"; chmod +x "$fake_bin/$1"; }
 unstub() { rm -f "$fake_bin/$1"; }
 
-run() { PATH="$fake_bin:$base_bin" FF_TEST_DIR="$tmp_dir" "$base_bin/bash" "$@"; }
+run() { XDG_RUNTIME_DIR=/run/user/test PATH="$fake_bin:$base_bin" FF_TEST_DIR="$tmp_dir" "$base_bin/bash" "$@"; }
 check() { run "$unit_checks" "$@" 2>&1; }
 
 # --- brightness: the panel follows, does not follow, is not there.
@@ -47,7 +56,7 @@ check() { run "$unit_checks" "$@" 2>&1; }
 ddcutil_stub() {
   stub ddcutil <<'EOF'
 #!/usr/bin/env bash
-# FF_TEST_DDC: follow | stuck | no-display | no-read
+# FF_TEST_DDC: follow | stuck | no-return | no-display | no-read
 state="$FF_TEST_DIR/brightness"
 echo "$*" >> "$FF_TEST_DIR/ddcutil.log"
 case "$*" in
@@ -57,7 +66,11 @@ case "$*" in
     esac
     echo "VCP 10 C $(cat "$state") 100" ;;
   "--noverify setvcp --sleep-multiplier 1.5 10 "*)
-    [ "$FF_TEST_DDC" = stuck ] || echo "${!#}" > "$state" ;;
+    case "$FF_TEST_DDC" in
+      stuck) ;;
+      no-return) [ "${!#}" = 40 ] || echo "${!#}" > "$state" ;; # takes a level, not the way back
+      *) echo "${!#}" > "$state" ;;
+    esac ;;
   "detect --brief")
     if [ "$FF_TEST_DDC" = no-display ]; then
       printf 'Invalid display\n   I2C bus:  /dev/i2c-3\n'
@@ -83,6 +96,14 @@ expect "brightness pass" '^== Brightness +PASS .*set:read 25:25 75:75, back at 4
 out=$(FF_TEST_DDC=stuck check brightness) && fail "a panel that does not follow passed"
 expect "brightness fail" '^== Brightness +FAIL .*does not follow.*set:read 25:40 75:40, back at 40' "$out"
 
+# A panel that will not go back is asked again, and once more on the way out.
+echo 40 > "$tmp_dir/brightness"; : > "$tmp_dir/ddcutil.log"
+out=$(FF_TEST_DDC=no-return check brightness) && fail "a panel left at a test level passed"
+expect "brightness not restored" '^== Brightness +FAIL +the panel was at 40 and would not go back: it now reads 75' "$out"
+[ "$(grep -c 'setvcp .* 40$' "$tmp_dir/ddcutil.log")" = 6 ] || \
+  fail "a panel that did not go back was not asked again: $(grep -c 'setvcp .* 40$' "$tmp_dir/ddcutil.log") tries"
+echo 40 > "$tmp_dir/brightness"
+
 out=$(FF_TEST_DDC=no-display check brightness) && fail "no DDC/CI display passed"
 expect "no DDC/CI display" '^== Brightness +NO-DDC +no DDC/CI display found' "$out"
 
@@ -94,12 +115,14 @@ expect "unreadable brightness" '^== Brightness +FAIL +a DDC/CI display answers b
 pulse_stubs() {
   stub pactl <<'EOF'
 #!/usr/bin/env bash
-echo "$*" >> "$FF_TEST_DIR/pactl.log"
+# FF_TEST_PULSE=needs-start: no server until systemctl has started the user manager.
+echo "$* [${XDG_RUNTIME_DIR:-}]" >> "$FF_TEST_DIR/pactl.log"
+if [ "${FF_TEST_PULSE:-up}" = needs-start ] && [ ! -e "$FF_TEST_DIR/user-manager" ]; then exit 1; fi
 case "$1" in
   info) [ -n "$FF_TEST_SINK" ] ;;
   get-default-sink) [ -n "$FF_TEST_SINK" ] && echo "$FF_TEST_SINK" ;;
-  get-sink-volume) echo "Volume: front-left: 26241 /  40% / -23.85 dB,   front-right: 26241 /  40% / -23.85 dB" ;;
-  get-sink-mute) echo "Mute: yes" ;;
+  get-sink-volume) printf 'Volume: front-left: 26241 /  40%% / -23.85 dB,   front-right: 13107 /  20%% / -41.94 dB\n        balance -0.50\n' ;;
+  get-sink-mute) [ "${FF_TEST_MUTE:-yes}" != unreadable ] && echo "Mute: ${FF_TEST_MUTE:-yes}" ;;
   set-sink-volume | set-sink-mute) ;;
   *) echo "unexpected pactl $*" >&2; exit 1 ;;
 esac
@@ -113,7 +136,26 @@ od -An -v -tu1 -w4 | gawk '
   END { print NR, (l ? "left" : "") (r ? "right" : "") }' >> "$FF_TEST_DIR/pacat.log"
 EOF
 }
-ln -s "$(command -v od)" "$base_bin/od"
+
+# The live ISO's side of it: runuser hands the command to feralfile, systemctl
+# starts what is asked (FF_TEST_SYSTEMCTL=fails: it does not).
+root_stubs() {
+  stub runuser <<'EOF'
+#!/usr/bin/env bash
+[ "$1 $2 $3" = "-u feralfile --" ] || { echo "unexpected runuser $*" >&2; exit 1; }
+shift 3
+exec "$@"
+EOF
+  stub systemctl <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$FF_TEST_DIR/systemctl.log"
+[ "${FF_TEST_SYSTEMCTL:-ok}" = ok ] || exit 1
+case "$*" in
+  "start user@1000.service") touch "$FF_TEST_DIR/user-manager" ;;
+  "start bluetooth.service") touch "$FF_TEST_DIR/bluetoothd" ;;
+esac
+EOF
+}
 
 unstub pactl; unstub pacat
 out=$(check speakers) && fail "speakers without pactl did not report a skip"
@@ -127,9 +169,34 @@ expect "speakers played" '^== Speakers +PLAYED .*low tone LEFT, then high tone R
 expect "left is announced first" '^Speakers: >>> LEFT' "$(sed -n 1p <<<"$out")"
 [ "$(cat "$tmp_dir/pacat.log")" = $'120000 left\n120000 right' ] || \
   fail "the tones were not one channel each, left then right: $(cat "$tmp_dir/pacat.log")"
-expect "volume set for the tone" '^set-sink-volume @DEFAULT_SINK@ 63%$' "$(cat "$tmp_dir/pactl.log")"
-[ "$(tail -n 2 "$tmp_dir/pactl.log")" = $'set-sink-volume @DEFAULT_SINK@ 40%\nset-sink-mute @DEFAULT_SINK@ 1' ] || \
-  fail "volume and mute were not put back: $(cat "$tmp_dir/pactl.log")"
+expect "volume set for the tone" '^set-sink-volume alsa_output.hdmi-stereo 63% ' "$(cat "$tmp_dir/pactl.log")"
+[ "$(tail -n 2 "$tmp_dir/pactl.log")" = $'set-sink-volume alsa_output.hdmi-stereo 26241 13107 [/run/user/test]\nset-sink-mute alsa_output.hdmi-stereo 1 [/run/user/test]' ] || \
+  fail "each channel's volume and the mute were not put back: $(cat "$tmp_dir/pactl.log")"
+
+# A sink whose state cannot be read in full is played as it stands.
+: > "$tmp_dir/pactl.log"
+out=$(FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_MUTE=unreadable check speakers) || fail "speakers did not play as found:
+$out"
+expect "played as found" '^== Speakers +PLAYED .*volume as found' "$out"
+grep -q '^set-sink' "$tmp_dir/pactl.log" && fail "volume or mute was changed without a way back"
+
+# As root on the live ISO: feralfile's PulseAudio, started when it is not up.
+root_stubs
+: > "$tmp_dir/pactl.log"; : > "$tmp_dir/systemctl.log"; rm -f "$tmp_dir/user-manager"
+out=$(FF_TEST_UID=0 FF_TEST_PULSE=needs-start FF_TEST_SINK=alsa_output.hdmi-stereo check speakers) || \
+  fail "speakers did not play as root:
+$out"
+expect "speakers played as root" '^== Speakers +PLAYED ' "$out"
+[ "$(cat "$tmp_dir/systemctl.log")" = "start user@1000.service" ] || fail "feralfile's user manager was not started"
+grep -v ' \[/run/user/1000\]$' "$tmp_dir/pactl.log" && fail "a PulseAudio call as root did not go to feralfile's server"
+rm -f "$tmp_dir/user-manager"
+out=$(FF_TEST_UID=0 FF_TEST_PULSE=needs-start FF_TEST_SYSTEMCTL=fails FF_TEST_SINK=alsa_output.hdmi-stereo check speakers) && \
+  fail "a PulseAudio that never came up counted as played"
+expect "no PulseAudio as root" '^== Speakers +FAIL +no PulseAudio server answers' "$out"
+unstub runuser
+out=$(FF_TEST_UID=0 FF_TEST_SINK=alsa_output.hdmi-stereo check speakers) && fail "speakers without runuser did not report a skip"
+expect "no runuser" '^== Speakers +SKIP +no feralfile user to play the tone as' "$out"
+unstub systemctl
 
 out=$(FF_TEST_SINK=auto_null check speakers) && fail "the dummy sink counted as played"
 expect "dummy sink" '^== Speakers +FAIL .*no sound output' "$out"
@@ -157,7 +224,13 @@ bluez_stubs() {
   stub busctl <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *GetManagedObjects) cat "$FF_TEST_DIR/bluez.$FF_TEST_BLUEZ" ;;
+  *GetManagedObjects)
+    # needs-start: bluetoothd is down until systemctl has started it.
+    if [ "$FF_TEST_BLUEZ" = needs-start ]; then
+      [ -e "$FF_TEST_DIR/bluetoothd" ] && cat "$FF_TEST_DIR/bluez.adapter"
+    else
+      cat "$FF_TEST_DIR/bluez.$FF_TEST_BLUEZ"
+    fi ;;
   "--system status org.bluez") [ "$FF_TEST_BLUEZ" != down ] ;;
   *) echo "unexpected busctl $*" >&2; exit 1 ;;
 esac
@@ -191,6 +264,17 @@ out=$(FF_TEST_BLUEZ=none FF_TEST_DISCOVERY=heard check bluetooth) && fail "a mis
 expect "no adapter" '^== Bluetooth +FAIL +no Bluetooth adapter \(bluetoothd runs but has none\)' "$out"
 out=$(FF_TEST_BLUEZ=down FF_TEST_DISCOVERY=heard check bluetooth 2>&1) && fail "no bluetoothd passed"
 expect "no bluetoothd" '^== Bluetooth +FAIL +no Bluetooth adapter \(bluetoothd is not running\)' "$out"
+
+# As root on the live ISO, bluetoothd is started when it is not up.
+root_stubs
+: > "$tmp_dir/systemctl.log"; rm -f "$tmp_dir/bluetoothd"
+out=$(FF_TEST_UID=0 FF_TEST_BLUEZ=needs-start FF_TEST_DISCOVERY=heard check bluetooth) || fail "bluetooth did not pass as root:
+$out"
+[ "$(cat "$tmp_dir/systemctl.log")" = "start bluetooth.service" ] || fail "bluetoothd was not started"
+rm -f "$tmp_dir/bluetoothd"; : > "$tmp_dir/systemctl.log"
+out=$(FF_TEST_BLUEZ=needs-start FF_TEST_DISCOVERY=heard check bluetooth) && fail "bluetooth passed with bluetoothd down"
+[ -s "$tmp_dir/systemctl.log" ] && fail "a run that is not root tried to start bluetoothd"
+unstub runuser; unstub systemctl
 
 # --- record: every check runs whatever the one before it did; JSON carries
 # hostname and label as the Wi-Fi reading does.

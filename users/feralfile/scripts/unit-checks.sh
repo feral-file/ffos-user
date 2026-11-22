@@ -28,10 +28,16 @@ BT_WINDOW=12        # seconds; one BR/EDR inquiry is 10.24 s
 AUDIO_USER="${FF_AUDIO_USER:-feralfile}" # owns the PulseAudio the player uses
 
 STATUS="" DETAIL="" DATA=null
-BRIGHTNESS_RESTORE=""
+BRIGHTNESS_RESTORE=""                         # the level to put the panel back to
+AUDIO_SINK="" AUDIO_VOLUMES="" AUDIO_MUTE=""  # the sink's state to put back
+AUDIO_UID=""
 
 have() { command -v "$1" >/dev/null 2>&1; }
 is_root() { [ "$(id -u)" -eq 0 ]; }
+
+# run <seconds> <command...>: nothing here may hold the factory loop for good,
+# so every outside command has a deadline, and a kill behind it.
+run() { timeout -k 5 "$@"; }
 
 # result <name> <status> <detail>: the one line a person and factory-check read.
 result() {
@@ -49,7 +55,7 @@ json() { DATA=$(jq -n "$@" 2>/dev/null) || DATA=null; }
 ddc_get() {
   local i out
   for i in 1 2 3; do
-    out=$(timeout 30 ddcutil getvcp 10 --brief 2>&1 | gawk '$1 == "VCP" && $2 == "10" && $3 == "C" && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ { print $4, $5; exit }')
+    out=$(run 15 ddcutil getvcp 10 --brief 2>&1 | gawk '$1 == "VCP" && $2 == "10" && $3 == "C" && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ { print $4, $5; exit }')
     if [ -n "$out" ]; then echo "$out"; return 0; fi
     [ "$i" -lt 3 ] && sleep 1
   done
@@ -57,7 +63,7 @@ ddc_get() {
 }
 
 # The flags feral-controld sets brightness with; the read-back is done here.
-ddc_set() { timeout 30 ddcutil --noverify setvcp --sleep-multiplier 1.5 10 "$1" >/dev/null 2>&1; }
+ddc_set() { run 15 ddcutil --noverify setvcp --sleep-multiplier 1.5 10 "$1" >/dev/null 2>&1; }
 
 # ddc_follow <value> -> the value the panel reports after being set to it.
 ddc_follow() {
@@ -71,10 +77,17 @@ ddc_follow() {
   echo "${got:-none}"
 }
 
+# Put the panel back where it was. Stays armed until the panel reads the
+# original level again, so the exit trap has one more go at a panel that did
+# not take it.
 brightness_restore() {
+  local i back=""
   [ -n "$BRIGHTNESS_RESTORE" ] || return 0
-  ddc_set "$BRIGHTNESS_RESTORE" || true
-  BRIGHTNESS_RESTORE=""
+  for i in 1 2 3; do
+    back=$(ddc_follow "$BRIGHTNESS_RESTORE")
+    if [ "$back" = "$BRIGHTNESS_RESTORE" ]; then BRIGHTNESS_RESTORE=""; break; fi
+  done
+  echo "$back"
 }
 
 check_brightness() {
@@ -85,7 +98,7 @@ check_brightness() {
   if is_root && ! compgen -G '/dev/i2c-*' >/dev/null; then modprobe i2c-dev 2>/dev/null || true; fi
 
   if ! reading=$(ddc_get); then
-    if timeout 60 ddcutil detect --brief 2>/dev/null | grep -q '^Display [0-9]'; then
+    if run 60 ddcutil detect --brief 2>/dev/null | grep -q '^Display [0-9]'; then
       result Brightness FAIL "a DDC/CI display answers but its brightness (VCP 10) cannot be read"
     else
       result Brightness NO-DDC "no DDC/CI display found (a bench monitor without DDC/CI reads this way; on the art panel it is a failure)"
@@ -108,11 +121,12 @@ check_brightness() {
     steps+="${steps:+ }$target:$back"
     [ "$back" = "$target" ] || ok=0
   done
-  back=$(ddc_follow "$cur")
-  BRIGHTNESS_RESTORE=""
+  back=$(brightness_restore)
+  # $(...) ran that in a subshell: disarm here only when it did put it back.
+  [ "$back" = "$cur" ] && BRIGHTNESS_RESTORE=""
 
   if [ "$back" != "$cur" ]; then
-    result Brightness FAIL "the panel was at $cur and now reads $back; set:read $steps (max $max)"
+    result Brightness FAIL "the panel was at $cur and would not go back: it now reads $back; set:read $steps (max $max)"
   elif [ "$ok" -eq 1 ]; then
     result Brightness PASS "the panel follows the set value; set:read $steps, back at $cur (max $max)"
   else
@@ -127,15 +141,26 @@ check_brightness() {
 
 # --- speakers ---------------------------------------------------------------
 
-# pa <command...>: run a PulseAudio client against the server the player uses.
-# That server belongs to feralfile; root (the live ISO) has none of its own and
-# libpulse does not start one for root.
+# pa <seconds> <command...>: run a PulseAudio client against the server the
+# player uses. That server belongs to feralfile; root (the live ISO) has none
+# of its own and libpulse does not start one for root.
 pa() {
+  local secs=$1; shift
   if is_root; then
-    runuser -u "$AUDIO_USER" -- env XDG_RUNTIME_DIR="/run/user/$AUDIO_UID" "$@"
+    run "$secs" runuser -u "$AUDIO_USER" -- env LC_ALL=C XDG_RUNTIME_DIR="/run/user/$AUDIO_UID" "$@"
   else
-    "$@"
+    LC_ALL=C run "$secs" "$@"
   fi
+}
+
+# Put the sink's volume and mute back as they were found. Armed only once both
+# were read, and before either is touched.
+audio_restore() {
+  [ -n "$AUDIO_SINK" ] || return 0
+  # shellcheck disable=SC2086 # one volume per channel
+  pa 10 pactl set-sink-volume "$AUDIO_SINK" $AUDIO_VOLUMES >/dev/null 2>&1 || true
+  pa 10 pactl set-sink-mute "$AUDIO_SINK" "$AUDIO_MUTE" >/dev/null 2>&1 || true
+  AUDIO_SINK=""
 }
 
 # tone <left|right> <hz> -> raw 48 kHz stereo s16le on stdout, one channel
@@ -159,15 +184,14 @@ tone() {
   }'
 }
 
-play() { tone "$1" "$2" | pa timeout 20 pacat --playback --raw --format=s16le --rate=48000 --channels=2 --channel-map=front-left,front-right 2>/dev/null; }
+play() { tone "$1" "$2" | pa 20 pacat "--device=$3" --playback --raw --format=s16le --rate=48000 --channels=2 --channel-map=front-left,front-right 2>/dev/null; }
 
 check_speakers() {
-  local i sink="" vol="" mute="" played=1
+  local i sink="" volumes="" mute="" level played=1
   DATA=null
   for i in pactl pacat gawk; do
     if ! have "$i"; then result Speakers SKIP "$i is not on this image"; return; fi
   done
-  AUDIO_UID=""
   if is_root; then
     if ! have runuser || ! AUDIO_UID=$(id -u "$AUDIO_USER" 2>/dev/null); then
       result Speakers SKIP "no $AUDIO_USER user to play the tone as"
@@ -175,12 +199,12 @@ check_speakers() {
     fi
     # On the live ISO nothing has logged feralfile in; its user manager (and
     # the PulseAudio socket in it) may still need starting.
-    if ! pa timeout 10 pactl info >/dev/null 2>&1; then
-      systemctl start "user@$AUDIO_UID.service" >/dev/null 2>&1 || true
+    if ! pa 10 pactl info >/dev/null 2>&1; then
+      run 30 systemctl start "user@$AUDIO_UID.service" >/dev/null 2>&1 || true
     fi
   fi
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    sink=$(pa timeout 10 pactl get-default-sink 2>/dev/null) && [ -n "$sink" ] && break
+    sink=$(pa 10 pactl get-default-sink 2>/dev/null) && [ -n "$sink" ] && break
     sink=""
     sleep 1
   done
@@ -194,33 +218,40 @@ check_speakers() {
     return
   fi
 
-  # Play at the image's default volume, unmuted, then put both back.
-  vol=$(pa timeout 10 pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -o '[0-9]\+%' | head -n 1 | tr -d '%') || vol=""
-  mute=$(pa timeout 10 pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null | gawk '{ print $2; exit }') || mute=""
-  pa timeout 10 pactl set-sink-mute @DEFAULT_SINK@ 0 >/dev/null 2>&1 || true
-  pa timeout 10 pactl set-sink-volume @DEFAULT_SINK@ "$TEST_VOLUME%" >/dev/null 2>&1 || true
+  # Play at the image's default volume, unmuted, then put both back: every
+  # channel's own raw volume, and the mute. A sink whose state cannot be read
+  # in full is played as it stands, since it could not be put back.
+  volumes=$(pa 10 pactl get-sink-volume "$sink" 2>/dev/null |
+    gawk '{ for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/ && $(i + 1) == "/") printf "%s ", $i }') || volumes=""
+  mute=$(pa 10 pactl get-sink-mute "$sink" 2>/dev/null | gawk '{ print $2; exit }') || mute=""
+  level="as found"
+  if [ -n "$volumes" ] && { [ "$mute" = yes ] || [ "$mute" = no ]; }; then
+    AUDIO_VOLUMES=$volumes AUDIO_SINK=$sink
+    if [ "$mute" = yes ]; then AUDIO_MUTE=1; else AUDIO_MUTE=0; fi
+    pa 10 pactl set-sink-mute "$sink" 0 >/dev/null 2>&1 || true
+    pa 10 pactl set-sink-volume "$sink" "$TEST_VOLUME%" >/dev/null 2>&1 || true
+    level="$TEST_VOLUME%"
+  fi
 
   echo "Speakers: >>> LEFT speaker, LOW tone, now"
-  play left 440 || played=0
+  play left 440 "$sink" || played=0
   echo "Speakers: >>> RIGHT speaker, HIGH tone, now"
-  play right 880 || played=0
-
-  [ -n "$vol" ] && { pa timeout 10 pactl set-sink-volume @DEFAULT_SINK@ "$vol%" >/dev/null 2>&1 || true; }
-  [ "$mute" = yes ] && { pa timeout 10 pactl set-sink-mute @DEFAULT_SINK@ 1 >/dev/null 2>&1 || true; }
+  play right 880 "$sink" || played=0
+  audio_restore
 
   if [ "$played" -eq 1 ]; then
-    result Speakers PLAYED "listen: low tone LEFT, then high tone RIGHT, each from its own side only (output $sink)"
+    result Speakers PLAYED "listen: low tone LEFT, then high tone RIGHT, each from its own side only (output $sink, volume $level)"
   else
     result Speakers FAIL "the tone could not be played to $sink"
   fi
-  json --arg status "$STATUS" --arg detail "$DETAIL" --arg sink "$sink" --argjson volume "$TEST_VOLUME" \
-    '{status: $status, detail: $detail, sink: $sink, volume_percent: $volume, left_hz: 440, right_hz: 880}'
+  json --arg status "$STATUS" --arg detail "$DETAIL" --arg sink "$sink" --arg volume "$level" \
+    '{status: $status, detail: $detail, sink: $sink, volume: $volume, left_hz: 440, right_hz: 880}'
 }
 
 # --- bluetooth --------------------------------------------------------------
 
 bluez_objects() {
-  timeout 15 busctl --system --json=short call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null
+  run 15 busctl --system --json=short call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null
 }
 
 # bt_adapter -> TSV: object path, address, powered (true/false) of the first adapter.
@@ -239,7 +270,7 @@ bt_adapter() {
 # nothing. This holds one connection open through libsystemd for the whole
 # window, reads the tree while the discovery is still running, then stops it.
 bt_discover() {
-  timeout $(($2 + 40)) python3 - "$1" "$2" <<'PY'
+  run $(($2 + 40)) python3 - "$1" "$2" <<'PY'
 import ctypes, subprocess, sys, time
 
 path, window = sys.argv[1].encode(), float(sys.argv[2])
@@ -285,7 +316,7 @@ check_bluetooth() {
   adapter=$(bt_adapter)
   if [ -z "$adapter" ] && is_root; then
     # bluetooth.service is enabled on the image; on a live boot make sure.
-    systemctl start bluetooth.service >/dev/null 2>&1 || true
+    run 30 systemctl start bluetooth.service >/dev/null 2>&1 || true
   fi
   for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -n "$adapter" ] && break
@@ -293,7 +324,7 @@ check_bluetooth() {
     adapter=$(bt_adapter)
   done
   if [ -z "$adapter" ]; then
-    if busctl --system status org.bluez >/dev/null 2>&1; then
+    if run 15 busctl --system status org.bluez >/dev/null 2>&1; then
       result Bluetooth FAIL "no Bluetooth adapter (bluetoothd runs but has none): check the M.2 card"
     else
       result Bluetooth FAIL "no Bluetooth adapter (bluetoothd is not running)"
@@ -303,7 +334,7 @@ check_bluetooth() {
   fi
   IFS=$'\t' read -r path address powered <<<"$adapter"
   if [ "$powered" != true ]; then
-    timeout 15 busctl --system set-property org.bluez "$path" org.bluez.Adapter1 Powered b true >/dev/null 2>&1 || true
+    run 15 busctl --system set-property org.bluez "$path" org.bluez.Adapter1 Powered b true >/dev/null 2>&1 || true
     powered_here=1
     sleep 2
   fi
@@ -312,7 +343,7 @@ check_bluetooth() {
   err=$(mktemp)
   tree=$(bt_discover "$path" "$BT_WINDOW" 2>"$err") || tree=""
   if [ "$powered_here" -eq 1 ]; then
-    timeout 15 busctl --system set-property org.bluez "$path" org.bluez.Adapter1 Powered b false >/dev/null 2>&1 || true
+    run 15 busctl --system set-property org.bluez "$path" org.bluez.Adapter1 Powered b false >/dev/null 2>&1 || true
   fi
   if [ -z "$tree" ]; then
     result Bluetooth FAIL "the adapter $address would not run a discovery ($(tail -n 1 "$err" | cut -c 1-80))"
@@ -396,8 +427,11 @@ one() {
 # Sourced (scripts/test-unit-checks.sh), only the functions load.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
-# A check cut short by a signal still puts the panel's brightness back.
-trap brightness_restore EXIT
+# A check cut short still puts the panel's brightness and the volume back.
+trap 'brightness_restore >/dev/null; audio_restore' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 case "${1:-}" in
   brightness | speakers | bluetooth) one "$1" ;;
