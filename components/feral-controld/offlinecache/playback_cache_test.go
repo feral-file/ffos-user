@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,7 +69,15 @@ func TestPlaybackCache_WarmsCurrentThenUpcomingAndReusesAfterRestart(t *testing.
 	s := playbackService(t, store, classify)
 	require.NoError(t, s.Start(context.Background()))
 	s.automatic.observe(items, 1, true)
-	require.Eventually(t, func() bool { st, _ := s.Status(StatusRequest{}); return st.Totals != nil && st.Totals.Ready == 3 }, 3*time.Second, 5*time.Millisecond)
+	// Waits on the store: Status does not report automatic captures (#423).
+	require.Eventually(t, func() bool {
+		for _, item := range items {
+			if _, err := store.LoadItem(SourceKey(item.Source)); err != nil {
+				return false
+			}
+		}
+		return true
+	}, 3*time.Second, 5*time.Millisecond)
 	s.Stop()
 	mu.Lock()
 	require.Equal(t, []string{"/b", "/c", "/a"}, paths)
@@ -247,30 +256,89 @@ func TestPlaybackCache_StatusHidesSpeculationUntilManualJoin(t *testing.T) {
 					_, ok := s.dequeueAdmitted()
 					require.True(t, ok)
 				}
+				// Even a fresh automatic capture is the FF1's own, so it
+				// reads as not_cached and stays out of the listing (#423).
 				st, err := s.Status(StatusRequest{Sources: []string{item.Source}})
 				require.NoError(t, err)
-				want := StateNotCached
-				if prior == "ready" {
-					want = StateReady
-				}
-				require.Equal(t, want, st.Items[0].State)
-				if prior == "missing" {
-					st, err = s.Status(StatusRequest{})
-					require.NoError(t, err)
-					require.Empty(t, st.Items)
-				}
+				require.Equal(t, []ItemStatus{{Source: item.Source, State: StateNotCached}}, st.Items)
+				st, err = s.Status(StatusRequest{})
+				require.NoError(t, err)
+				require.Empty(t, st.Items)
+				require.Equal(t, StatusTotals{}, *st.Totals)
 			}
 			_, err = s.enqueue(item, 0, ClassMedia)
 			require.NoError(t, err)
+			// Someone has now asked: the explicit job shows over any record.
 			st, err := s.Status(StatusRequest{Sources: []string{item.Source}})
 			require.NoError(t, err)
-			if prior == "ready" {
-				require.Equal(t, StateReady, st.Items[0].State)
-			} else {
-				require.Equal(t, StateDownloading, st.Items[0].State)
-			}
+			require.Equal(t, StateDownloading, st.Items[0].State)
+			st, err = s.Status(StatusRequest{})
+			require.NoError(t, err)
+			require.Equal(t, []ItemStatus{{Source: item.Source, State: StateDownloading}}, st.Items)
+			require.Equal(t, StatusTotals{Total: 1, Downloading: 1}, *st.Totals)
 		})
 	}
+}
+
+// Downloads lists only the works someone asked the FF1 to keep (#423). A
+// finished automatic capture is absent from every report while the FF1
+// still uses it, and an explicit Download of it then reports like any
+// download.
+func TestPlaybackCache_AutomaticCapturesStayOutOfReports(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "max-age=7200")
+		_, _ = io.WriteString(w, "image")
+	}))
+	defer origin.Close()
+	store := playbackStore(t)
+	kept := ItemStatus{Source: "https://example.com/kept.png", State: StateReady, Percent: 100, CoverageComplete: true}
+	require.NoError(t, store.SaveItem(&ItemRecord{Item: dp1playlist.PlaylistItem{Source: kept.Source}, Coverage: Coverage{Complete: true}}))
+	s := playbackService(t, store, playbackClassifier(func(context.Context, string) (MediaClass, error) { return ClassMedia, nil }))
+	s.started.Store(true)
+	obs := &recordingProgressObserver{}
+	s.observer = obs
+	played := dp1playlist.PlaylistItem{Source: origin.URL + "/played.png"}
+	s.automatic.observe([]dp1playlist.PlaylistItem{played}, 0, true)
+	playbackPass(s)
+	rec, err := store.LoadItem(SourceKey(played.Source))
+	require.NoError(t, err)
+	require.True(t, rec.Automatic)
+	require.True(t, rec.freshForPlayback(time.Now()))
+
+	require.Empty(t, obs.states(), "an automatic capture is never announced")
+	st, err := s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Equal(t, []ItemStatus{kept}, st.Items)
+	require.Equal(t, StatusTotals{Total: 1, Ready: 1}, *st.Totals)
+	st, err = s.Status(StatusRequest{TotalsOnly: true})
+	require.NoError(t, err)
+	require.Equal(t, StatusTotals{Total: 1, Ready: 1}, *st.Totals)
+	st, err = s.Status(StatusRequest{Sources: []string{played.Source, kept.Source}})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []ItemStatus{kept, {Source: played.Source, State: StateNotCached}}, st.Items)
+	// The FF1's own use is unchanged: the offline rescue still replays it.
+	require.True(t, s.HasReplayableItem(played.Source))
+
+	// A Download makes it a work someone asked the FF1 to keep.
+	require.NoError(t, s.DownloadItem(context.Background(), played))
+	st, err = s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Equal(t, StatusTotals{Total: 2, Ready: 1, Downloading: 1}, *st.Totals)
+	job, ok := s.dequeueAdmitted()
+	require.True(t, ok)
+	s.process(context.Background(), job)
+	rec, err = store.LoadItem(SourceKey(played.Source))
+	require.NoError(t, err)
+	require.False(t, rec.Automatic)
+	require.Equal(t, []ItemState{StateQueued, StateDownloading, StateReady}, obs.states())
+	st, err = s.Status(StatusRequest{Sources: []string{played.Source}})
+	require.NoError(t, err)
+	require.Equal(t, StateReady, st.Items[0].State)
+	st, err = s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Len(t, st.Items, 2)
+	require.Equal(t, StatusTotals{Total: 2, Ready: 2}, *st.Totals)
 }
 
 // Expire retry backoff without sleeping five minutes. These tests drive the
@@ -476,13 +544,22 @@ func TestPlaybackCache_ExpiredRecordsPrunedWithoutDiskPressure(t *testing.T) {
 	require.NoError(t, store.SaveItem(&ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}, Automatic: true, Coverage: Coverage{Complete: true}, Resources: []Resource{{URL: source, SHA256: hash, FreshUntil: time.Now().Add(-time.Hour)}}}))
 	s := playbackService(t, store, nil)
 	s.storage = &storagePolicy{percent: 50, minFree: 5 << 30, space: func(string) (int64, int64, error) { return 128 << 30, 100 << 30, nil }}
+	// Unlisted before any sweep runs: an automatic capture is never
+	// reported (#423), expired or not.
+	st, err := s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Empty(t, st.Items)
 	require.NoError(t, s.Start(context.Background()))
 	defer s.Stop()
-	require.Eventually(t, func() bool { st, err := s.Status(StatusRequest{}); return err == nil && len(st.Items) == 0 }, time.Second, time.Millisecond)
-	st, err := s.Status(StatusRequest{Sources: []string{source}})
+	// Usage reaches 0 only at the sweep's closing GC, after the eviction
+	// has dropped the tracked state Start seeded from the record.
+	require.Eventually(t, func() bool { used, _ := store.DiskUsage(); return used == 0 }, time.Second, time.Millisecond)
+	st, err = s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Empty(t, st.Items)
+	st, err = s.Status(StatusRequest{Sources: []string{source}})
 	require.NoError(t, err)
 	require.Equal(t, StateNotCached, st.Items[0].State)
-	require.Eventually(t, func() bool { used, _ := store.DiskUsage(); return used == 0 }, time.Second, time.Millisecond)
 }
 
 func TestStorageBudget_WarnsOncePerPressureEpisodeWithEffectiveLimit(t *testing.T) {
@@ -683,6 +760,8 @@ func TestPlaybackCache_ExplicitDownloadUpgradesInflightCapture(t *testing.T) {
 	defer origin.Close()
 	store := playbackStore(t)
 	s := playbackService(t, store, playbackClassifier(func(context.Context, string) (MediaClass, error) { return ClassMedia, nil }))
+	obs := &recordingProgressObserver{}
+	s.observer = obs
 	require.NoError(t, s.Start(context.Background()))
 	defer s.Stop()
 	item := dp1playlist.PlaylistItem{Source: origin.URL}
@@ -692,13 +771,27 @@ func TestPlaybackCache_ExplicitDownloadUpgradesInflightCapture(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("automatic capture did not start")
 	}
+	st, err := s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Empty(t, st.Items)
 	require.NoError(t, s.DownloadItem(context.Background(), item))
+	st, err = s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Equal(t, []ItemStatus{{Source: item.Source, State: StateDownloading}}, st.Items)
 	s.automatic.observe([]dp1playlist.PlaylistItem{{Source: "https://example.com/new.png"}}, 0, false)
 	close(release)
 	require.Eventually(t, func() bool {
 		rec, err := store.LoadItem(SourceKey(item.Source))
 		return err == nil && !rec.Automatic && rec.Resources[0].FreshUntil.IsZero()
 	}, time.Second, time.Millisecond)
+	// The joined capture is now the requested download (the flag cleared in
+	// process), so it is announced and listed like any download (#423).
+	require.Eventually(t, func() bool { return slices.Contains(obs.states(), StateReady) }, time.Second, time.Millisecond)
+	st, err = s.Status(StatusRequest{})
+	require.NoError(t, err)
+	require.Len(t, st.Items, 1)
+	require.Equal(t, StateReady, st.Items[0].State)
+	require.Equal(t, StatusTotals{Total: 1, Ready: 1}, *st.Totals)
 }
 
 func TestStorageBudget_EnforcedAtStartupWithoutPlayback(t *testing.T) {
@@ -771,4 +864,37 @@ func TestAutomaticCapture_DoesNotSnapshotMutableRedirect(t *testing.T) {
 	used, err := store.DiskUsage()
 	require.NoError(t, err)
 	require.Zero(t, used)
+}
+
+// PR #461 review F15: an onchfs work on screen is protected and current for
+// the warmer (so speculative reclaim keeps it), while the warmer never
+// classifies or captures it (OnchfsMaterializer writes it).
+func TestPlaybackCache_OnchfsWorkIsProtectedButNeverCaptured(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=7200")
+		_, _ = io.WriteString(w, "image")
+	}))
+	defer origin.Close()
+	onchfsWork := "https://cy46rsmjzxosyd46sunre2rbwglegcmfjqfi4cu3cgj2mvogoeva.evm.onchfs.invalid/?fxhash=1"
+	var classified sync.Map
+	classify := playbackClassifier(func(_ context.Context, source string) (MediaClass, error) {
+		classified.Store(source, true)
+		return ClassMedia, nil
+	})
+	store := playbackStore(t)
+	s := playbackService(t, store, classify)
+	require.NoError(t, s.Start(context.Background()))
+	defer s.Stop()
+	items := []dp1playlist.PlaylistItem{{Source: onchfsWork}, {Source: origin.URL + "/next"}}
+	s.automatic.observe(items, 0, true)
+
+	require.True(t, s.automatic.protectedKeys()[SourceKey(onchfsWork)], "the work on screen is protected")
+	require.Equal(t, SourceKey(onchfsWork), s.automatic.currentKey())
+	require.Eventually(t, func() bool {
+		_, err := store.LoadItem(SourceKey(origin.URL + "/next"))
+		return err == nil
+	}, 3*time.Second, 5*time.Millisecond, "the next item is still warmed")
+	_, asked := classified.Load(onchfsWork)
+	require.False(t, asked, "the onchfs work is never classified for capture")
 }

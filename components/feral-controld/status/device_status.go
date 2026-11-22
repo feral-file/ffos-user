@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -76,6 +78,22 @@ func NewDeviceStatus(
 		cdp:        cdpClient,
 		cache:      &versionCache{},
 	}
+}
+
+// ReadScreenRotation reads the configured orientation, defaulting to landscape.
+func ReadScreenRotation(os wrapper.OS) string {
+	data, err := os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
+	if err == nil {
+		switch strings.TrimSpace(string(data)) {
+		case "90":
+			return "portrait"
+		case "180":
+			return "landscapeReverse"
+		case "270":
+			return "portraitReverse"
+		}
+	}
+	return "landscape"
 }
 
 // DeviceStatusContract is the API contract version this firmware speaks,
@@ -161,12 +179,35 @@ type DeviceStatusResponse struct {
 	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
 	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
 	SleepSchedule *sleepschedule.Status `json:"sleepSchedule,omitempty"`
+	// Control is the feral-file#3551 capability block (docs/ff1-control-v1.md
+	// §11), from SetControlStatusSource; omitted while control.enabled is
+	// false. Typed any so this package does not depend on package control.
+	Control any `json:"control,omitempty"`
+}
+
+// controlStatusSource supplies DeviceStatusResponse.Control. A package-level
+// seam (like netmetrics' setters) because deviceStatus is a value type built
+// before the control authority, and both the pulled getDeviceStatus reply and
+// the poller's pushed device_status go through GetStatus.
+var controlStatusSource atomic.Pointer[func() any]
+
+// SetControlStatusSource wires the control block source. Call before the
+// poller starts; nil clears it.
+func SetControlStatusSource(fn func() any) {
+	if fn == nil {
+		controlStatusSource.Store(nil)
+		return
+	}
+	controlStatusSource.Store(&fn)
 }
 
 // GetStatus retrieves comprehensive device status information
 // This function can be used by both command handlers and status polling
 func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, error) {
 	response := &DeviceStatusResponse{Contract: DeviceStatusContract}
+	if fn := controlStatusSource.Load(); fn != nil {
+		response.Control = (*fn)()
+	}
 
 	// Use errgroup for parallel execution
 	g, ctx := errgroup.WithContext(ctx)
@@ -212,28 +253,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
-	// Get screen rotation
 	g.Go(func() error {
-		// Default to landscape
-		screenRotation = "landscape"
-
-		configData, err := d.os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
-		if err != nil {
-			return nil // Don't fail if config file doesn't exist
-		}
-
-		if len(configData) > 0 {
-			savedRotation := strings.TrimSpace(string(configData))
-			orientationMap := map[string]string{
-				"normal": "landscape",
-				"90":     "portrait",
-				"180":    "landscapeReverse",
-				"270":    "portraitReverse",
-			}
-			if orientation, ok := orientationMap[savedRotation]; ok {
-				screenRotation = orientation
-			}
-		}
+		screenRotation = ReadScreenRotation(d.os)
 		return nil
 	})
 
@@ -262,19 +283,9 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Get installed version and latest version
 	g.Go(func() error {
-		configBytes, err := d.os.ReadFile(constants.FF1_CONFIG_FILE)
+		config, err := ff1config.Read(d.os, d.json)
 		if err != nil {
-			return fmt.Errorf("failed to read config file: %w", err)
-		}
-
-		var config struct {
-			Version  string `json:"version"`
-			Branch   string `json:"branch"`
-			Endpoint string `json:"endpoint"`
-		}
-
-		if err := d.json.Unmarshal(configBytes, &config); err != nil {
-			return fmt.Errorf("failed to parse config file: %w", err)
+			return err
 		}
 
 		installedVersion = config.Version

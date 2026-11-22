@@ -21,8 +21,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -562,7 +562,7 @@ func TestHandleCast_Success(t *testing.T) {
 
 	// Mock command handler to return success (use gomock.Any() for payload)
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(expectedResult, nil).
 		Times(1)
 
@@ -674,7 +674,7 @@ func TestHandleCast_ProcessError(t *testing.T) {
 	// Mock command handler to return error
 	processErr := errors.New("process error")
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, processErr).
 		Times(1)
 
@@ -724,10 +724,10 @@ func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
 		Times(1)
 
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, &commandrouter.SourceUnreachableError{
-			Results: []offlinecache.SourceProbeResult{
-				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			Results: []mediahealth.ProbeResult{
+				{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 400},
 			},
 		}).
 		Times(1)
@@ -777,7 +777,7 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 
 	// Mock command handler to return nil result (no error, but no content)
 	ts.mockCmd.EXPECT().
-		Process(ts.ctx, gomock.Any()).
+		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, nil).
 		Times(1)
 
@@ -1092,6 +1092,19 @@ func TestRespondJSON_Success(t *testing.T) {
 
 // countingHandler is a real inner Handler that counts how many commands reach
 // it, used to prove the storm gate sheds excess before they hit the device.
+
+// fromControllerCtx matches a context the hub marked with
+// commands.FromController: every cast that enters through the LAN API is a
+// controller's, and the router wakes a sleeping player only for those.
+type fromControllerCtx struct{}
+
+func (fromControllerCtx) Matches(x interface{}) bool {
+	ctx, ok := x.(context.Context)
+	return ok && commands.IsFromController(ctx)
+}
+
+func (fromControllerCtx) String() string { return "a context marked commands.FromController" }
+
 type countingHandler struct {
 	calls atomic.Int64
 }
@@ -1276,41 +1289,55 @@ func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
 	assert.Equal(t, v1, v2, "v1 and v2 must serve the identical provider payload")
 }
 
-// TestHandleStatus_ClaimedDeviceStillServesTopicID pins the multi-controller
-// contract: FF1 is controlled by several phones, and a frame whose original
-// phone is lost/wiped must stay pairable from any LAN peer, so a CLAIMED
-// device keeps serving its topic_id (LAN-presence = authorization, matching
-// the BLE-era posture). The claimed flag stays visible so the app can
-// suppress the unprompted app-open claim offer — manual pairing only.
-func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
-	ctx := context.Background()
+// TestHandleStatus_ClaimedDeviceWithholdsTopicID pins feral-file#3551 phase
+// 0: the topic is a bearer credential on ff-relayer, so once the device is
+// claimed neither status route hands it to LAN peers. The key stays present
+// as "" (the pre-multi-phone shape) because the released app maps claimed +
+// empty topic_id to its known alreadyClaimed result; dropping the key or
+// inventing a marker would break that mapping.
+func TestHandleStatus_ClaimedDeviceWithholdsTopicID(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		claimed   bool
+		wantTopic string
+	}{
+		{"claimed withholds the topic", true, ""},
+		{"unclaimed serves the topic for the first claim", false, "topic-xyz"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 
-	mockWS := mocks.NewMockWS(ctrl)
-	mockCmd := mocks.NewMockCommandHandler(ctrl)
-	mockServer := mocks.NewMockHTTPServer(ctrl)
-	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+			mockServer := mocks.NewMockHTTPServer(ctrl)
+			mux := http.NewServeMux()
+			mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	provider := stubStatusProvider{info: StatusInfo{
-		DeviceID: "ff1-abc",
-		Claimed:  true,
-		TopicID:  "topic-xyz",
-	}}
-	h := New(ctx, mockWS, mockCmd, provider, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+			provider := stubStatusProvider{info: StatusInfo{
+				DeviceID: "ff1-abc",
+				Claimed:  tt.claimed,
+				TopicID:  "topic-xyz",
+			}}
+			New(context.Background(), mocks.NewMockWS(ctrl), mocks.NewMockCommandHandler(ctrl),
+				provider, nil, mockServer, wrapper.NewJSON(), logger)
 
-	req := httptest.NewRequest("GET", "http://127.0.0.1:1111/api/status", nil)
-	w := httptest.NewRecorder()
-	h.withMiddleware("status", h.handleStatus)(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	var got map[string]any
-	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	assert.Equal(t, true, got["claimed"])
-	assert.Equal(t, "topic-xyz", got["topic_id"],
-		"a claimed device keeps serving its topic — multi-phone pairing "+
-			"and lost-phone recovery depend on it")
+			for _, path := range []string{"/api/status", "/api/v2/status"} {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111"+path, nil))
+				require.Equal(t, http.StatusOK, w.Code, path)
+				var got map[string]any
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
+				assert.Equal(t, tt.claimed, got["claimed"], path)
+				topic, present := got["topic_id"]
+				assert.True(t, present, "%s: topic_id key must stay present", path)
+				assert.Equal(t, tt.wantTopic, topic, path)
+				if tt.claimed {
+					assert.NotContains(t, w.Body.String(), "topic-xyz",
+						"%s: a claimed device's topic must appear nowhere in the payload", path)
+				}
+			}
+		})
+	}
 }
 
 // TestHandleStatus_NilProviderReturnsContract verifies a nil provider still

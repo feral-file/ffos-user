@@ -1,0 +1,71 @@
+{
+  "name": "controller-link",
+  "kind": "controllerLink",
+  "description": "Controller links an owner's app MUST reject as a whole (§5.6.1.1).",
+  "cases": [
+    {
+      "description": "No fragment.",
+      "link": "https://link.feralfile.com/controller"
+    },
+    {
+      "description": "The payload in the path instead of the fragment.",
+      "link": "https://link.feralfile.com/controller/ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "A fragment that is the bare encoded payload, without c=.",
+      "link": "https://link.feralfile.com/controller#ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "Another path that only starts like the prefix.",
+      "link": "https://link.feralfile.com/controllers#c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "Another host.",
+      "link": "https://evil.example/controller#c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "c missing.",
+      "link": "https://link.feralfile.com/controller#d=FF1-8EVTK3RE"
+    },
+    {
+      "description": "c repeated.",
+      "link": "https://link.feralfile.com/controller#c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger&c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "d repeated.",
+      "link": "https://link.feralfile.com/controller#d=FF1-8EVTK3RE&d=FF1-8EVTK3RE&c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "An unknown member.",
+      "link": "https://link.feralfile.com/controller#x=1&c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "An empty member.",
+      "link": "https://link.feralfile.com/controller#c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger&"
+    },
+    {
+      "description": "An empty d.",
+      "link": "https://link.feralfile.com/controller#d=&c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "A d outside the hostname shape.",
+      "link": "https://link.feralfile.com/controller#d=FF1%20A%2Fb&c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7CStranger"
+    },
+    {
+      "description": "A truncated escape.",
+      "link": "https://link.feralfile.com/controller#c=%E0%A4%A"
+    },
+    {
+      "description": "An escape that is not UTF-8.",
+      "link": "https://link.feralfile.com/controller#c=%FF"
+    },
+    {
+      "description": "c that is not a controller QR.",
+      "link": "https://link.feralfile.com/controller#c=not-a-code"
+    },
+    {
+      "description": "c that is a QR §5.6.1 rejects (empty label).",
+      "link": "https://link.feralfile.com/controller#c=ff1-ctl%3A1%7C7b0d6e4a-2f51-4c8e-9a43-a48fcc56c5d9%7CBKPkQNZYTuUJegdV7CUkLmlhJOFYP5HtrFgyQ0zRdH9TmxGdF3qrhlvwLYIUYsoNSie_yZbFhPEuW8AYj-3fnpY%7CsXGZrXnWLFvKOrRY_-GqMHExtwH_30xLBFC54u6A67k%7CLDeOvUQyvO0Dz9_-sScFFr6zm3aN07LPxz8kRpI_DQg%7Cv4Ix8k1W_PVXPvGxKNDbQ8zJ6roWKFIVTwzZYwD-z1g%7CL_JV6u33ftKNz3GLr9Ii9TyDFx1QgiUBkyQVCu2RgCk%7CDKGaaktvRLMK0QPPdvtL_g%7Cother%7C"
+    }
+  ]
+}

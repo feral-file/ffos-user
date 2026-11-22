@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
@@ -167,6 +168,14 @@ type Service struct {
 	// contract as the poll bounds above.
 	navigationParkPollInterval time.Duration
 	navigationParkTimeout      time.Duration
+
+	// readBuild reads the installed build (the same ff1config descriptor the
+	// OTA gate and the claim QR read); nil means ff1config.ReadInstalled.
+	// Test-only override, same pre-worker contract as the poll bounds above.
+	// versionMu guards the cached value.
+	readBuild func() (ff1config.Build, error)
+	versionMu sync.Mutex
+	version   string
 
 	mu      sync.Mutex
 	support support
@@ -710,6 +719,40 @@ func (s *Service) RefreshClaimQRName(resolve func() string) {
 	})
 }
 
+// RefreshClaimQRURL rewrites the url of the claim-QR narration while claim_qr
+// is the current intent, keeping its device_name. build runs only then, so a
+// caller whose url carries a fresh single-use credential (the control
+// invitation, feral-file#3551) mints one only for a QR that is on screen.
+// Same conditional-commit discipline as RefreshClaimQRName: a narrator that
+// took the screen meanwhile is never overwritten.
+func (s *Service) RefreshClaimQRURL(build func() string) {
+	cur, has := s.ctrl.Current()
+	if !has || setupState(cur) != stateClaimQR {
+		return
+	}
+	url := build()
+	if url == "" {
+		return
+	}
+	req := map[string]any{"state": stateClaimQR, "url": url}
+	s.pushIf(req, func(last map[string]any) bool {
+		if stringField(last, "state") != stateClaimQR {
+			return false
+		}
+		if name := stringField(last, "device_name"); name != "" {
+			req["device_name"] = name
+		}
+		return true
+	})
+}
+
+// ClaimQRShowing reports whether the claim QR is the current narration
+// intent.
+func (s *Service) ClaimQRShowing() bool {
+	cur, has := s.ctrl.Current()
+	return has && setupState(cur) == stateClaimQR
+}
+
 // ShowReady narrates that setup completed successfully.
 func (s *Service) ShowReady() {
 	s.push(map[string]any{"state": stateReady})
@@ -801,6 +844,11 @@ func (s *Service) HideIfShowing(states ...string) {
 		return false
 	})
 }
+
+// StateClaimQR is exported for HideIfShowing callers that take the claim QR
+// down when it is no longer claimable: the first owner enrolled with the
+// control invitation it carried (feral-file#3551 §5.1).
+const StateClaimQR = stateClaimQR
 
 // StateFinalizing is exported for HideIfShowing callers that need to name the
 // narration they own (the auto-claim flow's post-join gap overlay).
@@ -1053,6 +1101,7 @@ func (s *Service) trySend(req map[string]any) {
 	// (a no-op for every other state) — must stay AFTER narrationSupported, so
 	// the downgrade decision only ever runs when a manifest is present.
 	req = s.resolveExtensionState(req)
+	req = s.withVersion(req)
 
 	payload, err := json.Marshal(map[string]any{
 		"command": setupDisplayCommand,
@@ -1089,6 +1138,50 @@ func (s *Service) trySend(req map[string]any) {
 	if state := stringField(req, "state"); state != stateUpdating {
 		s.logger.Info("Setup narration pushed", zap.String("state", state))
 	}
+}
+
+// withVersion returns req with the installed software version as `version`,
+// so every setup panel can show which build is running and an old one is
+// visible at boot. Copy-on-write: the retained intent is never mutated.
+// Players that predate the field ignore it. Hidden carries nothing to label,
+// and an unreadable version is simply omitted.
+func (s *Service) withVersion(req map[string]any) map[string]any {
+	if stringField(req, "state") == stateHidden {
+		return req
+	}
+	version := s.installedVersion()
+	if version == "" {
+		return req
+	}
+	out := make(map[string]any, len(req)+1)
+	for k, v := range req {
+		out[k] = v
+	}
+	out["version"] = version
+	return out
+}
+
+// installedVersion reads the installed version from the FF1 config file once
+// it is readable and caches it for the process: the label names the build
+// that is RUNNING, so an OTA that rewrites the file before controld restarts
+// must not relabel the updating screen with the version still to come.
+// Unreadable or blank reads are not cached, so a later push retries.
+func (s *Service) installedVersion() string {
+	s.versionMu.Lock()
+	defer s.versionMu.Unlock()
+	if s.version != "" {
+		return s.version
+	}
+	read := s.readBuild
+	if read == nil {
+		read = ff1config.ReadInstalled
+	}
+	build, err := read()
+	if err != nil {
+		return ""
+	}
+	s.version = strings.TrimSpace(build.Version)
+	return s.version
 }
 
 // narrationSupported resolves, once, whether the player advertises setupDisplay

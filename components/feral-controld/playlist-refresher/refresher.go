@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/display-protocol/dp1-go/displayat"
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -22,6 +24,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/sigverify"
+	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -157,6 +160,160 @@ type refresher struct {
 	// already cleared the slot), and the new generation's reconciliation
 	// establishes a fresh verdict. Mirrors commandrouter.sendCDPRequest.
 	sessionGeneration func() uint64
+
+	// mediaHealthHints, when set (SetMediaHealthHints), supplies the
+	// per-item hint argument for every send.
+	mediaHealthHints func(items []dp1playlist.PlaylistItem) interface{}
+
+	// onchfs starts reading onchfs works a refresh brings (ffos-user#427);
+	// nil leaves them unplayable.
+	onchfs OnchfsMaterializer
+
+	// seriesPlaybackSource, when set (SetSeriesPlaybackSource), is
+	// commandrouter's own device-level series-playback getter
+	// (commandrouter.SeriesPlaybackSource) — the same store main.go wires
+	// into status.Poller, so this package's resync and commandrouter's own
+	// cast paths read the identical override and can never disagree about
+	// which mode a series narrows under (feral-file/ffos-user#453). nil
+	// means "follow the document", mirroring currentSeriesPlaybackMode's
+	// own nil-safety when no store was wired (a build before this seam, or
+	// a test).
+	seriesPlaybackSource func() *dp1.SeriesPlaybackMode
+
+	// randomSeriesMu guards randomSeriesPicks — see narrowStable's doc. Both
+	// fields are touched only from this package's own serialized background
+	// goroutine (background()'s select loop runs processPlayingPlaylist one
+	// pass at a time) today, but a dedicated lock keeps that invariant from
+	// being load-bearing if a caller outside that loop is ever added
+	// (feralfile-bot F3, 2026-11-12).
+	randomSeriesMu    sync.Mutex
+	randomSeriesPicks map[dp1.SeriesGroupKey]randomSeriesPick
+}
+
+// randomSeriesPick is one series group's last SeriesPlaybackRandom
+// selection, remembered so narrowStable does not re-roll it on every
+// periodic resync — see that method's doc. Only the Source is kept, never
+// the full item: narrowStable always re-looks-up the matching edition from
+// the CURRENT tick's group.Editions before returning it, so a field other
+// than Source (duration, license, contentRating, …) can never go stale
+// behind this memory — storing the struct itself was tried first and
+// replayed exactly that stale copy indefinitely (run-reviewer, round 3 on
+// this fix, 2026-11-12).
+//
+// artworkModel is the group's ArtworkModel at pick time. dp1.NarrowEditions
+// only ever returns a distinct edition when
+// artworkModel.HasDistinctEditions() — a single/multi series always
+// collapses to the representative regardless of mode, and narrowStable's own
+// top-level gate now keeps such a group out of randomSeriesPicks entirely
+// (feralfile-bot F5, 2026-11-12) — and ArtworkModel is read fresh from the
+// catalog's answer on every tick's ResolveSeriesCastPlan call, so it is NOT
+// invariant across ticks for the same SeriesGroupKey. A stored pick whose
+// artworkModel no longer matches the current tick's must still be
+// invalidated exactly like a mode change: the top-level gate only catches a
+// reclassification INTO single/multi (HasDistinctEditions() false); a
+// reclassification between two models that both report true (e.g.
+// multi_unique and an unrecognized/empty value) only this equality check
+// catches (run-reviewer, round 4 on this fix, 2026-11-12).
+type randomSeriesPick struct {
+	mode         dp1.SeriesPlaybackMode
+	artworkModel dp1.SeriesArtworkModel
+	source       string
+	// acceptedSeq is the cast acceptance order (dp1.RandomGroupPick.Seq) of
+	// the last RecordAcceptedPicks write to this entry — zero for an entry
+	// narrowStable itself wrote (its own tick-based writes carry no Seq and
+	// never need to compare against this; see RecordAcceptedPicks' doc).
+	acceptedSeq uint64
+}
+
+// SetSeriesPlaybackSource injects the device-level series-playback getter
+// onto r, if r is the concrete refresher built by New (mirroring
+// SetSessionGeneration's contract). Must be called before Start.
+func SetSeriesPlaybackSource(r Refresher, fn func() *dp1.SeriesPlaybackMode, logger *zap.Logger) {
+	setter, ok := r.(interface {
+		setSeriesPlaybackSource(func() *dp1.SeriesPlaybackMode)
+	})
+	if !ok {
+		logger.Warn("Playlist refresher does not support series playback wiring")
+		return
+	}
+	setter.setSeriesPlaybackSource(fn)
+}
+
+func (r *refresher) setSeriesPlaybackSource(fn func() *dp1.SeriesPlaybackMode) {
+	r.seriesPlaybackSource = fn
+}
+
+// currentSeriesPlaybackMode reads the device-level override, mirroring
+// commandrouter's own method of the same name: nil means "follow the
+// document", either because no override is set or because no source was
+// wired (a build before this seam, or a test).
+func (r *refresher) currentSeriesPlaybackMode() *dp1.SeriesPlaybackMode {
+	if r.seriesPlaybackSource == nil {
+		return nil
+	}
+	return r.seriesPlaybackSource()
+}
+
+// AcceptedPickRecorder exposes r's RecordAcceptedPicks as a plain function,
+// for commandrouter to call every time it accepts a CMD_DISPLAY_PLAYLIST
+// cast that resolved a SeriesPlaybackRandom pick — the reverse direction of
+// SeriesPlaybackSource (commandrouter exposes a getter this package calls;
+// here this package exposes a setter commandrouter calls), wired the same
+// way in main.go so the two packages never import each other directly.
+func AcceptedPickRecorder(r Refresher) (fn func([]dp1.RandomGroupPick), ok bool) {
+	recorder, ok := r.(interface {
+		RecordAcceptedPicks([]dp1.RandomGroupPick)
+	})
+	if !ok {
+		return nil, false
+	}
+	return recorder.RecordAcceptedPicks, true
+}
+
+// RecordAcceptedPicks overwrites randomSeriesPicks for every group in picks
+// with the edition a cast just put on screen — including when the group's
+// own previous remembered pick was itself content-policy withheld. That
+// overwrite is exactly what narrowStable's live-display check cannot do for
+// this case (see rememberedWithheld's doc, feralfile-bot F6 reopened, F8,
+// 2026-11-13): this is the fix, recording the pick at its one point of
+// certain truth — cast acceptance — instead of asking narrowStable to infer
+// it later from an already-filtered display.
+//
+// Not unconditional, though: a pick's own Seq must be at least as new as
+// whatever accepted pick is already recorded for its Key. Two
+// CMD_DISPLAY_PLAYLIST casts resolving the same series group can be
+// in-flight together (the command gate's own concurrency budget allows it)
+// and settle in an order unrelated to which one is actually newer; without
+// this compare, whichever cast's push happens to run its defer last would
+// win regardless, which can replay an older, possibly-withheld pick over a
+// genuinely newer one (run-reviewer consolidated F3 on this fix, 2026-11-16)
+// — in the one case this whole fix exists for (the group's remembered pick
+// withheld), narrowStable's own live-display self-heal would not catch that
+// either, since it is the very check this push bypasses.
+//
+// mode is always SeriesPlaybackRandom: RandomPicksFromNarrowed only ever
+// reports a pick for a group it resolved under that mode (see its own
+// doc), so there is nothing else to store it as.
+func (r *refresher) RecordAcceptedPicks(picks []dp1.RandomGroupPick) {
+	if len(picks) == 0 {
+		return
+	}
+	r.randomSeriesMu.Lock()
+	defer r.randomSeriesMu.Unlock()
+	if r.randomSeriesPicks == nil {
+		r.randomSeriesPicks = make(map[dp1.SeriesGroupKey]randomSeriesPick)
+	}
+	for _, pick := range picks {
+		if existing, ok := r.randomSeriesPicks[pick.Key]; ok && pick.Seq < existing.acceptedSeq {
+			continue
+		}
+		r.randomSeriesPicks[pick.Key] = randomSeriesPick{
+			mode:         dp1.SeriesPlaybackRandom,
+			artworkModel: pick.ArtworkModel,
+			source:       pick.Source,
+			acceptedSeq:  pick.Seq,
+		}
+	}
 }
 
 // SetSessionGeneration injects the generation getter onto r, if r is the
@@ -204,6 +361,59 @@ func (r *refresher) setSignatureVerification(active *sigverify.Active) {
 func SetContentPolicy(r Refresher, policy *contentpolicy.Store) {
 	if target, ok := r.(*refresher); ok {
 		target.contentPolicy = policy
+	}
+}
+
+// SetMediaHealthHints installs the media-health hint source
+// (feral-file/ffos-user#392) onto r, if r is the concrete refresher built by
+// New. Every displayPlaylist the refresher sends — soft refresh and force
+// cast alike — carries the `mediaHealth` argument the source returns for the
+// items being pushed, or none. Must be called before Start; nil sends no
+// hints.
+func SetMediaHealthHints(r Refresher, fn func(items []dp1playlist.PlaylistItem) interface{}, logger *zap.Logger) {
+	setter, ok := r.(interface {
+		setMediaHealthHints(func(items []dp1playlist.PlaylistItem) interface{})
+	})
+	if !ok {
+		logger.Warn("Playlist refresher does not support media health wiring")
+		return
+	}
+	setter.setMediaHealthHints(fn)
+}
+
+// OnchfsMaterializer is the consumer-owned view of
+// offlinecache.OnchfsMaterializer (see commandrouter.OnchfsMaterializer).
+type OnchfsMaterializer interface {
+	Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int
+}
+
+// SetOnchfsMaterializer wires the onchfs reader (ffos-user#427) into the
+// refresher's scope sync. Same post-construction seam as SetMediaHealthHints.
+func SetOnchfsMaterializer(r Refresher, m OnchfsMaterializer, logger *zap.Logger) {
+	setter, ok := r.(interface{ setOnchfsMaterializer(OnchfsMaterializer) })
+	if !ok {
+		logger.Warn("Playlist refresher does not support onchfs wiring")
+		return
+	}
+	setter.setOnchfsMaterializer(m)
+}
+
+func (r *refresher) setOnchfsMaterializer(m OnchfsMaterializer) { r.onchfs = m }
+
+func (r *refresher) setMediaHealthHints(fn func(items []dp1playlist.PlaylistItem) interface{}) {
+	r.mediaHealthHints = fn
+}
+
+// attachMediaHealthHints sets args["mediaHealth"] for playlist, or leaves
+// it absent. Called on every refresher send immediately before the CDP
+// write, on the final item list.
+func (r *refresher) attachMediaHealthHints(args map[string]interface{}, playlist *dp1.Playlist) {
+	delete(args, "mediaHealth")
+	if r.mediaHealthHints == nil || playlist == nil {
+		return
+	}
+	if hints := r.mediaHealthHints(playlist.Items); hints != nil {
+		args["mediaHealth"] = hints
 	}
 }
 
@@ -522,10 +732,43 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				}
 			}
 		case playerStatus.Playlist != nil:
+			// recastForMode's internal re-cast (feral-file/ffos-user#454)
+			// rebuilds the on-screen document as a static dp1_call with its
+			// original playlistUrl/dynamicQuery markers stripped (see
+			// recastForMode's doc), so an otherwise-correct "nothing
+			// refreshable" static document must not be assumed before
+			// checking for a source retained behind this SAME id — a
+			// retained source from a since-superseded cast (a different
+			// playlist, or default playback) is never reused, because
+			// RefreshSource only returns non-zero for a matching id
+			// (feralfile-bot F1 on PR #454, 2026-11-10 14:15).
+			if r.scheduler != nil {
+				if retained := r.scheduler.RefreshSource(playerStatus.Playlist.ID); !retained.IsZero() {
+					contextUnknown = retained.ContentContext == ""
+					schedulerSource = retained
+					break
+				}
+			}
 			// Static inline player status only contains the filtered active set and
 			// no refreshable source identity, so it cannot rebuild future items.
+			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
 			contextUnknown = playerStatus.ContentContext == ""
-			staticInline = playerStatus.Playlist
+			// Defensive, not load-bearing: see resolveDisplayedPlaylist's own
+			// static branch below, which this is the third occurrence of the
+			// same condition for (the second is commandrouter/offlinecache.go's
+			// resolveDisplayedPlaylist). Every display path now expands a
+			// series before the player ever reports a playlist back, so this
+			// is a no-op today — but the replay scope this feeds must agree
+			// with what resolveDisplayedPlaylist would derive from the same
+			// playerStatus, and relying on that invariant holding forever
+			// (round 1 found it did not, for this exact function) is how the
+			// next reviewer finds it a fourth time.
+			// Short-deadlined because this runs on the refresher's one
+			// select loop: see dp1.DefensiveSeriesExpansionTimeout.
+			expandCtx, cancel := context.WithTimeout(r.context, dp1.DefensiveSeriesExpansionTimeout)
+			expanded := r.dp1.ExpandSeriesItems(expandCtx, *playerStatus.Playlist, 0)
+			cancel()
+			staticInline = &expanded
 			staticInlineContext = playerStatus.ContentContext
 		default:
 			// A displayPlaylist status carrying neither a URL nor an inline playlist
@@ -552,13 +795,22 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	switch {
 	case schedulerSource.PlaylistURL != "":
 		kind = "playlist URL"
-		playlist, err = r.dp1.ProcessPlaylistURL(r.context, schedulerSource.PlaylistURL, false)
+		currentlyDisplayed := r.currentlyDisplayedItems(playerStatus)
+		// Built from schedulerSource.ContentContext, not playerStatus — the
+		// scheduler-owned branch this case serves may hold no playerStatus
+		// yet (currentlyDisplayed's own fetch above is lazy). legacySchedulerSource
+		// folds in the same way it does for contextUnknown below, before the
+		// projection that actually uses it: both answer the identical "will this
+		// tick's cast be filtered at all" question, just at two different points
+		// in this function (feralfile-bot F7, 2026-11-13).
+		displayFilter := r.contentDisplayFilter(schedulerSource.ContentContext, contextUnknown || legacySchedulerSource)
+		playlist, err = r.narrowedPlaylistFromURL(schedulerSource.PlaylistURL, currentlyDisplayed, displayFilter)
 		if err != nil {
 			// Offline fallback: serve the last successfully cached body for
 			// this URL rather than failing the pass outright, mirroring
 			// resolveDisplayedPlaylist's own URL branch. Only a cache miss
 			// leaves the live error standing.
-			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL); cacheErr == nil {
+			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL, currentlyDisplayed, displayFilter); cacheErr == nil {
 				playlist, err = cached, nil
 			}
 		}
@@ -681,6 +933,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 	if retireBlockedCurrent {
 		args["retireBlockedCurrent"] = true
 	}
+	r.attachMediaHealthHints(args, playlist)
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
 		Arguments: args,
@@ -770,6 +1023,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		} else {
 			command.Arguments["dp1_call"] = playlist
 		}
+		r.attachMediaHealthHints(command.Arguments, playlist)
 		// Invalidate BEFORE the send (#307): from the moment it lands the
 		// player may show the new document, and the status poller could
 		// match the previous one by URL before the reply is processed. A
@@ -869,11 +1123,18 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 // original document, the same retained-state change deferred for scheduled
 // playlists.
 func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext string, contextUnknown bool, playerStatus *status.PlayerStatus, authorityToken uint64) error {
+	// Both no-send exits below scope replay from what the PLAYER reports, not
+	// from the expanded playlist this pass resolved: nothing is sent on either,
+	// so a scope built from the expansion would describe items the kiosk will
+	// never fetch — see playlistForReplayScope. The re-send path further down
+	// is the opposite case and keeps scoping from the playlist it sends.
+	displayed := playlistForReplayScope(playerStatus, playlist)
+
 	if r.contentPolicy == nil || contextUnknown {
 		if contextUnknown {
 			r.logger.Warn("Player status omits contentContext; leaving this inline playlist unprojected rather than reclassifying it as curated")
 		}
-		return r.syncStaticInlineScope(playlist)
+		return r.syncStaticInlineScope(displayed)
 	}
 
 	origin, contextErr := contentpolicy.NormalizeContext(rawContext)
@@ -890,7 +1151,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 	if len(projected.Items) == len(playlist.Items) {
 		// Nothing newly blocked: the common case, and it must stay as cheap as
 		// it was before this path did any projection at all.
-		return r.syncStaticInlineScope(playlist)
+		return r.syncStaticInlineScope(displayed)
 	}
 
 	retire := currentBlockedByRefresh(playerStatus, playlist, r.contentPolicy.CurrentLocked(), origin)
@@ -914,6 +1175,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 	if retire {
 		command.Arguments["retireBlockedCurrent"] = true
 	}
+	r.attachMediaHealthHints(command.Arguments, &out)
 
 	// Serialized against every other authoritative display, exactly like the
 	// ordinary refresh send below. This re-send is built from a status read
@@ -1105,6 +1367,36 @@ func currentBlockedByRefresh(playerStatus *status.PlayerStatus, fresh *dp1.Playl
 	return false
 }
 
+// playlistForReplayScope returns the playlist whose items offline-replay
+// scope must be derived from, for a pass that sends the player NOTHING.
+//
+// Interception is keyed on the URLs the kiosk actually fetches, so the scope
+// has to describe what the PLAYER holds — not what the daemon would resolve
+// the same status to now. Whenever player status carries a concrete item list
+// (a static inline playlist: the filtered active set the player was cast),
+// that list IS what it holds, and re-resolving it can only diverge from the
+// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// its representative, so a later pass whose expansion succeeds would scope
+// replay to editions that were never displayed and never cached. SyncPlaylist
+// then finds nothing cached and disables replay outright
+// (offlinecache.applyScope), while the cached representative is still on the
+// wall (feralfile-bot #421 F7).
+//
+// A URL status carries no item list at all, and a dynamic one carries queries
+// rather than resolved items, so there the resolved playlist is the only
+// answer available — and it is also the one the player was given.
+//
+// Callers that DO send a replacement playlist must scope from what they send,
+// not from this: see refreshStaticInline's re-send path. Mirrored by
+// commandrouter/offlinecache.go's own copy, for the same reason
+// resolveDisplayedPlaylist is duplicated there (see that function's doc).
+func playlistForReplayScope(playerStatus *status.PlayerStatus, resolved *dp1.Playlist) *dp1.Playlist {
+	if playerStatus != nil && playerStatus.Playlist != nil && !playerStatus.Playlist.HasDynamicContent() {
+		return playerStatus.Playlist
+	}
+	return resolved
+}
+
 // syncReplayScopeLocked points offline-cache replay at playlist's items and
 // announces the change. Callers MUST already hold the playback coordinator
 // (KioskReplay.LockPlayback) and keep holding it across whatever CDP send
@@ -1122,6 +1414,14 @@ func (r *refresher) syncReplayScopeLocked(playlist *dp1.Playlist) {
 	sources := make([]string, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
 		sources = append(sources, item.Source)
+	}
+	// A re-resolved playlist can bring onchfs works the cast never read (a
+	// wallet that gained one, a record the cache evicted). Start reading
+	// them without waiting: this runs under the playback lock, and each one
+	// that lands calls the materializer's OnReady, which forces another
+	// pass whose scope then includes it.
+	if r.onchfs != nil {
+		r.onchfs.Ensure(r.context, playlist.Items, 0)
 	}
 	if _, syncErr := r.kioskReplay.SyncPlaylist(r.context, sources); syncErr != nil {
 		r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
@@ -1217,9 +1517,11 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 	switch {
 	case playerStatus.PlaylistURL != nil:
 		url := *playerStatus.PlaylistURL
-		playlist, err := r.dp1.ProcessPlaylistURL(r.context, url, false)
+		currentlyDisplayed := r.currentlyDisplayedItems(playerStatus)
+		displayFilter := r.contentDisplayFilter(playerStatus.ContentContext, playerStatus.ContentContext == "")
+		playlist, err := r.narrowedPlaylistFromURL(url, currentlyDisplayed, displayFilter)
 		if err != nil {
-			cached, cacheErr := r.loadCachedPlaylistForURL(url)
+			cached, cacheErr := r.loadCachedPlaylistForURL(url, currentlyDisplayed, displayFilter)
 			if cacheErr != nil {
 				return nil, err
 			}
@@ -1228,7 +1530,15 @@ func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) 
 		return playlist, nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			return playerStatus.Playlist, nil
+			// Defensive, not load-bearing: see
+			// commandrouter/offlinecache.go's resolveDisplayedPlaylist,
+			// which mirrors this same shape for the same reason — and
+			// dp1.DefensiveSeriesExpansionTimeout for why a defensive
+			// expansion on this loop gets its own short deadline.
+			expandCtx, cancel := context.WithTimeout(r.context, dp1.DefensiveSeriesExpansionTimeout)
+			defer cancel()
+			expanded := r.dp1.ExpandSeriesItems(expandCtx, *playerStatus.Playlist, 0)
+			return &expanded, nil
 		}
 		return r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
 	default:
@@ -1295,8 +1605,13 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 		return
 	}
 
-	sources := make([]string, 0, len(playlist.Items))
-	for _, item := range playlist.Items {
+	// This resync never sends the player a playlist — it only re-points
+	// interception at what is already on screen — so the scope comes from the
+	// items the player reported, not from the resolve above. See
+	// playlistForReplayScope.
+	scoped := playlistForReplayScope(playerStatus, playlist)
+	sources := make([]string, 0, len(scoped.Items))
+	for _, item := range scoped.Items {
 		sources = append(sources, item.Source)
 	}
 	// Serialize this scope resync against any concurrent displayPlaylist/
@@ -1322,6 +1637,575 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 	}
 }
 
+// fromOfflineCacheSegments converts offlinecache's own SeriesSegment mirror
+// type back into dp1.CastSegment, for loadCachedPlaylistForURL below to
+// build a dp1.CastPlan and call its existing Narrow(deviceMode). Duplicated
+// from commandrouter's identical helper (offlinecache.go's
+// toOfflineCacheSegments/fromOfflineCacheSegments) rather than shared, for
+// the same reason this package already carries its own
+// loadCachedPlaylistForURL/resolveDisplayedPlaylist copies — see
+// AGENTS.md's service-boundary guidance. Keep the two in sync.
+func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastSegment {
+	out := make([]dp1.CastSegment, 0, len(segments))
+	for _, seg := range segments {
+		if seg.Item != nil {
+			item := *seg.Item
+			out = append(out, dp1.CastSegment{Item: &item})
+			continue
+		}
+		group := seg.Group
+		var documentMode *dp1.SeriesPlaybackMode
+		if group.DocumentMode != nil {
+			mode := dp1.SeriesPlaybackMode(*group.DocumentMode)
+			documentMode = &mode
+		}
+		out = append(out, dp1.CastSegment{
+			Group: &dp1.ResolvedSeriesGroup{
+				Key: dp1.SeriesGroupKey{
+					Chain:    group.Key.Chain,
+					Address:  group.Key.Address,
+					SeriesID: dp1playlist.SeriesID(group.Key.SeriesID),
+				},
+				DocumentMode:   documentMode,
+				Representative: group.Representative,
+				Editions:       group.Editions,
+				Resolved:       group.Resolved,
+				ArtworkModel:   dp1.SeriesArtworkModel(group.ArtworkModel),
+			},
+		})
+	}
+	return out
+}
+
+// narrowedPlaylistFromURL fetches url and narrows any seriesRegistry item it
+// carries by the device's current series-playback override — the same
+// dp1.CastPlan.Narrow logic a live cast already applies — instead of the
+// unconditional, mode-ignorant full expansion r.dp1.ProcessPlaylistURL used
+// to apply at both of this method's call sites (feral-file/ffos-user#453: a
+// resync on this LIVE-reachable path was re-expanding a series back to full
+// after an earlier cast had narrowed it, and resolveDisplayedPlaylist's own
+// replay-scope resolve had the identical gap).
+//
+// Deliberately NOT ProcessPlaylistURLForCast: that variant caps at
+// CAST_PLAYLIST_ITEMS_LIMIT, which this resync path must not newly start
+// truncating — it resyncs whatever is already playing, however large, the
+// same uncapped contract ProcessPlaylistURL always had.
+//
+// currentlyDisplayed is narrowStable's seed source — see that method's doc.
+// May be nil (no player status in hand at this call site); narrowStable
+// treats that exactly like "nothing to seed from" and rolls fresh.
+//
+// displayFilter is narrowStable's occurrence predicate — see that method's
+// doc. May be nil (no content-policy context known at this call site);
+// narrowStable then counts every item, exactly as before displayFilter
+// existed.
+func (r *refresher) narrowedPlaylistFromURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) (*dp1.Playlist, error) {
+	playlist, rawPlaylist, err := r.dp1.FetchPlaylist(r.context, url)
+	if err != nil {
+		return nil, err
+	}
+	if playlist.HasDynamicContent() {
+		return r.dp1.ProcessDynamicPlaylist(r.context, *playlist, false)
+	}
+	deviceMode := r.currentSeriesPlaybackMode()
+	plan := r.dp1.ResolveSeriesCastPlan(r.context, *playlist, rawPlaylist, deviceMode, 0)
+	narrowed := *playlist
+	narrowed.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed, displayFilter)
+	return &narrowed, nil
+}
+
+// narrowStable is dp1.CastPlan.Narrow with one difference: a group currently
+// resolving to dp1.SeriesPlaybackRandom reuses its last pick's SOURCE for
+// that dp1.SeriesGroupKey (randomSeriesPicks) instead of asking
+// dp1.NarrowEditions to roll a new one, as long as (a) the mode resolved for
+// it is still random, (b) the group's ArtworkModel hasn't changed since the
+// pick was made (see randomSeriesPick's doc — a change can flip whether a
+// distinct pick is even allowed), and (c) that source is still present among
+// the group's current editions — in which case the matching edition is
+// re-looked-up fresh from THIS tick's Editions (editionBySource), never
+// replayed from the pick itself, so a field other than Source (duration,
+// license, contentRating, …) never goes stale behind this memory
+// (run-reviewer, round 3 on this fix, 2026-11-12). Either condition failing
+// forces a fresh pick: a mode change ("setting change") or the catalog's
+// answer no longer carrying the previously shown edition's source ("that
+// edition disappears") — the two escape hatches feralfile-bot's F3 asked
+// for, 2026-11-12. A non-random group, OR one whose ArtworkModel does not
+// have distinct editions at all (single/multi — nothing for random to
+// pick between, dp1.NarrowEditions always collapses it to the
+// representative regardless of mode), clears any stale memory for its key
+// and goes straight to dp1.NarrowEditions: such a group is never seeded,
+// reused, or memoized by anything below, so it can never pick up a
+// non-representative edition this way — a single/multi group whose one
+// edition's Source happened to coincide with the representative's, or with
+// whatever the player currently shows, used to be memoized and replayed as
+// if it were a genuine distinct pick (feralfile-bot F5, 2026-11-12). A
+// later mode change back to random, or a correction INTO multi_unique,
+// starts from a real roll rather than a stale leftover from before.
+//
+// Scoped to this package's own live-reachable resync and its cached-sidecar
+// fallback (both of narrowedPlaylistFromURL's and loadCachedPlaylistForURL's
+// callers): a live setSeriesPlayback cast or the initial display makes its
+// own fresh pick through commandrouter's separate dp1.CastPlan.Narrow call,
+// which this memory does not see or influence by itself — the two packages
+// deliberately do not share state (AGENTS.md's service-boundary guidance).
+// currentlyDisplayed is this package's only window onto that live choice,
+// so every tick for a still-random, distinct-editions group checks it
+// FIRST, before any remembered pick: called at most once per narrowStable
+// call (memoized below — a plan with several unseeded random groups costs
+// at most one call, however many groups ask for it). The check is by
+// OCCURRENCE, not by scanning the whole displayed list for any matching
+// Source: displayed is itself a flatten of this same plan (live or stale),
+// so this group's own slot is whatever position items has already reached
+// in THIS loop — editionAtOccurrence reads exactly that index. A whole-list
+// scan used to let an unrelated item elsewhere in the playlist that happens
+// to share a Source with one of this group's editions be mistaken for the
+// group's own live pick — e.g. an explicit standalone item ahead of a
+// multi_unique series also containing that same edition (feralfile-bot F7,
+// 2026-11-12). When the item at that occurrence is among THIS group's
+// editions, that is adopted as the pick — seeded if none was remembered
+// yet, or OVERWRITING a remembered pick that disagrees with it. The
+// overwrite is what lets a newer accepted cast's own choice (a
+// setSeriesPlayback recast of the same URL that rolls a different edition,
+// or a setting recast back into random) replace this memory instead of
+// being silently reverted by the next periodic resync (feralfile-bot F6,
+// 2026-11-12): on an ORDINARY tick the player is still showing exactly
+// what was last remembered, so this only reconfirms the existing pick,
+// never changes it. An out-of-range occurrence (no player status in hand,
+// or a shorter displayed list) or a non-match falls through to the
+// remembered pick, then to a fresh roll, exactly as before this check
+// existed.
+//
+// displayFilter reports whether an item would survive the SAME content-
+// policy projection that produced displayed's own on-screen state — nil
+// when no such projection could have happened (no content-policy store, or
+// the context behind this tick's cast is unknown), in which case occurrence
+// counts every earlier item exactly as it did before displayFilter existed.
+// It exists because displayed is the PLAYER's state, already filtered,
+// while items (built up across this very loop) is not: content-policy
+// projection runs AFTER narrowStable, over the finished, unfiltered plan
+// (see processPlayingPlaylist's own ProjectLocked call). Without it, an
+// earlier curated item this tick's policy would also remove (a mature
+// item under the default policy, say) still counts toward occurrence,
+// shifting every later group's slot by however many such items precede it
+// — reading the WRONG position out of displayed and overwriting a correct
+// remembered pick with an unrelated item (feralfile-bot F7, 2026-11-13;
+// this is a second, distinct failure mode from the whole-list-scan F7 the
+// occurrence check above itself replaced on 2026-11-12 — that one needed
+// no filtering mismatch at all to misfire).
+func (r *refresher) narrowStable(plan dp1.CastPlan, device *dp1.SeriesPlaybackMode, currentlyDisplayed func() []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) []dp1playlist.PlaylistItem {
+	r.randomSeriesMu.Lock()
+	defer r.randomSeriesMu.Unlock()
+	if r.randomSeriesPicks == nil {
+		r.randomSeriesPicks = make(map[dp1.SeriesGroupKey]randomSeriesPick)
+	}
+
+	// Memoized so a plan with several unseeded random groups costs at most
+	// one call to currentlyDisplayed (which may itself be a live
+	// FetchPlayerStatus round trip), not one per group.
+	var displayed []dp1playlist.PlaylistItem
+	displayedFetched := false
+	fetchDisplayed := func() []dp1playlist.PlaylistItem {
+		if !displayedFetched {
+			displayedFetched = true
+			if currentlyDisplayed != nil {
+				displayed = currentlyDisplayed()
+			}
+		}
+		return displayed
+	}
+
+	// scheduleActive answers, per segment, the SAME displayAt question
+	// playlistschedule.Scheduler.PrepareWithSource asks of the flattened
+	// playlist narrowStable returns — before this, occurrence counted a
+	// future-scheduled segment that PrepareWithSource goes on to strip out
+	// entirely, so every later group's slot in displayed was shifted by
+	// however many such segments preceded it (feralfile-bot F7,
+	// 2026-11-13; a second, distinct failure mode from the content-policy
+	// one filteredOccurrence/displayFilter already closed one round
+	// earlier — this one needs no policy mismatch to misfire, only an
+	// item-level displayAt schedule). See scheduleActiveSegments' doc.
+	// time.Now() directly, not r.clock: r.clock is a gomock-backed seam many
+	// existing tests construct without stubbing Now() (narrowStable never
+	// called it before), and this check only needs to agree with wall-clock
+	// reality at the moment PrepareWithSource will apply the same filter a
+	// few lines later in the caller — not to be independently mockable.
+	scheduleActive := scheduleActiveSegments(plan.Segments, time.Now(), sleepschedule.LocalTimezone(), displayFilter)
+
+	items := make([]dp1playlist.PlaylistItem, 0, len(plan.Segments))
+	// active is items' own parallel slice: active[i] is whether items[i]'s
+	// originating segment is schedule-active, so filteredOccurrence can
+	// count past both filters without re-deriving per-segment activity
+	// from an already-flattened item.
+	active := make([]bool, 0, len(plan.Segments))
+	// seen is this tick's own group keys, used below to prune
+	// randomSeriesPicks down to groups the CURRENT plan still carries — the
+	// mode-change delete a few lines down only fires for a key the plan
+	// still has, so a group that stops appearing at all (the device moves
+	// on to a different playlist/exhibition) was otherwise never removed,
+	// growing this map for the life of the process (run-reviewer, round 1
+	// on this fix, 2026-11-12).
+	seen := make(map[dp1.SeriesGroupKey]struct{}, len(plan.Segments))
+	for i, seg := range plan.Segments {
+		if seg.Item != nil {
+			items = append(items, *seg.Item)
+			active = append(active, scheduleActive[i])
+			continue
+		}
+		group := seg.Group
+		seen[group.Key] = struct{}{}
+		mode := dp1.ResolveSeriesPlaybackMode(group.DocumentMode, device)
+		// A single/multi group has nothing distinct to pick between — a
+		// fresh dp1.NarrowEditions call always collapses it to the
+		// representative regardless of mode — so it must never enter
+		// randomSeriesPicks at all: reusing, seeding, or memoizing a pick
+		// for it risks replaying some OTHER edition whose Source happens to
+		// coincide with the representative's or with whatever is on
+		// screen, which NarrowEditions itself would never choose
+		// (feralfile-bot F5, 2026-11-12).
+		if mode != dp1.SeriesPlaybackRandom || !group.ArtworkModel.HasDistinctEditions() {
+			delete(r.randomSeriesPicks, group.Key)
+			narrowedNonRandom := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
+			items = append(items, narrowedNonRandom...)
+			for range narrowedNonRandom {
+				active = append(active, scheduleActive[i])
+			}
+			continue
+		}
+		// Check what the player actually shows BEFORE any remembered pick:
+		// a live cast commandrouter sent independently of this refresher
+		// (a setSeriesPlayback recast of the same URL, or a setting recast
+		// back into random) rolls its own edition through its own
+		// dp1.CastPlan.Narrow call, which this memory never sees. Without
+		// this, the first periodic resync after such a cast would silently
+		// revert its choice back to whatever was remembered from before
+		// (feralfile-bot F6, 2026-11-12). On an ordinary tick the player is
+		// still showing exactly what was last remembered, so this only
+		// reconfirms the existing pick (or leaves a not-yet-seeded one
+		// matching) rather than changing anything.
+		//
+		// Only consulted when THIS group's own segment is itself
+		// schedule-active: a future-scheduled group has no active slot in
+		// displayed at all to compare against, so checking occurrence for
+		// it is meaningless and must fall straight through to the
+		// remembered-pick/fresh-roll path below, preserving whatever was
+		// remembered rather than reading an unrelated, coincidentally-
+		// positioned item as if it were this group's live pick
+		// (feralfile-bot F7, 2026-11-13).
+		//
+		// occurrence is this group's own slot in the flattened list: items
+		// already holds every earlier segment's own contribution, so its
+		// current length — counting only the items both schedule-active
+		// AND displayFilter admits, the same ones a content-policy
+		// projection of this tick's cast would keep after displayAt
+		// scheduling strips future segments — is exactly where this
+		// group's narrowed output will land in displayed too — matching
+		// displayed only at that one position, never anywhere else a
+		// coincidental Source match could sit (feralfile-bot F7,
+		// 2026-11-12; corrected to count past content-policy filtering,
+		// feralfile-bot F7, 2026-11-13; corrected again to count past
+		// displayAt scheduling, feralfile-bot F7, 2026-11-13).
+		//
+		// pick/pickValid are fetched once, before the live check, so both
+		// the "does this group even have a slot in displayed" question
+		// below and the remembered-pick fallback further down agree on the
+		// same remembered edition.
+		pick, hasPick := r.randomSeriesPicks[group.Key]
+		pickValid := hasPick && pick.mode == mode && pick.artworkModel == group.ArtworkModel
+		// A remembered pick that content policy itself withholds has NO
+		// slot in displayed at all — the real projection drops it entirely
+		// rather than leaving a placeholder — so occurrence would land on
+		// whatever comes after it instead, and a coincidental Source match
+		// there (e.g. an explicit item sharing an edition's Source with
+		// this very group) would be wrongly adopted as the group's live
+		// pick, overwriting the still-withheld remembered one (feralfile-bot
+		// F8, 2026-11-13). Skip the live check in that case and fall
+		// straight through to preserving the remembered pick below, exactly
+		// like a schedule-inactive group already does.
+		rememberedWithheld := false
+		if pickValid && displayFilter != nil {
+			if rememberedEdition, found := editionBySource(group.Editions, pick.source); found {
+				rememberedWithheld = !displayFilter(rememberedEdition)
+			}
+		}
+		if scheduleActive[i] && !rememberedWithheld {
+			occurrence := filteredOccurrence(items, active, displayFilter)
+			if seeded, ok := editionAtOccurrence(fetchDisplayed(), occurrence, group.Editions); ok {
+				// Written unconditionally, even when the source already
+				// matched what was remembered: a conditional write here (only
+				// on a source change) left mode/artworkModel stale on every
+				// tick that merely reconfirmed the pick, so a later tick
+				// consulting the remembered-pick branch below (display
+				// unavailable) could still see a since-changed artworkModel as
+				// unchanged and skip the invalidation that field exists for
+				// (run-reviewer, round 1 on this fix, 2026-11-12).
+				//
+				// acceptedSeq carries forward from whatever this group's
+				// entry already held (zero if there was none), rather than
+				// defaulting to zero here: this write runs on essentially
+				// every ordinary tick for a schedule-active, non-withheld,
+				// still-displayed group, so discarding it would silently
+				// reset RecordAcceptedPicks' ordering guard (acceptedSeq)
+				// to zero within one PLAYLIST_REFRESH_INTERVAL of any
+				// accepted push — after which a stale, out-of-order push
+				// for an EARLIER cast would no longer be recognized as
+				// older and could overwrite a correct, newer pick
+				// (run-reviewer consolidated F1 on pass 3 of this fix,
+				// 2026-11-16).
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: seeded.Source, acceptedSeq: pick.acceptedSeq}
+				items = append(items, seeded)
+				active = append(active, scheduleActive[i])
+				continue
+			}
+		}
+		// Nothing currently displayed for this group (player status
+		// unavailable, this group isn't part of it, this group's own
+		// segment is itself schedule-inactive, or its remembered pick is
+		// content-withheld) — fall back to the remembered pick, then to a
+		// fresh roll, exactly as before the display check above existed.
+		if pickValid {
+			if fresh, found := editionBySource(group.Editions, pick.source); found {
+				items = append(items, fresh)
+				active = append(active, scheduleActive[i])
+				continue
+			}
+			// The picked source is gone from this tick's editions — the
+			// catalog's answer moved on. Falls through to a fresh pick
+			// below, exactly like "that edition disappears" already did.
+		}
+		narrowed := dp1.NarrowEditions(mode, group.ArtworkModel, group.Representative, group.Editions)
+		// Only remember a pick that is actually one of group.Editions:
+		// NarrowEditions' representative-fallback case (len(editions)==0)
+		// can return a representative whose own Source is not guaranteed
+		// to be among Editions (see CastPlan.Full's doc, feralfile-bot F1)
+		// — memoizing it would just miss every lookup next tick. Leaving
+		// it unmemoized costs nothing: that case is already deterministic,
+		// so re-deriving it fresh every tick returns the identical result
+		// anyway.
+		if len(narrowed) == 1 {
+			if _, found := editionBySource(group.Editions, narrowed[0].Source); found {
+				// acceptedSeq carried forward here too — see the seeded-pick
+				// write above for why (run-reviewer consolidated F1 on pass
+				// 3 of this fix, 2026-11-16).
+				r.randomSeriesPicks[group.Key] = randomSeriesPick{mode: mode, artworkModel: group.ArtworkModel, source: narrowed[0].Source, acceptedSeq: pick.acceptedSeq}
+			}
+		}
+		items = append(items, narrowed...)
+		for range narrowed {
+			active = append(active, scheduleActive[i])
+		}
+	}
+	for key := range r.randomSeriesPicks {
+		if _, ok := seen[key]; !ok {
+			delete(r.randomSeriesPicks, key)
+		}
+	}
+	return items
+}
+
+// editionBySource returns the item in editions whose Source exactly
+// matches source — the same no-normalization comparison commandrouter's
+// findPlaylistItemBySource uses — so narrowStable always returns and
+// re-stores the CURRENT tick's edition for a remembered pick, never a
+// stale copy captured when the pick was first made (run-reviewer, round 3
+// on this fix, 2026-11-12: storing the item itself let every field but
+// Source — duration, license, contentRating, … — go stale for as long as
+// the pick was held).
+func editionBySource(editions []dp1playlist.PlaylistItem, source string) (dp1playlist.PlaylistItem, bool) {
+	for _, edition := range editions {
+		if edition.Source == source {
+			return edition, true
+		}
+	}
+	return dp1playlist.PlaylistItem{}, false
+}
+
+// playerStatusDisplayedItems returns ps's own record of what the player
+// currently shows — Items when the reply carries it, else the inline
+// Playlist's Items, else nil — for narrowStable's seed source. ps may be
+// nil.
+func playerStatusDisplayedItems(ps *status.PlayerStatus) []dp1playlist.PlaylistItem {
+	if ps == nil {
+		return nil
+	}
+	if ps.Items != nil {
+		return *ps.Items
+	}
+	if ps.Playlist != nil {
+		return ps.Playlist.Items
+	}
+	return nil
+}
+
+// currentlyDisplayedItems builds narrowStable's seed-source closure: ps's
+// own items when already in hand, else one FetchPlayerStatus call made
+// lazily (narrowStable's own memoization ensures at most once per
+// narrowStable call, however many unseeded groups it finds) — the case
+// processPlayingPlaylist reaches once a scheduler source is already
+// committed and therefore skips its own player-status fetch (see that
+// function's schedulerSource.IsZero() branch).
+func (r *refresher) currentlyDisplayedItems(ps *status.PlayerStatus) func() []dp1playlist.PlaylistItem {
+	return func() []dp1playlist.PlaylistItem {
+		if ps != nil {
+			return playerStatusDisplayedItems(ps)
+		}
+		fetched, err := r.statusPoller.FetchPlayerStatus(r.context)
+		if err != nil {
+			return nil
+		}
+		return playerStatusDisplayedItems(fetched)
+	}
+}
+
+// contentDisplayFilter builds narrowStable's occurrence predicate (see that
+// method's doc) from a resolved content context. nil — "count every item,
+// nothing is filtered" — when contextUnknown (processPlayingPlaylist's own
+// projection guard skips ProjectLocked in exactly that case too, so
+// occurrence must agree: nothing will be removed), or when there is no
+// content-policy store to ask at all.
+//
+// policy is read via Snapshot, not CurrentLocked: this runs ahead of, and
+// without, the policy lock processPlayingPlaylist takes only after
+// resolution (see that function's own doc on why), and Snapshot is the
+// store's established lock-free read for exactly that kind of caller — see
+// contentpolicy.Store's snap field doc. A policy update racing this read
+// against the later ProjectLocked call is the same bounded, accepted gap
+// every other lock-free Snapshot read in this codebase already carries,
+// and strictly narrows the prior gap: before this existed, occurrence was
+// never corrected for filtering AT ALL, on every tick, not just across a
+// policy-change race.
+func (r *refresher) contentDisplayFilter(contentContext string, contextUnknown bool) func(dp1playlist.PlaylistItem) bool {
+	if r.contentPolicy == nil || contextUnknown {
+		return nil
+	}
+	origin, err := contentpolicy.NormalizeContext(contentContext)
+	if err != nil {
+		return nil
+	}
+	policy := r.contentPolicy.Snapshot()
+	return func(item dp1playlist.PlaylistItem) bool {
+		return policy.Allows(item, origin)
+	}
+}
+
+// editionAtOccurrence reports whether the item at position index in
+// displayed — this group's own slot in the flattened list, not any
+// position — has the same Source as one of editions, and returns that
+// edition (not the displayed copy, whose other fields may be a player-side
+// projection) so narrowStable can seed a fresh group's pick from what a
+// live cast already put on screen instead of rolling a new one.
+//
+// Matching by occurrence rather than scanning displayed for any Source
+// match anywhere is deliberate: a playlist can carry the same edition's
+// Source more than once — an explicit standalone item alongside a series
+// that also contains that edition, or two groups sharing one — and a
+// whole-list scan would mistake that OTHER item's position for this
+// group's own live pick (feralfile-bot F7, 2026-11-12: an explicit item
+// ahead of a multi_unique series containing the same edition was read as
+// the group's pick, discarding the live random choice actually shown at
+// the group's own, later position). index out of range, or no match at
+// that position, returns false — exactly like "nothing displayed for this
+// occurrence."
+//
+// Accepted risk: this assumes displayed was itself flattened with the
+// SAME per-segment item counts this tick's plan computes for every
+// segment ahead of index — true whenever nothing upstream changed, but
+// not guaranteed. An EARLIER full-mode, distinct-editions group
+// contributes its WHOLE editions slice (dp1.NarrowEditions's full case),
+// and narrowedPlaylistFromURL re-resolves that group fresh from the
+// catalog on every tick (no caching) — so its contributed count can
+// change between the live display and this tick purely from routine
+// catalog churn (editions added/removed) or that series item's own
+// document-mode changing, not only a device-level SeriesPlaybackMode
+// override (run-reviewer, round 3 on this fix, 2026-11-12: narrower than
+// "a mode change" first suggested). When that drift happens, index can
+// point at the wrong slot for a LATER random-mode group; the match still
+// requires that wrong slot's Source to coincide with one of THIS group's
+// OWN editions before anything is adopted, so a misfire can only replay
+// a different edition of the same group, never a foreign item.
+func editionAtOccurrence(displayed []dp1playlist.PlaylistItem, index int, editions []dp1playlist.PlaylistItem) (dp1playlist.PlaylistItem, bool) {
+	if index < 0 || index >= len(displayed) {
+		return dp1playlist.PlaylistItem{}, false
+	}
+	return editionBySource(editions, displayed[index].Source)
+}
+
+// filteredOccurrence counts how many of items are BOTH schedule-active
+// (active[i], see scheduleActiveSegments) AND admitted by displayFilter —
+// nil displayFilter admits all of them. active must be the same length as
+// items (narrowStable keeps the two in lockstep). See narrowStable's doc
+// for why this, and not len(items), is this group's own slot in displayed.
+func filteredOccurrence(items []dp1playlist.PlaylistItem, active []bool, displayFilter func(dp1playlist.PlaylistItem) bool) int {
+	n := 0
+	for i, item := range items {
+		if !active[i] {
+			continue
+		}
+		if displayFilter != nil && !displayFilter(item) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// scheduleActiveSegments reports, for each segment in plan order, whether
+// that segment's own items would survive displayAt scheduling — the same
+// filter playlistschedule.Scheduler.PrepareWithSource applies to the
+// flattened playlist narrowStable returns, which this package's own
+// resync never otherwise sees applied until after narrowStable has already
+// built its occurrence counts (feralfile-bot F7, 2026-11-13). All of a
+// group's Editions (and its Representative) share the single series item's
+// own DisplayAt — dp1/series.go's expansion clears then re-applies the
+// parent item's DisplayAt to every edition — so one representative value
+// per segment decides the whole segment's activity; no edition needs to be
+// picked first. now/loc mirror exactly what the scheduler itself resolves
+// them to in production (clock.Now(), and a nil locFn defaulting to
+// sleepschedule.LocalTimezone — see playlistschedule.New's doc): this
+// package has no way to read the scheduler's own configured locFn back
+// out, so it recomputes the one value production never overrides rather
+// than risk silently drifting from the scheduler's actual answer. A
+// synthetic index-keyed ID is enough to map
+// displayat.ComputeActiveSet's filtered subset back to segment positions,
+// since ComputeActiveSet otherwise leaves every field (including ID)
+// untouched.
+//
+// displayFilter is applied to the same preview before it ever reaches
+// ComputeActiveSet, not just to occurrence counting afterward: ComputeActiveSet
+// picks ONE "latest past-due" cohort out of every item it is given, so a
+// content-policy-withheld item with a newer past displayAt than a legitimately
+// displayable one can still win that cohort and mark the real one inactive —
+// exactly what the real scheduler never sees, since content-policy projection
+// already removed the withheld item before playlistschedule.Scheduler ever
+// runs on the real flattened playlist (feralfile-bot F7, 2026-11-13). Omitting
+// a withheld segment from preview entirely (rather than keeping it and
+// zeroing its DisplayAt) keeps it from competing for "latest" at all, exactly
+// mirroring its absence from the real, already-filtered input the scheduler
+// resolves against.
+func scheduleActiveSegments(segments []dp1.CastSegment, now time.Time, loc *time.Location, displayFilter func(dp1playlist.PlaylistItem) bool) []bool {
+	preview := make([]dp1playlist.PlaylistItem, 0, len(segments))
+	for i, seg := range segments {
+		var item dp1playlist.PlaylistItem
+		hasItem := false
+		switch {
+		case seg.Item != nil:
+			item, hasItem = *seg.Item, true
+		case seg.Group != nil:
+			item, hasItem = seg.Group.Representative, true
+		}
+		if hasItem && displayFilter != nil && !displayFilter(item) {
+			continue
+		}
+		preview = append(preview, dp1playlist.PlaylistItem{ID: strconv.Itoa(i), DisplayAt: item.DisplayAt})
+	}
+	active := make([]bool, len(segments))
+	for _, item := range displayat.ComputeActiveSet(&dp1playlist.Playlist{Items: preview}, now, loc) {
+		if idx, err := strconv.Atoi(item.ID); err == nil && idx >= 0 && idx < len(active) {
+			active[idx] = true
+		}
+	}
+	return active
+}
+
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
 // (see its doc, including why the returned playlist carries NO signature
 // verdict: the saved body is a typed, hydrated re-marshal, not the signed
@@ -1332,11 +2216,22 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 // caching disabled, url was never downloaded, or the downloaded copy has
 // since been cleared), so the caller can report the original live
 // resolution error instead.
-func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
+//
+// If the cached copy carries series-group identity (feral-file/ffos-user
+// #453), the returned playlist's Items are narrowed by the device's current
+// series-playback override first — see commandrouter's identical fix on its
+// own loadCachedPlaylistForURL for the full rationale; the two are kept in
+// step by hand (this package deliberately does not depend on commandrouter
+// — see AGENTS.md's service-boundary guidance).
+//
+// currentlyDisplayed is narrowStable's seed source — see that method's
+// doc. May be nil. displayFilter is narrowStable's occurrence predicate —
+// see that method's doc. May be nil.
+func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func() []dp1playlist.PlaylistItem, displayFilter func(dp1playlist.PlaylistItem) bool) (*dp1.Playlist, error) {
 	if r.offlineCache == nil {
 		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
 	}
-	raw, err := r.offlineCache.CachedPlaylistForURL(url)
+	raw, segments, err := r.offlineCache.CachedPlaylistForURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
 	}
@@ -1346,6 +2241,11 @@ func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) 
 	var playlist *dp1.Playlist
 	if err := r.json.Unmarshal(raw, &playlist); err != nil {
 		return nil, fmt.Errorf("offline cache: parse cached playlist for %s: %w", url, err)
+	}
+	if len(segments) > 0 {
+		plan := dp1.CastPlan{Segments: fromOfflineCacheSegments(segments)}
+		deviceMode := r.currentSeriesPlaybackMode()
+		playlist.Items = r.narrowStable(plan, deviceMode, currentlyDisplayed, displayFilter)
 	}
 	return playlist, nil
 }

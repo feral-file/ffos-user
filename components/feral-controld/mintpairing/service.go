@@ -24,6 +24,8 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
@@ -107,6 +109,8 @@ type Service interface {
 	Start(ctx context.Context)
 	Stop()
 	HandleStartPairingSession(ctx context.Context, args map[string]any) (any, error)
+	// HandleGetPairingSession snapshots session state without broker or display I/O.
+	HandleGetPairingSession(ctx context.Context, args map[string]any) (any, error)
 	// HandleJoinPairingChannel joins a broker channel a site created
 	// (site-initiated pairing): the app hands over the channel's pairing
 	// token or short code, and the device becomes its minter. Nothing is
@@ -178,6 +182,12 @@ type Service interface {
 	// a request arriving after the wipe has begun belongs to a claim that is
 	// gone.
 	CloseActivePairing(ctx context.Context) (closed bool, err error)
+	// SetDisplayGrants wires the control authority that issues display grants
+	// to Play 0.5 sites and the v2 endpoint those sites cast through
+	// (docs/ff1-control-v1.md §5.7). Call once at wiring time. Not called,
+	// or called with a nil issuer or an empty endpoint, every 0.5 request is
+	// answered display_grant_unavailable.
+	SetDisplayGrants(issuer DisplayGrantIssuer, relayV2Endpoint string)
 }
 
 // NavigationSession is the narrow slice of playersession.Session the display
@@ -245,6 +255,11 @@ type service struct {
 	// contract as session above.
 	navigationParkPollInterval time.Duration
 	navigationParkTimeout      time.Duration
+
+	// displayGrants and relayV2Endpoint are set by SetDisplayGrants; see
+	// displaygrant.go.
+	displayGrants   DisplayGrantIssuer
+	relayV2Endpoint string
 }
 
 // createGate counts session creations that have been handed to the relayer and
@@ -393,6 +408,9 @@ type brokerChannel interface {
 	MinterPublicKeyJWK() minter.PublicJWK
 	PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, int64, error)
 	SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error)
+	// SendMintDisplayGrant answers a 0.5 request with a display grant and no
+	// session (§5.7 of docs/ff1-control-v1.md).
+	SendMintDisplayGrant(ctx context.Context, request minter.MintRequest, grant minter.DisplayGrantResult) (*minter.SendMessageResult, error)
 	SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error)
 	Close(ctx context.Context) error
 }
@@ -439,8 +457,19 @@ func (b brokerChannelAdapter) SendMintSuccess(ctx context.Context, request minte
 	return b.channel.SendMintSuccess(ctx, request, result)
 }
 
+func (b brokerChannelAdapter) SendMintDisplayGrant(ctx context.Context, request minter.MintRequest, grant minter.DisplayGrantResult) (*minter.SendMessageResult, error) {
+	return b.channel.SendMintSuccessResult(ctx, request, minter.MintSuccess{DisplayGrant: &grant})
+}
+
 func (b brokerChannelAdapter) SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {
 	return b.channel.SendMintRejection(ctx, request, rejection)
+}
+
+// JoinedMintRequest is the request the site announced at create (play#19),
+// read by displayGrantKeysFor so the announced display keys and the
+// encrypted ones are compared.
+func (b brokerChannelAdapter) JoinedMintRequest() (minter.MintRequest, bool) {
+	return b.channel.JoinedMintRequest()
 }
 
 func (b brokerChannelAdapter) Close(ctx context.Context) error {
@@ -527,12 +556,13 @@ type pendingApproval struct {
 }
 
 type activePairing struct {
-	channel     brokerChannel
-	channelID   string
-	pairingCode string
-	expiresAt   time.Time
-	phase       activePairingPhase
-	browserName string
+	channel       brokerChannel
+	channelID     string
+	pairingCode   string
+	codeCreatedAt time.Time
+	expiresAt     time.Time
+	phase         activePairingPhase
+	browserName   string
 	// listener is this session's owner side of the overlay, created once per
 	// session so re-shows of the same code are not treated as overrides. It
 	// also doubles as hideSession's ownership key via Controller.HideOwned,
@@ -640,6 +670,13 @@ type approvalDecisionRequest struct {
 	// something malformed. parseDecision resolves it into KeepPaired.
 	KeepPairedRaw json.RawMessage `json:"keepPaired,omitempty"`
 	KeepPaired    bool            `json:"-"`
+	// Approver is the ctl of the owner whose sealed envelope carried the
+	// decision, or "" for a plaintext decision (a legacy device). It is the
+	// approver a display grant records (§5.7); it is read only here, where
+	// the request context is still at hand, and IssueDisplayGrant re-checks
+	// it. Not part of sameDecision: the same owner retrying is the same
+	// decision.
+	Approver string `json:"-"`
 }
 
 type approvalResponse struct {
@@ -845,7 +882,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		return commandError("invalid_config", "mint pairing player contract is not valid", false), nil
 	}
 	startGuard := currentTopicGuard()
-	if startGuard.topicID == "" {
+	if startGuard.topicID == "" && !s.displayGrantsWired() {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
 	}
 
@@ -876,7 +913,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 					// this decision (round 5 review follow-up — this call site
 					// shared showMint's old blanket-Warn bug but was missed
 					// when showPairingCode's sibling sites were fixed).
-					s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+					s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, s.expiryOf(active))...)
 					return commandError("display_unavailable", "failed to display mint pairing request status", true), err
 				}
 				s.logger.Warn("Failed to redisplay active mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
@@ -886,7 +923,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 				OK:        true,
 				Status:    "pending_approval",
 				ChannelID: active.channelID,
-				ExpiresAt: formatOptionalTime(active.expiresAt),
+				ExpiresAt: formatOptionalTime(s.expiryOf(active)),
 			}, nil
 		}
 		if err := s.showPairingCode(ctx, active, pr, func() bool { return s.isActive(active) }); err != nil {
@@ -898,10 +935,10 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 				// decision — round 3 review, F2. refreshExpiredPairingCode is
 				// the one caller that reads this as its own error, to skip its
 				// own fallback Warn.
-				s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+				s.logger.Info("Mint pairing redisplay skipped", pairingDisplayLogFields(active.channelID, active.pairingCode, s.expiryOf(active))...)
 				return commandError("display_unavailable", "failed to display mint pairing QR code", true), err
 			}
-			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
+			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, s.expiryOf(active)), zap.Error(err))...)
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
 		return startPairingResponse{
@@ -909,7 +946,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 			Status:      "already_started",
 			ChannelID:   active.channelID,
 			PairingCode: active.pairingCode,
-			ExpiresAt:   formatOptionalTime(active.expiresAt),
+			ExpiresAt:   formatOptionalTime(s.expiryOf(active)),
 		}, nil
 	}
 
@@ -944,7 +981,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 	})
 	if err != nil {
 		s.logger.Warn("Failed to start mint pairing broker channel", zap.Error(err))
-		return commandError("broker_unavailable", "failed to start mint pairing broker channel", true), nil
+		return brokerStartFailure(err), nil
 	}
 
 	// A channel can come back after the claim it was started for is gone — a
@@ -955,7 +992,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		s.closeChannel(channel)
 		s.logger.Warn("Dropping a mint pairing channel that outlived its claim",
 			zap.String("channelID", channel.PairingDisplay().ChannelID),
-			zap.String("startedForTopicID", startGuard.topicID))
+			zap.String("startedForTopicFP", helper.TopicFingerprint(startGuard.topicID)))
 		return commandError("topic_changed", "the relayer topic changed while the pairing session was starting", true), nil
 	}
 
@@ -970,15 +1007,22 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(s.opts.IdleTTL)
 	}
-	sessionCtx, sessionCancel := context.WithDeadline(runCtx, expiresAt)
+	// No deadline on the session context, as for a joined pairing: the
+	// broker renews the channel's idle deadline when a browser joins and when
+	// its request lands, and the worker follows that (waitForMintRequestUntilExpiry,
+	// extendDeadline). A context fixed at the create-time expiry would close
+	// and refresh a channel a browser had just joined, leaving it polling a
+	// channel that is gone (issue #333).
+	sessionCtx, sessionCancel := context.WithCancel(runCtx)
 	active := &activePairing{
-		channel:     channel,
-		channelID:   display.ChannelID,
-		pairingCode: pairingCode,
-		expiresAt:   expiresAt,
-		phase:       activePairingPhasePairingCode,
-		cancel:      sessionCancel,
-		done:        make(chan struct{}),
+		channel:       channel,
+		channelID:     display.ChannelID,
+		pairingCode:   pairingCode,
+		codeCreatedAt: time.Now(),
+		expiresAt:     expiresAt,
+		phase:         activePairingPhasePairingCode,
+		cancel:        sessionCancel,
+		done:          make(chan struct{}),
 	}
 	s.logger.Info("Mint pairing broker channel started", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
@@ -1038,8 +1082,14 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		return commandError("pairing_closed", "the pairing was closed while it was starting", false), nil
 	}
 
-	// The broker approval session must outlive the initiating RPC. sessionCtx is
-	// still bounded by service shutdown and the broker pairing expiry.
+	// The reply below reports the local expiresAt (the code's expiry as
+	// started), never active.expiresAt: from its first poll the worker may
+	// extend that field (extendDeadline), and a read after the go statement
+	// would race it.
+	//
+	// The broker approval session must outlive the initiating RPC. sessionCtx
+	// ends on service shutdown or cancellation; the worker enforces the
+	// broker-followed expiry itself (waitForMintRequestUntilExpiry).
 	go s.waitForBrowserAndApproval(sessionCtx, active, startGuard) //nolint:gosec
 
 	return startPairingResponse{
@@ -1047,7 +1097,7 @@ func (s *service) startPairing(ctx context.Context, pr overlay.Priority) (any, e
 		Status:      "started",
 		ChannelID:   active.channelID,
 		PairingCode: active.pairingCode,
-		ExpiresAt:   formatOptionalTime(active.expiresAt),
+		ExpiresAt:   formatOptionalTime(expiresAt),
 	}, nil
 }
 
@@ -1078,7 +1128,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		return commandError("invalid_config", "mint pairing broker is not configured", false), nil
 	}
 	startGuard := currentTopicGuard()
-	if startGuard.topicID == "" {
+	if startGuard.topicID == "" && !s.displayGrantsWired() {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
 	}
 	credential := join.credentialDigest()
@@ -1190,7 +1240,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 		s.closeChannel(joined.channel)
 		s.logger.Warn("Dropping a joined mint pairing channel that outlived its claim",
 			zap.String("channelID", joined.channelID),
-			zap.String("startedForTopicID", startGuard.topicID))
+			zap.String("startedForTopicFP", helper.TopicFingerprint(startGuard.topicID)))
 		return commandError("topic_changed", "the relayer topic changed while joining the pairing channel", true), nil
 	}
 
@@ -1204,7 +1254,7 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	}
 
 	// No deadline on the session context itself: a joined pairing's deadline
-	// moves with the broker's (see extendJoinedDeadline), so the worker
+	// moves with the broker's (see extendDeadline), so the worker
 	// enforces it with a derived context and the approval timer instead. The
 	// session context ends only on cancellation (replace, close, reset,
 	// shutdown).
@@ -1251,16 +1301,19 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	}, nil
 }
 
-// extendJoinedDeadline moves a joined pairing's deadline to the broker's
-// current channel expiry when that is later, and returns the deadline. The broker extends its idle
-// deadline on every accepted message and the minter tracks it; an earlier or
-// unreported value never shortens the deadline. Written under s.mu because
-// currentActive and the close paths read it there.
-func (s *service) extendJoinedDeadline(active *activePairing) time.Time {
+// extendDeadline moves a pairing's deadline to the broker's current channel
+// expiry when that is later, and returns the deadline. The broker extends its
+// idle deadline on a join and on every accepted message, and the minter tracks
+// it from each poll; an earlier or unreported value never shortens the
+// deadline. It applies to both directions: a device-created channel is renewed
+// when the browser joins it and sends its request, a site-created one when the
+// site's request lands. Written under s.mu because currentActive and the
+// status paths read it there; other goroutines read it through expiryOf.
+func (s *service) extendDeadline(active *activePairing) time.Time {
 	reported := channelExpiresAt(active.channel)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if active.joined && reported.After(active.expiresAt) {
+	if reported.After(active.expiresAt) {
 		active.expiresAt = reported
 	}
 	return active.expiresAt
@@ -1448,6 +1501,9 @@ func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]an
 	if err != nil {
 		return approvalError(decision.ApprovalRequestID, "invalid_request", err.Error(), false), nil
 	}
+	if p, ok := control.PrincipalFrom(ctx); ok {
+		decision.Approver = p.ControllerID
+	}
 
 	s.mu.Lock()
 	s.pruneCompletedLocked()
@@ -1521,8 +1577,12 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 	if decision.Version != 1 {
 		return decision, errors.New("approval decision version must be 1")
 	}
-	if decision.ApprovalRequestID == "" || decision.TopicID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
-		return decision, errors.New("approvalRequestID, topicID, channelID, and requestMessageID are required")
+	// topicID may be empty: a device with display grants pairs without a
+	// legacy topic, and its approval request carries "" (see topic_not_ready
+	// in docs/controld-inbound-controller-messages.md). The caller still
+	// requires it to equal the pending request's topic.
+	if decision.ApprovalRequestID == "" || decision.ChannelID == "" || decision.RequestMessageID == "" {
+		return decision, errors.New("approvalRequestID, channelID, and requestMessageID are required")
 	}
 	if err := s.resolveKeepPaired(&decision); err != nil {
 		return decision, err
@@ -1600,8 +1660,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 
 	var request *minter.MintRequest
 	var err error
-	switch {
-	case active.joined && active.announcedRequest != nil:
+	if active.joined && active.announcedRequest != nil {
 		// Ask now, while the visitor is still in the app. The site's
 		// encrypted copy of this request (same message id) is never polled:
 		// this worker answers one request per channel.
@@ -1610,10 +1669,8 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		s.logger.Info("Answering the mint request the site announced at create",
 			zap.String("channelID", active.channelID),
 			zap.String("requestMessageID", announced.MessageID))
-	case active.joined:
-		request, err = s.waitForJoinedMintRequest(ctx, active)
-	default:
-		request, err = s.waitForMintRequest(ctx, active.channel)
+	} else {
+		request, err = s.waitForMintRequestUntilExpiry(ctx, active)
 	}
 	if reason, mismatched := attestationMismatch(err); mismatched {
 		// Not terminalSent even when a rejection went out: the channel is
@@ -1622,12 +1679,12 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	}
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) && s.shouldRefreshExpiredPairing(active) {
+		if errors.Is(err, errChannelExpired) && s.shouldRefreshExpiredPairing(active) {
 			refreshAfterClose = true
 			s.logger.Info("Mint pairing code expired; refreshing broker channel", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 			return
 		}
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, errChannelExpired) {
 			s.logger.Warn("Mint pairing request wait failed", zap.Error(err), zap.String("channelID", active.channelID))
 		}
 		return
@@ -1644,13 +1701,29 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			zap.String("channelID", request.ChannelID),
 			zap.String("requestMessageID", request.MessageID),
 			zap.String("origin", request.Origin),
-			zap.String("pairedForTopicID", guard.topicID))
+			zap.String("pairedForTopicFP", helper.TopicFingerprint(guard.topicID)))
 		return
 	}
 
-	// The broker extended its idle deadline when it accepted the site's
+	// The broker extended its idle deadline when it accepted the browser's
 	// request; the approval wait must not end at the stale one.
-	s.extendJoinedDeadline(active)
+	s.extendDeadline(active)
+
+	// A 0.5 request this device cannot honor is refused before the owner
+	// is asked (§5.7), never answered with a session.
+	display := isDisplayRequest(active.channel, *request)
+	if display {
+		if _, err := s.displayGrantPrecheck(active.channel, *request); err != nil {
+			terminalSent = s.rejectDisplayUnavailable(active.channel, *request, err)
+			return
+		}
+	} else if guard.topicID == "" {
+		// A 0.4 request needs a relayer session, which needs the legacy
+		// topic; a device pairing without one (display grants only) refuses
+		// it before the owner is asked, never calling the relayer with "".
+		terminalSent = s.rejectSessionWithoutTopic(active.channel, *request)
+		return
+	}
 
 	approvalRequestID, err := newApprovalRequestID()
 	if err != nil {
@@ -1689,7 +1762,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 	}
 
-	if err := s.sendApprovalRequest(ctx, approvalRequestID, guard.topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt); err != nil {
+	if err := s.sendApprovalRequest(ctx, approvalRequestID, guard.topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt, display); err != nil {
 		_, sendErr := active.channel.SendMintRejection(ctx, *request, minter.MintRejection{Reason: "approval_unavailable", Retryable: true})
 		if sendErr != nil {
 			s.logger.Warn("Failed to send approval request and browser rejection", zap.Error(errors.Join(err, sendErr)), zap.String("channelID", active.channelID))
@@ -2036,23 +2109,82 @@ func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRe
 	return *pending.accepted, true
 }
 
-// waitForJoinedMintRequest waits for the site's request on a joined channel
-// until the channel's deadline. The joined session context carries none, and
-// the deadline is not fixed: when it passes, the broker expiry the minter last
-// saw is re-read, and the wait continues if the broker moved it.
-func (s *service) waitForJoinedMintRequest(ctx context.Context, active *activePairing) (*minter.MintRequest, error) {
+// errChannelExpired ends a request wait whose channel ran out its idle
+// deadline with no request on it: the ordinary end of an unused pairing code,
+// which the worker answers by refreshing the code (device-initiated) or by
+// ending the pairing (site-joined).
+var errChannelExpired = errors.New("mint pairing channel expired")
+
+// expiryConfirmTimeout bounds the one confirming poll at the deadline (see
+// waitForMintRequestUntilExpiry). A poll that does not answer in time is read
+// as the expiry it was checking for, as before the confirmation existed.
+const expiryConfirmTimeout = 2 * time.Second
+
+// waitForMintRequestUntilExpiry waits for the browser's request until the
+// channel's deadline, for both pairing directions. The session context
+// carries no deadline, and the deadline is not fixed: the broker renews it
+// when a browser joins and on every accepted message, and the minter tracks
+// that from each poll.
+//
+// Ending the wait closes the channel, so before it does it asks the broker
+// once more: a browser that joined in the last poll interval holds a channel
+// the device last saw as idle, and closing it would leave that browser
+// polling a channel that is gone (issue #333). The confirming poll either
+// shows the request, shows the renewed deadline (wait on), or answers that
+// the channel is over. A broker that already said so (410 expired; 404 or
+// 409 once the deadline passed) needs no second ask. The residual race is
+// one broker round trip, and a device clock running ahead of the broker's.
+func (s *service) waitForMintRequestUntilExpiry(ctx context.Context, active *activePairing) (*minter.MintRequest, error) {
 	for {
-		deadline := s.extendJoinedDeadline(active)
+		deadline := s.extendDeadline(active)
 		waitCtx, cancel := context.WithDeadline(ctx, deadline)
 		request, err := s.waitForMintRequest(waitCtx, active.channel)
 		cancel()
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			if s.extendJoinedDeadline(active).After(deadline) {
-				continue
-			}
+		// A request riding with an error is an attestation mismatch the
+		// worker answers; it never reads as an expiry.
+		if err == nil || request != nil || ctx.Err() != nil || !channelEnded(err, deadline) {
+			return request, err
 		}
-		return request, err
+		if s.extendDeadline(active).After(deadline) {
+			continue
+		}
+		if isChannelGone(err) {
+			return nil, fmt.Errorf("%w: %w", errChannelExpired, err)
+		}
+
+		confirmCtx, cancelConfirm := context.WithTimeout(ctx, expiryConfirmTimeout)
+		request, _, err = active.channel.PollMintRequest(confirmCtx, 0)
+		cancelConfirm()
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case request != nil && err != nil:
+			// An attestation mismatch: answered by the worker, as from the wait.
+			return request, fmt.Errorf("poll mint request: %w", err)
+		case request != nil:
+			return request, nil
+		case err == nil && s.extendDeadline(active).After(deadline):
+			continue
+		}
+		return nil, errChannelExpired
 	}
+}
+
+// channelEnded reports whether a request-wait error means the channel's life
+// is over rather than a fault: the deadline passed (whatever the last poll
+// answered — a 404 for an expired channel a create already swept, or a
+// network error on a poll that finished just past it), or the broker answered
+// 410, its own expiry, which a broker clock running ahead of the device's
+// reports a beat before the device's deadline. Before the deadline any other
+// failure stays a failure, as it always was: reading a 404/409 as expiry
+// would refresh in a tight loop against a broker that answers every fresh
+// channel that way.
+func channelEnded(err error, deadline time.Time) bool {
+	if errors.Is(err, context.DeadlineExceeded) || !time.Now().Before(deadline) {
+		return true
+	}
+	status, ok := brokerStatusCode(err)
+	return ok && status == http.StatusGone
 }
 
 func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel) (*minter.MintRequest, error) {
@@ -2108,6 +2240,12 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 				s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
 			}
 		}
+	}
+
+	// A 0.5 request (display-grant keys sent) never gets a session: it is
+	// issued a display grant instead (§5.7), under the same fences.
+	if isDisplayRequest(channel, request) {
+		return s.completeDisplayGrant(ctx, active, channel, request, guard, approvalRequestID, decision)
 	}
 
 	// Admission comes BEFORE the guard check, not after it. A factory reset
@@ -2200,7 +2338,7 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 		} else {
 			s.logger.Warn("Left a possibly delivered mint pairing session in place after a failed browser delivery",
 				zap.Error(err),
-				zap.String("topicID", topicID),
+				zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 				zap.String("sessionID", session.SessionID),
 				zap.Bool("persistent", session.Persistent))
 		}
@@ -2213,8 +2351,8 @@ func (s *service) completeDecisionFor(ctx context.Context, active *activePairing
 	// terminal message is already delivered and is not taken back.
 	if after := currentTopicGuard(); !after.sameAs(guard) {
 		s.logger.Warn("Relayer topic changed while delivering a mint pairing session; revoking the session it was minted for",
-			zap.String("mintedForTopicID", topicID),
-			zap.String("currentTopicID", after.topicID),
+			zap.String("mintedForTopicFP", helper.TopicFingerprint(topicID)),
+			zap.String("currentTopicFP", helper.TopicFingerprint(after.topicID)),
 			zap.String("sessionID", session.SessionID),
 			zap.Bool("persistent", session.Persistent))
 		s.revokeAbandonedSession(topicID, session.SessionID)
@@ -2358,10 +2496,14 @@ func (s *service) WaitForInFlightCreates(ctx context.Context) (int, error) {
 	return s.creates.wait(ctx)
 }
 
+// errRelayerSessionsRetired is the legacy relayer answering 410 on its
+// session routes (LEGACY_API_ENABLED=false or the device API retired).
+var errRelayerSessionsRetired = errors.New("legacy relayer session routes are retired")
+
 // RevokeTopicSessions revokes every session the relayer holds for topicID.
 // See Service. It keeps going after a failure so one unreachable session
 // cannot strand the rest, and reports the count it did revoke alongside the
-// joined failures.
+// joined failures. A retired relayer (410) holds no usable sessions: 0, nil.
 func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int, error) {
 	if s == nil || s.sessionCreator == nil {
 		return 0, nil
@@ -2374,6 +2516,12 @@ func (s *service) RevokeTopicSessions(ctx context.Context, topicID string) (int,
 		return 0, nil
 	}
 	sessionIDs, err := s.sessionCreator.ListEphemeralSessionIDs(ctx, topicID)
+	if errors.Is(err, errRelayerSessionsRetired) {
+		// The legacy relayer has retired its session routes (410): every
+		// session it held is unusable already, so there is nothing to revoke.
+		s.logger.Info("Legacy relayer session routes are retired; no browser sessions to revoke")
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("list relayer sessions: %w", err)
 	}
@@ -2403,7 +2551,7 @@ func (s *service) revokeAbandonedSession(topicID string, sessionID string) {
 	if err := s.sessionCreator.RevokeEphemeralSession(ctx, topicID, sessionID); err != nil {
 		s.logger.Warn("Failed to revoke abandoned mint pairing session",
 			zap.Error(err),
-			zap.String("topicID", topicID),
+			zap.String("topic_fp", helper.TopicFingerprint(topicID)),
 			zap.String("sessionID", sessionID))
 	}
 }
@@ -2454,6 +2602,12 @@ func (s *service) rejectTopicChanged(channel brokerChannel, request minter.MintR
 }
 
 func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request minter.MintRequest, approvalRequestID string, rejectionReason string, retryable bool, outcomeStatus string) error {
+	return s.sendTerminalRejectionAndOutcomeWithReason(channel, request, approvalRequestID, rejectionReason, retryable, outcomeStatus, "")
+}
+
+// sendTerminalRejectionAndOutcomeWithReason also names outcomeReason on the
+// controller outcome (empty omits it).
+func (s *service) sendTerminalRejectionAndOutcomeWithReason(channel brokerChannel, request minter.MintRequest, approvalRequestID string, rejectionReason string, retryable bool, outcomeStatus string, outcomeReason string) error {
 	rejectionCtx, cancelRejection := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	_, err := channel.SendMintRejection(rejectionCtx, request, minter.MintRejection{Reason: rejectionReason, Retryable: retryable})
 	cancelRejection()
@@ -2462,7 +2616,7 @@ func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request
 	// budget so a canceled or exhausted session-creation context cannot hide
 	// the terminal state from both sides of the handoff.
 	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
-	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus, "")
+	s.sendApprovalOutcomeFull(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus, "", outcomeReason, "")
 	cancelOutcome()
 	return err
 }
@@ -2501,7 +2655,8 @@ func browserDisplayName(info minter.BrowserInfo) string {
 	return "the browser"
 }
 
-func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time) error {
+// grantsDisplayAccess marks a 0.5 request (§5.7), for the owner app's copy.
+func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time, grantsDisplayAccess bool) error {
 	msg := map[string]any{
 		"v":                          1,
 		"topicID":                    topicID,
@@ -2521,6 +2676,11 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 			"minterPublicKeyFingerprint":  fingerprintPublicJWK(minterPublicKey),
 		},
 	}
+	if grantsDisplayAccess {
+		// An approval gives the site a display grant it keeps using while
+		// the owner is away; the app words the dialog accordingly.
+		msg["grantsDisplayAccess"] = true
+	}
 	return s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST, approvalRequestID, msg, 10)
 }
 
@@ -2535,6 +2695,12 @@ func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID str
 // machine-readable reason (e.g. browser_gone on a cancellation outcome); empty
 // omits the field, keeping every existing outcome byte-identical.
 func (s *service) sendApprovalOutcomeWithReason(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string, reason string) {
+	s.sendApprovalOutcomeFull(ctx, approvalRequestID, channelID, requestMessageID, status, lifetime, reason, "")
+}
+
+// sendApprovalOutcomeFull adds ctl, the display grant a completed 0.5 request
+// was issued (§5.7); empty omits it.
+func (s *service) sendApprovalOutcomeFull(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string, lifetime string, reason string, ctl string) {
 	message := map[string]any{
 		"v":                 1,
 		"approvalRequestID": approvalRequestID,
@@ -2548,6 +2714,9 @@ func (s *service) sendApprovalOutcomeWithReason(ctx context.Context, approvalReq
 	}
 	if reason != "" {
 		message["reason"] = reason
+	}
+	if ctl != "" {
+		message["ctl"] = ctl
 	}
 	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, message, 10)
 	if err != nil {
@@ -2603,14 +2772,21 @@ func (s *service) OverlayStatus() OverlayStatus {
 		Showing: true,
 		State:   strings.TrimPrefix(string(cur.Kind), mintKindPrefix),
 	}
-	// currentActive is the same accessor startPairing's redisplay path uses;
-	// a miss here (active already cleared by the time this read lands) just
-	// leaves the identifying fields empty rather than guessing — the caller
-	// already has Showing+State from the controller, which is the part that
-	// must never disagree with DisplayActive().
-	if active, phase, _ := s.currentActive(); active != nil {
+	// A read-only peek, never currentActive: that accessor cancels a session
+	// past its deadline, and the status poller calls this every few seconds
+	// while a code is on screen. Landing in the worker's confirming poll at
+	// the deadline, it would end the session there, so the expired code was
+	// never refreshed and a browser that had just joined lost its channel
+	// (issue #333). The worker owns the end of the code. A miss (no active, or
+	// a code past its deadline that the worker is about to replace) leaves the
+	// identifying fields empty rather than advertising a dead code — the
+	// caller already has Showing+State from the controller, which is the part
+	// that must never disagree with DisplayActive().
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active := s.active; active != nil {
 		out.ChannelID = active.channelID
-		if phase == activePairingPhasePairingCode {
+		if active.phase == activePairingPhasePairingCode && time.Now().Before(active.expiresAt) {
 			out.PairingCode = active.pairingCode
 			out.ExpiresAt = active.expiresAt
 		}
@@ -2634,6 +2810,13 @@ func (s *service) currentActive() (*activePairing, activePairingPhase, string) {
 	// broker's (a poll in flight may be extending it right now), and the
 	// worker clears the slot when it ends. Expiring it here from a stale
 	// deadline would cancel a live pairing.
+	//
+	// A device-initiated pairing's deadline follows the broker too
+	// (extendDeadline), so past it the session is dying — its approval timer
+	// fired, or its code is being refreshed — and a new start replaces it
+	// rather than waiting on that cleanup. Known residual: a start landing in
+	// the worker's confirming poll after the deadline, for a browser that
+	// joined in the last poll interval, still replaces that browser's channel.
 	if !s.active.joined && !s.active.expiresAt.IsZero() && time.Now().After(s.active.expiresAt) {
 		s.active.cancel()
 		s.active = nil
@@ -3111,6 +3294,30 @@ func commandError(code string, message string, retryable bool) map[string]any {
 	}
 }
 
+// brokerStartFailure is the broker_unavailable reply for a failed channel
+// create. The code stays broker_unavailable whatever the cause, because that
+// is the contract callers know; what the broker answered rides along
+// additively (issue #333), so an outage, a rate limit and a refusal no longer
+// read the same. brokerStatus is present only when the broker (or the proxy
+// in front of it) answered with a status; brokerCode only when its body named
+// one. A refusal other than 408/429 is not retryable: the same request would
+// be refused again.
+func brokerStartFailure(err error) map[string]any {
+	status, answered := brokerStatusCode(err)
+	if !answered {
+		return commandError("broker_unavailable", "could not reach the mint pairing broker", true)
+	}
+	retryable := status >= 500 || status == http.StatusTooManyRequests || status == http.StatusRequestTimeout
+	result := commandError("broker_unavailable", fmt.Sprintf("the mint pairing broker answered HTTP %d", status), retryable)
+	payload := result["error"].(map[string]any)
+	payload["brokerStatus"] = status
+	var brokerErr *minter.BrokerError
+	if errors.As(err, &brokerErr) && brokerErr.Code != "" {
+		payload["brokerCode"] = brokerErr.Code
+	}
+	return result
+}
+
 func pairingDisplayLogFields(channelID string, pairingCode string, expiresAt time.Time) []zap.Field {
 	fields := []zap.Field{
 		zap.String("channelID", channelID),
@@ -3386,6 +3593,9 @@ func (c *RelayerSessionCreator) ListEphemeralSessionIDs(ctx context.Context, top
 	defer func() {
 		_ = resp.Body.Close()
 	}()
+	if resp.StatusCode == http.StatusGone {
+		return nil, errRelayerSessionsRetired
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("relayer session list failed with status %d", resp.StatusCode)
 	}

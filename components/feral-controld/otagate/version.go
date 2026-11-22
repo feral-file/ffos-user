@@ -12,14 +12,11 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 const (
-	// localConfigPath is the running build descriptor written into the FF1 image.
-	// Ported from feral-setupd constant::UPDATER_LOCAL_CONFIG_PATH.
-	localConfigPath = "/home/feralfile/ff1-config.json"
-
 	// upstreamURLSuffix is appended to the distributor endpoint, followed by the
 	// build branch, to form the version-check URL:
 	//   {endpoint}/api/latest/{branch}
@@ -261,29 +258,20 @@ type fileConfigProvider struct {
 	loadErr  error
 }
 
-// NewFileConfigProvider returns the production ConfigProvider that reads
-// /home/feralfile/ff1-config.json.
+// NewFileConfigProvider returns the production ConfigProvider that reads the
+// FF1 build descriptor through ff1config.
 func NewFileConfigProvider(osw wrapper.OS, jsonw wrapper.JSON) ConfigProvider {
 	return &fileConfigProvider{os: osw, json: jsonw}
 }
 
 func (p *fileConfigProvider) LocalBuild(_ context.Context) (string, string, string, error) {
 	p.once.Do(func() {
-		data, err := p.os.ReadFile(localConfigPath)
+		build, err := ff1config.Read(p.os, p.json)
 		if err != nil {
-			p.loadErr = fmt.Errorf("reading local config: %w", err)
+			p.loadErr = fmt.Errorf("local build: %w", err)
 			return
 		}
-		var cfg struct {
-			Branch   string `json:"branch"`
-			Version  string `json:"version"`
-			Endpoint string `json:"endpoint"`
-		}
-		if err := p.json.Unmarshal(data, &cfg); err != nil {
-			p.loadErr = fmt.Errorf("parsing local config JSON: %w", err)
-			return
-		}
-		p.branch, p.version, p.endpoint = cfg.Branch, cfg.Version, cfg.Endpoint
+		p.branch, p.version, p.endpoint = build.Branch, build.Version, build.Endpoint
 	})
 	return p.branch, p.version, p.endpoint, p.loadErr
 }

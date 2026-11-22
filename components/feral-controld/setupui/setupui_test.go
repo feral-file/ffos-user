@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
@@ -36,9 +37,8 @@ const validContract = `{
 
 // contractWithConnecting is the SHIPPING player manifest, loaded verbatim
 // from testdata/ffos-player-contract.json — a byte-for-byte copy of
-// ff-player `public/ffos-player-contract.json` on branch
-// fix/softap-portal-qr-on-attach (PR feral-file/ff-player#291, which adds
-// softap_qr's `client_attached`; previously PR #275), kept in lockstep by `cp`, the same convention as the DRM display-connected
+// ff-player `public/ffos-player-contract.json` on main, kept in lockstep by
+// `cp`, the same convention as the DRM display-connected
 // predicate's mirrored copies (an inlined Go string cannot be byte-faithful:
 // the manifest's notes contain backticks). Deliberately the full file, not a
 // trimmed extract: the point is that the manifest these tests gate on is the
@@ -253,7 +253,43 @@ func writeContract(t *testing.T, body string) string {
 
 func newTestService(t *testing.T, sender CDPSender, contract string) *Service {
 	t.Helper()
-	return New(sender, writeContract(t, contract), nil)
+	svc := New(sender, writeContract(t, contract), nil)
+	// Hermetic: a host that happens to carry the real FF1 config file must not
+	// add a version field to payloads the tests compare field by field.
+	svc.readBuild = func() (ff1config.Build, error) { return ff1config.Build{}, os.ErrNotExist }
+	return svc
+}
+
+// TestPushesCarryInstalledVersion: every visible setup state carries the
+// installed version read from the FF1 config file, so the screen shows which
+// build is running; the read is cached, so an OTA rewriting the file mid-run
+// does not relabel the screen; and a missing file omits the field.
+func TestPushesCarryInstalledVersion(t *testing.T) {
+	t.Run("visible states carry the version, cached once read", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+		installed := "3.0.1"
+		svc.readBuild = func() (ff1config.Build, error) { return ff1config.Build{Version: installed}, nil }
+
+		svc.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1")
+		sender.waitForCalls(t, 1)
+		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
+
+		installed = "3.0.2" // an OTA rewrote the descriptor before the restart
+		svc.ShowUpdating(10)
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
+	})
+
+	t.Run("missing config omits the field", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowJoining()
+		sender.waitForCalls(t, 1)
+		_, present := sender.lastRequest()["version"]
+		assert.False(t, present)
+	})
 }
 
 // TestTypedMethodsEmitContractPayloads asserts each typed method produces the
@@ -627,6 +663,9 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 				StateFields map[string]struct {
 					Optional []string `json:"optional"`
 				} `json:"stateFields"`
+				CommonFields struct {
+					Optional []string `json:"optional"`
+				} `json:"commonFields"`
 			} `json:"setupDisplay"`
 		} `json:"contracts"`
 	}
@@ -646,6 +685,8 @@ func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
 		"softap_qr must declare the attached-phase flag ShowSoftAPPortalQR sends")
 	assert.Contains(t, softAPFields.Optional, "reason",
 		"softap_qr must declare the failure line ShowSoftAPQRRetry sends")
+	assert.Contains(t, manifest.Contracts.SetupDisplay.CommonFields.Optional, "version",
+		"every state must accept the installed version withVersion sends")
 }
 
 // TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking

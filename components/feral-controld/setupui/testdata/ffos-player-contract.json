@@ -32,7 +32,7 @@
         "incomplete": "boolean",
         "activeOccurrenceKnown": "boolean"
       },
-      "notes": "getRecentlyPlayed {} returns {ok,status,records,incomplete,activeOccurrenceKnown}. status is 'ok', 'empty' when nothing is retained, or 'error' with an explicit message \u2014 an unknown command or a transport failure must never be read as an empty history. Before the store has been read the reply is {ok:false,status:'error',error:'Recently played is still loading'}; the player reads it at boot so a controller should not normally see that. records[].isActive marks the retained record that is on screen NOW, and activeOccurrenceKnown false means the device cannot currently name one (a work committing, a stop, sleep, a failed render, or a policy change that moved the selection) \u2014 treat it as pending, not as 'nothing has ever played'. incomplete true means a committed work is missing from the timeline, including when the store itself was unreadable and was started over. resolveRecentlyPlayed {recordId} is INTERNAL to controld: it returns the retained item plus its defaults and contentContext so controld can re-enter its ordinary displayPlaylist path, which is what retires displayAt scheduler ownership. Do not treat it as a play command; there is no player-local replay. An evicted or malformed recordId is rejected before anything on the wall changes."
+      "notes": "getRecentlyPlayed {} returns {ok,status,records,incomplete,activeOccurrenceKnown}. status is 'ok', 'empty' when nothing is retained, or 'error' with an explicit message \u2014 an unknown command or a transport failure must never be read as an empty history. Before the store has been read the reply is {ok:false,status:'error',error:'Recently played is still loading'}; the player reads it at boot so a controller should not normally see that. records[].isActive marks the retained record that is on screen NOW. activeOccurrenceKnown false means the device cannot yet say whether one is (a work committing, a restart before the first commit, or a failed render until a later commit, a stop, or a cast with nothing to show) \u2014 treat it as pending, not as 'nothing has ever played'. true with no record active means none is on screen: a stop, sleep, a policy change that moved the selection, or a work too large to retain. incomplete true means a committed work is missing from the timeline, including when the store itself was unreadable and was started over. resolveRecentlyPlayed {recordId} is INTERNAL to controld: it returns the retained item plus its defaults and contentContext so controld can re-enter its ordinary displayPlaylist path, which is what retires displayAt scheduler ownership. Do not treat it as a play command; there is no player-local replay. An evicted or malformed recordId is rejected before anything on the wall changes."
     },
     "displayPlaylistPolicy": {
       "version": 1,
@@ -121,7 +121,12 @@
           ]
         }
       },
-      "notes": "Requests missing a required field for their state are rejected with {ok:false}. progress must be a finite number. The player renders overlay-driving commands (mintPairingDisplay, setupDisplay) without arbitration, so the controller must keep at most one non-hidden at a time.",
+      "commonFields": {
+        "optional": [
+          "version"
+        ]
+      },
+      "notes": "Requests missing a required field for their state are rejected with {ok:false}. Any state may carry version, the installed FF OS version string; the player shows it small in a corner of every visible panel, and a missing or non-string value draws no label and never rejects the request. progress must be a finite number. The player renders overlay-driving commands (mintPairingDisplay, setupDisplay) without arbitration, so the controller must keep at most one non-hidden at a time.",
       "acceptedResponse": {
         "ok": true
       }
@@ -133,6 +138,36 @@
     "playerStatus": {
       "version": 1,
       "notes": "window.__ffosPlayerStatus() (no request payload \u2014 a plain global function, not a checkStatus-style command) returns JSON.stringify({protocol, route, handlerRegistered, hasArtwork, bootHydration}), where bootHydration is one of pending|ok|halted_cleared|halted_preserving|failed. Installed by CDPRequestHandler.initialize() and set back to null by cleanup(). Absent on player builds that predate this contract entry \u2014 controld's capability fuse treats a manifest without this entry as unsupported and falls back to conservative (log-only) boot recovery."
+    },
+    "mediaHealth": {
+      "version": 1,
+      "commands": [
+        "setMediaHealth"
+      ],
+      "requestFields": [
+        "mediaHealth"
+      ],
+      "statusFields": [
+        "outcomes",
+        "skippedIndices"
+      ],
+      "outcomeKinds": [
+        "ok",
+        "fail",
+        "skip"
+      ],
+      "outcomeStages": [
+        "detect",
+        "load",
+        "decode",
+        "watchdog",
+        "webgl",
+        "exhausted",
+        "hint",
+        "ready"
+      ],
+      "ringSize": 64,
+      "notes": "Paired with feral-controld's mediahealth store (ffos-user#392). HINTS: displayPlaylist.request.mediaHealth is a sparse object keyed by item.source as pushed, broken entries only, each {category, reason}; it rides beside dp1_call on every push (cast, boot cast, refresh) and the signed DP-1 body is untouched. Absent means NO hints, on a refresh too (unlike contentContext, which inherits): a controld that declares this entry sends the map on every push. The timeline resolves every selection past hinted sources BEFORE mounting, in play order; `playlist` wraps, `none` does not, and `one` ignores hints because the viewer asked for that work. Hinted items stay in checkStatus.items; the published index is where playback actually landed. When nothing else is playable (an all-broken map, or only hinted works remain under repeat-off) the requested slot plays anyway and the ordinary 3-attempt retry/skip budget judges it, so a hint can never blank the wall. Hints are never persisted: after a reboot the next push restores them. Malformed maps are ignored, never rejected. HINT SKIPS: checkStatus.skippedIndices is an array of indices into checkStatus.items that the player is passing over because of a hint it HOLDS, ascending, ALWAYS present from this player ([] when nothing is hinted or nothing is cast). It is the player's state, not controld's observation: copy it per item into player_status.mediaHealth[i].skipped (absent from an older build means false). It follows the selection rules above: [] under `one`; under `playlist` every hinted slot while any unhinted slot exists; under `none` only a hinted slot with an unhinted slot after it (the tolerated tail still plays); [] when every slot is hinted. The published index is never listed: the work on the wall is not being skipped, including one whose hint arrived on a refresh mid-play (it is listed once playback leaves it). Recomputed on every status read, so a push that drops or adds a hint shows on the next poll. SET MEDIA HEALTH: setMediaHealth {castSeq, mediaHealth} is a hint-only push for a verdict reached between casts. It is INTERNAL to the loopback CDP seam like resolveRecentlyPlayed: controld's cast-session router must never forward it from a controller. It REPLACES the held map with the same sparse map and the same tolerant parse as the push (absent or malformed means no hints, so a healed source simply disappears) and touches nothing else: no castInfo write, no timeline rebuild, no outcome entry, and the work on screen is never unmounted (a newly hinted current work finishes its slot and is listed in skippedIndices once playback leaves it; the next selection honours the map under the rules above). castSeq is the fence: it must be an integer (else {ok:false, error:'invalidCastSeq'}) equal to the current outcomes.castSeq while a cast is held (else {ok:false, error:'staleCast'}, e.g. a new cast opened or a disconnect cleared the wall); a refusal leaves the held map untouched. Success replies {ok:true, skippedIndices}, the value the next checkStatus reports. Feature-detected by name in commands; the contract version stays 1. OUTCOMES: checkStatus.outcomes is {castSeq, entries[]}, ALWAYS present from this player ({castSeq:0, entries:[]} before anything reports; an older build omits the key). entries are oldest-first, at most 64, each {seq, castSeq, source, kind, stage, code?, mediaType?, attempt, elapsedMs, at}. The outer castSeq is the CURRENT generation: it increments on every accepted Now Display (explicit, boot replay, scheduled, fallback). Each entry carries the castSeq it was recorded under and keeps it for as long as it is retained, so dedupe by the ENTRY's (castSeq, seq), never by the outer castSeq paired with seq: an undrained failure from cast 1 is still (1, n) after cast 2 opens and must not count as corroboration from a distinct cast. seq is monotonic for the PAGE lifetime and is never reset per cast, so dedupe by seq alone is equivalent. Both restart with the page: a drained seq lower than the last one seen means the player restarted, so controld must restart its dedupe rather than drop the entries. Nothing is removed on read; controld reads a seq jump as a gap. Stages: detect = the content-type HEAD probe answered non-2xx (code = HTTP status) or got no response at all (code = network), online or offline: a browser cannot tell a DNS failure, a refused connection or the probe timeout from a CORS/CSP refusal, so network is DEVICE-LOCAL and never a verdict, only a reason to re-probe the source sooner. It is the trace an unresolvable host leaves behind a later iframe ready (Chromium's own error page loads as the fallback iframe); detect/unreachable (code = unreachable) is the attempt's own verdict when the probe's 10 s budget ran out with no response, now or on an earlier attempt for the same URL: the player declares the attempt failed instead of mounting the fallback iframe (feral-file#3583), so it COUNTS like a watchdog expiry and no ready follows it in that play; the iframe fallback still plays the work, so a detect fail can be followed by an ok in the SAME play and entries must be applied in seq order. load = an element error (code = image|video|audio|iframe|object|model, or hls_<hls.js ErrorType> for a fatal HLS error). decode = a video/audio MediaError (code = aborted|network|decode|src_not_supported). watchdog = the per-slot stuck-load watchdog expired (code = the load phase that ran out: transfer, no bytes for its idle bound or past the transfer ceiling; decode, bytes complete but the element never reported; opaque, a plain element load with no visible progress; fixed, iframe/object/model/PDF, which expose none). webgl = GPU context lost on the probe canvas (code = context_lost): device-local, never a source verdict. exhausted = the retry budget is spent (code = attempt limit); the playlist then advances. hint = kind skip, the timeline honoured a hint and never mounted the source (attempt 0, elapsedMs 0). ready = kind ok, the mount reached ready; elapsedMs is mount to ready. One fail entry per attempt: competing failure signals for the same attempt are collapsed at the transition into failed. attempt is 1-based within the per-item budget and resets on a new work or a genuine success. mediaType is the resolved renderer (image|video|audio|iframe|pdf|object|model) once MIME detection settled, absent before. Source URLs appear here only over loopback CDP; the player never sends them anywhere else."
     }
   }
 }

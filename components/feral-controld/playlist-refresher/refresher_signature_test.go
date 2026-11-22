@@ -65,7 +65,7 @@ func TestRefresher_SoftRefresh_ReconcilesWithoutAttestingOnAcceptance(t *testing
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).AnyTimes()
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
 		assert.Contains(t, params["expression"].(string), `"refresh":true`, "this pass must be a soft refresh")
 		if _, stillAttested := active.Lookup("", playlistURL); stillAttested {
@@ -113,7 +113,7 @@ func TestRefresher_SoftRefresh_SameVerdictKeepsAnnotation(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).AnyTimes()
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOKResponse(), nil).AnyTimes()
 
 	ts.refresher.Start()
@@ -150,8 +150,8 @@ func TestRefresher_CachedFallback_ClearsSlot(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(nil, errors.New("offline")).AnyTimes()
-	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), nil).AnyTimes()
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(nil, json.RawMessage(nil), errors.New("offline")).AnyTimes()
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), []offlinecache.SeriesSegment(nil), nil).AnyTimes()
 	sent := make(chan struct{}, 1)
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
 		select {
@@ -244,7 +244,7 @@ func TestRefresher_ActiveCohortRefresh_RestagesPending(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(v2, nil).AnyTimes()
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(v2, json.RawMessage(nil), nil).AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(string, map[string]any) (any, error) {
 		select {
 		case sent <- struct{}{}:
@@ -298,13 +298,13 @@ func TestRefresher_FutureOnlyRefresh_RestagesPending(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).DoAndReturn(
-		func(context.Context, string, bool) (*dp1.Playlist, error) {
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).DoAndReturn(
+		func(context.Context, string) (*dp1.Playlist, json.RawMessage, error) {
 			select {
 			case passed <- struct{}{}:
 			default:
 			}
-			return v2, nil
+			return v2, nil, nil
 		}).AnyTimes()
 
 	r.Start()
@@ -347,13 +347,13 @@ func TestRefresher_FutureOnlyCachedFallback_ClearsOnPromote(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(nil, errors.New("offline")).AnyTimes()
-	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).DoAndReturn(func(string) (json.RawMessage, error) {
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(nil, json.RawMessage(nil), errors.New("offline")).AnyTimes()
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).DoAndReturn(func(string) (json.RawMessage, []offlinecache.SeriesSegment, error) {
 		select {
 		case loaded <- struct{}{}:
 		default:
 		}
-		return json.RawMessage(cachedRaw), nil
+		return json.RawMessage(cachedRaw), nil, nil
 	}).AnyTimes()
 
 	r.Start()
@@ -403,7 +403,7 @@ func TestRefresher_ForceCast_UnpublishedAcrossGenerationBump(t *testing.T) {
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(v2, nil).AnyTimes()
+	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(v2, json.RawMessage(nil), nil).AnyTimes()
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(func(_ string, params map[string]any) (any, error) {
 		assert.Contains(t, params["expression"].(string), `"now_display"`, "cold-cache reconstruction is a force cast")
 		gen++ // the page reloads while the send is in flight

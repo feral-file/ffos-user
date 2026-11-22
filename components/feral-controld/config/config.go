@@ -24,6 +24,11 @@ type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
 }
 
+// RelayV2Config is optional and never replaces legacy relayer configuration.
+type RelayV2Config struct {
+	Endpoint string `json:"endpoint"`
+}
+
 type RelayerConfig struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"apiKey"`
@@ -49,23 +54,162 @@ type CommandStormConfig struct {
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 
-// SourceProbeConfig tunes the displayPlaylist source preflight (#304): the
-// probe that rejects a cast whose every item source is definitively dead.
-// Follows CommandStormConfig's optional-section + Disabled opt-out convention.
-//
-// The Disabled switch exists because the preflight turns a previously
-// always-accept command path into one that can REFUSE, based on a verdict
-// table (identity-independent 4xx = dead) whose accepted residual is an
-// origin that answers this probe a 4xx while still rendering in the kiosk —
-// a class the repo has shipped evidence of (see uarewrite). If that residual
-// materializes on the fleet, this flag is the remedy; without it the only
-// recovery is a package rollback. Same reasoning as uarewrite's operator-
-// editable host list: new hostile origin behavior should be a config edit,
-// not a release.
+// SourceProbeConfig is the RETIRED "sourceProbe" block of the former
+// cast-time preflight (#304), kept only so a fielded controld.json that sets
+// `sourceProbe.disabled` keeps its meaning: MediaHealthTuning reads it as
+// `mediaHealth.disabled` (the preflight is now the media-health pass) and
+// warns. Do not add fields; new tuning goes on MediaHealthConfig.
 type SourceProbeConfig struct {
-	// Disabled turns the cast-time source preflight off entirely (casts are
-	// forwarded unprobed, the pre-#304 behavior). Default (false) keeps it on.
 	Disabled bool `json:"disabled"`
+}
+
+// MediaHealthConfig tunes the device-side media observation store and its
+// L0 probe (feral-file/ffos-user#392, docs/media-health.md). Carried as RAW
+// bytes on Config and decoded permissively by MediaHealthTuning, for the
+// same reason as ContentPolicy: the block is optional and a hand-edited
+// typo must never crash-loop this recovery-critical daemon.
+type MediaHealthConfig struct {
+	// Disabled turns the whole feature off: no store, no cast-time pass (casts
+	// are forwarded unprobed, the pre-#304 behavior), no hints, no lookahead,
+	// no per-item status. The remedy if a verdict rule ever systematically
+	// misjudges an origin class on the fleet — a config edit, not a rollback.
+	Disabled bool `json:"disabled"`
+	// KnownBadPageMarkers are case-insensitive substrings that identify a
+	// gateway error page served with HTTP 200 (the indexer's
+	// known_bad_page_markers). Operator-editable: a new gateway quirk is an
+	// edit, not a release.
+	KnownBadPageMarkers []string `json:"knownBadPageMarkers,omitempty"`
+	// ProbeMaxBytes is the L0 window (default 32 KiB, the indexer's).
+	ProbeMaxBytes int `json:"probeMaxBytes,omitempty"`
+	// Lookahead: a negative value disables the during-play lookahead and
+	// the background sweep. (It once sized the lookahead's window; the
+	// lookahead now walks the whole wall, so a positive value is accepted
+	// and ignored.)
+	Lookahead int `json:"lookahead,omitempty"`
+	// CastItems is how many sources, in play order, the cast-time pass
+	// probes before leaving the rest to the lookahead (default 24); 0
+	// keeps the default. CastConcurrency is that pass's worker pool
+	// (default 4). Both are operator tuning for an origin that still
+	// rate-limits the defaults; the per-host cap (2 in flight) is fixed.
+	CastItems       int `json:"castItems,omitempty"`
+	CastConcurrency int `json:"castConcurrency,omitempty"`
+	// KioskObserverDisabled turns off the passive kiosk navigation
+	// observer (the daemon's own CDP session reporting each artwork
+	// frame's HTTP status to the store). The kill switch for the one
+	// media-health piece that holds a socket to the kiosk.
+	KioskObserverDisabled bool `json:"kioskObserverDisabled,omitempty"`
+	// IPFSGateways / ArweaveGateways are the ordered fallback gateways for
+	// content-addressed sources (defaults mediahealth.DefaultIPFSGateways /
+	// DefaultArweaveGateways): after the source's own gateway answers
+	// 404/410, they are tried one by one, at most two, with the kiosk's
+	// own request shape (no Range), and the first that serves is the one
+	// the kiosk loads the work through. https origins only; an operator
+	// switches them without a release — but only to a gateway seen to
+	// serve a WHOLE large file from a device (ar-io.dev meters them).
+	IPFSGateways    []string `json:"ipfsGateways,omitempty"`
+	ArweaveGateways []string `json:"arweaveGateways,omitempty"`
+	// L1 is the nightly render probe (docs/media-health.md §6): an
+	// experiment, absent or enabled=false means it never runs.
+	L1 *MediaHealthL1Config `json:"l1,omitempty"`
+	// WallCapture judges the wall's own frame as play evidence for an HTML
+	// work (docs/media-health.md, "Wall capture"): an experiment that
+	// screenshots the live kiosk, so absent or enabled=false means it never
+	// runs. It classifies with the l1 block's fingerprints and threshold.
+	WallCapture *MediaHealthWallCaptureConfig `json:"wallCapture,omitempty"`
+	// RenderConclusive lets a corroborated render negative — a blank or
+	// known-bad frame from the nightly render or the wall, agreed by an
+	// earlier night, another play or the other source — conclude broken:
+	// skipped, and counted toward rejecting an all-broken cast. Off (the
+	// default) keeps every render negative suspect, advisory. Turn it on
+	// only once the office fixture shows no false blanks among its healthy
+	// works: a false blank hides real art.
+	RenderConclusive bool `json:"renderConclusive,omitempty"`
+	// Malformed records that the block did not decode; every field then
+	// reads as its default.
+	Malformed bool `json:"-"`
+}
+
+// MediaHealthL1Config tunes the nightly render probe. Its verdicts are
+// reported to the app as `suspect` and never skip or reject anything, so
+// every knob here is about cost and sensitivity, never about playback.
+type MediaHealthL1Config struct {
+	// Enabled turns the probe on. Off by default: it renders untrusted
+	// pages in the headless browser while the panel sleeps.
+	Enabled bool `json:"enabled"`
+	// MaxPerNight caps renders per local calendar day (default 200).
+	MaxPerNight int `json:"maxPerNight,omitempty"`
+	// MinAsleepSeconds is how long the panel must have been confirmed
+	// asleep before the first render (default 120; negative = none); a
+	// wake restarts it, so a short manual nap never starts the headless
+	// browser.
+	MinAsleepSeconds int `json:"minAsleepSeconds,omitempty"`
+	// BlankVarianceThreshold is the per-channel variance below which a
+	// frame is blank (default 0.0001, measured on the wall's own frames —
+	// a decade under the indexer's 0.001, which called dark art blank);
+	// values outside (0, 0.25) keep the default.
+	BlankVarianceThreshold float64 `json:"blankVarianceThreshold,omitempty"`
+	// SettleMs / ConfirmSettleMs are the wait after navigation before the
+	// capture, for a first render and for the confirmation render of a
+	// blank (defaults 30000 / 45000: the headless browser paints on the
+	// CPU, so it gets longer than the indexer's GPU-backed 15000 / 30000).
+	SettleMs        int `json:"settleMs,omitempty"`
+	ConfirmSettleMs int `json:"confirmSettleMs,omitempty"`
+	// KnownBad lists fingerprints of renders that paint fine but are not
+	// the artwork (gateway error pages, placeholders): a frame within
+	// maxDistance (Hamming, 0-64; keep it small, 4-8) of one is suspect
+	// immediately. An entry that does not parse is logged and dropped.
+	KnownBad []MediaHealthFingerprint `json:"knownBad,omitempty"`
+}
+
+// MediaHealthWallCaptureConfig tunes the capture of the wall.
+type MediaHealthWallCaptureConfig struct {
+	// Enabled turns it on. Off by default: it screenshots the live kiosk.
+	Enabled bool `json:"enabled"`
+	// SettleMs is how long a work has been on screen before the capture
+	// (default 15000; the kiosk renders on its GPU, so it needs less than
+	// the nightly headless render's 30000).
+	SettleMs int `json:"settleMs,omitempty"`
+	// MaxEdge bounds the captured frame's longer edge in pixels (default
+	// 1024, the nightly render's viewport).
+	MaxEdge int `json:"maxEdge,omitempty"`
+}
+
+// MediaHealthFingerprint is one known-bad render: a 64-bit pHash as hex
+// (with or without 0x), a tolerance, and a label for the record.
+type MediaHealthFingerprint struct {
+	PHash       string `json:"phash"`
+	MaxDistance int    `json:"maxDistance"`
+	Label       string `json:"label"`
+}
+
+// MediaHealthTuning decodes the mediaHealth block, folding in the retired
+// sourceProbe.disabled switch. Absent means enabled with defaults.
+func (c *Config) MediaHealthTuning(logger *zap.Logger) MediaHealthConfig {
+	var t MediaHealthConfig
+	if len(c.MediaHealth) > 0 {
+		if err := json.Unmarshal(c.MediaHealth, &t); err != nil {
+			// The kill switch survives a typo elsewhere in the block: an
+			// operator who wrote {"disabled":true,"castItems":"8"} asked
+			// for the feature off, and a malformed sibling must not turn it
+			// back on. Same rule as OnchfsTuning.
+			var sw struct {
+				Disabled bool `json:"disabled"`
+			}
+			disabled := json.Unmarshal(c.MediaHealth, &sw) == nil && sw.Disabled
+			if logger != nil {
+				logger.Warn("mediaHealth config block malformed; using defaults",
+					zap.Bool("disabled", disabled), zap.Error(err), zap.String("raw", string(c.MediaHealth)))
+			}
+			t = MediaHealthConfig{Malformed: true, Disabled: disabled}
+		}
+	}
+	if c.SourceProbe != nil && c.SourceProbe.Disabled {
+		if logger != nil {
+			logger.Warn("sourceProbe.disabled is retired; read as mediaHealth.disabled")
+		}
+		t.Disabled = true
+	}
+	return t
 }
 
 // SignatureVerificationConfig tunes DP-1 playlist signature verification on
@@ -225,6 +369,7 @@ type NetlogConfig struct {
 // Configuration for all components
 type Config struct {
 	CDPConfig         *CDPConfig         `json:"cdp"`
+	RelayV2           *RelayV2Config     `json:"relayV2,omitempty"`
 	RelayerConfig     *RelayerConfig     `json:"relayer"`
 	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
 	// LogStreaming is decoded permissively because telemetry is optional and
@@ -238,6 +383,9 @@ type Config struct {
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	SourceProbe  *SourceProbeConfig  `json:"sourceProbe,omitempty"`
+	// MediaHealth is decoded permissively by MediaHealthTuning(); see
+	// MediaHealthConfig.
+	MediaHealth  json.RawMessage     `json:"mediaHealth,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 	Netlog       *NetlogConfig       `json:"netlog,omitempty"`
 	// ContentPolicy carries the operator-only unrated-archive audit gate as RAW
@@ -272,6 +420,12 @@ type Config struct {
 	// is to be hand-edited when a new hostile gateway appears.
 	GatewayUserAgent json.RawMessage `json:"gatewayUserAgent,omitempty"`
 
+	// Onchfs tunes how the device reads onchfs works from chain (the nodes
+	// per chain, the request timeout, a kill switch). Raw bytes decoded by
+	// OnchfsTuning(), for the same reason as GatewayUserAgent: a typo in
+	// a hand-edited optional block must never fail config.Load.
+	Onchfs json.RawMessage `json:"onchfs,omitempty"`
+
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
 	// permissively by ProvisioningTuning(). RawMessage on purpose: config.Load
@@ -282,6 +436,11 @@ type Config struct {
 	// whole parse exactly as today (operator guidance: validate the JSON
 	// before restarting). Existing keys keep their existing strict behavior.
 	Provisioning json.RawMessage `json:"provisioning,omitempty"`
+
+	// Control is the feral-file#3551 controller-authorization block
+	// (docs/ff1-control-v1.md), raw and decoded permissively by
+	// ControlTuning() for the same crash-loop reason as Provisioning.
+	Control json.RawMessage `json:"control,omitempty"`
 
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
@@ -310,6 +469,53 @@ func (c *Config) ContentPolicyTuning(logger *zap.Logger) ContentPolicyConfig {
 				zap.Error(err), zap.String("raw", string(c.ContentPolicy)))
 		}
 		return ContentPolicyConfig{}
+	}
+	return t
+}
+
+// ControlConfig is the decoded "control" block.
+//
+// controld.json is replaced on every full-image OTA from a release-level
+// secret (plan fact F11), so this block is a RELEASE setting, not a device
+// one, and it must never be able to reopen a device that already has control
+// state: main forces the protocol on whenever .state/control (or its
+// retirement tombstone) exists, whatever Enabled says. See control_wiring.go.
+type ControlConfig struct {
+	// Enabled decides only whether a device WITHOUT control state starts the
+	// protocol (creates its identity and offers invitations).
+	Enabled bool `json:"enabled"`
+	// Malformed records that the block (or one of its fields) did not
+	// decode; the affected fields read false.
+	Malformed bool `json:"-"`
+}
+
+// ControlTuning decodes the control block field by field. Absent means
+// disabled. A malformed field reads false and sets Malformed: for Enabled
+// that only affects devices without control state, so it degrades safely.
+// Unknown keys are ignored: a stale "enforced" in an older controld.json
+// (the state was removed by feral-file#3551) still parses.
+func (c *Config) ControlTuning(logger *zap.Logger) ControlConfig {
+	var t ControlConfig
+	if len(c.Control) == 0 || string(c.Control) == "null" {
+		return t
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(c.Control, &fields); err != nil {
+		t.Malformed = true
+	}
+	for name, dst := range map[string]*bool{"enabled": &t.Enabled} {
+		raw, ok := fields[name]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, dst); err != nil {
+			*dst = false
+			t.Malformed = true
+		}
+	}
+	if t.Malformed && logger != nil {
+		logger.Error("control config block malformed; bad fields read as false (devices with control state keep enforcing it)",
+			zap.String("raw", string(c.Control)))
 	}
 	return t
 }
@@ -486,6 +692,55 @@ func decodeDisableSwitch(raw json.RawMessage) *bool {
 	return sw.Enabled
 }
 
+// OnchfsConfig tunes the device's own onchfs reader (ffos-user#427). Every
+// field is optional; the defaults (onchfs.DefaultEndpoints, a 15 s request
+// timeout) are what an unconfigured device runs.
+type OnchfsConfig struct {
+	// Disabled turns the reader off: onchfs works are then left as
+	// unplayable `onchfs://` sources, which is how a device behaved after
+	// fxhash's gateway went away.
+	Disabled bool `json:"disabled,omitempty"`
+	// Chains overrides the nodes for a chain, keyed by CAIP-2 id
+	// ("eip155:1", "eip155:8453", "tezos:NetXdQprcVkpaWU"). A chain listed
+	// here replaces that chain's defaults; a chain not listed keeps them.
+	// Nodes are untrusted (every byte is verified), so the risk of an edit
+	// is availability and privacy, not integrity. Add a node only after a
+	// whole work has been read through it from a device.
+	Chains map[string]OnchfsChainConfig `json:"chains,omitempty"`
+	// RequestTimeoutSeconds bounds one RPC request; 0 is the default.
+	RequestTimeoutSeconds int `json:"requestTimeoutSeconds,omitempty"`
+}
+
+// OnchfsChainConfig is one chain's node list, in order of preference.
+type OnchfsChainConfig struct {
+	RPC []string `json:"rpc"`
+}
+
+// OnchfsTuning decodes the onchfs block. Absent or malformed, it is the zero
+// value: the built-in defaults, as GatewayUserAgentTuning reasons. The one
+// exception mirrors that function's too: an explicit "disabled": true is
+// honored even when a sibling field does not decode, because defaults are ON
+// and discarding the switch would turn the reader back on against the
+// operator's stated intent.
+func (c *Config) OnchfsTuning(logger *zap.Logger) OnchfsConfig {
+	if len(c.Onchfs) == 0 {
+		return OnchfsConfig{}
+	}
+	var o OnchfsConfig
+	if err := json.Unmarshal(c.Onchfs, &o); err != nil {
+		var sw struct {
+			Disabled bool `json:"disabled"`
+		}
+		disabled := json.Unmarshal(c.Onchfs, &sw) == nil && sw.Disabled
+		if logger != nil {
+			logger.Error("onchfs config block malformed; using built-in defaults",
+				zap.Bool("disabled", disabled), zap.Error(err), zap.String("raw", string(c.Onchfs)))
+		}
+		return OnchfsConfig{Disabled: disabled}
+	}
+	return o
+}
+
 // ProvisioningTuning carries the on-device knobs for the provisioning escape
 // policy (docs/network-recovery-ux.md §4.1/§4.2). Every field follows the
 // integer-with-unit-in-the-name convention (never time.Duration, which JSON
@@ -593,6 +848,12 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 	var c Config
 	if err := m.json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	// A config without a "relayer" block means "no legacy relayer" (the
+	// relayer latches retired on an empty endpoint), not a nil dereference
+	// at startup.
+	if c.RelayerConfig == nil {
+		c.RelayerConfig = &RelayerConfig{}
 	}
 
 	// Fetch MAC info at startup

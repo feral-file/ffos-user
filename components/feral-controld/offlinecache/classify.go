@@ -8,6 +8,7 @@ import (
 	go_url "net/url"
 	"strings"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -22,9 +23,11 @@ import (
 //   - ClassMedia and ClassUnknown are both routed to the browser-free
 //     direct-download path (mediacapture.go): the kiosk player renders
 //     every one of these as a native element (<img>/<video>/<audio>/
-//     <object>/iframe-without-scripting) that requests the bare source
-//     URL directly, so the "dependency graph" is exactly one file — no
-//     browser is needed to discover dependencies that do not exist.
+//     <object>/iframe-without-scripting) fed by one request for the bare
+//     source URL (a still's is the player's CORS fetch() of that URL,
+//     handed to the <img> as a blob), so the "dependency graph" is
+//     exactly one file — no browser is needed to discover dependencies
+//     that do not exist.
 //     ClassUnknown (an empty or unrecognized Content-Type) is treated
 //     the same as ClassMedia rather than rejected: the goal is offline
 //     caching for every single-file artwork, and a best-effort direct
@@ -62,6 +65,14 @@ const (
 	// to http.Client and fail with "unsupported protocol scheme", which
 	// is exactly the spurious failure this class exists to stop.
 	ClassInline MediaClass = "inline"
+
+	// ClassOnchfs is a device-local onchfs source
+	// (https://<root>.onchfs.invalid/…, ffos-user#427). Its host never
+	// resolves: the work is read from chain by OnchfsMaterializer when it
+	// is cast, not captured. Classified without a round trip, ahead of the
+	// guard (which would refuse the unresolvable host), and skipped at
+	// queue time exactly like ClassInline.
+	ClassOnchfs MediaClass = "onchfs"
 )
 
 //go:generate mockgen -source=classify.go -destination=../mocks/offlinecache_classify.go -package=mocks -mock_names=Classifier=MockOfflineCacheClassifier
@@ -237,6 +248,9 @@ func (c *classifier) Classify(ctx context.Context, url string) (MediaClass, erro
 			return ClassUnknown, err
 		}
 		return ClassInline, nil
+	}
+	if contentpath.IsOnchfsSourceURL(url) {
+		return ClassOnchfs, nil
 	}
 
 	// Before ANY network round trip, and before the streaming-suffix

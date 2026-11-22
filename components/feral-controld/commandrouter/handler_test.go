@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -122,8 +124,8 @@ func playerNotOkResponse() map[string]interface{} {
 // displayPlaylist via URL: DP1 processing, CDP send returning ok, and ForceRefresh.
 func expectDisplayPlaylistSuccess(ts *testSetup, playlistURL string, playlist *dp1.Playlist) {
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(playlist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(playlist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -404,6 +406,8 @@ func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) 
 }
 
 type fakeMintPairingService struct {
+	getCalls       int
+	getResult      any
 	startCalls     int
 	joinCalls      int
 	closeCalls     int
@@ -421,6 +425,11 @@ type fakeMintPairingService struct {
 	// false) matches this fake's behavior before issue #381's direct-reply
 	// annotation needed it to be settable.
 	overlayStatus mintpairing.OverlayStatus
+}
+
+func (f *fakeMintPairingService) HandleGetPairingSession(context.Context, map[string]any) (any, error) {
+	f.getCalls++
+	return f.getResult, nil
 }
 
 func (f *fakeMintPairingService) Start(context.Context) {}
@@ -462,6 +471,8 @@ func (f *fakeMintPairingService) SetController(*overlay.Controller) {}
 func (f *fakeMintPairingService) Painter() overlay.Painter { return nil }
 
 func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
+
+func (f *fakeMintPairingService) SetDisplayGrants(mintpairing.DisplayGrantIssuer, string) {}
 
 func (f *fakeMintPairingService) RevokeTopicSessions(context.Context, string) (int, error) {
 	return 0, nil
@@ -560,7 +571,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	mockPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(mockPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(mockPlaylist, dp1.CastPlan{}, nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -639,7 +650,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -686,7 +697,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL, gomock.Any()).Return(newPlaylist, dp1.CastPlan{}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -742,11 +753,11 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(nil, errors.New("network unreachable")).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).
 		Times(1)
 
-	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), []offlinecache.SeriesSegment(nil), nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(cachedRawBytes, gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -784,8 +795,8 @@ func TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCached
 	playlistURL := "https://example.com/playlist.json"
 	liveErr := errors.New("network unreachable")
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(nil, liveErr).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(nil, dp1.CastPlan{}, liveErr).
 		Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -849,6 +860,16 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 		}).
 		Times(1)
 
+	// Static dp1_call: no dynamic content, so Process resolves series items
+	// by hand (see handler.go's CMD_DISPLAY_PLAYLIST branch) rather than
+	// through ProcessDynamicPlaylistForCast. mockPlaylist has none, so the
+	// resolution is a no-op; returning plain segments unchanged is what the
+	// real resolveSeriesCastPlan would do too.
+	ts.mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ts.ctx, *mockPlaylist, gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
+		Times(1)
+
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Return(cdpResult, nil).
@@ -899,8 +920,17 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 	ctx := context.Background()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Static dp1_call again (see WithPlaylistObject above); echo the
+	// playlist straight back as plain segments since what this test pins is
+	// the inlineManifest round-trip through the real JSON wrapper, not
+	// series resolution.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), dp1.CAST_PLAYLIST_ITEMS_LIMIT).
+		DoAndReturn(passthroughCastPlan).
+		Times(1)
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), logger)
 
 	var playlistMap map[string]interface{}
@@ -959,8 +989,16 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 	ctx := context.Background()
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Re-entering displayPlaylist with the retained item goes through the
+	// static dp1_call branch, which resolves series items by hand; this
+	// playlist has none, so echo it back as plain segments.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
+		AnyTimes()
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mockStatusPoller,
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	var displayExpression string
@@ -1109,8 +1147,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
-		Return(processedPlaylist, nil).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist, gomock.Any()).
+		Return(processedPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1199,8 +1237,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
-		Return(processedPlaylist, nil).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist, gomock.Any()).
+		Return(processedPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1491,8 +1529,8 @@ func TestCommandHandler_Metrics_DisplayPlaylist_CDPFailure(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1525,8 +1563,8 @@ func TestCommandHandler_Metrics_PlayerResponseNotOk(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1563,8 +1601,8 @@ func TestCommandHandler_Metrics_PlayerResponseMissingMessage(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
+		Return(mockPlaylist, dp1.CastPlan{}, nil).
 		Times(1)
 
 	ts.mockCDP.EXPECT().
@@ -1828,4 +1866,58 @@ func TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly(t *testing.T) 
 		_, err := h.Process(context.Background(), commands.Command{Type: cmd})
 		require.NoError(t, err, "%s must still be served during a staged reset", cmd)
 	}
+}
+
+// setMediaHealth replaces the player's skip map; only the daemon's hint
+// pusher may send it. From a controller it is refused before CDP is touched.
+func TestCommandHandler_Process_SetMediaHealthIsInternal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl) // no EXPECT: any Send fails the test
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	result, err := handler.Process(context.Background(), commands.Command{
+		Type: commands.CMD_SET_MEDIA_HEALTH,
+		Arguments: map[string]interface{}{
+			"castSeq":     1,
+			"mediaHealth": map[string]interface{}{"https://o/a": map[string]interface{}{"category": "source_missing"}},
+		},
+	})
+	require.NoError(t, err)
+	reply, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, false, reply["ok"])
+	assert.Equal(t, "setMediaHealth is internal", reply["error"])
+}
+
+func TestCommandHandler_Process_GetMintPairingSession(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+			want := map[string]any{"ok": true, "status": "none", "active": false}
+			mintSvc := &fakeMintPairingService{getResult: want}
+			if enabled {
+				ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+			}
+			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_GET_MINT_PAIRING_SESSION})
+			require.NoError(t, err)
+			if enabled {
+				assert.Equal(t, want, result)
+				assert.Equal(t, 1, mintSvc.getCalls)
+				assert.Zero(t, mintSvc.startCalls)
+			} else {
+				assert.Equal(t, "disabled", result.(map[string]any)["error"].(map[string]any)["code"])
+			}
+		})
+	}
+}
+
+func TestCommandHandler_Process_GetMintPairingSessionDuringReset(t *testing.T) {
+	h, ctrl := stagedResetHandler(t)
+	defer ctrl.Finish()
+	result, err := h.Process(context.Background(), commands.Command{Type: commands.CMD_GET_MINT_PAIRING_SESSION})
+	require.NoError(t, err)
+	assert.Equal(t, "disabled", result.(map[string]any)["error"].(map[string]any)["code"])
 }

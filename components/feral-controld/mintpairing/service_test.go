@@ -552,6 +552,24 @@ func TestRelayerSessionCreator_ListEphemeralSessionIDsReportsAFailedList(t *test
 	require.Error(t, err, "an unreadable list must never look like an empty one")
 }
 
+// A retired legacy relayer (410 on its session routes) holds no usable
+// sessions, so a factory reset's sweep is done, not failed.
+func TestRevokeTopicSessions_RetiredRelayerIsNothingToRevoke(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer server.Close()
+
+	creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+	_, err := creator.ListEphemeralSessionIDs(context.Background(), "topic-1")
+	require.ErrorIs(t, err, errRelayerSessionsRetired)
+
+	s := newService(Options{}, nil, creator, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	revoked, err := s.RevokeTopicSessions(context.Background(), "topic-1")
+	require.NoError(t, err)
+	assert.Zero(t, revoked)
+}
+
 func TestRelayerSessionCreator_RevokeTreatsAMissingSessionAsRevoked(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -733,6 +751,47 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForBrokerStartFailure(t *t
 	result, err := s.HandleStartPairingSession(context.Background(), nil)
 	require.NoError(t, err)
 	assertCommandError(t, result, "broker_unavailable", true)
+	assert.NotContains(t, result.(map[string]any)["error"], "brokerStatus", "no broker answer, no status")
+}
+
+// The broker's answer travels with broker_unavailable (issue #333), so the
+// app and anyone reading the reply can tell an outage from a refusal. The code
+// itself stays broker_unavailable: it is the contract callers already know.
+func TestHandleStartPairingSession_BrokerStartFailureCarriesTheBrokerAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		err           error
+		wantStatus    int
+		wantCode      string
+		wantRetryable bool
+	}{
+		{"outage", &minter.BrokerError{Method: http.MethodPost, Path: "/v1/channels", StatusCode: http.StatusServiceUnavailable}, http.StatusServiceUnavailable, "", true},
+		{"rate limited", &minter.BrokerError{StatusCode: http.StatusTooManyRequests, Code: "rate_limited"}, http.StatusTooManyRequests, "rate_limited", true},
+		{"refused", &minter.BrokerError{StatusCode: http.StatusBadRequest, Code: "invalid_request"}, http.StatusBadRequest, "invalid_request", false},
+		{"wrapped", fmt.Errorf("start: %w", &minter.BrokerError{StatusCode: http.StatusBadGateway}), http.StatusBadGateway, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+			s := newService(
+				Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
+				&fakeBrokerStarter{err: tc.err},
+				nil, nil, &fakeCDP{}, wrapper.NewJSON(), zap.NewNop(),
+			).(*service)
+
+			result, err := s.HandleStartPairingSession(context.Background(), nil)
+			require.NoError(t, err)
+			assertCommandError(t, result, "broker_unavailable", tc.wantRetryable)
+			payload := result.(map[string]any)["error"].(map[string]any)
+			assert.Equal(t, tc.wantStatus, payload["brokerStatus"])
+			if tc.wantCode == "" {
+				assert.NotContains(t, payload, "brokerCode")
+			} else {
+				assert.Equal(t, tc.wantCode, payload["brokerCode"])
+			}
+			assert.Contains(t, payload["message"], fmt.Sprint(tc.wantStatus))
+		})
+	}
 }
 
 func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testing.T) {
@@ -1451,6 +1510,249 @@ func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *
 	assert.Equal(t, 0, newChannel.closeCount)
 }
 
+// newDeviceExpiryTestService is the device-initiated service the expiry tests
+// below share: starter hands out the pairing's channel and then a spare one,
+// so a refresh shows up as a second start.
+func newDeviceExpiryTestService(starter *fakeBrokerStarter, relayerClient *fakeRelayer, cdpClient *fakeCDP, pollInterval time.Duration) *service {
+	return newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    pollInterval,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		starter,
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+}
+
+// A browser that joins a device-created channel renews the broker's idle
+// deadline (join and its mint request both do). The device must follow that
+// renewal instead of the create-time expiry: closing and refreshing the
+// channel at the create-time deadline is what left a polling browser with a
+// 404 (issue #333), and capping the approval there cut the owner's window to
+// whatever was left of the code's five minutes.
+func TestWaitForBrowserAndApproval_DeviceCodeFollowsTheBrokerExpiryOnceABrowserJoins(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	start := time.Now()
+	createExpiry := start.Add(80 * time.Millisecond)
+	renewed := start.Add(time.Minute).Truncate(time.Second)
+	request := &minter.MintRequest{ChannelID: "ch_code", MessageID: "msg_1", Origin: "https://gallery.example", BrowserInfo: minter.BrowserInfo{Name: "Chrome"}}
+	joined, requested := false, false
+	ch := &fakeBrokerChannel{channelID: "ch_code", pairingCode: "PAIR-123", expiresAt: createExpiry}
+	// Runs under ch.mu: the browser joins before the create-time expiry and
+	// sends its request only after it.
+	ch.beforePoll = func() {
+		if !joined && time.Since(start) > 40*time.Millisecond {
+			joined = true
+			ch.brokerExpiry = renewed
+		}
+		if !requested && time.Now().After(createExpiry.Add(70*time.Millisecond)) {
+			requested = true
+			ch.request = request
+		}
+	}
+	starter := &fakeBrokerStarter{channels: []brokerChannel{ch, &fakeBrokerChannel{channelID: "ch_spare", pairingCode: "PAIR-SPARE"}}}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newDeviceExpiryTestService(starter, relayerClient, &fakeCDP{}, time.Millisecond)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+
+	var approval relayer.Response
+	select {
+	case approval = <-relayerClient.sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the late request to reach the owner")
+	}
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	approvalExpiry, err := time.Parse(time.RFC3339, approval.Message.(map[string]any)["expiresAt"].(string))
+	require.NoError(t, err)
+	assert.True(t, approvalExpiry.After(createExpiry), "the approval must not be capped at the create-time expiry")
+	assert.Equal(t, 1, starter.StartCount(), "a joined channel must not be refreshed")
+	assert.Equal(t, 0, ch.CloseCount(), "a joined channel must not be closed under its browser")
+	assert.True(t, s.expiryOf(s.active).Equal(renewed))
+}
+
+// The worker can extend the deadline on its first poll, while the start that
+// launched it is still building its reply: a browser that joins and sends its
+// request the moment the code appears. The reply reads its expiry before the
+// worker starts. This pins the reply's value; -race catches a regression only
+// when the worker happens to run first (reliably with a pause injected after
+// the go statement, which is how the fix was checked).
+func TestHandleStartPairingSession_StartReplyDoesNotRaceTheFirstExtension(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	createExpiry := time.Now().Add(time.Minute).Truncate(time.Second)
+	ch := &fakeBrokerChannel{
+		channelID:    "ch_code",
+		pairingCode:  "PAIR-123",
+		expiresAt:    createExpiry,
+		brokerExpiry: createExpiry.Add(time.Minute),
+		request:      &minter.MintRequest{ChannelID: "ch_code", MessageID: "msg_1", Origin: "https://gallery.example"},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newDeviceExpiryTestService(&fakeBrokerStarter{channel: ch}, relayerClient, &fakeCDP{}, time.Millisecond)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	response := result.(startPairingResponse)
+	require.True(t, response.OK)
+	assert.Equal(t, formatOptionalTime(createExpiry), response.ExpiresAt, "the reply reports the code's expiry as started")
+	assertRelayerNotification(t, <-relayerClient.sent, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+}
+
+// A browser can join in the last poll interval before the deadline, after the
+// device's last look. One more poll at the deadline is the device's chance to
+// see it before closing a channel the browser now holds.
+func TestWaitForBrowserAndApproval_ConfirmsExpiryWithTheBrokerBeforeRefreshing(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	createExpiry := time.Now().Add(80 * time.Millisecond)
+	request := &minter.MintRequest{ChannelID: "ch_code", MessageID: "msg_1", Origin: "https://gallery.example", BrowserInfo: minter.BrowserInfo{Name: "Chrome"}}
+	sent := false
+	ch := &fakeBrokerChannel{channelID: "ch_code", pairingCode: "PAIR-123", expiresAt: createExpiry}
+	// With a poll interval far longer than the code's life, the only poll
+	// after the deadline is the confirming one.
+	ch.beforePoll = func() {
+		if !sent && time.Now().After(createExpiry) {
+			sent = true
+			ch.request = request
+			ch.brokerExpiry = time.Now().Add(time.Minute)
+		}
+	}
+	starter := &fakeBrokerStarter{channels: []brokerChannel{ch, &fakeBrokerChannel{channelID: "ch_spare", pairingCode: "PAIR-SPARE"}}}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newDeviceExpiryTestService(starter, relayerClient, &fakeCDP{}, time.Hour)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+
+	select {
+	case approval := <-relayerClient.sent:
+		assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the confirming poll to pick up the request")
+	}
+	assert.Equal(t, 1, starter.StartCount())
+	assert.Equal(t, 0, ch.CloseCount())
+}
+
+// The confirming poll usually lands after the broker expired the channel, and
+// the broker says so with 410 (or 404 once a create swept it). That is the
+// ordinary end of an unused code, and it must still refresh it.
+func TestWaitForBrowserAndApproval_RefreshesWhenTheConfirmingPollFindsTheChannelGone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"expired", &minter.BrokerError{StatusCode: http.StatusGone, Code: "expired"}},
+		{"swept", &minter.BrokerError{StatusCode: http.StatusNotFound, Code: "not_found"}},
+		{"unreachable", errors.New("dial tcp: i/o timeout")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+
+			createExpiry := time.Now().Add(80 * time.Millisecond)
+			oldChannel := &fakeBrokerChannel{channelID: "ch_old", pairingCode: "PAIR-OLD", expiresAt: createExpiry}
+			oldChannel.beforePoll = func() {
+				if time.Now().After(createExpiry) {
+					oldChannel.requestHandedOut = true
+					oldChannel.pollAfterRequestErr = tc.err
+				}
+			}
+			newChannel := &fakeBrokerChannel{channelID: "ch_new", pairingCode: "PAIR-NEW", expiresAt: time.Now().Add(time.Minute)}
+			starter := &fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}}
+			cdpClient := &fakeCDP{}
+			s := newDeviceExpiryTestService(starter, nil, cdpClient, time.Millisecond)
+			s.Start(context.Background())
+			defer s.Stop()
+
+			result, err := s.HandleStartPairingSession(context.Background(), nil)
+			require.NoError(t, err)
+			require.True(t, result.(startPairingResponse).OK)
+
+			require.Eventually(t, func() bool { return starter.StartCount() == 2 }, time.Second, 5*time.Millisecond)
+			assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+			// Wait for the refresh to publish, so its goroutine is done with
+			// shared state before the deferred reset runs.
+			require.Eventually(t, func() bool {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.active != nil && s.active.channelID == "ch_new"
+			}, time.Second, 5*time.Millisecond)
+			assert.Equal(t, 1, oldChannel.CloseCount())
+		})
+	}
+}
+
+// The status poller reads OverlayStatus every few seconds while a code is on
+// screen. A read landing while the worker's confirming poll is in flight must
+// not end the session: that left the expired code unrefreshed (and would close
+// the channel under a browser the confirming poll was there to rescue).
+func TestOverlayStatus_DuringTheConfirmingPollDoesNotEndTheSession(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	createExpiry := time.Now().Add(80 * time.Millisecond)
+	confirming := make(chan struct{})
+	confirmed := false
+	oldChannel := &fakeBrokerChannel{channelID: "ch_old", pairingCode: "PAIR-OLD", expiresAt: createExpiry}
+	oldChannel.beforePoll = func() {
+		if !confirmed && time.Now().After(createExpiry) {
+			confirmed = true
+			close(confirming)
+			time.Sleep(300 * time.Millisecond) // the broker round trip
+			oldChannel.requestHandedOut = true
+			oldChannel.pollAfterRequestErr = &minter.BrokerError{StatusCode: http.StatusGone, Code: "expired"}
+		}
+	}
+	newChannel := &fakeBrokerChannel{channelID: "ch_new", pairingCode: "PAIR-NEW", expiresAt: time.Now().Add(time.Minute)}
+	starter := &fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}}
+	cdpClient := &fakeCDP{}
+	s := newDeviceExpiryTestService(starter, nil, cdpClient, time.Hour)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	require.True(t, result.(startPairingResponse).OK)
+
+	select {
+	case <-confirming:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the confirming poll")
+	}
+	status := s.OverlayStatus()
+	assert.True(t, status.Showing)
+	assert.Empty(t, status.PairingCode, "a code past its deadline is not reported")
+
+	require.Eventually(t, func() bool { return starter.StartCount() == 2 }, 2*time.Second, 5*time.Millisecond, "the expired code must still be refreshed")
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.active != nil && s.active.channelID == "ch_new"
+	}, time.Second, 5*time.Millisecond)
+}
+
 // TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow
 // covers round 2's F-race from the delivery side: the expiry cleanup's hide of
 // the old overlay is now synchronous up to its DECISION (clearing the
@@ -1515,6 +1817,14 @@ func TestWaitForBrowserAndApproval_RefreshSucceedsEvenWhenTheExpiredHideIsSlow(t
 		return starter.StartCount() == 2
 	}, 250*time.Millisecond, 5*time.Millisecond, "the refresh must not wait on the slow hide delivery")
 	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+	// The code is displayed before the refresh publishes it; wait for that,
+	// so the refresh goroutine is done with shared state before the deferred
+	// reset runs (a -race report otherwise).
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.active != nil && s.active.channelID == "ch_new"
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {
@@ -4007,6 +4317,7 @@ type fakeBrokerChannel struct {
 	// rejectionRetryable records each rejection's retryable flag, in order.
 	rejectionRetryable []bool
 	deliveredSessions  []minter.MintResult
+	deliveredGrants    []minter.DisplayGrantResult
 	successErr         error
 	// pollErr is returned together with the pending request — the minter's
 	// attestation-mismatch shape (the refused request rides along).
@@ -4019,6 +4330,17 @@ type fakeBrokerChannel struct {
 	pollAfterRequestErr error
 	// requestHandedOut records that the request was returned by a poll.
 	requestHandedOut bool
+	// joinedRequest is the request the site announced at create, when set.
+	joinedRequest *minter.MintRequest
+}
+
+func (f *fakeBrokerChannel) JoinedMintRequest() (minter.MintRequest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.joinedRequest == nil {
+		return minter.MintRequest{}, false
+	}
+	return *f.joinedRequest, true
 }
 
 // SetPollAfterRequestErr makes later polls fail with err, as the broker does
@@ -4125,6 +4447,34 @@ func (f *fakeBrokerChannel) SendMintSuccess(_ context.Context, _ minter.MintRequ
 		}
 	}
 	return &minter.SendMessageResult{ChannelID: f.resolvedChannelID(), Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+// SendMintDisplayGrant records a delivered display grant; it shares the
+// session delivery's count, hooks and failure injection.
+func (f *fakeBrokerChannel) SendMintDisplayGrant(_ context.Context, _ minter.MintRequest, grant minter.DisplayGrantResult) (*minter.SendMessageResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.successCount++
+	f.deliveredGrants = append(f.deliveredGrants, grant)
+	if f.onSend != nil {
+		f.onSend()
+	}
+	if f.successErr != nil {
+		return nil, f.successErr
+	}
+	if f.successSent != nil {
+		select {
+		case f.successSent <- struct{}{}:
+		default:
+		}
+	}
+	return &minter.SendMessageResult{ChannelID: f.resolvedChannelID(), Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+func (f *fakeBrokerChannel) DeliveredGrants() []minter.DisplayGrantResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]minter.DisplayGrantResult(nil), f.deliveredGrants...)
 }
 
 func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {

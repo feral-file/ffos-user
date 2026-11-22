@@ -143,6 +143,12 @@ const (
 	// against a fresh scan; the QR returns within minutes if the network is
 	// still gone.
 	ReasonAPRecheck = "ap-recheck"
+	// ReasonSustainedNoLease is the sustained-offline raise when the window
+	// saw the device associated (or wired) but never given an address. It
+	// tells a DHCP failure apart from a lost link in the logs and in the
+	// reported reason; the screen is the plain QR either way. Same recheck
+	// session policy as "sustained-offline" (ffos-user#404).
+	ReasonSustainedNoLease = "sustained-no-lease"
 	// ReasonSetupIncompleteSettled is the episode's terminal narration after
 	// its raise cycles exhaust: the machine settles in STATION mode (the LAN
 	// escape lives there) with a standing diagnosis.
@@ -248,6 +254,12 @@ type WifiController interface {
 	ScanAllSSIDs(ctx context.Context) ([]string, error)
 	RefreshScanCache(ctx context.Context) ([]string, error)
 	CachedScan(ctx context.Context) ([]string, error)
+	// CachedScanTime is when CachedScan's list was scanned (ok=false: none).
+	// Only the portal's list-age line reads it.
+	CachedScanTime() (time.Time, bool)
+	// SetOwnAPSSID tells the scan cache which SSID is this device's own
+	// setup AP, so RefreshScanCache drops it before judging a scan empty.
+	SetOwnAPSSID(ssid string)
 	// Join must honor ctx cancellation: applyJoin bounds it with a deadline
 	// (Config.JoinTimeout) because it is the one long blocking call on the
 	// loop goroutine — an implementation that ignores ctx wedges the machine
@@ -357,6 +369,17 @@ const (
 	preAPScanRetryDelay = 2 * time.Second
 )
 
+// LinkDetail is one Config.ActiveLinkDetail reading (production:
+// status.LinkChecker.ExternalLinkReading). Link and Wired carry the ACTIVATED
+// verdicts every guard keys on; AddrPending reports a device past L2 that is
+// still waiting for an address — evidence only for which reason a sustained
+// raise carries, never for whether it fires.
+type LinkDetail struct {
+	Link, Wired     bool
+	AddrPending     bool
+	AddrPendingConn string
+}
+
 // Config wires the machine's dependencies and tunables.
 type Config struct {
 	AP           softap.Backend
@@ -440,11 +463,13 @@ type Config struct {
 
 	// ActiveLinkDetail, when non-nil, is preferred over ActiveLink: the same
 	// probe with the ethernet-only verdict from the same nmcli read
-	// (status.LinkChecker.ExternalLinkDetail). It exists for the §4.7 health
+	// (status.LinkChecker.ExternalLinkReading). It exists for the §4.7 health
 	// snapshot — the machine caches the link TYPE its tick probes saw, so
 	// status polls never spend a probe of their own. Identical failure bias
-	// to ActiveLink (an error is unknown and defers the AP).
-	ActiveLinkDetail func(ctx context.Context) (link, wired bool, err error)
+	// to ActiveLink (an error is unknown and defers the AP). The reading's
+	// AddrPending verdict picks the sustained raise's reason (see
+	// ReasonSustainedNoLease); it never authorizes or suppresses a raise.
+	ActiveLinkDetail func(ctx context.Context) (LinkDetail, error)
 
 	// WiredLink, when non-nil, confirms or refutes a live ETHERNET link (the
 	// status.LinkChecker.WiredLink seam; constraint 6 semantics: verdict from
@@ -724,6 +749,21 @@ type Machine struct {
 	offlineAbsent      int
 	offlinePause       int
 	offlineFreshNeeded int
+	// offlineNoLease latches when any confirmed-absent sample of the CURRENT
+	// window saw a device associated but stuck getting an address
+	// (LinkDetail.AddrPending); offlineNoLeaseConn is that sighting's
+	// connection name. Any sample, not the last one: NM cycles a DHCP-starved
+	// station through IP_CONFIG (~45s), FAILED, and a fresh activation, and
+	// after its autoconnect retries run out it can sit DISCONNECTED for
+	// minutes, so the reading at expiry is often not the stuck one. Reset with
+	// the window. It changes only the raise's reason, never whether or when
+	// it fires (ffos-user#404).
+	offlineNoLease     bool
+	offlineNoLeaseConn string
+	// lastAddrPending/lastAddrPendingConn are the most recent real probe's
+	// AddrPending verdict, handed from probeLink to the tick's absent branch.
+	lastAddrPending     bool
+	lastAddrPendingConn string
 
 	// wiredLink is Config.WiredLink (nil = never confirmable; see the Config
 	// field for the fail-safe consequences).
@@ -745,7 +785,7 @@ type Machine struct {
 
 	// activeLinkDetail is Config.ActiveLinkDetail (preferred over activeLink
 	// when set — see the Config field).
-	activeLinkDetail func(ctx context.Context) (link, wired bool, err error)
+	activeLinkDetail func(ctx context.Context) (LinkDetail, error)
 
 	// §4.7 health-snapshot caches, in the mu-guarded block because Snapshot
 	// reads them from request goroutines. Written ONLY by real probes: the
@@ -1905,6 +1945,7 @@ func (m *Machine) onTick(ctx context.Context) {
 			// a full window of samples has accumulated with no sighting and no
 			// outstanding post-pause freshness debt (constraint 7 / §4.3).
 			m.recordOfflineAbsent()
+			m.noteNoLeaseSample()
 			if m.offlineWindowExpired() {
 				// Re-probe before THIS one-way door too: the relocation scan
 				// above runs multi-second radio work after the top-of-tick
@@ -1925,8 +1966,20 @@ func (m *Machine) onTick(ctx context.Context) {
 					m.repaintBootNarration(g)
 					break
 				}
+				// Capture the window's no-lease verdict before clearOffline
+				// resets it; it picks the reason, never the decision.
+				noLease, noLeaseConn := m.offlineNoLease, m.offlineNoLeaseConn
 				m.clearOffline()
 				m.resetJoinStatus()
+				if noLease {
+					m.logger.Info("provisioning: sustained offline with the link associated but no address; starting setup",
+						zap.String("connection", noLeaseConn))
+					m.transition(ctx, StateAPActive, Detail{
+						Reason:  ReasonSustainedNoLease,
+						Message: "Network connected but no address was assigned; starting setup",
+					})
+					return
+				}
 				m.transition(ctx, StateAPActive, Detail{
 					Reason:  "sustained-offline",
 					Message: "Wi-Fi unavailable; starting setup",
@@ -2507,6 +2560,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		m.noteAPRaiseFailure()
 		return err
 	}
+	m.wifi.SetOwnAPSSID(info.SSID)
 
 	// Re-arm the attached-client latch BEFORE the portal can accept a request:
 	// on the rescan/re-raise paths the phone's captive probe races srv.Start
@@ -2525,6 +2579,15 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		Addr:   m.portalAddr,
 		APSSID: info.SSID,
 		Scan:   m.wifi.CachedScan,
+		// Read on portal request goroutines: CachedScanTime only reads the
+		// cache under wifictl's own lock, and the clock is goroutine-safe.
+		ScanAge: func() (time.Duration, bool) {
+			at, ok := m.wifi.CachedScanTime()
+			if !ok {
+				return 0, false
+			}
+			return m.clock.Now().Sub(at), true
+		},
 		Join:   m.RequestJoin,
 		Status: m.Status,
 		Rescan: m.RequestRescan,
@@ -3112,11 +3175,13 @@ func (m *Machine) probeLink(ctx context.Context) linkProbe {
 	}
 	var up, wired bool
 	var err error
+	var reading LinkDetail
 	wiredKnown := false
 	if m.activeLinkDetail != nil {
 		// Preferred: the same nmcli read also yields the ethernet-only
 		// verdict, so the health snapshot learns the link TYPE for free.
-		up, wired, err = m.activeLinkDetail(ctx)
+		reading, err = m.activeLinkDetail(ctx)
+		up, wired = reading.Link, reading.Wired
 		wiredKnown = err == nil
 	} else {
 		up, err = m.activeLink(ctx)
@@ -3129,6 +3194,8 @@ func (m *Machine) probeLink(ctx context.Context) linkProbe {
 			outcome = linkAbsent
 		}
 	}
+	m.lastAddrPending = err == nil && reading.AddrPending
+	m.lastAddrPendingConn = reading.AddrPendingConn
 	m.mu.Lock()
 	m.linkOutcomeKnown = err == nil
 	m.linkOutcome = outcome
@@ -3235,6 +3302,16 @@ func (m *Machine) pauseOfflineWindow() {
 
 func (m *Machine) resetOfflineWindow() {
 	m.offlineAbsent, m.offlinePause, m.offlineFreshNeeded = 0, 0, 0
+	m.offlineNoLease, m.offlineNoLeaseConn = false, ""
+}
+
+// noteNoLeaseSample latches the current window's no-lease verdict from the
+// tick probe that just counted as confirmed-absent (see offlineNoLease).
+func (m *Machine) noteNoLeaseSample() {
+	if !m.lastAddrPending || m.offlineNoLease {
+		return
+	}
+	m.offlineNoLease, m.offlineNoLeaseConn = true, m.lastAddrPendingConn
 }
 
 // clearOffline fully resets the offline window AND disarms the boot relocation

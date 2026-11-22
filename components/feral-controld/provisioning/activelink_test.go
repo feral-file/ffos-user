@@ -922,3 +922,77 @@ func TestOfflineWindowEventBurstsDoNotAccumulate(t *testing.T) {
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
+
+// TestSustainedRaiseNamesNoLease pins #404's reason split: a window in which
+// the station was seen associated but stuck getting an address raises with
+// ReasonSustainedNoLease — on the SAME schedule as a plain sustained-offline
+// raise (the verdict picks the reason, never the decision) and with the same
+// plain QR.
+// The stuck sighting is early in the window on purpose: NM cycles a
+// DHCP-starved station out of IP_CONFIG, so the reading at expiry is usually
+// not the stuck one.
+func TestSustainedRaiseNamesNoLease(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		noLease    bool
+		wantReason string
+	}{
+		{"associated without an address", true, ReasonSustainedNoLease},
+		{"plain link loss", false, "sustained-offline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newLinkHarness(t, &fakeLink{})
+			h.wifi.setProfile(true)
+			var probes int
+			h.m.activeLinkDetail = func(context.Context) (LinkDetail, error) {
+				probes++
+				// Only the first tick sees IP_CONFIG; the rest read FAILED/
+				// DISCONNECTED (plain absence).
+				if tc.noLease && probes == 1 {
+					return LinkDetail{AddrPending: true, AddrPendingConn: "HomeNet"}, nil
+				}
+				return LinkDetail{}, nil
+			}
+			ctx := context.Background()
+
+			h.m.onConnectivity(ctx, false, false)
+			h.tickN(ctx, windowSamples-1)
+			assert.Equal(t, StateOfflineRetrying, h.m.State(),
+				"the no-lease verdict must not raise early")
+			h.tick(ctx)
+			require.Equal(t, StateAPActive, h.m.State(),
+				"the no-lease verdict must not suppress the raise either")
+
+			var reasons []string
+			for _, c := range h.notifier.calls {
+				if c.State == StateAPActive {
+					reasons = append(reasons, c.Detail.Reason)
+				}
+			}
+			assert.Contains(t, reasons, tc.wantReason)
+			assert.Equal(t, sessionRecheck, h.m.sessionPolicy,
+				"both reasons run the recheck cadence")
+		})
+	}
+}
+
+// TestNoLeaseLatchResetsWithTheWindow: a stuck sighting from an earlier
+// window that ended in a link sighting must not color a later, plain outage.
+func TestNoLeaseLatchResetsWithTheWindow(t *testing.T) {
+	h := newLinkHarness(t, &fakeLink{})
+	h.wifi.setProfile(true)
+	reading := LinkDetail{AddrPending: true, AddrPendingConn: "HomeNet"}
+	h.m.activeLinkDetail = func(context.Context) (LinkDetail, error) { return reading, nil }
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	h.tick(ctx) // stuck sighting latches
+	reading = LinkDetail{Link: true}
+	h.tick(ctx) // link sighted: window and latch reset
+	reading = LinkDetail{}
+	h.tickN(ctx, windowSamples)
+	require.Equal(t, StateAPActive, h.m.State())
+	for _, c := range h.notifier.calls {
+		assert.NotEqual(t, ReasonSustainedNoLease, c.Detail.Reason)
+	}
+}

@@ -1,6 +1,7 @@
 package helper_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -275,4 +276,14 @@ func TestTruncateMapPreservesJSONStructure(t *testing.T) {
 
 	// The beginning should still be valid JSON start (either '{' or part of a key)
 	assert.True(t, result[0] == '{' || result[0] == '"')
+}
+
+func TestTopicFingerprint(t *testing.T) {
+	if helper.TopicFingerprint("") != "" {
+		t.Fatal("empty topic must stay empty")
+	}
+	fp := helper.TopicFingerprint("topic-secret-value")
+	if len(fp) != 8 || fp == helper.TopicFingerprint("topic-secret-valuf") || strings.Contains(fp, "topic") {
+		t.Fatalf("fingerprint %q", fp)
+	}
 }

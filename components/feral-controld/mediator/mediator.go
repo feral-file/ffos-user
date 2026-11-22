@@ -2,6 +2,8 @@ package mediator
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -16,6 +18,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/controlgate"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
@@ -103,11 +107,13 @@ type mediator struct {
 	// single-writer discipline as topicObserver.
 	sysMetricsObserver func(raw []byte)
 
-	// relayerReconciling collapses overlapping heartbeat-driven relayer
-	// reconciles to one in flight: signal handlers run on per-signal
-	// goroutines and heartbeats outpace RetryableConnect's transient-retry
-	// loop. Overlaps would be tolerated (ErrAlreadyConnected is success) but
-	// are pointless work against the relayer endpoint.
+	// relayerReconciling collapses overlapping relayer reconnects (the
+	// heartbeat reconcile and the online-edge reconnect) to one in flight:
+	// signal handlers run on per-signal goroutines and heartbeats outpace
+	// RetryableConnect's transient-retry loop, which never ends while the
+	// legacy host keeps timing out. Overlaps would be tolerated
+	// (ErrAlreadyConnected is success) but each would be one more endless
+	// dial loop against the relayer endpoint.
 	relayerReconciling atomic.Bool
 
 	mdnsMu         sync.Mutex
@@ -161,8 +167,52 @@ type mediator struct {
 	// must be internally synchronized and non-blocking.
 	internetObserver func(connected bool)
 
+	// relayV2Waker, when set, is called on every online connectivity edge
+	// (relayer.WakeV2): the v2 socket owns its own redial loop, and without a
+	// nudge the backoff it grew while the device was offline outlives the
+	// network change by minutes (feral-file#3551 G3 bench F2). Set once
+	// before Start via SetRelayV2Waker (type-asserted seam, like
+	// SetInternetObserver); must be non-blocking.
+	relayV2Waker func()
+
 	// connPushHook is the test-only completion seam (SetConnectivityPushHook).
 	connPushHook atomic.Pointer[func()]
+
+	// control is the feral-file#3551 control gate; nil when control.enabled
+	// is false, which keeps the relayer path exactly as before. Set once
+	// before Start (SetControl).
+	control ControlGate
+}
+
+// ControlGate is the mediator's view of controlgate.Gate.
+type ControlGate interface {
+	HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*controlgate.Wire, *control.PublicError)
+	Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command)
+}
+
+// SetControl wires the control gate (type-asserted seam, like
+// SetInternetObserver, so the Mediator interface and its mocks stay as
+// they are). Call before Start.
+func (m *mediator) SetControl(g ControlGate) { m.control = g }
+
+// SetRelayV2Waker wires the v2 carrier's wake (see the relayV2Waker field).
+// Call before Start.
+func (m *mediator) SetRelayV2Waker(fn func()) { m.relayV2Waker = fn }
+
+// plaintextDenial is the relayer RPC message for a plaintext command the
+// §7.2 policy refuses. ok:false is load-bearing and error is a flat string:
+// it is the only shape every released client reports as a failure without
+// crashing (ff-app casts error to String; ff1-cli and Play treat a body
+// without ok:false as success).
+func plaintextDenial(cmd commands.Type, code string) map[string]any {
+	msg := "this FF1 requires a signed control envelope for " + string(cmd) + "; update the Feral File app or ff-cli"
+	switch code {
+	case control.CodeLocked:
+		msg = "this FF1's control state is locked; factory reset it on the device itself to recover"
+	case control.CodeInvalidMessage:
+		msg = "message has duplicate or case-variant member names"
+	}
+	return map[string]any{"ok": false, "error": code, "command": string(cmd), "message": msg}
 }
 
 // startMDNSLocked registers the advertiser with the current device info and
@@ -599,8 +649,11 @@ func (m *mediator) reconcileRelayer(ctx context.Context) {
 		return
 	}
 
-	m.logger.Info("Relayer reconcile: device online with relayer disconnected, connecting")
-	if err := m.relayer.RetryableConnect(ctx); err != nil {
+	// Retired is the steady state once the legacy host is gone: Debug, since
+	// this runs on every heartbeat and dials nothing (see legacyRetiredGate).
+	if err := m.relayer.RetryableConnect(ctx); errors.Is(err, relayer.ErrLegacyRetired) {
+		m.logger.Debug("Relayer reconcile: legacy relayer retired", zap.Error(err))
+	} else if err != nil {
 		m.logger.Error("Relayer reconcile: connect failed, retrying on a later heartbeat", zap.Error(err))
 	} else {
 		m.logger.Info("Relayer reconcile: relayer connected")
@@ -718,6 +771,17 @@ func (m *mediator) handleDBusSignal(
 			return nil, fmt.Errorf("invalid body type")
 		}
 
+		// Wake the v2 carrier first, before anything here that touches the
+		// legacy relayer: its IsConnected (the log below) waits on the mutex a
+		// legacy Connect holds across its handshake, and the legacy reconnect
+		// at the end may block for as long as the legacy host keeps failing.
+		// v2 must not wait on either. WakeV2 never blocks; while a v2 socket
+		// is up it only restarts the backoff, for when that socket (often
+		// dialed on the network just left) dies.
+		if connected && m.relayV2Waker != nil {
+			m.relayV2Waker()
+		}
+
 		m.logger.Info("Received connectivity change event",
 			zap.Bool("connected", connected),
 			zap.Bool("relayer_connected", m.relayer.IsConnected()),
@@ -742,17 +806,6 @@ func (m *mediator) handleDBusSignal(
 		m.notifyInternetObserver(connected)
 		m.connMu.Unlock()
 		m.enqueueConnectivityPush()
-
-		// Reconnect the relayer if it's not already connected
-		if connected && !m.relayer.IsConnected() {
-			m.logger.Info("Connectivity restored, reconnecting relayer")
-			err := m.relayer.RetryableConnect(ctx)
-			if err != nil {
-				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
-			} else {
-				m.logger.Info("Relayer reconnected after connectivity change")
-			}
-		}
 
 		// Re-register mDNS on connectivity changes. The Stop+Start is preserved
 		// from the original interface-change handling: a connectivity event can
@@ -783,6 +836,41 @@ func (m *mediator) handleDBusSignal(
 		}
 		m.mdnsMu.Unlock()
 
+		// Reconnect the relayer if it's not already connected. Last in this
+		// handler, after the mDNS re-registration above: RetryableConnect
+		// keeps retrying transient and busy failures for as long as they
+		// last, so on a network where the legacy host only ever times out or
+		// is reset (a filtered workers.dev, feral-file#3551 G3) it never
+		// returns, and nothing after it may depend on it. The same
+		// relayerReconciling guard as the heartbeat reconcile keeps the
+		// mediator to one such loop (main.go's startup retry is the only
+		// other): each online edge would otherwise start another.
+		if connected && !m.relayer.IsConnected() {
+			m.logger.Info("Connectivity restored, reconnecting relayer")
+			// An online edge earns a latched-retired legacy relayer one dial:
+			// the permanent error it latched on may have come from the network
+			// just left (a captive portal's DNS answer), not from the relayer.
+			// Armed even when a reconnect is already running: the next
+			// RetryableConnect spends it.
+			if p, ok := m.relayer.(interface{ AllowRetiredProbe() }); ok {
+				p.AllowRetiredProbe()
+			}
+			if !m.relayerReconciling.CompareAndSwap(false, true) {
+				m.logger.Info("Relayer reconnect already in progress; not starting another")
+				return nil, nil
+			}
+			defer m.relayerReconciling.Store(false)
+			err := m.relayer.RetryableConnect(ctx)
+			switch {
+			case errors.Is(err, relayer.ErrLegacyRetired):
+				m.logger.Info("Legacy relayer still retired after connectivity change", zap.Error(err))
+			case err != nil:
+				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
+			default:
+				m.logger.Info("Relayer reconnected after connectivity change")
+			}
+		}
+
 	default:
 		m.logger.Warn("Unknown signal", zap.String("member", payload.Member.String()))
 	}
@@ -793,6 +881,10 @@ func (m *mediator) handleDBusSignal(
 func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Payload) error {
 	payloadJSON, _ := m.json.Marshal(payload)
 	logPayload := helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)
+	if payload.MessageID == relayer.MESSAGE_ID_SYSTEM {
+		// The system frame carries the topic, a bearer credential: never log it.
+		logPayload = []byte("[system frame redacted]")
+	}
 	m.logger.Info("handle received relayer message",
 		zap.ByteString("payload", logPayload),
 		zap.String("messageID", payload.MessageID),
@@ -841,8 +933,52 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			Type:         commandType,
 			Arguments:    payload.Message.Request,
 			RawArguments: payload.Message.RawRequest,
+			Ambiguous:    payload.Message.Ambiguous,
 		}
-		result, err := m.cmdHandler.Process(ctx, command)
+		// Control protocol (feral-file#3551, docs/ff1-control-v1.md §7.2,
+		// §10): an envelope is answered by the authority, the RPC message is
+		// {"v":1,"jwe"} or the public error; plaintext is policy-checked
+		// on RouteRelayer before it can reach the router.
+		if m.control != nil {
+			// A frame with no command (the relayer's own error frames, e.g.
+			// {"error":{"code":2000,"message":"Invalid messageID"}}) is
+			// never answered: TierOf("") is owner, and a denial without a
+			// messageID draws the same relayer error back, looping forever.
+			// A reply without a messageID has no caller either (the rule
+			// sendShedResponse applies).
+			if payload.Message.Command == nil {
+				m.logger.Debug("Relayer frame without a command ignored under control")
+				return nil
+			}
+			if commandType == control.CmdEnvelope {
+				// No messageID, no caller: do not spend a window or run the
+				// command for a reply that would be discarded.
+				if payload.MessageID == "" {
+					m.logger.Debug("Relayer envelope without a messageID ignored")
+					return nil
+				}
+				var message any
+				wire, perr := m.control.HandleEnvelope(ctx, payload.Message.RawRequest, control.Origin{Route: control.RouteRelayer, Known: true})
+				if perr != nil {
+					message = json.RawMessage(perr.Body())
+				} else {
+					message = wire
+				}
+				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID, Message: message})
+			}
+			d, normalized := m.control.Plaintext(control.RouteRelayer, command)
+			if !d.Allow {
+				m.logger.Warn("Relayer plaintext command refused by control policy",
+					zap.String("command", commandType.String()), zap.String("code", d.Code))
+				if payload.MessageID == "" {
+					return nil
+				}
+				return m.relayer.Send(ctx, relayer.Response{Type: "RPC", MessageID: payload.MessageID,
+					Message: plaintextDenial(commandType, d.Code)})
+			}
+			command = normalized
+		}
+		result, err := m.cmdHandler.Process(commands.FromController(ctx), command)
 		if err != nil {
 			if commandrouter.IsRateLimited(err) {
 				// Report a legible rejection back to the caller rather than

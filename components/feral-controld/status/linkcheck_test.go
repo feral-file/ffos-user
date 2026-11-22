@@ -499,3 +499,35 @@ func TestDiagnosticDoesNotLoosenActivatedVerdicts(t *testing.T) {
 
 	assert.False(t, c.HasLink(context.Background()), "HasLink must stay ACTIVATED-only")
 }
+
+// TestExternalLinkReadingAddrPending pins #404's verdict: a non-excluded
+// device in IP_CONFIG..SECONDARIES reads as address-pending (with its
+// connection name) while the ACTIVATED-only Link verdict stays false, and
+// neither ACTIVATED, FAILED, nor the device's own hotspot counts.
+func TestExternalLinkReadingAddrPending(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		wantPend bool
+		wantConn string
+		wantLink bool
+	}{
+		{"station stuck in ip-config", dev("wlan0", "wifi", "70 (connecting (getting IP configuration))", "HomeNet"), true, "HomeNet", false},
+		{"station in ip-check", dev("wlan0", "wifi", "80 (connecting (checking IP connectivity))", "HomeNet"), true, "HomeNet", false},
+		{"activated is a link, not pending", dev("wlan0", "wifi", "100 (connected)", "HomeNet"), false, "", true},
+		{"failed is neither", dev("wlan0", "wifi", "120 (failed)", "HomeNet"), false, "", false},
+		{"still authenticating is neither", dev("wlan0", "wifi", "60 (connecting (need authentication))", "HomeNet"), false, "", false},
+		{"own hotspot is excluded", dev("wlan0", "wifi", "70 (connecting (getting IP configuration))", "ff1-softap"), false, "", false},
+		{"wired stuck in ip-config", dev("eth0", "ethernet", "70 (connecting (getting IP configuration))", "Wired connection 1"), true, "Wired connection 1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lc := status.NewLinkChecker(probeExec(t, tt.output, nil), zap.NewNop())
+			r, err := lc.ExternalLinkReading(context.Background(), "ff1-softap")
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantPend, r.AddrPending)
+			assert.Equal(t, tt.wantConn, r.AddrPendingConn)
+			assert.Equal(t, tt.wantLink, r.Link)
+		})
+	}
+}

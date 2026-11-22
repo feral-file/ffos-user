@@ -9,6 +9,8 @@ import (
 	"go.uber.org/zap"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -67,11 +69,11 @@ type StatusInfo struct {
 	SetupState string
 	// Connectivity is a coarse link-state string (e.g. "connected").
 	Connectivity string
-	// TopicID is the relayer topicID. It is the transitional LAN topic-handover
-	// value replacing BLE's and is expected to be dropped in LAN contract v2.
-	// handleStatus serves it unconditionally, claimed or not: FF1 supports
-	// multiple controlling phones, so a claimed device must stay pairable
-	// from any phone on the LAN (see handleStatus for the trust-model note).
+	// TopicID is the relayer topicID — a bearer credential on ff-relayer. It
+	// is the LAN claim-handover value replacing BLE's. Providers populate it
+	// unconditionally; serveStatus owns the wire policy and serves it ONLY
+	// while the device is unclaimed (feral-file#3551; see serveStatus for the
+	// trust-model note).
 	TopicID string
 	// Network is the §4.7 health object (nil when no provisioning machine is
 	// wired — the additive field is then omitted).
@@ -85,22 +87,29 @@ type StatusInfo struct {
 // informationally equivalent to the
 // device_connect claim QR (device_id|topic_id|internet|branch|version|phase —
 // the QR's constant "pairing" phase is derivable as claimed==false with a
-// served topic_id).
+// served topic_id). Once claimed, topic_id is served as "" (see serveStatus).
 type statusResponse struct {
 	RelayerConnected       bool       `json:"relayer_connected"`
 	RelayerLastConnectedAt *time.Time `json:"relayer_last_connected_at"`
-	DeviceID               string     `json:"device_id"`
-	Version                string     `json:"version"`
-	Branch                 string     `json:"branch"`
-	Contract               string     `json:"contract"`
-	Claimed                bool       `json:"claimed"`
-	Internet               bool       `json:"internet"`
-	SetupState             string     `json:"setup_state"`
-	Connectivity           string     `json:"connectivity"`
-	TopicID                string     `json:"topic_id"`
+	// RelayV2Connected is the v2 device-ID relay socket; additive.
+	// RelayerConnected keeps meaning the legacy socket.
+	RelayV2Connected bool   `json:"relay_v2_connected"`
+	DeviceID         string `json:"device_id"`
+	Version          string `json:"version"`
+	Branch           string `json:"branch"`
+	Contract         string `json:"contract"`
+	Claimed          bool   `json:"claimed"`
+	Internet         bool   `json:"internet"`
+	SetupState       string `json:"setup_state"`
+	Connectivity     string `json:"connectivity"`
+	TopicID          string `json:"topic_id"`
 	// network is the additive §4.7 health object (docs/network-recovery-ux.md);
 	// omitted when no provisioning machine is wired.
 	Network *status.NetworkHealth `json:"network,omitempty"`
+	// Control is the feral-file#3551 capability block (§11); omitted when
+	// control.enabled is false, which is how a client tells the protocol is
+	// off.
+	Control *control.Status `json:"control,omitempty"`
 }
 
 // handleStatus serves GET /api/status — the legacy (contract "1") route, kept
@@ -129,14 +138,41 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 		info = h.statusProvider.Status(r.Context())
 	}
 
-	// topic_id is served claimed or not. FF1 is a multi-controller product:
-	// several phones control one frame, and a frame whose original phone was
-	// lost or wiped must remain pairable from any phone on the LAN. The
-	// app-side flow suppresses only the unprompted app-open claim offer for
-	// claimed devices — manual pairing always works. LAN-presence acts as the
-	// authorization boundary, matching the BLE-era posture (any nearby phone
-	// could pair without authentication); an on-device confirmation before
-	// topic handover is the LAN contract v2 path if this needs tightening.
+	// topic_id is served ONLY while the device is unclaimed (feral-file#3551
+	// LAN containment). The topic is a bearer credential on the legacy
+	// ff-relayer: serving it to any LAN peer of a claimed device handed that
+	// peer remote control of an owned frame. Unclaimed devices keep serving it
+	// because the first claim on pre-protocol firmware reads it here. Images
+	// without a legacy relayer block never get a topic, so this is "" there.
+	//
+	// Multi-phone still works without it: a second phone joins through an
+	// existing phone's "Show Pairing QR Code", whose on-screen claim QR
+	// carries the topic — physical presence, not LAN presence, is the
+	// boundary. A sole-phone owner who lost that phone recovers by factory
+	// reset. Phase 1 replaces this with per-controller approval.
+	//
+	// Wire shape: the key stays present as "" (no omitempty), exactly the
+	// pre-multi-phone shape this firmware shipped before 5061f91. The released
+	// app maps claimed==true with an empty topic_id to its known
+	// alreadyClaimed result rather than a generic connection error, so keep
+	// "claimed + empty string" — do not drop the key or invent a new marker.
+	topicID := info.TopicID
+	if info.Claimed {
+		topicID = ""
+	}
+	// Once the control protocol has an owner (or is locked), the topic is
+	// withheld even before the relayer claim lands: the owner enrolls first
+	// and claims second, and in between the topic would still be a relayer
+	// bearer credential for any LAN peer.
+	var controlStatus *control.Status
+	if h.control != nil {
+		st := h.control.Status()
+		controlStatus = &st
+		if st.State != control.StateLegacy {
+			topicID = ""
+		}
+	}
+
 	connected, lastConnected := netmetrics.RelayerSnapshot()
 	var lastConnectedAt *time.Time
 	if !lastConnected.IsZero() {
@@ -145,6 +181,7 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	resp := statusResponse{
 		RelayerConnected:       connected,
 		RelayerLastConnectedAt: lastConnectedAt,
+		RelayV2Connected:       netmetrics.RelayV2Connected(),
 		DeviceID:               info.DeviceID,
 		Version:                info.Version,
 		Branch:                 info.Branch,
@@ -153,8 +190,9 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 		Internet:               info.Internet,
 		SetupState:             info.SetupState,
 		Connectivity:           info.Connectivity,
-		TopicID:                info.TopicID,
+		TopicID:                topicID,
 		Network:                info.Network,
+		Control:                controlStatus,
 	}
 
 	if err := h.respondJSON(w, http.StatusOK, resp); err != nil {
@@ -246,16 +284,9 @@ func (p *stateStatusProvider) FF1DeviceID() string {
 // LAN payload can never disagree with the QR. Best-effort: any read/parse
 // failure yields empty values rather than failing the whole status response.
 func (p *stateStatusProvider) installedBuild() (version, branch string) {
-	configBytes, err := p.os.ReadFile(constants.FF1_CONFIG_FILE)
+	build, err := ff1config.Read(p.os, p.json)
 	if err != nil {
 		return "", ""
 	}
-	var cfg struct {
-		Version string `json:"version"`
-		Branch  string `json:"branch"`
-	}
-	if err := p.json.Unmarshal(configBytes, &cfg); err != nil {
-		return "", ""
-	}
-	return cfg.Version, cfg.Branch
+	return build.Version, build.Branch
 }

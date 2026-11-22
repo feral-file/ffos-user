@@ -24,6 +24,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,11 @@ import (
 //go:embed templates/*.html fonts/*.woff2 static/setup.css
 var assets embed.FS
 
-var tmpl = template.Must(template.ParseFS(assets, "templates/*.html"))
+// Include the shared CSS in each HTML response: joining or rescanning stops
+// the portal, so a follow-up stylesheet request may never reach it. Parsing
+// the file as a template keeps one source without bypassing html/template's
+// contextual escaping for any user-supplied data.
+var tmpl = template.Must(template.ParseFS(assets, "templates/*.html", "static/setup.css"))
 
 // Abuse bounds for the portal listener. The portal is unauthenticated by
 // design (a captive portal must be) and anything on the setup AP's subnet can
@@ -173,6 +178,11 @@ type Config struct {
 	Join   JoinFunc
 	Status StatusFunc
 	Rescan RescanFunc
+	// ScanAge, when set, reports how old the list Scan serves is (ok=false:
+	// unknown, no line). The picker shows it because the list is served at
+	// any age while the AP holds the radio and an empty refresh never
+	// replaces it, so an aged list must look aged (#267, #404).
+	ScanAge func() (age time.Duration, ok bool)
 	// ActivityObserved, when set, is invoked once per HUMAN-CAUSED portal
 	// request — the /connect and /rescan action handlers only, classified by
 	// handler, not method (the rescan form submits as GET). It feeds the
@@ -424,10 +434,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/connect", s.handleConnect)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/rescan", s.handleRescan)
-	// Explicit registrations keep these asset paths out of handleRoot's
+	// Explicit registration keeps font paths out of handleRoot's
 	// treat-unknown-paths-as-captive-probes redirect.
 	s.mux.HandleFunc("/fonts/", s.handleFonts)
-	s.mux.HandleFunc("/setup.css", s.handleSetupCSS)
 
 	// OS captive-portal probes. Returning a redirect (rather than the 204 /
 	// success body each OS looks for) is what makes the phone decide it is
@@ -535,21 +544,6 @@ func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleSetupCSS serves the shared stylesheet. Unlike the fonts it is not
-// marked immutable: the sheet changes with daemon releases, and a phone that
-// cached it across an OTA would style the new pages with the old rules. An
-// hour comfortably covers a setup session.
-func (s *Server) handleSetupCSS(w http.ResponseWriter, r *http.Request) {
-	data, err := assets.ReadFile("static/setup.css")
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	w.Header().Set("Cache-Control", "max-age=3600")
-	_, _ = w.Write(data)
-}
-
 // renderIndex writes the picker page. It is path-independent so the /connect
 // rejection path can re-render the form without tripping handleRoot's
 // non-root-path redirect.
@@ -593,7 +587,13 @@ func (s *Server) renderIndexRejection(w http.ResponseWriter, r *http.Request, re
 		SSIDs            []string
 		ManualSSIDOption string
 		LastStatus       *Status
+		ScanAge          string
 	}{SSIDs: ssids, ManualSSIDOption: manualSSIDOption}
+	if s.cfg.ScanAge != nil && len(ssids) > 0 {
+		if age, ok := s.cfg.ScanAge(); ok {
+			data.ScanAge = scanAgeText(age)
+		}
+	}
 
 	if rejection != "" {
 		// A fresh rejection outranks the machine's last join outcome: the
@@ -607,6 +607,24 @@ func (s *Server) renderIndexRejection(w http.ResponseWriter, r *http.Request, re
 	}
 
 	s.render(w, "index.html", data)
+}
+
+// scanAgeText renders the picker's list age as a phrase that completes
+// "Networks found …". Coarse on purpose: the point is "fresh" versus "old
+// enough to search again", and the page is not live.
+func scanAgeText(age time.Duration) string {
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < 2*time.Minute:
+		return "1 minute ago"
+	case age < time.Hour:
+		return strconv.Itoa(int(age/time.Minute)) + " minutes ago"
+	case age < 2*time.Hour:
+		return "over an hour ago"
+	default:
+		return strconv.Itoa(int(age/time.Hour)) + " hours ago"
+	}
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {

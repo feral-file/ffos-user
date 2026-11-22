@@ -64,8 +64,7 @@ if (($# == 0)); then
   exit 1
 fi
 
-printf '%s\n' "$@" >"${FF_PLAYER_TEST_SERVER_ARGS:?missing server args file}"
-
+all_args=("$@")
 root="${1:?missing root}"
 shift
 
@@ -91,7 +90,15 @@ while (($#)); do
   esac
 done
 
-printf '%s\n' "$$" >"${FF_PLAYER_TEST_PID_FILE:?missing pid file}"
+# The serve script starts two servers: the player on FF_PLAYER_TEST_PORT and
+# the works server on another port. Each records its own args and pid so the
+# assertions can tell them apart.
+suffix=""
+if [[ "$port" != "${FF_PLAYER_TEST_PORT:?missing port}" ]]; then
+  suffix=".works"
+fi
+printf '%s\n' "${all_args[@]}" >"${FF_PLAYER_TEST_SERVER_ARGS:?missing server args file}${suffix}"
+printf '%s\n' "$$" >"${FF_PLAYER_TEST_PID_FILE:?missing pid file}${suffix}"
 
 while [[ ! -f "${FF_PLAYER_TEST_NOTIFY_FILE:?missing notify file}" ]]; do
   sleep 0.1
@@ -131,11 +138,15 @@ chmod +x "$bin_dir/darkhttpd" "$bin_dir/curl" "$bin_dir/systemd-notify"
 
 server_args="$tmp_dir/server.args"
 
+works_port="18081"
+
 run_ready_server() {
-  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file" "$server_args"
+  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file" "$server_args" \
+    "$pid_file.works" "$server_args.works"
 
   FF_PLAYER_STATIC_ROOT="$root_dir" \
   FF_PLAYER_STATIC_PORT="$port" \
+  FF_PLAYER_WORKS_PORT="$works_port" \
   FF_PLAYER_READY_TIMEOUT_SECONDS=5 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}" \
   FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}" \
@@ -281,6 +292,29 @@ FF_PLAYER_TEST_HEADER_SUPPORT=0 \
 if grep -Fq -- "--header" "$server_args"; then
   fail "legacy darkhttpd without --header support must be started without the flag"
 fi
+
+# Works server (device-local origins for data: artworks). A bundle without the
+# data-document shell (an older player) must still reach READY, with no works
+# server and a legible journal line: the player falls back on its own.
+rm -rf "$root_dir/data-document"
+run_ready_server bash "$script_under_test"
+[ ! -e "$server_args.works" ] || fail "no works server may start without the data-document shell"
+assert_contains "$output_file" "serve-feral-player: no data-document shell"
+
+# With the shell, the works server serves ONLY the data-document directory
+# (so no other bundle page can boot in a work's origin), on its own port, on
+# loopback, with the same no-cache header as the player.
+mkdir -p "$root_dir/data-document"
+echo "<html><body>shell</body></html>" >"$root_dir/data-document/index.html"
+run_ready_server bash "$script_under_test"
+[ -s "$pid_file.works" ] || fail "expected the works server to start when the shell is present"
+[ "$(head -n 1 "$server_args.works")" = "$root_dir/data-document" ] || \
+  fail "works server root must be the data-document directory, got: $(head -n 1 "$server_args.works")"
+assert_contains "$server_args.works" "$works_port"
+assert_contains "$server_args.works" "127.0.0.1"
+assert_contains "$server_args.works" "Cache-Control: no-cache"
+[ "$(head -n 1 "$server_args")" = "$root_dir" ] || fail "player server root must stay the bundle root"
+rm -rf "$root_dir/data-document"
 
 # --- Real-binary header validation ---------------------------------------------
 # Everything above proves argument CONSTRUCTION against a fake darkhttpd; it

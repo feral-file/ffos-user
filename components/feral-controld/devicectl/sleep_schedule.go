@@ -271,6 +271,51 @@ func InvalidatePlayerSleepState(exec Executor, logger *zap.Logger) {
 	inv.invalidatePlayerSleepState()
 }
 
+// PlayerAsleep reports whether the panel is asleep for the purposes of
+// background work that must not run beside the wall (the media-health L1
+// render, feral-file/ffos-user#392): the schedule's desired state is
+// sleeping AND the last player apply succeeded at sleeping. Any other
+// tracker state (awake, a failed apply, a fresh document not yet re-driven)
+// reads as awake — the conservative side. Reached by interface assertion
+// (see InvalidatePlayerSleepState) so the Executor interface and its mock
+// stay unchanged.
+func (e *executor) PlayerAsleep() bool {
+	_, asleep := e.PlayerAsleepSince()
+	return asleep
+}
+
+// PlayerAsleepSince is PlayerAsleep with the time the player confirmed
+// the CURRENT sleep (the stamp applySleepTransition takes on each
+// transition into sleep): a consumer that polls can tell a sleep that
+// started after its last poll from one that has been going on, which a
+// bare bool cannot. (zero, false) while awake.
+func (e *executor) PlayerAsleepSince() (time.Time, bool) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	if e.sleepScheduleDesiredCache == sleepschedule.StateSleeping && e.sleepPlayerState == playerSleeping {
+		return e.sleepConfirmedAt, true
+	}
+	return time.Time{}, false
+}
+
+// PlayerAsleep is the exported seam over an Executor: false when the
+// executor does not implement the tracker (a test double).
+func PlayerAsleep(exec Executor) bool {
+	_, asleep := PlayerAsleepSince(exec)
+	return asleep
+}
+
+// PlayerAsleepSince is the exported seam over an Executor for
+// PlayerAsleepSince: (zero, false) when the executor does not implement
+// the tracker.
+func PlayerAsleepSince(exec Executor) (time.Time, bool) {
+	a, ok := exec.(interface{ PlayerAsleepSince() (time.Time, bool) })
+	if !ok {
+		return time.Time{}, false
+	}
+	return a.PlayerAsleepSince()
+}
+
 func (e *executor) invalidatePlayerSleepState() {
 	e.sleepApplyMu.Lock()
 	e.sleepPlayerState = playerFreshDocument
@@ -568,6 +613,18 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 
 	e.sleepPlayerState = playerSleepStateFor(state)
 	e.sleepLastGood = state
+	if state == sleepschedule.StateSleeping {
+		// Stamped on EVERY transition into sleep (an aligned re-apply is
+		// skipped by the caller, so a continuing sleep keeps its stamp):
+		// PlayerAsleepSince consumers measure the current sleep from here,
+		// and a wake followed by a new sleep between two of their polls
+		// must read as a new sleep, not a continuation. Wall clock when the
+		// executor has no clock (bare executors in tests).
+		e.sleepConfirmedAt = time.Now()
+		if e.clock != nil {
+			e.sleepConfirmedAt = e.clock.Now()
+		}
+	}
 	return nil
 }
 
@@ -883,6 +940,34 @@ func PlayerSleepGate(exec Executor) func() bool {
 		return func() bool { return false }
 	}
 	return g.playerSleepGateBlocked
+}
+
+// PlayerCastWakeGate returns the predicate commandrouter consults before a
+// controller's cast: does the player need waking first? It is deliberately
+// wider than PlayerSleepGate. The navigation gate asks whether navigating
+// would route a sleeping wall out of /sleep, so a FAILED wake (tracker
+// playerUnknownFailed, attempted awake, desired awake) reads as not
+// blocked. For a cast that answer is wrong: the player was last confirmed
+// sleeping and its page is still parked on /sleep, so the cast must retry
+// the wake rather than forward into it. The predicate therefore takes the
+// onAwake edge's own view of "was sleeping" (onAwakeWasSleepingLocked,
+// which keeps a failed wake eligible through sleepLastGood) OR the
+// schedule's desired state, so a page reloaded inside the sleep window is
+// woken by override before the loop can sleep it again. Executors without
+// the tracker (test doubles) yield an always-false predicate.
+func PlayerCastWakeGate(exec Executor) func() bool {
+	g, ok := exec.(interface{ playerNeedsWakeForCast() bool })
+	if !ok {
+		return func() bool { return false }
+	}
+	return g.playerNeedsWakeForCast
+}
+
+// playerNeedsWakeForCast implements PlayerCastWakeGate's predicate.
+func (e *executor) playerNeedsWakeForCast() bool {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	return e.sleepScheduleDesiredCache == sleepschedule.StateSleeping || e.onAwakeWasSleepingLocked()
 }
 
 // playerSleepGateBlocked implements PlayerSleepGate's predicate.
