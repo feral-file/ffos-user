@@ -7,4 +7,5 @@ chmod +x /home/feralfile/scripts/ota-update-success-check.sh
 chmod +x /home/feralfile/scripts/enable-wake-on-lan.sh
 chmod +x /home/feralfile/scripts/wifi-reading.sh
 chmod +x /home/feralfile/scripts/factory-check.sh
+chmod +x /home/feralfile/scripts/unit-checks.sh
 sudo chmod +x /usr/local/bin/vmagent-prod

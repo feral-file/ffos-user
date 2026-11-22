@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # factory-check.sh: the live-ISO "Factory check" boot entry (ffos
 # archiso-x86_64-linux-factory-check.conf). Boots a bare FF1 board from the
-# installer USB stick into a text screen and takes Wi-Fi readings back to back
-# on its own, nothing installed, nothing on the NVMe touched. Hands-off by
+# installer USB stick into a text screen and checks the unit back to back on
+# its own, nothing installed, nothing on the NVMe touched. Hands-off by
 # design: inside the art panel only the USB-C port is reachable once the pocket
 # cover is on, so the keyboard is needed for the boot menu only. Boot with the
 # cover off, pick the entry, unplug the keyboard, close the box, and read the
-# panel. Each reading is a numbered run of wifi-reading.sh, shown against
-# reading 1, so moving the antennas between readings shows as a delta on the
-# screen. The screen is the record (photograph it); the JSON also lands on a
-# second FAT/exFAT USB stick when one is plugged in. Runs as root on tty1 via
-# /root/.automated_script.sh. Ends when the power is pulled.
+# panel. Each reading is a numbered run of unit-checks.sh (brightness over
+# DDC/CI, a tone on each speaker, a Bluetooth discovery) and then of
+# wifi-reading.sh, shown against reading 1, so moving the antennas between
+# readings shows as a delta on the screen. The two never run at once: Wi-Fi and
+# Bluetooth share the card's radio. The panel's brightness is stepped until it
+# has passed once, then left alone, so that pulling the power later cannot
+# leave a panel at a test level. The speakers sound on every reading, for
+# whoever is listening. The screen is the record (photograph it); the JSON also
+# lands on a second FAT/exFAT USB stick when one is plugged in. Runs as root on
+# tty1 via /root/.automated_script.sh. Ends when the power is pulled.
 set -uo pipefail
 
-SCRIPTS=/home/feralfile/scripts
+SCRIPTS="${FF_SCRIPTS:-/home/feralfile/scripts}"
+SCREEN="${FF_SCREEN:-/dev/tty}"
 RESULTS=/root/factory-check
 MOUNT=/mnt/factory-check
 CMDLINE="${FF_CMDLINE:-/proc/cmdline}"
@@ -65,14 +71,32 @@ results_stick() {
 
 header() {
   clear
-  echo "Feral File factory check: Wi-Fi reading        board $(cat /etc/hostname 2>/dev/null)"
+  echo "Feral File factory check        board $(cat /etc/hostname 2>/dev/null)"
   echo "$results_line"
+  echo "Each reading: brightness, speakers (low tone LEFT, then high tone RIGHT), Bluetooth, Wi-Fi."
   echo "Readings repeat on their own; the keyboard can be unplugged and the box closed."
   echo "Photograph the screen for each antenna placement. Pull the power to finish."
   echo "-------------------------------------------------------------------------------------"
 }
 
-# Sourced (scripts/test-wifi-reading.sh), only the functions load.
+# unit_checks <n>: run reading n's unit checks on the screen and leave their
+# "== " result lines in $checks. Whatever unit-checks.sh does, this returns.
+checks=""
+brightness_pass="" # the line of the reading in which the panel passed
+unit_checks() {
+  local out leave_out=()
+  [ -n "$brightness_pass" ] && leave_out=(-x brightness)
+  out=$(bash "$SCRIPTS/unit-checks.sh" record "r$1" -o "$RESULTS" "${leave_out[@]}" 2>&1 | tee "$SCREEN") || true
+  checks=$(grep '^== ' <<<"$out") || checks="== unit checks did not run"
+  if [ -n "$brightness_pass" ]; then
+    checks="$brightness_pass"$'\n'"$checks"
+  elif grep -q '^== Brightness *PASS' <<<"$checks"; then
+    brightness_pass="$(grep '^== Brightness' <<<"$checks") (reading $1)"
+  fi
+}
+
+# Sourced (scripts/test-wifi-reading.sh, scripts/test-unit-checks.sh), only the
+# functions load.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 if iface=$(wait_for_wifi); then
@@ -100,7 +124,9 @@ while true; do
   header
   echo "Reading $n  $(date '+%H:%M:%S')  Wi-Fi $iface $(cat "/sys/class/net/$iface/address")"
   echo
-  if out=$(bash "$SCRIPTS/wifi-reading.sh" record "r$n" -n "$SCANS" -o "$RESULTS" 2>&1 | tee /dev/tty); then
+  unit_checks "$n"
+  echo
+  if out=$(bash "$SCRIPTS/wifi-reading.sh" record "r$n" -n "$SCANS" -o "$RESULTS" 2>&1 | tee "$SCREEN"); then
     current=$(sed -n 's/^saved //p' <<<"$out")
     if [ -z "$first" ]; then
       first=$current
@@ -108,9 +134,13 @@ while true; do
       say "Reading $n against reading 1:"
       bash "$SCRIPTS/wifi-reading.sh" compare "$first" "$current" | grep -E 'GHz: median|seen only in'
     fi
-    sync
   else
-    say "Reading failed; trying again."
+    say "Wi-Fi reading failed; trying again."
   fi
+  # Again at the foot of the screen: a long access-point table scrolls the
+  # checks' own lines off the top.
+  say "Unit checks, reading $n:"
+  echo "$checks"
+  sync
   sleep "$PAUSE_SECONDS"
 done
