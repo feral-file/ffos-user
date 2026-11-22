@@ -48,7 +48,7 @@ chmod +x "$base_bin/sleep" "$base_bin/id"
 stub() { cat > "$fake_bin/$1"; chmod +x "$fake_bin/$1"; }
 unstub() { rm -f "$fake_bin/$1"; }
 
-run() { XDG_RUNTIME_DIR=/run/user/test PATH="$fake_bin:$base_bin" FF_TEST_DIR="$tmp_dir" "$base_bin/bash" "$@"; }
+run() { FF_STATE_DIR="$tmp_dir" XDG_RUNTIME_DIR=/run/user/test PATH="$fake_bin:$base_bin" FF_TEST_DIR="$tmp_dir" "$base_bin/bash" "$@"; }
 check() { run "$unit_checks" "$@" 2>&1; }
 
 # --- brightness: the panel follows, does not follow, is not there.
@@ -102,7 +102,13 @@ out=$(FF_TEST_DDC=no-return check brightness) && fail "a panel left at a test le
 expect "brightness not restored" '^== Brightness +FAIL +the panel was at 40 and would not go back: it now reads 75' "$out"
 [ "$(grep -c 'setvcp .* 40$' "$tmp_dir/ddcutil.log")" = 6 ] || \
   fail "a panel that did not go back was not asked again: $(grep -c 'setvcp .* 40$' "$tmp_dir/ddcutil.log") tries"
-echo 40 > "$tmp_dir/brightness"
+# The next run still knows where the panel belongs: it starts from the level
+# owed, not from the one it finds, and passes only once the panel is back there.
+out=$(FF_TEST_DDC=follow check brightness) || fail "a panel that recovered did not pass:
+$out"
+expect "brightness owed from the run before" '^== Brightness +PASS .*back at 40 \(max 100\)' "$out"
+[ "$(cat "$tmp_dir/brightness")" = 40 ] || fail "the level owed from the run before was not put back"
+[ ! -e "$tmp_dir/unit-checks.brightness" ] || fail "the level owed was kept after the panel went back"
 
 out=$(FF_TEST_DDC=no-display check brightness) && fail "no DDC/CI display passed"
 expect "no DDC/CI display" '^== Brightness +NO-DDC +no DDC/CI display found' "$out"
@@ -123,7 +129,8 @@ case "$1" in
   get-default-sink) [ -n "$FF_TEST_SINK" ] && echo "$FF_TEST_SINK" ;;
   get-sink-volume) printf 'Volume: front-left: 26241 /  40%% / -23.85 dB,   front-right: 13107 /  20%% / -41.94 dB\n        balance -0.50\n' ;;
   get-sink-mute) [ "${FF_TEST_MUTE:-yes}" != unreadable ] && echo "Mute: ${FF_TEST_MUTE:-yes}" ;;
-  set-sink-volume | set-sink-mute) ;;
+  set-sink-volume) [ "${FF_TEST_RESTORE:-ok}" = ok ] || [ "$3" = "63%" ] ;;
+  set-sink-mute) ;;
   *) echo "unexpected pactl $*" >&2; exit 1 ;;
 esac
 EOF
@@ -179,6 +186,13 @@ out=$(FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_MUTE=unreadable check speaker
 $out"
 expect "played as found" '^== Speakers +PLAYED .*volume as found' "$out"
 grep -q '^set-sink' "$tmp_dir/pactl.log" && fail "volume or mute was changed without a way back"
+
+# A volume that will not go back is asked again, and the line says so.
+: > "$tmp_dir/pactl.log"
+out=$(FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_RESTORE=refused check speakers) && fail "a volume left at the test level counted as played"
+expect "volume not restored" '^== Speakers +FAIL +the tones played, but the volume could not be put back' "$out"
+[ "$(grep -c '^set-sink-volume alsa_output.hdmi-stereo 26241 13107 ' "$tmp_dir/pactl.log")" = 6 ] || \
+  fail "a volume that did not go back was not asked again: $(cat "$tmp_dir/pactl.log")"
 
 # As root on the live ISO: feralfile's PulseAudio, started when it is not up.
 root_stubs

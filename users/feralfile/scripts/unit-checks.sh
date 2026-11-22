@@ -29,6 +29,9 @@ AUDIO_USER="${FF_AUDIO_USER:-feralfile}" # owns the PulseAudio the player uses
 
 STATUS="" DETAIL="" DATA=null
 BRIGHTNESS_RESTORE=""                         # the level to put the panel back to
+# The same level on disk while the panel is away from it, so a later run (the
+# factory loop starts one per reading) still knows where the panel belongs.
+BRIGHTNESS_OWED="${FF_STATE_DIR:-${TMPDIR:-/tmp}}/unit-checks.brightness"
 AUDIO_SINK="" AUDIO_VOLUMES="" AUDIO_MUTE=""  # the sink's state to put back
 AUDIO_UID=""
 
@@ -85,17 +88,21 @@ brightness_restore() {
   [ -n "$BRIGHTNESS_RESTORE" ] || return 0
   for i in 1 2 3; do
     back=$(ddc_follow "$BRIGHTNESS_RESTORE")
-    if [ "$back" = "$BRIGHTNESS_RESTORE" ]; then BRIGHTNESS_RESTORE=""; break; fi
+    if [ "$back" = "$BRIGHTNESS_RESTORE" ]; then
+      BRIGHTNESS_RESTORE=""
+      rm -f "$BRIGHTNESS_OWED"
+      break
+    fi
   done
   echo "$back"
 }
 
 check_brightness() {
-  local reading cur max low high target steps="" ok=1 back
+  local reading cur max low high target steps="" ok=1 back owed
   DATA=null
   if ! have ddcutil; then result Brightness SKIP "ddcutil is not on this image"; return; fi
   # ddcutil's package loads i2c-dev at boot; make sure before blaming the panel.
-  if is_root && ! compgen -G '/dev/i2c-*' >/dev/null; then modprobe i2c-dev 2>/dev/null || true; fi
+  if is_root && ! compgen -G '/dev/i2c-*' >/dev/null; then run 15 modprobe i2c-dev 2>/dev/null || true; fi
 
   if ! reading=$(ddc_get); then
     if run 60 ddcutil detect --brief 2>/dev/null | grep -q '^Display [0-9]'; then
@@ -107,6 +114,10 @@ check_brightness() {
     return
   fi
   read -r cur max <<<"$reading"
+  # An earlier run left the panel away from its level: that level, not the one
+  # it reads now, is where this run starts from and returns to.
+  owed=$(cat "$BRIGHTNESS_OWED" 2>/dev/null) || owed=""
+  if [[ "$owed" =~ ^[0-9]+$ ]] && [ "$owed" -le "$max" ]; then cur=$owed; fi
   if [ "$max" -lt 4 ]; then
     result Brightness FAIL "the panel reports a brightness range of 0-$max, too small to step through"
     json --arg status "$STATUS" --arg detail "$DETAIL" '{status: $status, detail: $detail}'
@@ -116,6 +127,7 @@ check_brightness() {
 
   echo "Brightness: the panel dims, brightens, and returns to $cur. Keep the power on until it has."
   BRIGHTNESS_RESTORE=$cur
+  echo "$cur" >"$BRIGHTNESS_OWED" 2>/dev/null || true
   for target in "$low" "$high"; do
     back=$(ddc_follow "$target")
     steps+="${steps:+ }$target:$back"
@@ -155,12 +167,21 @@ pa() {
 
 # Put the sink's volume and mute back as they were found. Armed only once both
 # were read, and before either is touched.
+# Stays armed until both took, so the exit trap has one more go; returns 1 when
+# they did not.
 audio_restore() {
+  local i
   [ -n "$AUDIO_SINK" ] || return 0
-  # shellcheck disable=SC2086 # one volume per channel
-  pa 10 pactl set-sink-volume "$AUDIO_SINK" $AUDIO_VOLUMES >/dev/null 2>&1 || true
-  pa 10 pactl set-sink-mute "$AUDIO_SINK" "$AUDIO_MUTE" >/dev/null 2>&1 || true
-  AUDIO_SINK=""
+  for i in 1 2 3; do
+    # shellcheck disable=SC2086 # one volume per channel
+    if pa 10 pactl set-sink-volume "$AUDIO_SINK" $AUDIO_VOLUMES >/dev/null 2>&1 &&
+      pa 10 pactl set-sink-mute "$AUDIO_SINK" "$AUDIO_MUTE" >/dev/null 2>&1; then
+      AUDIO_SINK=""
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 # tone <left|right> <hz> -> raw 48 kHz stereo s16le on stdout, one channel
@@ -237,9 +258,9 @@ check_speakers() {
   play left 440 "$sink" || played=0
   echo "Speakers: >>> RIGHT speaker, HIGH tone, now"
   play right 880 "$sink" || played=0
-  audio_restore
-
-  if [ "$played" -eq 1 ]; then
+  if ! audio_restore; then
+    result Speakers FAIL "the tones played, but the volume could not be put back on $sink (it is at $level, unmuted)"
+  elif [ "$played" -eq 1 ]; then
     result Speakers PLAYED "listen: low tone LEFT, then high tone RIGHT, each from its own side only (output $sink, volume $level)"
   else
     result Speakers FAIL "the tone could not be played to $sink"
