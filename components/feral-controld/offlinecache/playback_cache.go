@@ -9,6 +9,8 @@ import (
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
 const maxAutomaticItems = 2048
@@ -99,6 +101,10 @@ func (p *playbackCache) observe(items []dp1playlist.PlaylistItem, index int, rea
 			// must not disable warming of its eligible playlist neighbors.
 			continue
 		}
+		// An onchfs work stays in the list: it is never captured (prepare
+		// skips it; OnchfsMaterializer writes it), but it must count as
+		// playing and protected, or speculative reclaim deletes the work
+		// on screen to warm the next item (PR #461 review F15).
 		sources[i] = item.Source
 	}
 	p.mu.Lock()
@@ -180,6 +186,9 @@ func (p *playbackCache) prepare(ctx context.Context) {
 			}
 			p.mu.Unlock()
 			continue
+		}
+		if contentpath.IsOnchfsSourceURL(source) {
+			continue // written by OnchfsMaterializer, never captured
 		}
 		p.mu.Lock()
 		if p.generation != generation {

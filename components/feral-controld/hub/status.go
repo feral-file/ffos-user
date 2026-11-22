@@ -10,6 +10,7 @@ import (
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -71,8 +72,8 @@ type StatusInfo struct {
 	// TopicID is the relayer topicID — a bearer credential on ff-relayer. It
 	// is the LAN claim-handover value replacing BLE's. Providers populate it
 	// unconditionally; serveStatus owns the wire policy and serves it ONLY
-	// while the device is unclaimed (feral-file#3551 phase 0; see serveStatus
-	// for the trust-model note).
+	// while the device is unclaimed (feral-file#3551; see serveStatus for the
+	// trust-model note).
 	TopicID string
 	// Network is the §4.7 health object (nil when no provisioning machine is
 	// wired — the additive field is then omitted).
@@ -138,11 +139,11 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 	}
 
 	// topic_id is served ONLY while the device is unclaimed (feral-file#3551
-	// phase 0, LAN containment). The topic is a bearer credential on
+	// LAN containment). The topic is a bearer credential on the legacy
 	// ff-relayer: serving it to any LAN peer of a claimed device handed that
-	// peer remote control of an owned frame, and with it the topic-gated LAN
-	// surfaces (sshAccess, screenshot — see lanauth.go). Unclaimed devices keep
-	// serving it because the first claim reads it here.
+	// peer remote control of an owned frame. Unclaimed devices keep serving it
+	// because the first claim on pre-protocol firmware reads it here. Images
+	// without a legacy relayer block never get a topic, so this is "" there.
 	//
 	// Multi-phone still works without it: a second phone joins through an
 	// existing phone's "Show Pairing QR Code", whose on-screen claim QR
@@ -283,16 +284,9 @@ func (p *stateStatusProvider) FF1DeviceID() string {
 // LAN payload can never disagree with the QR. Best-effort: any read/parse
 // failure yields empty values rather than failing the whole status response.
 func (p *stateStatusProvider) installedBuild() (version, branch string) {
-	configBytes, err := p.os.ReadFile(constants.FF1_CONFIG_FILE)
+	build, err := ff1config.Read(p.os, p.json)
 	if err != nil {
 		return "", ""
 	}
-	var cfg struct {
-		Version string `json:"version"`
-		Branch  string `json:"branch"`
-	}
-	if err := p.json.Unmarshal(configBytes, &cfg); err != nil {
-		return "", ""
-	}
-	return cfg.Version, cfg.Branch
+	return build.Version, build.Branch
 }

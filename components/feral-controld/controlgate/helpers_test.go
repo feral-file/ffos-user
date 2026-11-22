@@ -22,10 +22,10 @@ const testDevice = "FF1-GATETEST"
 var b64 = base64.RawURLEncoding
 
 // newAuthority opens a fresh in-memory legacy authority.
-func newAuthority(t *testing.T, enforced bool) (*control.Authority, *control.MemFS) {
+func newAuthority(t *testing.T) (*control.Authority, *control.MemFS) {
 	t.Helper()
 	fsys := control.NewMemFS()
-	a, err := control.New(control.Config{Dir: "/s/control", DeviceID: testDevice, FS: fsys, Enforced: enforced})
+	a, err := control.New(control.Config{Dir: "/s/control", DeviceID: testDevice, FS: fsys})
 	if err != nil || a.LockErr() != nil {
 		t.Fatal(err, a.LockErr())
 	}

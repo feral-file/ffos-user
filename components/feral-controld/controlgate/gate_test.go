@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -43,7 +41,7 @@ func enrollOwner(t *testing.T, g *controlgate.Gate, a *control.Authority) *clien
 }
 
 func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	rec := &recorder{}
 	g := controlgate.New(a, rec, zap.NewNop())
 	enrolled := false
@@ -98,7 +96,7 @@ func TestHandleEnvelopeRunsAsPrincipal(t *testing.T) {
 // §5.5: a committed releaseOwnership fires the released hook, so the
 // invitation QR goes up; the router never sees it.
 func TestHandleEnvelopeReleaseHook(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	rec := &recorder{}
 	g := controlgate.New(a, rec, zap.NewNop())
 	released := 0
@@ -126,7 +124,7 @@ func TestHandleEnvelopeReleaseHook(t *testing.T) {
 }
 
 func TestHandleEnvelopeRequestShape(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	for _, body := range []string{``, `null`, `{}`, `{"v":2,"jwe":"x"}`, `{"v":1}`, `{"v":1,"jwe":""}`, `{"v":1,"jwe":"a","x":1}`, `{"jwe":"a","x":1}`} {
 		_, perr := g.HandleEnvelope(context.Background(), json.RawMessage(body), control.Origin{})
@@ -141,15 +139,24 @@ func TestHandleEnvelopeRequestShape(t *testing.T) {
 }
 
 func TestPlaintextPolicyFollowsState(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	cmd := commands.Command{Type: "factoryReset"}
-	if d, _ := g.Plaintext(control.RouteLAN, cmd); !d.Allow {
-		t.Fatal("legacy refused plaintext")
+	if d, _ := g.Plaintext(control.RouteLAN, cmd); d.Code != control.CodeEnrollmentRequired {
+		t.Fatalf("legacy LAN owner-tier plaintext: %+v", d)
+	}
+	if d, _ := g.Plaintext(control.RouteLAN, commands.Command{Type: "displayPlaylist"}); !d.Allow {
+		t.Fatal("legacy refused LAN controller-tier plaintext")
 	}
 	enrollOwner(t, g, a)
+	if d, _ := g.Plaintext(control.RouteLAN, commands.Command{Type: "displayPlaylist"}); !d.Allow {
+		t.Fatalf("enrolled, switch open: %+v", d)
+	}
+	if err := a.Store().SetLANOpen(false); err != nil {
+		t.Fatal(err)
+	}
 	if d, _ := g.Plaintext(control.RouteLAN, commands.Command{Type: "displayPlaylist"}); d.Code != control.CodeEnrollmentRequired {
-		t.Fatalf("%+v", d)
+		t.Fatalf("enrolled, switch closed: %+v", d)
 	}
 	if d, _ := g.Plaintext(control.RouteRelayer, cmd); d.Code != control.CodeEnvelopeRequired {
 		t.Fatalf("%+v", d)
@@ -183,7 +190,7 @@ type requestSourceKey struct{}
 // a relay that routes replies by a source carried in the context would hand
 // the owners' approval requests to the requester.
 func TestPublishAdmissionDetachesRequestContext(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	owner := enrollOwner(t, g, a)
 	rel := &fakeRelayer{}
@@ -243,51 +250,73 @@ func kinds(msgs []json.RawMessage) (plain, sealed int, ctls []string) {
 
 func TestSealingWrappersPerState(t *testing.T) {
 	note := map[string]any{"type": "notification", "notification_type": "device_status", "message": map[string]any{"volume": 3}, "persist_record_count": 1}
-	for _, enforced := range []bool{false, true} {
-		a, _ := newAuthority(t, enforced)
-		g := controlgate.New(a, &recorder{}, zap.NewNop())
-		fr := &fakeRelayer{}
-		fw := &fakeWS{}
-		wr := controlgate.WrapRelayer(fr, a, zap.NewNop())
-		ww := controlgate.WrapWS(fw, a, zap.NewNop())
+	mint := relayer.Response{Type: "notification", NotificationType: "mint_pairing_approval_request", Message: map[string]any{"x": 1}}
+	approval := map[string]any{"type": "notification", "notification_type": control.NotificationApprovalRequest, "message": map[string]any{}}
+	a, _ := newAuthority(t)
+	g := controlgate.New(a, &recorder{}, zap.NewNop())
+	fr := &fakeRelayer{}
+	fw := &fakeWS{}
+	wr := controlgate.WrapRelayer(fr, a, zap.NewNop())
+	ww := controlgate.WrapWS(fw, a, zap.NewNop())
 
-		// legacy: plaintext only, RPC untouched.
-		_ = wr.Send(context.Background(), note)
-		_ = ww.SendAll(note)
-		_ = wr.Send(context.Background(), relayer.Response{Type: "RPC", MessageID: "m", Message: map[string]any{"ok": true}})
-		if p, s, _ := kinds(fr.sent); p != 2 || s != 0 {
-			t.Fatalf("legacy relayer: plain %d sealed %d", p, s)
-		}
-		if p, s, _ := kinds(fw.sent); p != 1 || s != 0 {
-			t.Fatalf("legacy ws: plain %d sealed %d", p, s)
-		}
+	// legacy: plaintext only, RPC untouched.
+	_ = wr.Send(context.Background(), note)
+	_ = ww.SendAll(note)
+	_ = wr.Send(context.Background(), relayer.Response{Type: "RPC", MessageID: "m", Message: map[string]any{"ok": true}})
+	if p, s, _ := kinds(fr.sent); p != 2 || s != 0 {
+		t.Fatalf("legacy relayer: plain %d sealed %d", p, s)
+	}
+	if p, s, _ := kinds(fw.sent); p != 1 || s != 0 {
+		t.Fatalf("legacy ws: plain %d sealed %d", p, s)
+	}
 
-		owner := enrollOwner(t, g, a)
-		fr.sent, fw.sent = nil, nil
-		_ = wr.Send(context.Background(), note)
-		_ = ww.SendAll(note)
-		// mint pairing's struct shape is recognized too.
-		_ = wr.Send(context.Background(), relayer.Response{Type: "notification", NotificationType: "mint_pairing_approval_request", Message: map[string]any{"x": 1}})
-		rp, rs, ctls := kinds(fr.sent)
-		wp, ws, _ := kinds(fw.sent)
-		wantRelayerPlain := 2
-		if enforced {
-			wantRelayerPlain = 0
+	// enrolled, switch open: the relayer keeps plaintext for old apps; the
+	// LAN WS adds plaintext for the status types only (feral-file#3551),
+	// never for mint pairing or approval requests.
+	owner := enrollOwner(t, g, a)
+	fr.sent, fw.sent = nil, nil
+	_ = wr.Send(context.Background(), note)
+	_ = ww.SendAll(note)
+	_ = ww.SendAll(mint)
+	_ = ww.SendAll(approval)
+	// mint pairing's struct shape is recognized too.
+	_ = wr.Send(context.Background(), mint)
+	rp, rs, ctls := kinds(fr.sent)
+	wp, ws, _ := kinds(fw.sent)
+	if rp != 2 || rs != 2 || wp != 1 || ws != 3 {
+		t.Fatalf("enrolled, open: relayer plain %d sealed %d, ws plain %d sealed %d", rp, rs, wp, ws)
+	}
+	if ctls[0] != owner.ctl {
+		t.Fatalf("sealed for %v", ctls)
+	}
+	// The owner opens what it got.
+	var wire struct {
+		Message control.Sealed `json:"message"`
+	}
+	for _, m := range fw.sent {
+		if _ = json.Unmarshal(m, &wire); wire.Message.JWE != "" {
+			break
 		}
-		if rp != wantRelayerPlain || rs != 2 || wp != 0 || ws != 1 {
-			t.Fatalf("enforced=%v: relayer plain %d sealed %d, ws plain %d sealed %d", enforced, rp, rs, wp, ws)
+	}
+	if _, err := control.OpenNotification(wire.Message.JWE, owner.ctl, owner.nkFrom(t, g)); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []string{"device_status", "player_status", "ddc_status", "offline_cache_status"} {
+		fw.sent = nil
+		_ = ww.SendAll(map[string]any{"type": "notification", "notification_type": typ, "message": map[string]any{}})
+		if p, s, _ := kinds(fw.sent); p != 1 || s != 1 {
+			t.Fatalf("%s on the LAN WS, switch open: plain %d sealed %d", typ, p, s)
 		}
-		if ctls[0] != owner.ctl {
-			t.Fatalf("sealed for %v", ctls)
-		}
-		// The owner opens what it got.
-		var wire struct {
-			Message control.Sealed `json:"message"`
-		}
-		_ = json.Unmarshal(fw.sent[0], &wire)
-		if _, err := control.OpenNotification(wire.Message.JWE, owner.ctl, owner.nkFrom(t, g)); err != nil {
-			t.Fatal(err)
-		}
+	}
+
+	// enrolled, switch closed: the LAN WS is sealed-only again.
+	if err := a.Store().SetLANOpen(false); err != nil {
+		t.Fatal(err)
+	}
+	fw.sent = nil
+	_ = ww.SendAll(note)
+	if p, s, _ := kinds(fw.sent); p != 0 || s != 1 {
+		t.Fatalf("enrolled, closed: ws plain %d sealed %d", p, s)
 	}
 }
 
@@ -317,9 +346,9 @@ func (c *client) nkFrom(t *testing.T, g *controlgate.Gate) []byte {
 // "request" token; such messages are refused, and an allowed command runs
 // with Arguments decoded from the very bytes the policy judged.
 func TestPlaintextAmbiguityAndNormalization(t *testing.T) {
-	a, _ := newAuthority(t, true)
+	a, _ := newAuthority(t)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
-	enrollOwner(t, g, a) // enforced: relayer plaintext is the exact Play shape only
+	enrollOwner(t, g, a)
 	for _, msg := range []string{
 		`{"command":"displayPlaylist","request":{"intent":{"action":"now_display"},"dp1_call":{}},"Request":{"evil":1}}`,
 		`{"command":"displayPlaylist","Request":{"evil":1},"request":{"intent":{"action":"now_display"},"dp1_call":{}}}`,
@@ -345,7 +374,7 @@ func TestPlaintextAmbiguityAndNormalization(t *testing.T) {
 
 // Review F1: a live invitation protects the screen.
 func TestScreenProtectedWhileInvitationLive(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	if g.ScreenProtected() {
 		t.Fatal("protected with no invitation")
@@ -366,7 +395,7 @@ func TestScreenProtectedWhileInvitationLive(t *testing.T) {
 // (routing metadata, not content). Review round 4 M2: it is never persisted
 // (persist_record_count 0), whatever the original's count.
 func TestSealedCopyCarriesMessageIDNotPersisted(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	g := controlgate.New(a, &recorder{}, zap.NewNop())
 	enrollOwner(t, g, a)
 	fr := &fakeRelayer{}
@@ -390,7 +419,7 @@ func TestSealedCopyCarriesMessageIDNotPersisted(t *testing.T) {
 // logged with the verified controller, its role, the op, the command name
 // and the code, and nothing of the request body, rk, nk or JWE.
 func TestRefusedRequestAuditLog(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	core, logs := observer.New(zapcore.InfoLevel)
 	g := controlgate.New(a, &recorder{}, zap.New(core))
 	owner := enrollOwner(t, g, a)
@@ -443,52 +472,9 @@ func (r *toggleRelayer) IsConnected() bool {
 	}
 }
 
-// Hardware follow-up: on an enforced boot the stored plaintext history on
-// the relayer is overwritten once the relayer connects; nothing is sent in
-// any other state.
-func TestPurgeStalePlaintextOnEnforcedBoot(t *testing.T) {
-	for _, enforced := range []bool{false, true} {
-		a, _ := newAuthority(t, enforced)
-		g := controlgate.New(a, &recorder{}, zap.NewNop())
-		enrollOwner(t, g, a)
-		r := &toggleRelayer{connected: make(chan struct{})}
-		done := make(chan int)
-		go func() {
-			done <- controlgate.PurgeStalePlaintext(context.Background(), a, r, zap.NewNop(), time.Millisecond, 5*time.Second)
-		}()
-		time.Sleep(20 * time.Millisecond)
-		close(r.connected)
-		n := <-done
-		if !enforced {
-			if n != 0 || len(r.sent) != 0 {
-				t.Fatalf("purged in enrolled state: %d", n)
-			}
-			continue
-		}
-		if n != 6 || len(r.sent) != 6 {
-			t.Fatalf("purge sent %d", n)
-		}
-		types := map[string]bool{}
-		for _, m := range r.sent {
-			var v map[string]any
-			_ = json.Unmarshal(m, &v)
-			if v["type"] != "notification" || v["persist_record_count"] != float64(1) || fmt.Sprint(v["message"]) != "map[]" {
-				t.Fatalf("purge message shape: %s", m)
-			}
-			types[v["notification_type"].(string)] = true
-		}
-		for _, want := range []string{"device_status", "player_status", "ddc_status", "offline_cache_status",
-			"mint_pairing_approval_request", "mint_pairing_approval_outcome"} {
-			if !types[want] {
-				t.Fatalf("purged types %v, missing %s", types, want)
-			}
-		}
-	}
-}
-
 // Producer readiness must not suppress private v2 updates during legacy outage.
 func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	legacy := &toggleRelayer{connected: make(chan struct{})}
 	wrapped := controlgate.WrapRelayer(legacy, a, zap.NewNop())
 	live := true
@@ -521,7 +507,7 @@ func TestSealingRelayerV2OnlyReadiness(t *testing.T) {
 // the browser approval_unavailable); any other type still reports the
 // legacy outage, and so does mint pairing nobody was bound for.
 func TestSealingRelayerMintPairingSucceedsOnV2Alone(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	legacy := &toggleRelayer{connected: make(chan struct{})}
 	wrapped := controlgate.WrapRelayer(legacy, a, zap.NewNop())
 	queued := true

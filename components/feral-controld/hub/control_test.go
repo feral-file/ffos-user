@@ -23,10 +23,27 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// stubGate is a ControlGate with a fixed state and a recorded envelope.
+const testTopic = "topic-0123456789abcdef"
+
+var (
+	claimedWithTopic = state.ClaimInfo{DeviceID: "phone-1", Claimed: true, TopicID: testTopic, TopicReady: true}
+	unclaimed        = state.ClaimInfo{TopicID: testTopic, TopicReady: true}
+)
+
+func castRequest(command string) *http.Request {
+	body := `{"command":"` + command + `","request":{}}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:1111/api/cast", strings.NewReader(body))
+	req.RemoteAddr = "192.168.1.10:41000"
+	return req
+}
+
+// stubGate is a ControlGate with a fixed state and a recorded envelope. It
+// runs the real §7.2 package policy, so the hub tests below exercise the
+// LAN rule end to end through the route.
 type stubGate struct {
 	gen       uint64
 	state     control.State
+	lanClosed bool
 	envelope  json.RawMessage
 	origin    control.Origin
 	protected bool
@@ -40,7 +57,7 @@ func (s *stubGate) HandleEnvelope(_ context.Context, raw json.RawMessage, origin
 	return &controlgate.Wire{V: 1, JWE: "reply"}, nil
 }
 func (s *stubGate) Plaintext(route control.Route, cmd commands.Command) (control.Decision, commands.Command) {
-	return control.Policy(s.state, route, string(cmd.Type), cmd.RawArguments), cmd
+	return control.Policy(s.state, !s.lanClosed, route, string(cmd.Type), cmd.RawArguments), cmd
 }
 func (s *stubGate) ScreenProtected() bool        { return s.protected }
 func (s *stubGate) InvitationGeneration() uint64 { return s.gen }
@@ -62,7 +79,7 @@ func TestControlDisabledIsUnchanged(t *testing.T) {
 		assert.Equal(t, commands.Type(control.CmdEnvelope), c.Type)
 		return map[string]any{"ok": false}, nil
 	})
-	rec := serve(mux, castRequest(control.CmdEnvelope, nil))
+	rec := serve(mux, castRequest(control.CmdEnvelope))
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/v2/status", nil)
@@ -72,7 +89,9 @@ func TestControlDisabledIsUnchanged(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"topic_id":"`+testTopic+`"`)
 }
 
-// newControlHub is newGateHub plus a stub control gate in state st.
+// newControlHub builds a hub on a real mux with real JSON and a stub control
+// gate in state st ("" = control disabled), so requests run the whole route:
+// middleware, single body decode, the §7.2 policy, and the router mock.
 func newControlHub(t *testing.T, claim state.ClaimInfo, st control.State) (*http.ServeMux, *mocks.MockCommandHandler, *stubGate) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
@@ -83,7 +102,6 @@ func newControlHub(t *testing.T, claim state.ClaimInfo, st control.State) (*http
 	provider := fixedStatus{TopicID: claim.TopicID, Claimed: claim.Claimed}
 	h := New(context.Background(), mocks.NewMockWS(ctrl), mockCmd, provider, &fakeScreenshotCapturer{image: &screenshot.Image{Data: []byte("png"), Width: 1, Height: 1}}, mockServer,
 		wrapper.NewJSON(), zap.NewNop()).(*hub)
-	h.claimSnapshot = func() state.ClaimInfo { return claim }
 	if st == "" {
 		return mux, mockCmd, nil // control disabled
 	}
@@ -116,27 +134,49 @@ func TestControlEnvelopeRoute(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, serve(mux, req).Code)
 }
 
+// TestControlPlaintextPolicyOnLAN pins the LAN rule (feral-file#3551) through
+// the hub route: the undoable set runs for anyone on the LAN, the rest is
+// refused before the router (the mock carries an expectation only for the
+// allowed commands, so a refused one reaching it fails the test).
 func TestControlPlaintextPolicyOnLAN(t *testing.T) {
-	// Legacy: policy allows, and the phase-0 topic gate still guards
-	// sshAccess on a claimed device.
-	mux, mockCmd, _ := newControlHub(t, claimedWithTopic, control.StateLegacy)
-	rec := serve(mux, castRequest("sshAccess", nil))
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "topic_required")
-	mockCmd.EXPECT().Process(gomock.Any(), gomock.Any()).Return(map[string]any{"ok": true}, nil)
-	assert.Equal(t, http.StatusOK, serve(mux, castRequest("displayPlaylist", nil)).Code)
-
-	for _, st := range []control.State{control.StateEnrolled, control.StateEnforced, control.StateLocked} {
-		mux, _, _ := newControlHub(t, claimedWithTopic, st)
-		rec := serve(mux, castRequest("displayPlaylist", strPtr(testTopic)))
-		want := control.CodeEnrollmentRequired
-		status := http.StatusForbidden
-		if st == control.StateLocked {
-			want, status = control.CodeLocked, http.StatusUnauthorized
-		}
-		assert.Equal(t, status, rec.Code, st)
-		assert.JSONEq(t, string(control.PublicErrorBody(want)), rec.Body.String(), st)
+	refused := func(t *testing.T, mux *http.ServeMux, cmd, code string, status int) {
+		t.Helper()
+		rec := serve(mux, castRequest(cmd))
+		assert.Equal(t, status, rec.Code, cmd)
+		assert.JSONEq(t, string(control.PublicErrorBody(code)), rec.Body.String(), cmd)
 	}
+	allowed := func(t *testing.T, mux *http.ServeMux, mockCmd *mocks.MockCommandHandler, cmd string) {
+		t.Helper()
+		mockCmd.EXPECT().Process(gomock.Any(), gomock.Any()).Return(map[string]any{"ok": true}, nil)
+		assert.Equal(t, http.StatusOK, serve(mux, castRequest(cmd)).Code, cmd)
+	}
+
+	t.Run("legacy: controller tier and the first-owner QR", func(t *testing.T) {
+		mux, mockCmd, _ := newControlHub(t, claimedWithTopic, control.StateLegacy)
+		allowed(t, mux, mockCmd, "displayPlaylist")
+		allowed(t, mux, mockCmd, "connect")
+		allowed(t, mux, mockCmd, "showPairingQRCode")
+		for _, cmd := range []string{"sshAccess", "factoryReset", "startWifiSetup", "shutdown"} {
+			refused(t, mux, cmd, control.CodeEnrollmentRequired, http.StatusForbidden)
+		}
+	})
+	t.Run("enrolled, switch open: controller tier only", func(t *testing.T) {
+		mux, mockCmd, _ := newControlHub(t, claimedWithTopic, control.StateEnrolled)
+		allowed(t, mux, mockCmd, "displayPlaylist")
+		allowed(t, mux, mockCmd, "uploadLogs")
+		for _, cmd := range []string{"sshAccess", "factoryReset", "startWifiSetup", "shutdown", "showPairingQRCode"} {
+			refused(t, mux, cmd, control.CodeEnrollmentRequired, http.StatusForbidden)
+		}
+	})
+	t.Run("enrolled, switch closed: nothing in plaintext", func(t *testing.T) {
+		mux, _, g := newControlHub(t, claimedWithTopic, control.StateEnrolled)
+		g.lanClosed = true
+		refused(t, mux, "displayPlaylist", control.CodeEnrollmentRequired, http.StatusForbidden)
+	})
+	t.Run("locked", func(t *testing.T) {
+		mux, _, _ := newControlHub(t, claimedWithTopic, control.StateLocked)
+		refused(t, mux, "displayPlaylist", control.CodeLocked, http.StatusUnauthorized)
+	})
 }
 
 func TestControlStatusAndScreenshot(t *testing.T) {
@@ -159,9 +199,8 @@ func TestControlStatusAndScreenshot(t *testing.T) {
 	assert.JSONEq(t, string(control.PublicErrorBody(control.CodeEnrollmentRequired)), rec.Body.String())
 }
 
-// Review F1: in legacy, a live invitation closes /api/screenshot (an
-// unclaimed device has no topic gate, and the claim QR carries the
-// invitation).
+// Review F1: in legacy, a live invitation closes /api/screenshot (the claim
+// QR carries the invitation).
 func TestScreenshotRefusedWhileInvitationLive(t *testing.T) {
 	mux, _, g := newControlHub(t, unclaimed, control.StateLegacy)
 	g.protected = true
@@ -170,7 +209,7 @@ func TestScreenshotRefusedWhileInvitationLive(t *testing.T) {
 	assert.JSONEq(t, `{"error":{"code":"screen_protected"}}`, rec.Body.String())
 	g.protected = false
 	rec = serve(mux, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil))
-	assert.Equal(t, http.StatusOK, rec.Code, "no invitation: phase-0 rules (unclaimed = open)")
+	assert.Equal(t, http.StatusOK, rec.Code, "legacy without an invitation: open")
 }
 
 // Review F4: the hub passes the LAN peer's IP (not authority) for the
@@ -208,7 +247,6 @@ func TestScreenshotDiscardedWhenInvitationRacesCapture(t *testing.T) {
 		g := &stubGate{state: control.StateLegacy}
 		h := New(context.Background(), mocks.NewMockWS(ctrl), mocks.NewMockCommandHandler(ctrl), fixedStatus{},
 			&raceCapturer{g: g, live: live}, mockServer, wrapper.NewJSON(), zap.NewNop()).(*hub)
-		h.claimSnapshot = func() state.ClaimInfo { return unclaimed }
 		h.SetControl(g)
 		rec := serve(mux, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil))
 		assert.Equal(t, http.StatusForbidden, rec.Code, "live=%v", live)

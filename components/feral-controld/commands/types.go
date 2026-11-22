@@ -236,6 +236,7 @@ const (
 	// (mDNS TXT api=2 + /api/v2/status contract "2") is the capability gate.
 	CMD_START_WIFI_SETUP           Type = "startWifiSetup"
 	CMD_START_MINT_PAIRING_SESSION Type = "startMintPairingSession"
+	CMD_GET_MINT_PAIRING_SESSION   Type = "getMintPairingSession"
 	// CMD_JOIN_MINT_PAIRING_CHANNEL joins a Mint Pairing Broker channel a site
 	// created (site-initiated pairing). The app sends `{channelId,
 	// pairingToken}` or `{shortCode}`; the broker is always the device's own.
@@ -274,6 +275,15 @@ const (
 	// pair above.
 	CMD_GET_SERIES_PLAYBACK Type = "getSeriesPlayback"
 	CMD_SET_SERIES_PLAYBACK Type = "setSeriesPlayback"
+
+	// Media health (feral-file/ffos-user#392): controld-owned, never forwarded
+	// to window.handleCDPRequest. getMediaHealth returns one verdict per item
+	// of the playlist on screen, read from the device's observation store.
+	CMD_GET_MEDIA_HEALTH Type = "getMediaHealth"
+	// CMD_SET_MEDIA_HEALTH is controld → player only: the hint-only push
+	// (mediahealth.HintPusher). Internal: a controller must never install a
+	// skip map, so the router refuses it like resolveRecentlyPlayed.
+	CMD_SET_MEDIA_HEALTH Type = "setMediaHealth"
 )
 
 func (c Type) DeviceCtlCommand() bool {

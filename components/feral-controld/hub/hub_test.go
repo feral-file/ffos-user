@@ -21,8 +21,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/screenshot"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -726,8 +726,8 @@ func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
 	ts.mockCmd.EXPECT().
 		Process(fromControllerCtx{}, gomock.Any()).
 		Return(nil, &commandrouter.SourceUnreachableError{
-			Results: []offlinecache.SourceProbeResult{
-				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			Results: []mediahealth.ProbeResult{
+				{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 400},
 			},
 		}).
 		Times(1)

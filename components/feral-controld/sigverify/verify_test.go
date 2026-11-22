@@ -259,7 +259,7 @@ func TestVerify_PlaceholderSignature_Invalid(t *testing.T) {
 }
 
 // TestVerify_UnsupportedAlg_Invalid pins the supported-algorithms note in
-// docs/api-design.md: dp1-go v0.7.2 does not implement ecdsa-p256, so such an
+// docs/api-design.md: dp1-go registers no ecdsa-p256 verifier, so such an
 // entry reads as invalid rather than being skipped.
 func TestVerify_UnsupportedAlg_Invalid(t *testing.T) {
 	doc := unsignedDoc()

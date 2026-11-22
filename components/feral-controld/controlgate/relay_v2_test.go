@@ -22,7 +22,7 @@ import (
 // Exercise the actual binary carrier -> existing authority -> targeted reply.
 // Enrollment and crypto use the existing endpoint fixtures, not a new policy.
 func TestV2BindsOnlyAfterVerifiedReplayAdmission(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	recorder := &recorder{}
 	g := controlgate.New(a, recorder, zap.NewNop())
 	owner := enrollOwner(t, g, a)
@@ -107,6 +107,29 @@ func TestV2BindsOnlyAfterVerifiedReplayAdmission(t *testing.T) {
 	if owner.open(cmd, response["message"]).OK || recorder.count() != 1 {
 		t.Fatal("replay executed")
 	}
+	site := newClient(t, "site", *a.Status().Profile)
+	if _, err := a.IssueDisplayGrant(owner.ctl, control.DisplayGrantRequest{
+		Sig: site.sigPub, Enc: site.encPub, Origin: "https://art.example", OriginAttested: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status := site.build(control.OpCmd, "getDeviceStatus", `{}`, "")
+	send("unverified-peer", "site-status", status.cast)
+	h, response = read()
+	if h.To != "unverified-peer" || !site.open(status, response["message"]).OK || recorder.count() != 2 {
+		t.Fatal("display grant did not receive its targeted status reply", h, response)
+	}
+	if call := recorder.last(); !call.hasP || call.principal.Role != control.RoleDisplay {
+		t.Fatalf("status principal = %+v", call)
+	}
+	rotate := site.build(control.OpCmd, "rotate", `{"clockwise":true}`, "")
+	send("unverified-peer", "site-rotate", rotate.cast)
+	_, response = read()
+	if got := site.open(rotate, response["message"]); got.Code != control.CodePermissionDenied || recorder.count() != 2 {
+		t.Fatalf("display grant rotation escaped authorization: %+v", got)
+	}
+	// Only the owner receives notifications, even after a display grant's
+	// request was admitted and answered on the same relay channel.
 	done := make(chan struct{})
 	go func() { adapter.Notify("device_status", map[string]any{"test": true}, ""); close(done) }()
 	h, response = read()

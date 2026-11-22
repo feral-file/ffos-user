@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"time"
 
 	"go.uber.org/zap"
 
@@ -43,8 +42,7 @@ const unknownDeviceID = "FF1-UNKNOWN"
 //     retirement tombstone; anything Stat cannot rule out counts) forces the
 //     protocol on, whatever control.enabled says or whether it parsed;
 //   - control.enabled only decides whether a device WITHOUT control state
-//     starts the protocol (creates its identity, offers invitations);
-//   - control.enforced only ever tightens enrolled to enforced.
+//     starts the protocol (creates its identity, offers invitations).
 func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys control.FS, logger *zap.Logger) *controlWiring {
 	hasState := control.StateExists(fsys, dir)
 	if !hasState && !cfg.Enabled {
@@ -62,7 +60,7 @@ func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys contr
 		logger.Error("Hostname unreadable; control state forces the protocol on with an unknown device id (envelopes will fail)")
 		deviceID = unknownDeviceID
 	}
-	auth, err := control.New(control.Config{Dir: dir, DeviceID: deviceID, Enforced: cfg.Enforced, FS: fsys})
+	auth, err := control.New(control.Config{Dir: dir, DeviceID: deviceID, FS: fsys})
 	if err != nil {
 		// Only a programming error (empty DeviceID) gets here.
 		logger.Error("Control protocol could not start", zap.Error(err))
@@ -70,7 +68,7 @@ func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys contr
 	}
 	// The boot line the fleet count reads (plan §3.1): one per start.
 	st := auth.Status()
-	fields := []zap.Field{zap.String("control_state", string(st.State)), zap.Bool("control_enforced", cfg.Enforced),
+	fields := []zap.Field{zap.String("control_state", string(st.State)),
 		zap.Bool("control_enabled_config", cfg.Enabled), zap.Bool("control_state_on_disk", hasState)}
 	if st.Profile != nil {
 		fields = append(fields, zap.String("control_gen", st.Profile.Gen))
@@ -86,6 +84,12 @@ func newControlWiring(cfg config.ControlConfig, deviceID, dir string, fsys contr
 		// or factory-reset to recover.
 		logger.Warn("Display grant store unreadable; display grants disabled until the file is removed",
 			zap.Error(derr))
+	}
+	if lerr := auth.Store().LANErr(); lerr != nil {
+		// Fail safe (spec §8 lan.json): LAN plaintext stays closed until the
+		// owner sends setLanControl, which rewrites the file.
+		logger.Warn("LAN control switch unreadable; LAN plaintext closed until the owner sets it",
+			zap.Error(lerr))
 	}
 	status.SetControlStatusSource(func() any { return auth.Status() })
 	return &controlWiring{auth: auth}
@@ -129,9 +133,6 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 	if c == nil {
 		return
 	}
-	// Enforced boot: overwrite the plaintext status history the relayer
-	// keeps per topic (§9, §13). Background, best-effort, raw relayer.
-	go controlgate.PurgeStalePlaintext(ctx, c.auth, r, logger, 2*time.Second, 10*time.Minute)
 	gate := controlgate.New(c.auth, handler, logger)
 	publisher := controlgate.NewPublisher(r, w, logger)
 	gate.SetPublisher(publisher)

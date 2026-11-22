@@ -442,9 +442,11 @@ func (r *replayer) isCurrentRootLocked(root CDPSession) bool {
 // generation boundary: every child target from the prior connection
 // belonged to a now-dead socket and its sessionId is meaningless against
 // this one, so the entire target set is replaced. Scope is reset too —
-// the new socket starts with Fetch disabled, and whichever caller next
+// the new socket starts with Fetch disabled; kioskReplay.restoreScope
+// re-arms the remembered scope right after, and whichever caller next
 // runs SyncPlaylist (main.go's onConnect ForceRefresh, or the next
-// displayPlaylist) re-establishes it. Caller holds transitionMu.
+// displayPlaylist) establishes the authoritative one. Caller holds
+// transitionMu.
 func (r *replayer) attachRoot(session CDPSession) {
 	r.mu.Lock()
 	previous := r.targets[""]
@@ -632,7 +634,7 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, sources []string, mixe
 	for _, source := range sources {
 		rec, err := r.store.LoadItem(SourceKey(source))
 		if err != nil {
-			return fmt.Errorf("offline cache replay: load item %s: %w", source, err)
+			return fmt.Errorf("offline cache replay: load item %s: %w", redactSourceForLog(source), err)
 		}
 		for _, res := range rec.Resources {
 			if rec.Automatic {

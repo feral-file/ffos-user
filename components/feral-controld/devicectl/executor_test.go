@@ -20,6 +20,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -375,6 +376,22 @@ func TestExecutor_DeviceStatus_Success(t *testing.T) {
 	assert.Equal(t, "test-wifi", statusResponse.ConnectedWifi)
 	assert.Equal(t, "1.0.0", statusResponse.InstalledVersion)
 	assert.Equal(t, "1.0.1", statusResponse.LatestVersion)
+}
+
+func TestExecutor_DisplayGrantDeviceStatus(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ctx := control.WithPrincipal(ts.ctx, control.Principal{Role: control.RoleDisplay})
+	cmd := commands.Command{Type: commands.CMD_DEVICE_STATUS, Arguments: map[string]any{}}
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(`{}`), nil)
+	ts.mockOS.EXPECT().ReadFile(constants.SCREEN_ORIENTATION_FILE).Return([]byte("90"), nil)
+
+	result, err := ts.executor.Execute(ctx, cmd)
+	assert.NoError(t, err)
+	body, err := json.Marshal(result)
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"screenRotation":"portrait"}`, string(body))
 }
 
 func TestExecutor_DeviceStatus_Error(t *testing.T) {

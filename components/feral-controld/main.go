@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	go_os "os"
 	"strings"
@@ -37,11 +36,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/netlog"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
@@ -113,7 +114,10 @@ type app struct {
 	MintPairing       mintpairing.Service
 	// KioskReplay, OfflineCacheService, and OfflineCacheStaticServer may
 	// all be nil (feature disabled via config.OfflineCacheConfig).
-	KioskReplay              offlinecache.KioskReplay
+	KioskReplay offlinecache.KioskReplay
+	// ReplayInternet is the internet verdict kiosk replay's remembered-scope
+	// restore is gated on (see internetVerdict). Nil when replay is not wired.
+	ReplayInternet           *internetVerdict
 	OfflineCacheService      offlinecache.Service
 	OfflineCacheStaticServer offlinecache.StaticServer
 	// OfflineCacheNotifier's shutdown (its background WS-delivery worker,
@@ -127,12 +131,27 @@ type app struct {
 	// bug it fixes has nothing to do with caching, so it must run on a
 	// device with offlineCache off. Nil only when explicitly disabled via
 	// gatewayUserAgent.enabled=false, or when its policy failed to build.
-	UARewrite   *uarewrite.Interceptor
-	Hub         hub.Hub
-	LinkChecker *status.LinkChecker
+	UARewrite *uarewrite.Interceptor
+	// MediaHealthObserver reports the kiosk's artwork-frame navigations
+	// (their HTTP status) to the media-health store over its own passive
+	// CDP session (#392). Nil when media health or the observer is
+	// disabled. Re-attached on every kiosk reconnect like UARewrite, and
+	// closed with it.
+	MediaHealthObserver *offlinecache.KioskNavigationObserver
+	Hub                 hub.Hub
+	LinkChecker         *status.LinkChecker
 	// Netlog is the WAN-outage flight recorder; nil when disabled by config,
 	// unavailable (ring open failed), or in the test app.
 	Netlog *netlog.Recorder
+	// MediaHealth owns the per-device observation store (bbolt). Nil when
+	// disabled by config, when the store failed to open, or in the test
+	// app. Closed by run() LAST (its defer is registered first): the status
+	// poller, the lookahead worker and the command router all write to it
+	// until they stop. It used to be closed by a defer inside
+	// initializeApp, i.e. before run started — every read and write then
+	// failed with "database not open" and the feature was silently inert
+	// (PR #438 review, round 3, F11).
+	MediaHealth *mediahealth.Service
 
 	// StateLoadKnown records whether run()'s state.Load succeeded (false =
 	// the persisted state was unreadable and quarantined). The provisioning
@@ -297,6 +316,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	// Start watchdog
 	app.Watchdog.Start(ctx)
+	// Registered before every other closer so it runs after them: the store
+	// must outlive the status poller, the lookahead worker and the command
+	// router, which write to it until they stop (see app.MediaHealth).
+	if app.MediaHealth != nil {
+		defer func() {
+			if err := app.MediaHealth.Close(); err != nil {
+				app.Logger.Warn("media health: store close failed", zap.Error(err))
+			}
+		}()
+	}
 	defer app.Watchdog.Stop()
 
 	// Initialize DBus client. NON-FATAL: controld is the sole SoftAP/LAN
@@ -419,6 +448,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Logger.Error("Failed to get connectivity status", zap.Error(err))
 	} else {
 		app.Logger.Info("Connectivity status", zap.Bool("connected", connected))
+		// The mediator applies no verdict until the first connectivity edge
+		// or cold probe, which on a boot can come after the kiosk attaches;
+		// this read is the one answer available before CDP starts below.
+		if app.ReplayInternet != nil {
+			app.ReplayInternet.seed(connected)
+		}
 	}
 	// Single snapshot: relayer_ready and topic_id must come from the SAME
 	// write, not two separate GetState() field reads racing a concurrent
@@ -624,9 +659,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// no page JS: it arms Fetch interception on offlinecache's own CDP
 		// socket, and it must be armed as early as possible so the reloaded
 		// document's asset requests are intercepted rather than escaping to
-		// the live network. Its COMPANION half — re-applying the previously
-		// enabled item scope, which does need a hydrated page to resolve what
-		// is playing — is the "replay-scope-resync" reconciler instead; see
+		// the live network. While the device is known to have no internet it
+		// also re-arms the scope remembered on disk from the last successful
+		// sync, which is what serves a kept work to the first load after a
+		// boot with no network. Its COMPANION half —
+		// syncing scope to what is actually playing, which does need a
+		// hydrated page — is the "replay-scope-resync" reconciler instead; see
 		// replayScopeResyncReconciler for why splitting them is load-bearing.
 		//
 		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
@@ -649,6 +687,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to arm kiosk User-Agent rewrite", zap.Error(err))
 			}
 		}
+
+		// The media-health navigation observer owns a kiosk session too,
+		// and loses it on the same restarts. Passive (Network events only),
+		// so a failure here costs observations, never playback.
+		if app.MediaHealthObserver != nil {
+			if err := app.MediaHealthObserver.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to attach the media-health navigation observer to the kiosk", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
 
@@ -668,6 +715,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		}
 		if err := app.UARewrite.Close(); err != nil {
 			app.Logger.Warn("Failed to close kiosk User-Agent rewrite session", zap.Error(err))
+		}
+	}()
+	// Same ownership rule for the navigation observer's session.
+	defer func() {
+		if app.MediaHealthObserver == nil {
+			return
+		}
+		if err := app.MediaHealthObserver.Close(); err != nil {
+			app.Logger.Warn("Failed to close the media-health navigation observer session", zap.Error(err))
 		}
 	}()
 
@@ -740,6 +796,51 @@ func resolveMDNSDeviceInfo(os wrapper.OS, json wrapper.JSON, claim state.ClaimIn
 	}
 }
 
+// internetVerdict holds sys-monitord's internet-reachability answer for kiosk
+// replay: unknown until the startup read (seed) or the mediator's first
+// applied verdict (observe), then the latest one. Replay restores its
+// remembered scope on a kiosk attach only while this says offline; unknown
+// reads as "not offline", so a failed startup read keeps the attach exactly
+// as it was before the remembered scope existed.
+type internetVerdict struct{ state atomic.Int32 }
+
+const (
+	internetUnknown int32 = iota
+	internetOnline
+	internetOffline
+)
+
+func internetState(connected bool) int32 {
+	if connected {
+		return internetOnline
+	}
+	return internetOffline
+}
+
+// observe records an applied verdict; it always wins.
+func (v *internetVerdict) observe(connected bool) { v.state.Store(internetState(connected)) }
+
+// seed records the startup read unless a verdict already arrived.
+func (v *internetVerdict) seed(connected bool) {
+	v.state.CompareAndSwap(internetUnknown, internetState(connected))
+}
+
+func (v *internetVerdict) offline() bool { return v.state.Load() == internetOffline }
+
+// restoredScopeDropper is kiosk replay's optional "internet is back" seam,
+// named here because initializeApp's local `context` shadows the package.
+type restoredScopeDropper interface {
+	DropRestoredScope(ctx context.Context)
+}
+
+// attachContext and restoredScopeNotifier name kiosk replay's optional
+// "remembered scope armed" seam, for the same reason.
+type attachContext = context.Context
+
+type restoredScopeNotifier interface {
+	SetOnScopeRestored(notify func(ctx context.Context))
+}
+
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
 	logger.Info("Getting connectivity status")
 
@@ -810,7 +911,10 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // This is the half of the reconnect resync that cannot run inline on the CDP
 // connect callback next to AttachOnReconnect. AttachOnReconnect resets scope
 // (a new top-level socket starts with Fetch disabled — see replayer.attachRoot)
-// and deliberately does not re-apply it; something must call SyncPlaylist.
+// and, only with no internet, re-arms the scope remembered from the last
+// successful sync as a pass-through-on-miss head start
+// (offlinecache/replayscope.go); the scope
+// for what is actually on screen still needs something to call SyncPlaylist.
 // ForceRefresh is that something, but the pass it triggers resolves what is
 // playing via statusPoller.FetchPlayerStatus, which evaluates
 // window.handleCDPRequest in the page. Fired inline at connect time that
@@ -821,9 +925,9 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // the resync exists to close. As a reconciler it runs once the new document
 // has installed its command handler, so the status fetch can actually answer.
 //
-// Nothing is lost by deferring it: scope is disabled between attach and
-// handler-ready either way, so assets fetched in that window miss
-// interception regardless of when this runs.
+// Nothing is lost by deferring it: between attach and handler-ready scope is
+// off (or, with no internet, only the remembered scope is armed) either way,
+// so the window is the same regardless of when this runs.
 //
 // Known residual, deliberately accepted: the generation-ready worker gates on
 // StageHandler, which proves window.handleCDPRequest is INSTALLED, not that
@@ -980,6 +1084,10 @@ func initializeApp(
 	// Components
 	// CDP
 	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
+	// One kiosk screenshot capturer: the hub's /api/screenshot and the media
+	// health wall capture share its single flight, so they never capture at
+	// once.
+	kioskCapturer := screenshot.NewKiosk(cdpEndpoint, httpClient, webSocketDialer)
 
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
@@ -1053,14 +1161,7 @@ func initializeApp(
 	if !sigVerifyEnabled {
 		logger.Warn("DP-1 signature verification disabled by config; display requests carry no signature verdict")
 	}
-	// Raster read key for address-playlist wallet walks (feral-file#3576).
-	// Absent means the walk runs unauthenticated; whether Raster then answers
-	// is Raster's call, so say so once at startup rather than per display request.
-	rasterCfg := config.Get().RasterTuning(logger)
-	if rasterCfg.APIKey == "" {
-		logger.Warn("raster.apiKey not configured; Raster wallet display requests run unauthenticated")
-	}
-	dp1 := dp1.New(ffIndexer, httpClient, dp1.NewRasterHTTPClient(), json, io, logger, debug, sigVerifyEnabled, rasterCfg.APIKey)
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
 	// and advances them on timer / wake / CDP reconnect. Durable state stores
@@ -1127,12 +1228,25 @@ func initializeApp(
 	// mirror mintPairing's so the rest of the daemon behaves exactly as
 	// before this feature existed.
 	var offlineCache offlinecache.Service
+	// playbackObservers collects every consumer of the status poller's
+	// per-poll playback snapshot (the automatic playback cache, media
+	// health); one combined observer is installed below, before the poller
+	// starts.
+	var playbackObservers []func(*status.PlayerStatus)
+	// internetObservers collects every consumer of the mediator's applied
+	// internet verdict (the netlog recorder, media health); the mediator has
+	// ONE observer seam, so a fan-out is installed once below.
+	var internetObservers []func(connected bool)
 	var kioskReplay offlinecache.KioskReplay
 	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
 	var offlineCacheSysMetricsSink func(raw []byte)
 	var offlineCacheChanged func(func())
+	var offlineCacheRendererFactory func(offlinecache.MediaHealthRouting) mediahealth.Renderer
+	var offlineCacheAdmission offlinecache.AdmissionController
+	var offlineCacheStore offlinecache.Store
+	onchfsConfig := config.Get().OnchfsTuning(logger)
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1146,8 +1260,11 @@ func initializeApp(
 		offlineCacheNotifier = ocRuntime.Notifier
 		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 		offlineCacheChanged = ocRuntime.SetCacheChanged
+		offlineCacheRendererFactory = ocRuntime.NewMediaHealthRenderer
+		offlineCacheAdmission = ocRuntime.Admission
+		offlineCacheStore = ocRuntime.Store
 		if ocRuntime.ObservePlayback != nil {
-			status.SetPlaybackObserver(poller, func(st *status.PlayerStatus) {
+			playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
 				if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
 					ocRuntime.ObservePlayback(nil, 0, false)
 					return
@@ -1155,6 +1272,62 @@ func initializeApp(
 				ocRuntime.ObservePlayback(*st.Items, *st.Index, st.RenderStatus != nil && *st.RenderStatus == 2)
 			})
 		}
+	}
+
+	// onchfs works (ffos-user#427). fxhash's gateway is gone, so the device
+	// reads these works from chain and serves them through the offline
+	// cache's replay. With the feature off, only the part of the cache that
+	// serves local artwork runs (BootstrapCore: store, static server,
+	// replay), lazily: it dials the kiosk only once an onchfs scope is first
+	// armed, so a device that never shows an onchfs work behaves as before.
+	// The Service, capture and the app's offline-cache commands stay off;
+	// offlineCache (the Service) remains nil and every guard keyed on it is
+	// unchanged.
+	var onchfsMaterializer *offlinecache.OnchfsMaterializer
+	// onchfsReady is set to the refresher's ForceRefresh once that exists:
+	// a work read in the background widens the replay scope on the next pass.
+	var onchfsReady atomic.Pointer[func()]
+	if onchfsConfig.Disabled {
+		logger.Info("onchfs reader disabled by config; onchfs works stay unplayable")
+	} else {
+		if offlineCacheStore == nil {
+			ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+			core, _ := offlinecache.BootstrapCore(ocOpts, httpClient, webSocketDialer, os, io, json, clock, logger, true)
+			kioskReplay = core.KioskReplay
+			offlineCacheScopeLost = core.ScopeLost
+			offlineCacheStore = core.Store
+			// core.StaticServer is deliberately not started: it serves only
+			// blobs past replay's 200 MB inline limit, an onchfs file is at
+			// most onchfs.MaxPlainFileBytes, and replay treats a server that
+			// is not listening as a miss. No new listening port on devices
+			// with the feature off.
+		}
+		overrides := map[string][]string{}
+		for chain, c := range onchfsConfig.Chains {
+			overrides[chain] = c.RPC
+		}
+		timeout := onchfs.DefaultRequestTimeout
+		if onchfsConfig.RequestTimeoutSeconds > 0 {
+			timeout = time.Duration(onchfsConfig.RequestTimeoutSeconds) * time.Second
+		}
+		resolver := onchfs.NewResolver(onchfs.MergeEndpoints(overrides, logger), onchfs.NewHTTPClient(timeout), logger)
+		onchfsMaterializer = offlinecache.NewOnchfsMaterializer(offlinecache.OnchfsMaterializerConfig{
+			Store: offlineCacheStore, Resolver: resolver, Logger: logger, Base: context,
+			Standalone: offlineCache == nil,
+			// With a Service running, reclaiming space for an onchfs work
+			// goes through its ClearItem, whose GC is serialized with
+			// captures; standalone, the materializer collects itself.
+			Evict: evictThroughService(offlineCache),
+			// The Service's clear epoch keeps a read in flight from
+			// restoring a work the app just cleared.
+			Fence: fenceThroughService(offlineCache),
+			OnReady: func() {
+				if f := onchfsReady.Load(); f != nil {
+					(*f)()
+				}
+			},
+		})
+		logger.Info("onchfs reader ready", zap.Strings("chains", resolver.Chains()), zap.Bool("offline_cache_feature", offlineCache != nil))
 	}
 
 	// Kiosk User-Agent rewrite (#296). Built independently of the offline
@@ -1174,6 +1347,9 @@ func initializeApp(
 	// headless device this log is the only place the operator's mistake
 	// is visible at all.
 	var uaRewrite *uarewrite.Interceptor
+	// uaPolicy is the same policy, kept for the media health probe so it
+	// dials the wire the kiosk would (nil when the rewrite is off).
+	var uaPolicy *uarewrite.Policy
 	if gatewayUserAgentConfig.IsEnabled() {
 		var uaHosts []string
 		var uaAgent, uaGateway string
@@ -1193,6 +1369,7 @@ func initializeApp(
 			logger.Error("Invalid gatewayUserAgent config; kiosk User-Agent rewrite disabled",
 				zap.Error(err))
 		} else {
+			uaPolicy = policy
 			uaRewrite = uarewrite.NewInterceptor(
 				policy, cdpEndpoint, httpClient, webSocketDialer, json, io, clock, logger,
 			)
@@ -1226,27 +1403,157 @@ func initializeApp(
 		seriesPlaybackStore = seriesplayback.Fallback(constants.SERIES_PLAYBACK_FILE)
 	}
 	commandrouter.SetSeriesPlayback(rawCmdHandler, seriesPlaybackStore, logger)
-	// Accept-time source preflight (#304): a displayPlaylist whose every item
-	// source definitively answers an HTTP error is rejected at accept time
-	// instead of being forwarded and self-reported as playing. Wired against
-	// the raw handler before NewGate wraps it (SetSourceProber's contract),
-	// and independently of whether the offline cache is enabled. The
-	// sourceProbe.disabled config flag is the runtime kill switch: the
-	// preflight can REFUSE the device's primary function, so an origin class
-	// that answers this probe dead while still rendering in the kiosk must be
-	// recoverable by a config edit, not a package rollback (see
-	// config.SourceProbeConfig). net.DefaultResolver for the same reason the
-	// offline cache's classifier uses it: the guard's view of a name must
-	// match what would actually be dialed (see offlinecache.ErrUnsafeSource).
-	if sp := config.Get().SourceProbe; sp != nil && sp.Disabled {
-		logger.Warn("displayPlaylist source preflight disabled by config; display requests are forwarded unprobed")
+	// player_status also carries the device's current series-playback
+	// override (ffos-user#425 follow-up), passively — not only via an
+	// explicit getSeriesPlayback query. One getter, read from rawCmdHandler's
+	// own store and reused for both status surfaces exactly like
+	// buildOverlaySource below, so the poller's push loop and this package's
+	// own direct checkStatus reply can never disagree.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		poller.SetSeriesPlaybackSource(seriesPlaybackSource)
 	} else {
-		commandrouter.SetSourceProber(rawCmdHandler, offlinecache.NewSourceProber(net.DefaultResolver), logger)
+		logger.Warn("Command handler does not support series playback status wiring")
+	}
+	// Kiosk replay restores its remembered scope on attach only while the
+	// device is known to have no internet (feral-file/feral-file#3635); it
+	// reads the same applied verdict media health does, plus the startup
+	// read in run(). Type-asserted like the other optional seams, so the
+	// KioskReplay interface and its mocks stay as they are.
+	var replayInternet *internetVerdict
+	if sink, ok := kioskReplay.(interface{ SetOffline(func() bool) }); ok {
+		replayInternet = &internetVerdict{}
+		internetObservers = append(internetObservers, replayInternet.observe)
+		sink.SetOffline(replayInternet.offline)
+		// A scope restored while offline is dropped once internet is back,
+		// after the verdict above is recorded so no later attach restores
+		// it again. Off the mediator's goroutine: it waits for the playback
+		// lock and sends to the kiosk.
+		// The kiosk's first load of the work on a no-network start runs
+		// before replay can be armed, and fails; once the remembered scope
+		// is in force, ask the player to load it again rather than leave
+		// the screen black until the player's own retry 15s later.
+		// The callback's context ends at the next kiosk attach, so a
+		// refresh still waiting on the player never reaches a later page.
+		if notifier, ok := kioskReplay.(restoredScopeNotifier); ok {
+			notifier.SetOnScopeRestored(func(attachCtx attachContext) {
+				go devicectl.RefreshArtworkAfterReplayRestore(attachCtx, executor, logger)
+			})
+		}
+		if dropper, ok := kioskReplay.(restoredScopeDropper); ok {
+			internetObservers = append(internetObservers, func(connected bool) {
+				if connected {
+					go dropper.DropRestoredScope(context)
+				}
+			})
+		}
+	}
+	// Media health (#304, #392, docs/media-health.md): the accept-time L0 pass
+	// replaces the former source preflight — a displayPlaylist whose every
+	// item source definitively answers dead is still rejected at accept time
+	// — and additionally records every verdict in the device's observation
+	// store, hints the player past conclusively broken items, probes ahead
+	// during play, and annotates player_status per item. Wired against the
+	// raw handler before NewGate wraps it (SetMediaHealth's contract), and
+	// independently of whether the offline cache is enabled (the fetcher
+	// lives there, the feature does not). mediaHealth.disabled is the
+	// runtime kill switch, for the same reason the preflight had one: the
+	// pass can REFUSE the device's primary function, so a verdict rule that
+	// misjudges an origin class on the fleet must be recoverable by a config
+	// edit, not a package rollback.
+	// mediaHealthOnline mirrors the mediator's applied internet verdict for
+	// the media health service (false until the first verdict is applied:
+	// "unknown" must not blame a source). Fed through the internet-observer
+	// fan-out installed after the netlog recorder below, which shares the
+	// mediator's single observer seam.
+	var mediaHealthOnline atomic.Bool
+	internetObservers = append(internetObservers, func(connected bool) { mediaHealthOnline.Store(connected) })
+	// A source the offline cache can replay is never hinted (the hint would
+	// hide what replay interception could show); the check is the same one
+	// the display request rescue uses, and only counts when kiosk replay is wired.
+	var mediaHealthReplayable func(string) bool
+	if offlineCache != nil && kioskReplay != nil {
+		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
+	}
+	mediaHealthCfg := config.Get().MediaHealthTuning(logger)
+	// The probe sends the kiosk's own User-Agent (kiosk_useragent.go), read
+	// from the kiosk's DevTools endpoint for the app's lifetime.
+	kioskUA := newKioskUserAgent(cdpEndpoint, logger)
+	go kioskUA.Run(context)
+	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaRewrite != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, newHintSender(cdp.Send, session.Generation), logger)
+	var mediaHealthObserver *offlinecache.KioskNavigationObserver
+	if mediaHealthSvc != nil && !mediaHealthCfg.KioskObserverDisabled {
+		mediaHealthObserver = offlinecache.NewKioskNavigationObserver(cdpEndpoint, httpClient, webSocketDialer, json, io, mediaHealthSvc, logger)
+	}
+	if mediaHealthSvc != nil && uaRewrite != nil {
+		// The kiosk loads a content-addressed work through the gateway the
+		// probe found serving it, so the verdict and the wall agree (#392,
+		// gateway fallback). Installed before the interceptor's first
+		// attach (run()'s onConnect hook).
+		gateways := mediahealth.NewGateways(mediaHealthCfg.IPFSGateways, mediaHealthCfg.ArweaveGateways)
+		uaRewrite.SetGatewayOverride(mediaHealthSvc.GatewayOverride, uarewrite.OverrideFetchPatterns(gateways.ArweaveHosts()))
+	}
+	if mediaHealthSvc != nil {
+		commandrouter.SetMediaHealth(rawCmdHandler, mediaHealthSvc, logger)
+		playlistScheduler.SetHintSource(mediaHealthSvc.HintArgument)
+		status.SetItemHealthSource(poller, mediaHealthSvc.ItemHealths)
+		executor.SetMediaHealthResetter(mediaHealthSvc.Reset)
+		playbackObservers = append(playbackObservers, func(st *status.PlayerStatus) {
+			if st == nil || (st.Command != string(commands.CMD_DISPLAY_PLAYLIST) && st.Command != string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)) || st.Items == nil || st.Index == nil {
+				mediaHealthSvc.ObservePlayback(nil, 0, nil, nil)
+				return
+			}
+			mediaHealthSvc.ObservePlayback(*st.Items, *st.Index, st.RenderStatus, st.Outcomes)
+		})
+		if mediaHealthLookahead != nil {
+			go mediaHealthLookahead.Run(context)
+		}
+		// L1, the nightly render probe: an experiment behind
+		// mediaHealth.l1.enabled, off by default. It needs the offline
+		// cache's headless browser (its renderer) and runs only while
+		// the panel is asleep by devicectl's own tracker.
+		var admit func() bool
+		if offlineCacheAdmission != nil {
+			admit = func() bool { return offlineCacheAdmission.Admit(offlinecache.ClassSoftware).Allowed }
+		}
+		// The renderer routes every request exactly as the kiosk's
+		// interceptor does (gateway policy, the store's recorded fallback,
+		// the bare-CID rule), so the page L1 judges is the one the wall
+		// shows; all of it only when that interceptor is installed. Same
+		// typed-nil guard as wireMediaHealth.
+		var renderer mediahealth.Renderer
+		if offlineCacheRendererFactory != nil {
+			var routing offlinecache.MediaHealthRouting
+			if uaRewrite != nil && uaPolicy != nil {
+				routing = offlinecache.MediaHealthRouting{Policy: uaPolicy, Override: mediaHealthSvc.GatewayOverride, SlashBareCID: true}
+			}
+			renderer = offlineCacheRendererFactory(routing)
+		}
+		if l1 := wireMediaHealthL1(config.Get().MediaHealthTuning(logger), mediaHealthSvc.Store(), renderer,
+			func() (time.Time, bool) { return devicectl.PlayerAsleepSince(executor) }, admit, logger); l1 != nil {
+			go l1.Run(context)
+		}
+		// The wall capture: the wall's own frame as play evidence for an
+		// HTML work. Attached before the poller's first observation.
+		if wc := wireWallCapture(config.Get().MediaHealthTuning(logger), mediaHealthSvc, kioskCapturer,
+			func() bool { _, asleep := devicectl.PlayerAsleepSince(executor); return asleep }, logger); wc != nil {
+			mediaHealthSvc.SetWallCapture(wc)
+			go wc.Run(context)
+		}
+		if mediaHealthPusher != nil {
+			go mediaHealthPusher.Run(context)
+		}
+	}
+	if len(playbackObservers) > 0 {
+		status.SetPlaybackObserver(poller, func(st *status.PlayerStatus) {
+			for _, observe := range playbackObservers {
+				observe(st)
+			}
+		})
 	}
 	// Signature verification wiring: the same Active slot feeds the raw
 	// handler (writes on display request), the refresher (writes on re-push, below)
 	// and the status poller (reads on every poll). Wired against the raw
-	// handler for the same reason as SetSourceProber above.
+	// handler for the same reason as SetMediaHealth above.
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
@@ -1289,11 +1596,37 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
+	if mediaHealthSvc != nil {
+		playlist_refresher.SetMediaHealthHints(playlistRefresher, mediaHealthSvc.HintArgument, logger)
+	}
 	if offlineCacheChanged != nil {
 		offlineCacheChanged(playlistRefresher.ForceRefresh)
 	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
+	// Same device-level series-playback store commandrouter's own display
+	// paths and status.Poller already read (see the SeriesPlaybackSource
+	// wiring above), so the refresher's resync narrows a series exactly
+	// the way a live display would (feral-file/ffos-user#453) instead of
+	// following no override at all.
+	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
+		playlist_refresher.SetSeriesPlaybackSource(playlistRefresher, seriesPlaybackSource, logger)
+	}
+	// The reverse direction of the wiring above: every accepted display request's own
+	// SeriesPlaybackRandom pick is pushed straight into the refresher's
+	// stable-pick memory, so its periodic resync never has to rediscover a
+	// newer display's choice by reading the live display — a read that skips
+	// itself entirely when the group's previously remembered pick is
+	// content-policy withheld (feral-file/ffos-user#459, F6 reopened).
+	if recordPick, ok := playlist_refresher.AcceptedPickRecorder(playlistRefresher); ok {
+		commandrouter.SetAcceptedPickRecorder(rawCmdHandler, recordPick, logger)
+	}
+	if onchfsMaterializer != nil {
+		commandrouter.SetOnchfsMaterializer(rawCmdHandler, onchfsMaterializer, logger)
+		playlist_refresher.SetOnchfsMaterializer(playlistRefresher, onchfsMaterializer, logger)
+		forceRefresh := playlistRefresher.ForceRefresh
+		onchfsReady.Store(&forceRefresh)
+	}
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).
 	executor.SetContentPolicyResetter(func() error {
@@ -1379,13 +1712,20 @@ func initializeApp(
 	netlogRecorder := buildNetlogRecorder(context, netlogConfig, linkChecker, exec, clock, dbusClient,
 		netlogProbeEndpoint(relayV2Endpoint, relayerEndpoint), executor, deviceStatus, logger)
 	if netlogRecorder != nil {
-		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
-			sink.SetInternetObserver(netlogRecorder.ObserveInternet)
-		}
+		internetObservers = append(internetObservers, netlogRecorder.ObserveInternet)
 		if sink, ok := relayer.(interface {
 			SetConnectionObserver(func(connected bool, closeCode int))
 		}); ok {
 			sink.SetConnectionObserver(netlogRecorder.ObserveRelayer)
+		}
+	}
+	if len(internetObservers) > 0 {
+		if sink, ok := mediator.(interface{ SetInternetObserver(func(bool)) }); ok {
+			sink.SetInternetObserver(func(connected bool) {
+				for _, observe := range internetObservers {
+					observe(connected)
+				}
+			})
 		}
 	}
 
@@ -1487,6 +1827,11 @@ func initializeApp(
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}
+	if mediaHealthSvc != nil {
+		// A new player page restarts the outcome ring's numbering; forget
+		// the cursor so nothing in the fresh ring is mistaken for seen.
+		session.RegisterReconciler("media-health-cursor", mediaHealthCursorReconciler(mediaHealthSvc))
+	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
 	// Guarded on kioskReplay, not on the refresher. This is not an
@@ -1499,7 +1844,13 @@ func initializeApp(
 	// "feature off behaves exactly as before" contract the Bootstrap call
 	// above depends on. With the cache off, the periodic ticker stays the
 	// only resync, which is byte-identical to develop's behavior.
-	if kioskReplay != nil {
+	//
+	// Keyed on the Service (the feature), not on kioskReplay: with the
+	// feature off, kioskReplay still exists for onchfs works (the lazy
+	// core), and a scope it armed is restored by ScopeLost's ForceRefresh
+	// when the kiosk goes away, so this contract holds for those devices
+	// too.
+	if offlineCache != nil {
 		session.RegisterReconciler("replay-scope-resync", replayScopeResyncReconciler(playlistRefresher))
 	}
 	// Boot recovery's generation-bump accelerator (design doc §5.1): a new
@@ -1644,7 +1995,7 @@ func initializeApp(
 		internet: internetProbeFrom(dbusClient, logger),
 		snapshot: provMachine.Snapshot,
 	}
-	screenshotCapturer := screenshot.New(cdpEndpoint, httpClient, webSocketDialer)
+	screenshotCapturer := kioskCapturer
 	hub := hub.NewWithLogDelivery(context, wsHandler, cmdHandler, statusProvider, screenshotCapturer, nil, json, logger, logStreamEndpoint, logStreamAPIKey, logStreamEnvironment, playerLogSampleRate)
 	// Control-plane hub contact defers the escape policy's episode raise
 	// (§4.1): a phone with the app open must not have its link yanked. The
@@ -1668,6 +2019,8 @@ func initializeApp(
 		Ctx:                      context,
 		Cancel:                   cancelApp,
 		Logger:                   logger,
+		MediaHealth:              mediaHealthSvc,
+		MediaHealthObserver:      mediaHealthObserver,
 		Clock:                    clock,
 		OS:                       os,
 		Signal:                   signal,
@@ -1692,6 +2045,7 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
+		ReplayInternet:           replayInternet,
 		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
@@ -1759,4 +2113,21 @@ func initializeTestApp(
 		MintPairing:       mintPairing,
 		Hub:               hub,
 	}
+}
+
+// evictThroughService returns svc.ClearItem, or nil when no Service runs.
+func evictThroughService(svc offlinecache.Service) func(string) error {
+	if svc == nil {
+		return nil
+	}
+	return svc.ClearItem
+}
+
+// fenceThroughService returns svc as the materializer's clear fence, or a
+// nil fence (not a nil Service in a non-nil interface) when none runs.
+func fenceThroughService(svc offlinecache.Service) offlinecache.ClearFence {
+	if svc == nil {
+		return nil
+	}
+	return svc
 }

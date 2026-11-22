@@ -3,6 +3,8 @@ package control
 import (
 	"encoding/json"
 	"errors"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 )
 
 // Route is the transport a PLAINTEXT command arrived on. It matters only for
@@ -34,28 +36,38 @@ func deny(code string) Decision { return Decision{Code: code} }
 // Policy decides a plaintext (non-envelope) command per §7.2. Internal
 // callers (OOM recovery, playRecentlyPlayed re-entry) never reach it, and
 // the ff1Envelope carrier is routed to Authority.Open before it.
-func Policy(state State, route Route, cmd string, req json.RawMessage) Decision {
+//
+// The LAN rule (feral-file#3551): on the device's own network anyone may
+// run what the next command can undo, which is the controller tier (see
+// commandTiers); what cannot be undone is the owner's alone, by envelope.
+// "LAN" here is the hub, which serves local sources only (hub
+// localsource.go). lanOpen is the owner's switch and matters only once
+// there is an owner: closed, an owned device refuses all LAN plaintext.
+// Before an owner exists the one owner-tier plaintext admitted is
+// showPairingQRCode, which puts the first-owner invitation on the physical
+// screen (§5.1); enroll itself is an envelope.
+func Policy(state State, lanOpen bool, route Route, cmd string, _ json.RawMessage) Decision {
 	if route == RouteRelayV2 {
 		return relayV2Refusal(state)
 	}
 	tier := TierOf(cmd)
 	switch state {
 	case StateLegacy:
-		// Phase-0 rules (hub middleware) still apply; this layer adds none.
-		return allow
+		// The legacy (topic) relayer keeps its pre-protocol behavior: new
+		// images carry no relayer block, so that route carries no traffic
+		// (§15); it goes when the v1 client code is deleted.
+		if route == RouteRelayer || tier == TierController || cmd == cmdShowPairingQRCode {
+			return allow
+		}
+		return deny(CodeEnrollmentRequired)
 	case StateEnrolled:
 		if route == RouteLAN {
+			if lanOpen && tier == TierController {
+				return allow
+			}
 			return deny(CodeEnrollmentRequired)
 		}
 		if tier == TierController {
-			return allow
-		}
-		return deny(CodeEnvelopeRequired)
-	case StateEnforced:
-		if route == RouteLAN {
-			return deny(CodeEnrollmentRequired)
-		}
-		if cmd == "displayPlaylist" && isPlayCastShape(req) {
 			return allow
 		}
 		return deny(CodeEnvelopeRequired)
@@ -91,10 +103,13 @@ func (a *Authority) Policy(route Route, cmd string, req json.RawMessage) Decisio
 		}
 		return deny(CodeLocked)
 	}
-	return Policy(a.State(), route, cmd, req)
+	return Policy(a.State(), a.LANOpen(), route, cmd, req)
 }
 
-const cmdFactoryReset = "factoryReset"
+const (
+	cmdFactoryReset      = "factoryReset"
+	cmdShowPairingQRCode = string(commands.CMD_SHOW_PAIRING_QR_CODE)
+)
 
 // relayV2Refusal is the public code for any plaintext on RouteRelayV2:
 // legacy has no owner yet (enroll first), locked refuses everything, and an
@@ -103,17 +118,16 @@ func relayV2Refusal(state State) Decision {
 	switch state {
 	case StateLegacy:
 		return deny(CodeEnrollmentRequired)
-	case StateEnrolled, StateEnforced:
+	case StateEnrolled:
 		return deny(CodeEnvelopeRequired)
 	default:
 		return deny(CodeLocked)
 	}
 }
 
-// isPlayCastShape is the exact enforced-state relayer allowance (§7.2): a
-// request with exactly the members intent and dp1_call, intent exactly
-// {"action":"now_display"}, and dp1_call an object. This is the shape a Play
-// browser session sends; anything wider needs an envelope.
+// isPlayCastShape is "the exact Play shape" (§5.7), the one request a
+// display grant may send: exactly the members intent and dp1_call, intent
+// exactly {"action":"now_display"}, and dp1_call an object.
 func isPlayCastShape(req json.RawMessage) bool {
 	m, err := strictObject(req, []string{"intent", "dp1_call"}, nil)
 	if err != nil || !isJSONObject(m["dp1_call"]) {

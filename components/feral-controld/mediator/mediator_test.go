@@ -23,9 +23,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/controlgate"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -1483,8 +1483,8 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 	ts.mockCommandHandler.EXPECT().
 		Process(fromControllerCtx{}, commands.Command{Type: commands.Type(cmd), Arguments: args}).
 		Return(nil, &commandrouter.SourceUnreachableError{
-			Results: []offlinecache.SourceProbeResult{
-				{Source: "https://origin.example/dead", Verdict: offlinecache.ProbeDead, Status: 400},
+			Results: []mediahealth.ProbeResult{
+				{Source: "https://origin.example/dead", Verdict: mediahealth.VerdictDead, Status: 400},
 			},
 		}).
 		Times(1)

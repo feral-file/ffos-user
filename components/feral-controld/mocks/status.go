@@ -8,6 +8,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	dp1 "github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	status "github.com/feral-file/ffos-user/components/feral-controld/status"
 	gomock "github.com/golang/mock/gomock"
 )
@@ -72,6 +73,18 @@ func (m *MockStatusPoller) SetOverlaySource(fn func() *status.Overlay) {
 func (mr *MockStatusPollerMockRecorder) SetOverlaySource(fn interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetOverlaySource", reflect.TypeOf((*MockStatusPoller)(nil).SetOverlaySource), fn)
+}
+
+// SetSeriesPlaybackSource mocks base method.
+func (m *MockStatusPoller) SetSeriesPlaybackSource(fn func() *dp1.SeriesPlaybackMode) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSeriesPlaybackSource", fn)
+}
+
+// SetSeriesPlaybackSource indicates an expected call of SetSeriesPlaybackSource.
+func (mr *MockStatusPollerMockRecorder) SetSeriesPlaybackSource(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSeriesPlaybackSource", reflect.TypeOf((*MockStatusPoller)(nil).SetSeriesPlaybackSource), fn)
 }
 
 // SetStampObserver mocks base method.

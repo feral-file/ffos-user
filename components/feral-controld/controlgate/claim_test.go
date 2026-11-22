@@ -9,7 +9,7 @@ import (
 )
 
 func TestConnectAuthority(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	c := controlgate.ClaimQR{Auth: a}
 	owner := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "o", Role: control.RoleOwner})
 	ctl := control.WithPrincipal(context.Background(), control.Principal{ControllerID: "c", Role: control.RoleController})
@@ -26,7 +26,7 @@ func TestConnectAuthority(t *testing.T) {
 }
 
 func TestClaimQRPins(t *testing.T) {
-	a, _ := newAuthority(t, false)
+	a, _ := newAuthority(t)
 	fields, ok := controlgate.ClaimQR{Auth: a}.ClaimQRPins()
 	if !ok || len(fields) != 4 || fields[0] != "" {
 		t.Fatalf("fields %v ok %v", fields, ok)
