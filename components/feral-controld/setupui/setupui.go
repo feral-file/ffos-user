@@ -652,9 +652,10 @@ func (s *Service) ShowFinalizing() {
 // ShowClaimQR narrates the final claim step, rendering url as a QR code. The
 // caller constructs the device_connect URL; this package passes it through
 // verbatim as the required url field. deviceName, when non-blank, is the
-// mDNS-advertised name (e.g. "FF1-8EVTK3RE") the player weaves into the
-// "open the app on the same Wi-Fi and it finds this frame automatically"
-// guidance — the QR itself is the backup path.
+// mDNS-advertised name (e.g. "FF1-8EVTK3RE") passed to the player as device_name.
+// The QR is the only path to a first owner: scanning it makes the
+// scanning phone the owner, on the device's Wi-Fi. App discovery on the LAN
+// does not lead to a first owner.
 func (s *Service) ShowClaimQR(url string, deviceName string) {
 	s.showClaimQR(url, deviceName, overlay.Owner)
 }
