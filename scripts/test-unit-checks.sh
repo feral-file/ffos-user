@@ -174,7 +174,7 @@ out=$(FF_TEST_SINK=alsa_output.hdmi-stereo check speakers) || fail "speakers did
 $out"
 expect "speakers played" '^== Speakers +PLAYED .*low tone LEFT, then high tone RIGHT.*alsa_output.hdmi-stereo' "$out"
 expect "left is announced first" '^Speakers: >>> LEFT' "$(sed -n 1p <<<"$out")"
-[ "$(cat "$tmp_dir/pacat.log")" = $'120000 left\n120000 right' ] || \
+[ "$(cat "$tmp_dir/pacat.log")" = $'240000 left\n240000 right' ] || \
   fail "the tones were not one channel each, left then right: $(cat "$tmp_dir/pacat.log")"
 expect "volume set for the tone" '^set-sink-volume alsa_output.hdmi-stereo 63% ' "$(cat "$tmp_dir/pactl.log")"
 [ "$(tail -n 2 "$tmp_dir/pactl.log")" = $'set-sink-volume alsa_output.hdmi-stereo 26241 13107 [/run/user/test]\nset-sink-mute alsa_output.hdmi-stereo 1 [/run/user/test]' ] || \

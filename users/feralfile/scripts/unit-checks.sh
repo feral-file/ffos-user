@@ -23,7 +23,10 @@
 set -uo pipefail
 
 TEST_VOLUME=63      # percent; the image's default volume (.start-services.sh)
-TONE_SECONDS=1.5
+# Long enough, and far enough apart, for a person at the panel to place each
+# tone: 1.5 s back to back could not be told apart on an FF1 panel.
+TONE_SECONDS=4
+TONE_GAP=2          # seconds of silence between the left and the right tone
 BT_WINDOW=12        # seconds; one BR/EDR inquiry is 10.24 s
 AUDIO_USER="${FF_AUDIO_USER:-feralfile}" # owns the PulseAudio the player uses
 
@@ -256,6 +259,7 @@ check_speakers() {
 
   echo "Speakers: >>> LEFT speaker, LOW tone, now"
   play left 440 "$sink" || played=0
+  sleep "$TONE_GAP"
   echo "Speakers: >>> RIGHT speaker, HIGH tone, now"
   play right 880 "$sink" || played=0
   if ! audio_restore; then
