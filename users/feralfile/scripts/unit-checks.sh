@@ -23,8 +23,7 @@
 set -uo pipefail
 
 TEST_VOLUME=63      # percent; the image's default volume (.start-services.sh)
-# Long enough, and far enough apart, for a person at the panel to place each
-# tone: 1.5 s back to back could not be told apart on an FF1 panel.
+# Long enough, and far enough apart, for a person at the panel to place each tone.
 TONE_SECONDS=4
 TONE_GAP=2          # seconds of silence between the left and the right tone
 BT_WINDOW=12        # seconds; one BR/EDR inquiry is 10.24 s
@@ -173,12 +172,16 @@ pa() {
 # Stays armed until both took, so the exit trap has one more go; returns 1 when
 # they did not.
 audio_restore() {
-  local i
+  local i ok
   [ -n "$AUDIO_SINK" ] || return 0
   for i in 1 2 3; do
+    # Each one tried on its own: a volume that will not take does not keep the
+    # mute from going back.
+    ok=1
     # shellcheck disable=SC2086 # one volume per channel
-    if pa 10 pactl set-sink-volume "$AUDIO_SINK" $AUDIO_VOLUMES >/dev/null 2>&1 &&
-      pa 10 pactl set-sink-mute "$AUDIO_SINK" "$AUDIO_MUTE" >/dev/null 2>&1; then
+    pa 10 pactl set-sink-volume "$AUDIO_SINK" $AUDIO_VOLUMES >/dev/null 2>&1 || ok=0
+    pa 10 pactl set-sink-mute "$AUDIO_SINK" "$AUDIO_MUTE" >/dev/null 2>&1 || ok=0
+    if [ "$ok" -eq 1 ]; then
       AUDIO_SINK=""
       return 0
     fi
