@@ -351,6 +351,12 @@ type joinedChannel struct {
 	expiresAt   time.Time
 	origin      string
 	browserInfo minter.BrowserInfo
+	// announcedRequest is the mint request the site announced when it
+	// created the channel (play#17), nil when it announced none. With it the
+	// owner is asked as soon as the device joins, instead of when the site's
+	// page next polls: a phone browser stops polling while the visitor is in
+	// the app.
+	announcedRequest *minter.MintRequest
 }
 
 type sessionCreator interface {
@@ -497,13 +503,17 @@ func (b realBrokerJoiner) JoinChannel(ctx context.Context, request joinChannelRe
 		return joinedChannel{}, err
 	}
 	requester := channel.Requester()
-	return joinedChannel{
+	joined := joinedChannel{
 		channel:     brokerChannelAdapter{channel: channel},
 		channelID:   channel.ChannelID(),
 		expiresAt:   channel.ExpiresAt(),
 		origin:      requester.Origin,
 		browserInfo: requester.BrowserInfo,
-	}, nil
+	}
+	if request, ok := channel.JoinedMintRequest(); ok {
+		joined.announcedRequest = &request
+	}
+	return joined, nil
 }
 
 // startingPairing is the cancellable in-progress state of one pairing start:
@@ -570,6 +580,11 @@ type activePairing struct {
 	// origin and browserInfo are what the broker attested at join time.
 	origin      string
 	browserInfo minter.BrowserInfo
+	// announcedRequest is the request the site announced at create, if any
+	// (see joinedChannel). The worker answers it instead of waiting for the
+	// encrypted copy the site still sends for older devices; it takes one
+	// request per channel, so that copy is never read.
+	announcedRequest *minter.MintRequest
 	// delivering is set (under s.mu) once a session delivery for this pairing
 	// has passed its identity fence. A replacement that finds it set waits for
 	// the worker to finish: the send cannot be taken back, and the new pairing
@@ -1245,16 +1260,17 @@ func (s *service) HandleJoinPairingChannel(ctx context.Context, args map[string]
 	// shutdown).
 	sessionCtx, sessionCancel := context.WithCancel(runCtx)
 	active := &activePairing{
-		channel:        siteJoinedChannel{brokerChannel: joined.channel},
-		channelID:      channelID,
-		expiresAt:      expiresAt,
-		phase:          activePairingPhaseJoined,
-		cancel:         sessionCancel,
-		done:           make(chan struct{}),
-		joined:         true,
-		origin:         joined.origin,
-		browserInfo:    joined.browserInfo,
-		joinCredential: credential,
+		channel:          siteJoinedChannel{brokerChannel: joined.channel},
+		channelID:        channelID,
+		expiresAt:        expiresAt,
+		phase:            activePairingPhaseJoined,
+		cancel:           sessionCancel,
+		done:             make(chan struct{}),
+		joined:           true,
+		origin:           joined.origin,
+		browserInfo:      joined.browserInfo,
+		announcedRequest: joined.announcedRequest,
+		joinCredential:   credential,
 	}
 
 	// A close (or a superseding join) that landed during the broker call
@@ -1642,7 +1658,20 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 	}()
 
-	request, err := s.waitForMintRequestUntilExpiry(ctx, active)
+	var request *minter.MintRequest
+	var err error
+	if active.joined && active.announcedRequest != nil {
+		// Ask now, while the visitor is still in the app. The site's
+		// encrypted copy of this request (same message id) is never polled:
+		// this worker answers one request per channel.
+		announced := *active.announcedRequest
+		request = &announced
+		s.logger.Info("Answering the mint request the site announced at create",
+			zap.String("channelID", active.channelID),
+			zap.String("requestMessageID", announced.MessageID))
+	} else {
+		request, err = s.waitForMintRequestUntilExpiry(ctx, active)
+	}
 	if reason, mismatched := attestationMismatch(err); mismatched {
 		// Not terminalSent even when a rejection went out: the channel is
 		// closed below, because nothing more should happen on it.
