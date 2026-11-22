@@ -26,7 +26,7 @@ import (
 // lint pins that), so the dependency points this way: offlinecache
 // implements mediahealth's interface.
 //
-// It replaces probe.go's cast-time preflight (#304), whose status-only
+// It replaces probe.go's accept-time preflight (#304), whose status-only
 // HTTP/1 parser read no body at all. L0 needs the first 32 KiB, so this
 // fetcher reads through net/http's parser on the guarded transport
 // (64 KiB response-header ceiling, bounded redirects, no proxy) and bounds
@@ -38,9 +38,9 @@ const (
 	// maxConcurrentProbeFetches is the process-wide ceiling on in-flight
 	// probe responses, counted in units: plain HTTP spends one, HTTPS
 	// four, so at most 32 HTTP or 8 TLS peers can have this daemon parsing
-	// their headers and certificates at once — whatever the cast storm gate
+	// their headers and certificates at once — whatever the display request storm gate
 	// (operator-configurable, and independent of this bound) admits. The
-	// cast pass's own worker pool (16) and the lookahead (1) sit inside it.
+	// display pass's own worker pool (16) and the lookahead (1) sit inside it.
 	maxConcurrentProbeFetches int64 = 32
 	probeFetchHTTPSWeight     int64 = 4
 )

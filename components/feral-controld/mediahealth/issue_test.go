@@ -160,7 +160,7 @@ func TestIssue_KioskServedDocumentClearsProbeSideIssues(t *testing.T) {
 	assert.Equal(t, IssuePlayFailed, f.record().Issue, "a play failure is about rendering: a 200 does not clear it")
 }
 
-// The cast's 5 s deadline is not a real attempt.
+// The display request's 5 s deadline is not a real attempt.
 func TestIssue_CastTimeoutWritesNothing(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := newTableFetcher()

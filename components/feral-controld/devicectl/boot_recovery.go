@@ -217,7 +217,7 @@ func (e *executor) MaybeRecoverPlayerOnBootOnline(ctx context.Context) {
 	}
 	if !e.claimSettled() {
 		// Unclaimed: the auto-claim flow owns the screen, there is no
-		// playlist to repair, and anything cast after a claim loads with the
+		// playlist to repair, and anything displayed after a claim loads with the
 		// network already up — nothing this boot needs to repair. Terminal
 		// (Expired) so the one-shot latch stays consumed, same as Phase 1.
 		e.transitionBootRecoveryLocked(bootRecExpired, "unclaimed")

@@ -11,7 +11,7 @@ consulted and nothing leaves the device.
 
 | Layer | When | What it sees | Package |
 |---|---|---|---|
-| L0 | before play (the cast-time pass) and ahead of play (the lookahead) | the first 32 KiB of the source: HTTP status, declared vs sniffed type, gateway error pages and directory listings, corrupt containers | `mediahealth` (rules), `offlinecache` (the guarded fetch) |
+| L0 | before play (the accept-time pass) and ahead of play (the lookahead) | the first 32 KiB of the source: HTTP status, declared vs sniffed type, gateway error pages and directory listings, corrupt containers | `mediahealth` (rules), `offlinecache` (the guarded fetch) |
 | play | every `checkStatus` poll | what the player reported for each item it mounted: ready, or failed at which stage | `mediahealth` (drain), `status` (poll) |
 | L1 | nightly, while the panel sleeps (`mediaHealth.l1.enabled`, off by default) | a rendered frame of a software work: blank, or a known error-page fingerprint | `mediahealth` (classifier, runner), `offlinecache` (the headless render) |
 
@@ -61,7 +61,7 @@ cache uses (`offlinecache.SourceKey`), pinned equal by a test.
 
 A broken record **past** its recheck window is still shown to the app as
 broken (it is the last thing observed) but no longer hints and no longer
-counts toward rejecting a cast.
+counts toward rejecting a display request.
 
 ## Categories (what the app shows)
 
@@ -146,8 +146,8 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
     403, 429: the gateway's policy, never the content's) — **or no other
     gateway is configured for the network:** a transient `server_error`
     feeding the unreachable streak; one gateway's 404 is never a verdict on
-    its own. A deadline that runs out during the fallback at cast records
-    nothing, like any cast timeout.
+    its own. A deadline that runs out during the fallback at display records
+    nothing, like any display request timeout.
 
   The confirmation is the request the kiosk makes — **no `Range` header**,
   the body read capped at the probe window — not the probe's ranged read.
@@ -218,7 +218,7 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   captive portal or broken proxy answers 502 for every host. At 3 counted attempts spanning 24 h
   the record is broken (`unreachable`, or `dns` when the last attempt was a
   DNS failure) with the normal broken recheck, so it heals on the first
-  answer. A probe cut short by the cast pass's own 10 s ceiling, rather
+  answer. A probe cut short by the display request pass's own 10 s ceiling, rather
   than its 5 s item deadline, records nothing at all: running out of our
   own budget says nothing about the source, and an unrecorded item is
   reached by the lookahead within seconds. Fetch
@@ -253,7 +253,7 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   matches any text, XML or JSON body. A payload that passes is recorded
   `ok` (layer `l0`); one that does not decode is a reasoned inconclusive (a
   hold, no verdict). Every verdict is recorded and hinted like any other;
-  the cast pass writes a passing one only when its record is due, and the
+  the display request pass writes a passing one only when its record is due, and the
   lookahead walk and the sweep settle due `data:` records without
   network.
 - onchfs works (`https://<base32 root>.onchfs.invalid/…`, ffos-user#427,
@@ -270,7 +270,7 @@ agree. The regression inputs travel with the port (`mediahealth/validator_test.g
   one store transaction after the request barrier, so a playlist repeating
   one source thousands of times costs one request and one write.
 
-### The cast-time pass (replaces the #304 preflight)
+### The accept-time pass (replaces the #304 preflight)
 
 `commandrouter`'s `displayPlaylist` runs `mediahealth.Prober.Preflight` over
 the resolved sources after DP-1 resolution and before the playback lock. Shape
@@ -286,13 +286,13 @@ only its first 24 items. What changed: no early exit on the
 first alive source — every source the pass reaches is probed and recorded —
 and a source with a **conclusive stored verdict** (broken or ok inside its
 window) is answered from the store without a request, so a playlist seen
-before costs no network at cast.
+before costs no network at display.
 
 The pass is paced, not a burst. It probes the **first 24 sources in play
 order** (`castItems`) that need a request with **4 workers**
 (`castConcurrency`) and at most **2 in flight per host** — a playlist served
 by one CDN runs at 2, whatever the pool — then hands the rest of the wall to
-the lookahead. Items beyond the pass are unknown at cast: no record, no hint,
+the lookahead. Items beyond the pass are unknown at display: no record, no hint,
 fail-open; their hint rides the next push once the lookahead has reached them.
 The all-dead rejection keeps its reach: while **every** source seen so far is
 dead (a stored alive verdict, an inline item or an inconclusive answer ends
@@ -306,12 +306,12 @@ request and without a record (unknown, not held), and the probed source's own
 transient hold is the origin's `Retry-After` bounded by the usual hour instead
 of a flat hour.
 
-The admission rule is unchanged: the cast is rejected with `sourceUnreachable`
+The admission rule is unchanged: the display request is rejected with `sourceUnreachable`
 only when EVERY item is dead (now including a conclusive broken record), and
 the offline-cache rescue applies as before. A stored **render** verdict
 (`render_failed`, `render_blank`: the work mounted on this device and failed,
 or its frame read blank) is answered from the store as inconclusive, not dead:
-it says nothing about the origin, so an owner who casts that one work gets it
+it says nothing about the origin, so an owner who display requests that one work gets it
 played, judged by the player's retry budget, instead of a `sourceUnreachable`
 that names no unreachable source. The hint still steps the wall past it. A
 play-layer content-type answer (404, 403) keeps its fetch category and still
@@ -331,7 +331,7 @@ remembers where the walk stopped, so each step reads one chunk of records,
 not the whole wall, and resets when the playlist or the index changes. There
 is no cap on the wall. With nothing due on the wall, the background sweep
 takes one due record **not** on the wall, under a budget of 20 per hour, so a
-fixed source heals without being cast again and a 100k-record store never
+fixed source heals without being display again and a 100k-record store never
 becomes 100k probes a day.
 
 Pace: the next probe starts as soon as the previous one finishes — no gap.
@@ -339,7 +339,7 @@ Politeness is the shared `HostLimiter` alone: at most 2 in flight per host
 (the walk itself is one request at a time), and a host answering 429/503 is
 paused for its `Retry-After`; a source on a paused host is stepped over, not
 held. Each background request may take up to 30 s
-(`Prober.BackgroundItemTimeout`), not the cast pass's 5 s: nothing waits on
+(`Prober.BackgroundItemTimeout`), not the display request pass's 5 s: nothing waits on
 it, and a short deadline only turned slow answers into timeouts (arweave.net
 serves some 404 pages after 7–27 s). A probe that wrote a record is governed
 by that record alone, so a 429 with `Retry-After: 30` is due again after 30 s.
@@ -354,8 +354,8 @@ hints ride the next push, or the hint-only push below.
 Manifest contract: `contracts.mediaHealth` version 1 in
 `/opt/feral/feral-player/ffos-player-contract.json`. The field is sent only
 when the installed player declares it (re-read when the manifest's mtime
-changes), on every push: a cast, a scheduler cutover, a refresher soft refresh
-or force cast. Any `mediaHealth` a controller puts on a cast is dropped.
+changes), on every push: a display request, a scheduler cutover, a refresher soft refresh
+or force display. Any `mediaHealth` a controller puts on a display request is dropped.
 
 ```json
 "mediaHealth": {
@@ -365,15 +365,15 @@ or force cast. Any `mediaHealth` a controller puts on a cast is dropped.
 
 Sparse: conclusively broken items only, minus any source the offline cache
 can replay from a confirmed capture (the hint must not hide what replay
-interception would show — the same reason the cast rescue exists). The player
+interception would show — the same reason the display request rescue exists). The player
 skips a hinted item in its timeline without mounting it, keeps it in `items`,
 and reports `{kind:"skip", stage:"hint"}` in its outcome ring.
 
 ### The hint-only push: `setMediaHealth`
 
 A verdict reached **between** pushes (the lookahead, the sweep, the outcome
-drain) would otherwise reach the player only on the next cast, cutover or
-refresh, and a static inline cast is never re-pushed. Since the cast pass
+drain) would otherwise reach the player only on the next display request, cutover or
+refresh, and a static inline display is never re-pushed. Since the display request pass
 probes only its first 24 items, that is where most of a long wall's verdicts
 land. `mediahealth.HintPusher` closes the gap with a player command that
 replaces only the held hint map:
@@ -397,15 +397,15 @@ replaces only the held hint map:
   the player is believed to hold. Recomputing rather than listening for store
   writes also catches a verdict that **expires** past its recheck window. The
   belief is the map the last push path attached, or the last delivered
-  push, bound to the cast generation. An unknown belief sends the current
+  push, bound to the display request generation. An unknown belief sends the current
   map, **the empty one included**: after a controld restart under a
   surviving page, the page may still hold hints that have since healed or
   expired, and only an explicit empty replacement clears them. That costs
-  one send per cast with no belief, which replace semantics make harmless. Nothing is sent
-  in the first 15 s after a new cast, since the cast's push carried the map.
+  one send per display request with no belief, which replace semantics make harmless. Nothing is sent
+  in the first 15 s after a new display request, since the display request's push carried the map.
 - **Failure.** `staleCast` waits for the next poll's generation. A transport
   error or a reply that crossed a page generation change retries on the next
-  tick. Any other refusal parks the pusher until the next cast, so it never
+  tick. Any other refusal parks the pusher until the next display request, so it never
   loops against a player that does not implement the command.
 - **Internal.** `setMediaHealth` is tier `internal` and the command router
   refuses it from a controller: only the daemon may install a skip map.
@@ -431,8 +431,8 @@ player knows, which hint map it holds, and it feeds `mediaHealth[i].skipped`
 ```
 
 The last 64 entries; `seq` counts for the lifetime of the player page and
-`castSeq` increments per cast. controld keeps a seq cursor that survives casts
-(a cast must not re-apply the entries still in the ring), resets it when the
+`castSeq` increments per display request. controld keeps a seq cursor that survives display requests
+(a display request must not re-apply the entries still in the ring), resets it when the
 ring's highest seq falls below it (a page restart), and logs when the ring
 wrapped between polls. A player-session generation bump only flags the cursor:
 a bump can be a CDP reconnect to the surviving page as well as a new page, so
@@ -531,7 +531,7 @@ sighting for the item at `index` counts as one failure per mount (stage
 headless Chromium while the panel sleeps and classifies the frame. It is an
 experiment behind `mediaHealth.l1.enabled` (absent = off): its verdicts are
 stored under the record's `l1` sub-record and shown to the app as `suspect`,
-and they are **never** a hint and **never** count toward cast rejection — a
+and they are **never** a hint and **never** count toward display rejection — a
 blank frame is weaker evidence than a byte-level failure, and a false blank
 would hide real art, the worst outcome here.
 
@@ -546,7 +546,7 @@ would hide real art, the worst outcome here.
   starts the headless browser. The
   offline cache's admission gate, when enabled, is consulted read-only
   before each render. An in-flight render is cancelled within a couple of
-  seconds when the gate closes. A wake (or a cast interrupting the night)
+  seconds when the gate closes. A wake (or a display request interrupting the night)
   records nothing and the candidate stays due. The admission gate closing
   while the panel sleeps on — most likely the render's own load: SwiftShader
   takes an x86 FF1 from 40 °C past the 75 °C software block within seconds
@@ -587,7 +587,7 @@ would hide real art, the worst outcome here.
   **stalled**, since Chromium's own error page is on screen. The URL
   rendered is the
   record's **own source**, fragment kept — never the record's `wireUrl`,
-  which the cast pass copies from a wire-identical sibling (`work#one` and
+  which the display request pass copies from a wire-identical sibling (`work#one` and
   `work#two` are two works) — routed exactly as the kiosk's interceptor
   routes it (`offlinecache.MediaHealthRouting`), on the guard so **every**
   request of the render — the navigation, redirects, child frames,
@@ -646,7 +646,7 @@ would hide real art, the worst outcome here.
   **earlier night** (at least 12 h before: a same-night confirmation is the
   same observation), an open play failure run, or the wall's own failing
   frame. Then it is `broken`, layer `l1`, with the ordinary broken window
-  and backoff: skipped, and counted toward rejecting an all-broken cast.
+  and backoff: skipped, and counted toward rejecting an all-broken display.
   When the open run is a fetch one (the content-type check refused the
   document), both layers failed and the verdict carries the fetch reason
   (`render_detect`, `source_missing`/`source_unreachable`). Off by default
@@ -818,7 +818,7 @@ attempt's problem, beside `state`, never instead of it. It is omitted while
 | `access_denied` | 401/403/407 to the probe (may be the probe's identity) | the next probe answering, or a kiosk 2xx |
 | `play_failed` | one counted failed play (player ring or kiosk observer) | any `ready` that ends the failure run (an opaque embed's included — not the error page shown after a refused content-type check), or the verdict at 2 |
 
-Rules: only real attempts write an issue — the cast pass's 5 s deadline
+Rules: only real attempts write an issue — the display request pass's 5 s deadline
 expiring writes nothing at all (no record, no hold, no streak count; the
 lookahead's 30 s probe is the real attempt), and neither does an unreachable
 result while the device reached no other origin, nor a play while offline. A
@@ -939,13 +939,13 @@ data: capture the offending render once, record its pHash (the indexer's
 `maxDistance` small (4–8; a loose tolerance hides real art). An entry that
 does not parse is logged and dropped.
 
-`disabled` is the kill switch: no store, no pass (casts forwarded unprobed,
+`disabled` is the kill switch: no store, no pass (display requests forwarded unprobed,
 the pre-#304 behavior), no hints, no lookahead, no per-item status, no kiosk
 observer. `kioskObserverDisabled: true` turns off only the kiosk navigation
 observer (the one media-health piece that holds a socket to the kiosk). The
 retired `sourceProbe.disabled` is read as `mediaHealth.disabled`. `lookahead:
 -1` disables the lookahead and the background sweep. `castItems` and
-`castConcurrency` tune the cast-time pass for an origin that still
+`castConcurrency` tune the accept-time pass for an origin that still
 rate-limits the defaults; the per-host cap (2 in flight) is fixed, and the
 lookahead has no gap — it is paced by the per-host rules alone.
 

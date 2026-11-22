@@ -8,14 +8,14 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 )
 
-// onchfsOpening returns the cast's items reordered so the work the cast
-// opens on comes first, and how long the cast should wait for it to be read
+// onchfsOpening returns the display request's items reordered so the work the display request
+// opens on comes first, and how long the display request should wait for it to be read
 // from chain: onchfsCastWait when that work is onchfs, zero otherwise.
 //
 // Why: OnchfsMaterializer.Ensure waits for the FIRST onchfs work in the list
 // it is given. Handed the list as is, a wall that opens on an ordinary IPFS
 // work but carries one onchfs work at position 40 waited up to 15 s on every
-// cast while the chain RPCs were unreachable (a captive or filtered network),
+// display while the chain RPCs were unreachable (a captive or filtered network),
 // for a work nobody would see for an hour. Only the opening work is worth a
 // wait; the rest are read in the background and widen the replay scope when
 // they land. The reorder only steers Ensure: the list sent to the player is

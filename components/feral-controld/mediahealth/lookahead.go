@@ -35,7 +35,7 @@ import (
 //   - With nothing due on the wall, take one due record NOT on the wall
 //     from the store's recheck index, under a token bucket of
 //     SweepPerHour, so a 100k-record store never becomes 100k probes a
-//     day and a fixed source still heals without being cast again.
+//     day and a fixed source still heals without being display again.
 //
 // Pace: the next probe starts as soon as the previous one finishes — no
 // gap. Politeness is the Prober's shared HostLimiter alone: at most two
@@ -350,7 +350,7 @@ func (l *Lookahead) nextDue(now time.Time) string {
 	if err != nil || len(due) == 0 {
 		return ""
 	}
-	// A due data: record (a malformed URI the cast pass recorded) is
+	// A due data: record (a malformed URI the display request pass recorded) is
 	// re-settled through the same path: ProbeOne answers it synchronously
 	// with no network, and the broken backoff spaces the rechecks out.
 	l.mu.Lock()

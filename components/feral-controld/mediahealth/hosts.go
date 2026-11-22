@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// HostLimiter is the per-origin pacing the cast pass and the lookahead
-// SHARE. It is one object on the Prober on purpose: a 429 the cast pass
+// HostLimiter is the per-origin pacing the display request pass and the lookahead
+// SHARE. It is one object on the Prober on purpose: a 429 the display request pass
 // provokes must slow the lookahead down on the same host, and the two must
 // never hold three connections to one origin between them.
 //

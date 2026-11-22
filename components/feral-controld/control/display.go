@@ -199,7 +199,7 @@ func (a *Authority) refuseDisplay(adm *Admission, ctl string, window Window, cod
 
 // admitDisplay is §3.4 steps 5-6 for a display record, in every state but
 // locked (OpenFrom answered that already): legacy included, because a
-// legacy device issues display grants too (§5.7). A display ctl can cast,
+// legacy device issues display grants too (§5.7). A display ctl can display,
 // revoke itself, or read display status over relay v2. An
 // inactive record is access_revoked; for an active one every other op or
 // command is permission_denied. Refusals spend the ctr.
@@ -249,7 +249,7 @@ func (a *Authority) admitDisplay(pre authenticated, g DisplayGrant, now int64, r
 }
 
 // Permits reports whether p may run cmd with req (§7.1). A display grant is
-// limited to the exact Play cast shape and a read-only display status query.
+// limited to the exact Play display request shape and a read-only display status query.
 // The admission path additionally limits the status query to relay v2. Every
 // other role is decided by the tier table.
 func Permits(p Principal, cmd string, req json.RawMessage) bool {

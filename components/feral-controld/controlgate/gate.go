@@ -109,7 +109,7 @@ func parseEnvelopeRequest(raw json.RawMessage) (string, error) {
 }
 
 // HandleEnvelope opens one ff1Envelope request (the `request` object of the
-// cast, raw) and, when admitted, executes it. It returns the wire reply, or a
+// command, raw) and, when admitted, executes it. It returns the wire reply, or a
 // public error to send in clear (HTTP status / RPC message per §4.4).
 func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*Wire, *control.PublicError) {
 	compact, err := parseEnvelopeRequest(raw)
@@ -172,7 +172,7 @@ func (g *Gate) execute(ctx context.Context, adm *control.Admission) (string, err
 	}
 	// An admitted envelope is always a controller's command, so it carries the
 	// same FromController mark as the plaintext hub and relayer paths (#409:
-	// a controller's cast wakes a sleeping player).
+	// a controller's command wakes a sleeping player).
 	result, err := g.handler.Process(commands.FromController(control.WithPrincipal(ctx, adm.Principal)), cmd)
 	if err != nil {
 		return adm.Reply(false, control.CodeCommandFailed, failureBody(cmd.Type, err))

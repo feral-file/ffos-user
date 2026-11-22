@@ -1458,7 +1458,7 @@ func TestMediator_HandleRelayerMessage_RateLimited(t *testing.T) {
 }
 
 // TestMediator_HandleRelayerMessage_SourceUnreachable verifies the relayer
-// ingress path reports a dead-source cast rejection legibly: remote casters
+// ingress path reports a dead-source display rejection legibly: remote senders
 // (a publisher pushing a playlist to someone else's wall) are exactly the
 // audience the #304 preflight exists for, so the rejection must come back
 // as a structured "sourceUnreachable" RPC response carrying the per-item
@@ -1515,7 +1515,7 @@ func TestMediator_HandleRelayerMessage_SourceUnreachable(t *testing.T) {
 	if assert.True(t, ok, "source-unreachable response carries a structured body") {
 		// ok:false must be present and false: ff-cli's relayer helper
 		// hunts for a boolean ok and reads a body WITHOUT one as success,
-		// and ff-app casts the field and throws on absence — see the
+		// and ff-app sends the field and throws on absence — see the
 		// mediator's reply-shape comment.
 		assert.Equal(t, false, msg["ok"])
 		assert.Equal(t, "sourceUnreachable", msg["error"])

@@ -153,7 +153,7 @@ type Store interface {
 	// SeriesSegment's doc). A later read (an offline-cache fallback or
 	// resync) reconstructs a dp1.CastPlan from this and calls its existing
 	// Narrow(deviceMode) to decide what to display — the exact logic a
-	// live cast already uses — without a second catalog round trip.
+	// live display already uses — without a second catalog round trip.
 	//
 	// playlistRaw is the exact body this sidecar belongs to, saved into the
 	// envelope as a digest (see LoadPlaylistSeriesSegments) rather than

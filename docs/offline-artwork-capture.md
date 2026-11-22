@@ -1034,7 +1034,7 @@ offline-artworks/
   playlists/series-segments/<playlistId>.json  # series-group identity for a curated playlist's seriesRegistry items, when any resolved (SeriesSegment in types.go)
 ```
 
-The `series-segments` sidecar (feral-file/ffos-user#455, #453) exists because the playlist record above is the **flattened** result (every `seriesRegistry` item already replaced by its editions, same as a live `ExpandSeriesItems`) — the resolve that produced it keeps each series' group identity (representative, full edition set, the document's stated mode, `artworkModel`) only long enough to flatten it, and this sidecar is what survives that moment: `commandrouter` converts the resolve's `dp1.CastPlan.Segments` to this package's own `SeriesSegment` (it cannot import `dp1` — see that type's doc) and `Store.SavePlaylistSeriesSegments` writes it, nested the same invisible-to-`ListPlaylistIDs` way `by-url/` already is. `Service.CachedPlaylistForURL` returns it alongside the raw playlist so an offline fallback/resync can rebuild a `dp1.CastPlan` and call its existing `Narrow(deviceMode)` — the live-cast narrowing logic — without a second catalog round trip; see `docs/api-design.md`'s "DP-1 `seriesRegistry` expansion" section for the full mechanism. `DeletePlaylist` removes this sidecar too (unlike the `by-url/` index, which is deliberately left stale on a clear): it is interpreted directly against whatever `Items` a *later* save of the same playlist id holds, so a stray sidecar could silently narrow a future, unrelated playlist against the wrong group set. That delete is itself best-effort, logged on failure rather than surfaced — so the sidecar's envelope also carries a hex SHA-256 digest of the exact playlist body it was saved alongside. `LoadPlaylistSeriesSegments` recomputes the digest from the body the caller just loaded and discards the sidecar as `ErrPlaylistNotFound` (the same "nothing to narrow by" outcome every caller already handles) on a mismatch — whether that mismatch comes from a reader landing between the body write and this sidecar's own write, or from an earlier delete that silently failed to remove a sidecar now paired with unrelated content (feralfile-bot F2, 2026-11-12).
+The `series-segments` sidecar (feral-file/ffos-user#455, #453) exists because the playlist record above is the **flattened** result (every `seriesRegistry` item already replaced by its editions, same as a live `ExpandSeriesItems`) — the resolve that produced it keeps each series' group identity (representative, full edition set, the document's stated mode, `artworkModel`) only long enough to flatten it, and this sidecar is what survives that moment: `commandrouter` converts the resolve's `dp1.CastPlan.Segments` to this package's own `SeriesSegment` (it cannot import `dp1` — see that type's doc) and `Store.SavePlaylistSeriesSegments` writes it, nested the same invisible-to-`ListPlaylistIDs` way `by-url/` already is. `Service.CachedPlaylistForURL` returns it alongside the raw playlist so an offline fallback/resync can rebuild a `dp1.CastPlan` and call its existing `Narrow(deviceMode)` — the live-display narrowing logic — without a second catalog round trip; see `docs/api-design.md`'s "DP-1 `seriesRegistry` expansion" section for the full mechanism. `DeletePlaylist` removes this sidecar too (unlike the `by-url/` index, which is deliberately left stale on a clear): it is interpreted directly against whatever `Items` a *later* save of the same playlist id holds, so a stray sidecar could silently narrow a future, unrelated playlist against the wrong group set. That delete is itself best-effort, logged on failure rather than surfaced — so the sidecar's envelope also carries a hex SHA-256 digest of the exact playlist body it was saved alongside. `LoadPlaylistSeriesSegments` recomputes the digest from the body the caller just loaded and discards the sidecar as `ErrPlaylistNotFound` (the same "nothing to narrow by" outcome every caller already handles) on a mismatch — whether that mismatch comes from a reader landing between the body write and this sidecar's own write, or from an earlier delete that silently failed to remove a sidecar now paired with unrelated content (feralfile-bot F2, 2026-11-12).
 
 That digest cannot catch every stale-sidecar case, though: a RE-download of the IDENTICAL raw playlist bytes — the catalog's answer for the same series changed since the last download, or the document no longer resolves to a series at all — produces a NEW `segments` value with the SAME digest as the OLD sidecar, since the digest is a pure function of the body bytes alone. `Service.savePlaylistAndURLIndex` therefore invalidates whatever sidecar the playlist id currently holds right after the new body is durably saved, before writing any new segments for it, and aborts the whole save if that invalidation itself fails, instead of letting a new sidecar land next to — or an empty save silently leave in place — an old sidecar that would still validate against the new body. On success there is at most a brief window with no sidecar at all, which is the same safe "nothing to narrow by" outcome every caller already handles (feralfile-bot F2, round 3 on this fix, 2026-11-12). Invalidating is deliberately ordered AFTER the body save, not before: `SavePlaylist` either fully replaces the body or, on failure, leaves it untouched (temp file + rename), so invalidating first would destroy a still-correctly-paired sidecar for the OLD body on nothing more than a transient body-write failure (run-reviewer, round 3 on this fix, 2026-11-12).
 
@@ -1196,7 +1196,7 @@ that checks the persisted copy, or simply as metadata that vanished
 somewhere between the publisher and the screen. For the same reason the
 cached copy is never verified when loaded as a fallback: its bytes are this
 re-serialization (of an already-hydrated playlist), so a verdict over them
-would be a false tamper claim against an honest publisher. A cast served
+would be a false tamper claim against an honest publisher. A playlist served
 from the cache reports no `signatureStatus` at all.
 
 There is deliberately **no** top-level manifest, no separate
@@ -1806,7 +1806,7 @@ now — interception is keyed on the URLs the kiosk actually fetches. The two
 differ on every pass that sends the player nothing: both
 `resyncKioskReplayScopeToCurrentDisplay`s and `playlist-refresher`'s
 static-inline refresh re-derive "what is displayed" from player status, and
-that re-derivation now expands `seriesRegistry` items. A series cast while
+that re-derivation now expands `seriesRegistry` items. A series displayed while
 the art catalog was unreachable keeps its representative, so a later pass
 whose expansion succeeds would scope replay to editions that were never
 displayed and never captured — `SyncPlaylist` then finds nothing cached and
@@ -1823,23 +1823,23 @@ starts requesting that playlist's resources, rather than racing the first
 few requests against a scope switch that has not happened yet. "Before
 the send" never means "before the send is even certain to happen",
 though: the sync runs only after the `displayAt` scheduler has filtered
-the cast and something will actually be pushed. A future-only cast that
+the request and something will actually be pushed. A future-only request that
 the scheduler defers (`ok: true, deferred: true`, no player write)
 leaves scope untouched, because the previous playlist keeps displaying
 and switching interception to the deferred playlist would — under a
 fail_closed scope — block the on-screen playlist's own requests even
-with live network. When a filtered cast IS pushed, the scope is synced
+with live network. When a filtered request IS pushed, the scope is synced
 with the FULL playlist's item sources rather than the active cohort: the
 scheduler's timer/wake/retry cutovers push later cohorts of the same
 playlist directly with no replay-scope hook of their own, so the
-cast-time scope must already cover every cohort a cutover can display
+accept-time scope must already cover every cohort a cutover can display
 (uncached future items only dilute the scope to `mixed`, whose miss
 policy is pass-through — the safe direction — and the
 `playlist-refresher`'s periodic pass re-syncs as downloads complete).
 The refresher guards its own pre-send sync the same way it already
 guards the send: a playlist-authority change observed under the
 playback lock skips both, so a stale refresh pass can no longer
-overwrite the scope a newer scheduler-owned cast just installed. If the
+overwrite the scope a newer scheduler-owned push just installed. If the
 CDP send itself then fails, or the player rejects the command (`ok:false`),
 the kiosk never actually switched — it is still genuinely showing whatever
 it displayed before — so that early scope switch left replay pointed at a
@@ -2133,7 +2133,7 @@ time, so no further DP-1 resolution happens on the cached copy. It was
 NOT signature-verified then (an earlier version of this sentence claimed
 so; nothing ever did), and it is not verified at load either: the stored
 body is a typed, hydrated re-marshal that cannot verify, so the fallback
-cast carries no signature verdict (feral-file/ffos-user#307; see §7.1's
+display request carries no signature verdict (feral-file/ffos-user#307; see §7.1's
 JCS note above). If there is nothing to fall back
 to (never downloaded, offline caching disabled, or the download was
 since cleared — `LoadPlaylistIDForURL` intentionally is not kept in
@@ -2317,7 +2317,7 @@ and every `source` inside it is a URL this daemon will dial on the
 playlist's behalf from four separate places:
 
 - `classify.go`'s `HEAD` / ranged-`GET` probe,
-- `mediahealth_fetcher.go`'s L0 media probe (#304, #392: the cast-time pass
+- `mediahealth_fetcher.go`'s L0 media probe (#304, #392: the accept-time pass
   and the during-play lookahead),
 - `mediacapture.go`'s direct body download,
 - `capture.go`'s `Page.navigate` in the headless browser.
@@ -2707,7 +2707,7 @@ LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
 working, and would need an explicit opt-in config knob to relax.
 
 **Accepted risk — the preflight as a bounded outbound amplifier.** The
-cast-time source preflight (#304) gives the unauthenticated LAN a new way
+accept-time source preflight (#304) gives the unauthenticated LAN a new way
 to make the device dial out: a `displayPlaylist` may probe up to 256
 distinct wire URLs at concurrency 16, each on a fresh dial (keep-alives
 are off by design), and the hub's 422 body reflects per-item HTTP status

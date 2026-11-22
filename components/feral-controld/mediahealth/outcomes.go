@@ -9,8 +9,8 @@ import (
 // Outcomes is the `outcomes` field of the player's checkStatus reply under
 // the `mediaHealth` v1 manifest contract: a bounded ring of the most recent
 // per-item play outcomes, failures AND successes. Live-only on the player
-// (boot and hydrate strip it); CastSeq increments on every cast and Seq on
-// every entry, so a reader can tell a new cast from a continuation and a
+// (boot and hydrate strip it); CastSeq increments on every display request and Seq on
+// every entry, so a reader can tell a new display request from a continuation and a
 // dropped entry from a quiet wall.
 type Outcomes struct {
 	CastSeq int64     `json:"castSeq"`
@@ -194,10 +194,10 @@ type FrameEvidence struct {
 // Drainer tracks what has already been read from the ring so each outcome
 // is applied once. One per poller; not safe for concurrent use.
 //
-// The player numbers entries for the lifetime of its page, NOT per cast:
-// a cast bumps castSeq but the ring keeps its entries and seq keeps
-// counting, so the cursor must survive a cast — resetting it there would
-// re-apply the entries still in the ring and let an ordinary cast
+// The player numbers entries for the lifetime of its page, NOT per display request:
+// a display request bumps castSeq but the ring keeps its entries and seq keeps
+// counting, so the cursor must survive a display request — resetting it there would
+// re-apply the entries still in the ring and let an ordinary display request
 // manufacture its own corroboration. The cursor resets only when the
 // numbering may have restarted: a player-session generation bump (Reset)
 // or a ring whose highest seq is below the cursor (a restart the daemon

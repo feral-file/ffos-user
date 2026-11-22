@@ -6,7 +6,7 @@
 //
 //   - the per-item HINT handed to the player on every displayPlaylist
 //     push, so a conclusively broken item is skipped without being mounted;
-//   - the admission verdict of a cast (every item dead ⇒ sourceUnreachable),
+//   - the admission verdict of a display request (every item dead ⇒ sourceUnreachable),
 //     derived from the same probe pass that used to be the standalone
 //     preflight (#304);
 //   - the per-item health the app sees on player_status / getMediaHealth.

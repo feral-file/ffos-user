@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The cast pass probes its first Items sources and leaves the rest to the
+// The display request pass probes its first Items sources and leaves the rest to the
 // lookahead — unless everything seen so far is dead, in which case it
-// keeps going so an all-dead cast is still refused.
+// keeps going so an all-dead display is still refused.
 func TestPreflight_FirstItemsThenExtendsOnlyWhileAllDead(t *testing.T) {
 	wall := func(n int) []string {
 		out := make([]string, n)
@@ -84,7 +84,7 @@ func TestPreflight_FirstItemsThenExtendsOnlyWhileAllDead(t *testing.T) {
 			assert.Equal(t, 1, f.count(sources[i]))
 		}
 	})
-	t.Run("past the budget the cast cannot be refused, so nothing extends", func(t *testing.T) {
+	t.Run("past the budget the display request cannot be refused, so nothing extends", func(t *testing.T) {
 		clock := &testClock{t: time.Now()}
 		f := newTableFetcher()
 		sources := wall(10)
@@ -99,7 +99,7 @@ func TestPreflight_FirstItemsThenExtendsOnlyWhileAllDead(t *testing.T) {
 			assert.Equal(t, VerdictDead, results[i].Verdict, "item %d", i)
 		}
 		for i := 3; i < 8; i++ {
-			assert.ErrorIs(t, results[i].Err, errBeyondPass, "item %d: the budget-exhausted tail admits the cast whatever these say", i)
+			assert.ErrorIs(t, results[i].Err, errBeyondPass, "item %d: the budget-exhausted tail admits the display request whatever these say", i)
 			assert.Equal(t, 0, f.count(sources[i]))
 		}
 		assert.ErrorIs(t, results[8].Err, errBudgetExhausted)
@@ -120,7 +120,7 @@ func TestPreflight_FirstItemsThenExtendsOnlyWhileAllDead(t *testing.T) {
 		assert.Equal(t, VerdictAlive, results[5].Verdict)
 		assert.Equal(t, 1, f.count(sources[0]))
 		assert.Equal(t, 1, f.count(sources[1]))
-		assert.Equal(t, 0, f.count(sources[2]), "the cast cannot be all dead; the pass stops after its first batch")
+		assert.Equal(t, 0, f.count(sources[2]), "the display request cannot be all dead; the pass stops after its first batch")
 		assert.ErrorIs(t, results[2].Err, errBeyondPass)
 	})
 	t.Run("an inline item stops the extension too", func(t *testing.T) {
@@ -304,7 +304,7 @@ func TestHostLimiter_CooldownBoundsAndKeepsTheLater(t *testing.T) {
 	assert.False(t, ok, "expired entries are dropped")
 }
 
-// The whole wall is walked in play order, so the items the cast pass left
+// The whole wall is walked in play order, so the items the display request pass left
 // get their first verdict before playback reaches them; a cooled host is
 // stepped over, not held.
 func TestLookahead_WalksTheWholeWallForUnprobedSources(t *testing.T) {

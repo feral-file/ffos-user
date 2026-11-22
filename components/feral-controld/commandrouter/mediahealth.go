@@ -12,7 +12,7 @@ import (
 )
 
 // MediaHealth is the router's view of mediahealth.Service
-// (feral-file/ffos-user#392): the cast-time L0 pass, the per-item hint
+// (feral-file/ffos-user#392): the accept-time L0 pass, the per-item hint
 // field, and the getMediaHealth report. Consumer-owned so the router never
 // depends on the service's construction; nil (tests, a build with the
 // feature disabled) skips the pass entirely — fail-open, the pre-#304
@@ -233,7 +233,7 @@ const (
 // stripOutcomesReply removes the raw outcome ring from a direct checkStatus
 // reply, in both shapes the player answers (bare, and enveloped under
 // `message`). The ring carries item sources — presigned CDN URLs included —
-// and play history across casts; it is an input to the observation store
+// and play history across display requests; it is an input to the observation store
 // (the status poller reads it on its own CDP path), never a controller
 // surface. The poller's notification mapper already drops it; this is the
 // same boundary for the direct reply (PR #438 review, round 4, F16).

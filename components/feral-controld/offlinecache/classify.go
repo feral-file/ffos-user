@@ -69,7 +69,7 @@ const (
 	// ClassOnchfs is a device-local onchfs source
 	// (https://<root>.onchfs.invalid/…, ffos-user#427). Its host never
 	// resolves: the work is read from chain by OnchfsMaterializer when it
-	// is cast, not captured. Classified without a round trip, ahead of the
+	// is display, not captured. Classified without a round trip, ahead of the
 	// guard (which would refuse the unresolvable host), and skipped at
 	// queue time exactly like ClassInline.
 	ClassOnchfs MediaClass = "onchfs"

@@ -453,9 +453,9 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 // Interception is keyed on the URLs the kiosk actually fetches, so the scope
 // has to describe what the PLAYER holds — not what the daemon would resolve
 // the same status to now. Whenever player status carries a concrete item list
-// (a static inline playlist: the filtered active set the player was cast),
+// (a static inline playlist: the filtered active set the player was sent),
 // that list IS what it holds, and re-resolving it can only diverge from the
-// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// screen: a seriesRegistry item display request while the catalog was unreachable keeps
 // its representative, so a later pass whose expansion succeeds would scope
 // replay to editions that were never displayed and never cached. SyncPlaylist
 // then finds nothing cached and disables replay outright (see
@@ -805,10 +805,10 @@ func toOfflineCacheSegments(plan dp1.CastPlan) []offlinecache.SeriesSegment {
 }
 
 // fromOfflineCacheSegments is toOfflineCacheSegments' inverse, for a reader
-// (handler.go's playlistUrl cast-failure fallback, #455; playlist-
+// (handler.go's playlistUrl display request-failure fallback, #455; playlist-
 // refresher's resync, #453) that loaded a sidecar and needs a dp1.CastPlan
 // to call its existing Narrow(deviceMode) on — the exact narrowing logic a
-// live cast already uses, with no second catalog round trip.
+// live display already uses, with no second catalog round trip.
 func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastSegment {
 	out := make([]dp1.CastSegment, 0, len(segments))
 	for _, seg := range segments {
@@ -870,7 +870,7 @@ func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastS
 // current series-playback override — the exact same dp1.CastPlan.Narrow
 // logic a live ProcessPlaylistURLForCast already applies — rather than
 // played back as the unnarrowed full-editions list the download saved.
-// Both of this method's callers (handler.go's playlistUrl cast fallback,
+// Both of this method's callers (handler.go's playlistUrl display request fallback,
 // and resolveDisplayedPlaylist's PlaylistURL branch below) get this for
 // free. A cache with no sidecar (a plain playlist, or one downloaded
 // before this feature existed) is unaffected: Items stay exactly as

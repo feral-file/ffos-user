@@ -214,7 +214,7 @@ func TestGateways_UnconfirmedFeedsTheStreakAndTheCastRecordsNothing(t *testing.T
 	assert.Equal(t, VerdictInconclusive, cast[0].Verdict)
 	rec, err := q.Store.Get(src)
 	require.NoError(t, err)
-	assert.Nil(t, rec, "the cast's deadline ran out during the confirmation: nothing recorded")
+	assert.Nil(t, rec, "the display request's deadline ran out during the confirmation: nothing recorded")
 }
 
 func TestGateways_OtherHostsKeepTheirSingleRequest(t *testing.T) {

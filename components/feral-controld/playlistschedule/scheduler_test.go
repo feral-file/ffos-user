@@ -35,7 +35,7 @@ func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	// Seed a scheduled playlist first so we can prove a later unscheduled cast clears it.
+	// Seed a scheduled playlist first so we can prove a later unscheduled display request clears it.
 	seed := displayAtPlaylist(
 		item("a", "2026-07-21T00:00:00"),
 		item("b", "2026-07-23T00:00:00"),
@@ -165,7 +165,7 @@ func TestPrepare_DisplayAt_PersistsSourceAndClearDeletes(t *testing.T) {
 	playlistURL := "https://example.com/daily.json"
 	active := sched.PrepareWithSource(full, playlistschedule.Source{PlaylistURL: playlistURL})
 	require.Equal(t, []string{"today"}, itemIDs(active.Items))
-	assert.True(t, store.saved.IsZero(), "Prepare must not persist before the player accepts the cast")
+	assert.True(t, store.saved.IsZero(), "Prepare must not persist before the player accepts the display request")
 
 	sched.Commit()
 	require.False(t, store.saved.IsZero())
@@ -173,7 +173,7 @@ func TestPrepare_DisplayAt_PersistsSourceAndClearDeletes(t *testing.T) {
 
 	sched.Clear()
 	assert.False(t, store.cleared, "Clear must not persist before the player accepts the replacement")
-	assert.False(t, store.saved.IsZero(), "durable cache must still reflect the last accepted scheduled cast source")
+	assert.False(t, store.saved.IsZero(), "durable cache must still reflect the last accepted scheduled display request source")
 
 	sched.Commit()
 	assert.True(t, store.cleared)
@@ -457,10 +457,10 @@ func TestRestore_RestoredPendingSourceOnlyKeepsDurableSource(t *testing.T) {
 }
 
 // TestRestore_ReArmsPushRetryWhenRestoredActiveSetWasNeverPushed pins the fix
-// for a cutover lost across a losing cast race. Restore alone re-arms the
+// for a cutover lost across a losing display request race. Restore alone re-arms the
 // transition timer (armTimerLocked), but that only arms for a *future*
 // displayAt boundary. If the restored schedule's boundary has already passed
-// relative to the current clock — because a superseding cast raced the
+// relative to the current clock — because a superseding display request raced the
 // cutover, itself failed, and rolled the schedule back to its pre-cutover
 // snapshot — nothing would otherwise ever drive the real "now" active set to
 // the player: no timer (boundary already past) and no retry (snapshot.
@@ -523,13 +523,13 @@ func TestRestore_ReArmsPushRetryWhenRestoredActiveSetWasNeverPushed(t *testing.T
 	<-timerArmed
 	snapshot := sched.Snapshot()
 
-	// The "tomorrow" boundary crosses before a competing cast's CDP send
+	// The "tomorrow" boundary crosses before a competing request's CDP send
 	// returns.
 	mu.Lock()
 	now = t1
 	mu.Unlock()
 
-	// S2: a competing cast supersedes S1, canceling S1's timer.
+	// S2: a competing display request supersedes S1, canceling S1's timer.
 	_ = sched.Prepare(displayAtPlaylist(item("other", "2026-07-22T00:00:00Z")))
 
 	// S2's own CDP send fails; the caller (handler/refresher) rolls back to
@@ -698,7 +698,7 @@ func TestRecomputeNow_WakePathForceCastsNowDisplay(t *testing.T) {
 	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, _ := params["expression"].(string)
-			// displayAt cutover must force-cast: now_display without refresh so
+			// displayAt cutover must force-display: now_display without refresh so
 			// the player does not defer until the current artwork duration ends.
 			assert.Contains(t, expr, `"action":"now_display"`)
 			assert.NotContains(t, expr, `"refresh":true`)
@@ -886,7 +886,7 @@ func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) 
 	).AnyTimes()
 
 	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
-	// After the cast releases pushMu, recompute must push the *new* cache, not
+	// After the display request releases pushMu, recompute must push the *new* cache, not
 	// the superseded "old" snapshot.
 	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -1337,9 +1337,9 @@ func TestPush_OmitsContentContextWhenTheRestoredSourceHasNone(t *testing.T) {
 	sched.RecomputeNow(context.Background())
 }
 
-// A displayAt cutover is the one cast the command router does not mediate: it
-// replays a later cohort of a document the router filtered once, at cast time.
-// The push-time projection is what makes a policy tightened AFTER that cast
+// A displayAt cutover is the one display request the command router does not mediate: it
+// replays a later cohort of a document the router filtered once, at accept time.
+// The push-time projection is what makes a policy tightened AFTER that display request
 // reach those later cohorts, instead of a work blocked at 23:59 reappearing at
 // midnight.
 func TestPush_ReappliesTheContentPolicyProjectionAtCutover(t *testing.T) {
@@ -1389,7 +1389,7 @@ func TestPush_ReappliesTheContentPolicyProjectionAtCutover(t *testing.T) {
 // setContentPolicy reports success, and the work keeps playing because the only
 // cohort that could replace it is the one the policy just emptied. The empty
 // list goes out with retireBlockedCurrent, the player's documented signal to
-// retire the current item rather than an ordinary cast it would reject.
+// retire the current item rather than an ordinary display request it would reject.
 func TestPush_RetiresACutoverTheContentPolicyEmpties(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -1490,7 +1490,7 @@ func TestRecompute_PushesWhenOnlyTheProjectionChanged(t *testing.T) {
 
 	// ResumePersisted is the NON-forcing path — the one a cached fallback after
 	// a resolution failure takes, and the only one the unchanged-set early
-	// return governs. RecomputeNow force-casts, so it would not exercise it.
+	// return governs. RecomputeNow force-displays, so it would not exercise it.
 	sched.ResumePersisted(context.Background())
 	require.Equal(t, 1, sends, "an unchanged projection must not re-push")
 
@@ -1529,12 +1529,12 @@ func TestInlineDynamicSource_RoundTripPreservesVerdict(t *testing.T) {
 
 // recompute records lastActive as the PROJECTION, so a comparison against the
 // raw cached set can never match again once a tighten hides an item the cached
-// document still contains. Every Restore — every failed cast, every rejected
-// refresh — then armed a retry that force-cast the same cohort seconds later
+// document still contains. Every Restore — every failed display request, every rejected
+// refresh — then armed a retry that force-displays the same cohort seconds later
 // and restarted the artwork, with nothing to stop it.
 //
 // Asserted through the retry's EFFECT rather than its bookkeeping: with the
-// backoff sleep returning immediately, an armed retry force-casts and produces
+// backoff sleep returning immediately, an armed retry force-displays and produces
 // another send. Counting the arming directly would race the goroutine.
 func TestRestore_DoesNotArmARetryWhenOnlyTheProjectionHidItems(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -1596,14 +1596,14 @@ func TestRestore_DoesNotArmARetryWhenOnlyTheProjectionHidItems(t *testing.T) {
 	sched.RecomputeNow(context.Background())
 	drain(t, sent, "the tighten")
 
-	// A failed cast restores the snapshot. Nothing has diverged from what the
+	// A failed display request restores the snapshot. Nothing has diverged from what the
 	// player holds, so no retry may fire.
 	snapshot := sched.Snapshot()
 	sched.Restore(snapshot)
 
 	select {
 	case <-sent:
-		t.Fatal("Restore armed a push retry: it force-cast the same cohort and would restart the artwork")
+		t.Fatal("Restore armed a push retry: it force-displayed the same cohort and would restart the artwork")
 	case <-time.After(300 * time.Millisecond):
 	}
 }

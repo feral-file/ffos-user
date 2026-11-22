@@ -29,7 +29,7 @@ type ContentVerdict struct {
 // Every rule errs HEALTHY on ambiguity: a false broken hides a real artwork
 // from the wall, which is strictly worse than letting a broken one through
 // to the player's own retry/skip. Pure functions over an in-memory prefix —
-// no I/O — so the same validator serves the cast-time pass, the lookahead
+// no I/O — so the same validator serves the accept-time pass, the lookahead
 // and the tests.
 type ContentValidator struct {
 	probeMaxBytes   int

@@ -948,10 +948,10 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 // contentPolicySyncAttempts bounds the reconnect sync retry. Reconcilers run
 // SEQUENTIALLY in registration order and this one is registered before
 // playlist-recompute, so retrying here is what keeps a transient failure from
-// being followed by a scheduled cast to a player still on its own defaults —
+// being followed by a scheduled display request to a player still on its own defaults —
 // a cohort the scheduler then records as delivered and never re-pushes. Bounded
 // rather than persistent: a player that is genuinely gone must not hold the
-// whole reconnect lane, and every other trigger (cast, refresh, cutover, the
+// whole reconnect lane, and every other trigger (display request, refresh, cutover, the
 // next generation) re-syncs anyway.
 const contentPolicySyncAttempts = 3
 
@@ -982,7 +982,7 @@ func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy
 			case <-time.After(contentPolicySyncRetryDelay):
 			}
 		}
-		// Left deliberately non-fatal: the scheduled cast that follows is still
+		// Left deliberately non-fatal: the scheduled display request that follows is still
 		// better than a blank wall, and it is filtered by the daemon either way.
 		// What this cannot do on its own is guarantee the PLAYER is in step —
 		// see the per-generation verification discussion on #349.
@@ -998,7 +998,7 @@ func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy
 // soon as CDP reports initialized, so a restarted player can render a refresh
 // under ITS defaults before the owner's policy lands, and nothing re-sends
 // afterwards. A persisted showMatureContent:true then visibly fails until the
-// next periodic pass or cast.
+// next periodic pass or display.
 //
 // Deliberately conditional on the policy being non-default. An unconditional
 // force here would put a soft artwork refresh on EVERY generation bump — every
@@ -1152,14 +1152,14 @@ func initializeApp(
 
 	// DP1
 	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
-	// computed on every fetched or inline playlist and reported on the cast
+	// computed on every fetched or inline playlist and reported on the display request
 	// reply and player_status for diagnostics, without changing what plays
 	// or showing notices. The config flag is the kill
 	// switch for a verifier/canonicalization divergence (see
 	// config.SignatureVerificationConfig).
 	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
 	if !sigVerifyEnabled {
-		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
+		logger.Warn("DP-1 signature verification disabled by config; display requests carry no signature verdict")
 	}
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
@@ -1202,7 +1202,7 @@ func initializeApp(
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
 	// Display grants for Play 0.5 sites need the control authority and the
-	// v2 endpoint the site will cast through; with either missing every 0.5
+	// v2 endpoint the site will send through; with either missing every 0.5
 	// request is refused display_grant_unavailable (spec §5.7).
 	if controlWire != nil && controlWire.v2 != nil {
 		mintPairing.SetDisplayGrants(controlWire.auth, v2Config[0].Endpoint)
@@ -1447,7 +1447,7 @@ func initializeApp(
 			})
 		}
 	}
-	// Media health (#304, #392, docs/media-health.md): the cast-time L0 pass
+	// Media health (#304, #392, docs/media-health.md): the accept-time L0 pass
 	// replaces the former source preflight — a displayPlaylist whose every
 	// item source definitively answers dead is still rejected at accept time
 	// — and additionally records every verdict in the device's observation
@@ -1469,7 +1469,7 @@ func initializeApp(
 	internetObservers = append(internetObservers, func(connected bool) { mediaHealthOnline.Store(connected) })
 	// A source the offline cache can replay is never hinted (the hint would
 	// hide what replay interception could show); the check is the same one
-	// the cast rescue uses, and only counts when kiosk replay is wired.
+	// the display request rescue uses, and only counts when kiosk replay is wired.
 	var mediaHealthReplayable func(string) bool
 	if offlineCache != nil && kioskReplay != nil {
 		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
@@ -1551,13 +1551,13 @@ func initializeApp(
 		})
 	}
 	// Signature verification wiring: the same Active slot feeds the raw
-	// handler (writes on cast), the refresher (writes on re-push, below)
+	// handler (writes on display request), the refresher (writes on re-push, below)
 	// and the status poller (reads on every poll). Wired against the raw
 	// handler for the same reason as SetMediaHealth above.
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
-		// A displayAt-deferred cast parks its verdict as pending; the
+		// A displayAt-deferred display request parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
 		// the slot is invalidated as the push starts, so no status round
@@ -1604,18 +1604,18 @@ func initializeApp(
 	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
-	// Same device-level series-playback store commandrouter's own cast
+	// Same device-level series-playback store commandrouter's own display
 	// paths and status.Poller already read (see the SeriesPlaybackSource
 	// wiring above), so the refresher's resync narrows a series exactly
-	// the way a live cast would (feral-file/ffos-user#453) instead of
+	// the way a live display would (feral-file/ffos-user#453) instead of
 	// following no override at all.
 	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
 		playlist_refresher.SetSeriesPlaybackSource(playlistRefresher, seriesPlaybackSource, logger)
 	}
-	// The reverse direction of the wiring above: every accepted cast's own
+	// The reverse direction of the wiring above: every accepted display request's own
 	// SeriesPlaybackRandom pick is pushed straight into the refresher's
 	// stable-pick memory, so its periodic resync never has to rediscover a
-	// newer cast's choice by reading the live display — a read that skips
+	// newer display's choice by reading the live display — a read that skips
 	// itself entirely when the group's previously remembered pick is
 	// content-policy withheld (feral-file/ffos-user#459, F6 reopened).
 	if recordPick, ok := playlist_refresher.AcceptedPickRecorder(playlistRefresher); ok {
@@ -1642,7 +1642,7 @@ func initializeApp(
 	})
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
-		// Same generation fence for the refresher's force casts.
+		// Same generation fence for the refresher's force-displays.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
 
@@ -1806,7 +1806,7 @@ func initializeApp(
 	// Content policy MUST reconcile before playlist-recompute. A freshly
 	// initialized player starts on default policy, so a recompute that
 	// force-pushes a scheduled cohort first would have its mature items
-	// withheld by the player until some later cast, refresh or cutover —
+	// withheld by the player until some later display request, refresh or cutover —
 	// a durable, acknowledged Content setting visibly failing after a player
 	// restart. Nothing re-pushes the scheduler when the policy syncs later.
 	if policyStore != nil {

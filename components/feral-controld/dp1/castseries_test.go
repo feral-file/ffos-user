@@ -53,7 +53,7 @@ func allowRawItemModeDecode(ts *testSetup) {
 // editions, all identical copies of one artwork) — the exact shape that
 // reproduced feral-file/ffos-user#452 in the field: the Prophecy series
 // (aaajiao, contract 0xf4f1f0f18422be62e986b41c4c54c845c09df392, seriesId
-// 336) answers with artworkModel "multi", and a playlistUrl cast played all
+// 336) answers with artworkModel "multi", and a playlistUrl display request played all
 // 96 editions instead of narrowing to one.
 func multiEditionsBody(playlistID string) string {
 	return `{"items":[` +
@@ -72,13 +72,13 @@ func multiUniqueEditionsBody(playlistID string) string {
 }
 
 // TestDP1_ProcessPlaylistURLForCast_NarrowsMultiArtworkModelToRepresentative
-// is the exact field reproduction of feral-file/ffos-user#452: casting a
+// is the exact field reproduction of feral-file/ffos-user#452: displaying a
 // playlist by its URL (ff-cli display <url>, the normal way a published
-// exhibition is cast) used to always call the OLD ExpandSeriesItems, which
+// exhibition is display) used to always call the OLD ExpandSeriesItems, which
 // ignores artworkModel entirely and expanded every series to every catalog
 // edition regardless of mode. A `multi` series must narrow to its
 // representative via the SAME resolveSeriesCastPlan path a static dp1_call
-// cast already used.
+// display already used.
 func TestDP1_ProcessPlaylistURLForCast_NarrowsMultiArtworkModelToRepresentative(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -148,7 +148,7 @@ func manyEditionsBody(playlistID string, n int, artworkModel string) string {
 // still CAST_PLAYLIST_ITEMS_LIMIT) — so a later setSeriesPlayback re-narrow
 // (CastPlan.Narrow, fed this same plan via commandrouter's rememberSeriesCast)
 // could reconstruct up to 255 items, silently exceeding what the initial
-// cast ever showed. The returned CastPlan itself must stay bounded to what
+// display ever showed. The returned CastPlan itself must stay bounded to what
 // was actually displayed.
 func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedAfterMinimalTrim(t *testing.T) {
 	ts := setup(t)
@@ -187,11 +187,11 @@ func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedAfterMinimalTri
 	result, plan, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
 	require.NoError(t, err)
 	require.Len(t, result.Items, dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT,
-		"the initial cast must trim to the legacy minimal size, unchanged from before this round")
+		"the initial display request must trim to the legacy minimal size, unchanged from before this round")
 
 	renarrowed := plan.Narrow(nil)
 	assert.LessOrEqual(t, len(renarrowed), dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT,
-		"a later re-narrow of the CACHED plan must stay bounded to what the initial cast actually showed, not reconstruct up to CAST_PLAYLIST_ITEMS_LIMIT")
+		"a later re-narrow of the CACHED plan must stay bounded to what the initial display request actually showed, not reconstruct up to CAST_PLAYLIST_ITEMS_LIMIT")
 }
 
 // TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedWhenAlreadyShort
@@ -201,8 +201,8 @@ func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedAfterMinimalTri
 // path — so a `multi_unique` series narrowed to one representative under
 // `first` cached a plan still bounded to CAST_PLAYLIST_ITEMS_LIMIT (255).
 // Re-narrowing that cached plan to `full` must stay bounded to what a direct
-// `full` cast of the same source would show (MINIMAL_PLAYLIST_ITEMS_LIMIT),
-// not reconstruct every catalog edition just because the FIRST cast started
+// `full` display of the same source would show (MINIMAL_PLAYLIST_ITEMS_LIMIT),
+// not reconstruct every catalog edition just because the FIRST display started
 // short.
 func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedWhenAlreadyShort(t *testing.T) {
 	ts := setup(t)
@@ -245,7 +245,7 @@ func TestDP1_ProcessDynamicPlaylistForCast_CachedPlanStaysBoundedWhenAlreadyShor
 
 	renarrowed := plan.Narrow(dp1Mode(dp1.SeriesPlaybackFull))
 	assert.LessOrEqual(t, len(renarrowed), dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT,
-		"a later re-narrow to full of a plan cached from an already-short initial cast must stay bounded, matching a direct full cast, not reconstruct every edition")
+		"a later re-narrow to full of a plan cached from an already-short initial display request must stay bounded, matching a direct full display, not reconstruct every edition")
 }
 
 // dp1Mode is a one-line helper so the full-mode re-narrow above can take a
@@ -254,9 +254,9 @@ func dp1Mode(m dp1.SeriesPlaybackMode) *dp1.SeriesPlaybackMode { return &m }
 
 // TestDP1_ProcessPlaylistURLForCast_FullMultiUniquePlaysEveryEdition pins the
 // other side of the same mode: a multi_unique series with no seriesPlayback
-// and no device override still casts every catalog edition under the
+// and no device override still display requests every catalog edition under the
 // default `full` mode — unchanged from #425/#446, now reachable from a URL
-// cast too.
+// display too.
 func TestDP1_ProcessPlaylistURLForCast_FullMultiUniquePlaysEveryEdition(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -272,5 +272,5 @@ func TestDP1_ProcessPlaylistURLForCast_FullMultiUniquePlaysEveryEdition(t *testi
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
 	require.NoError(t, err)
-	require.Len(t, result.Items, 2, "multi_unique under the default full mode still casts every catalog edition")
+	require.Len(t, result.Items, 2, "multi_unique under the default full mode still display requests every catalog edition")
 }

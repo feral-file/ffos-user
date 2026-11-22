@@ -32,9 +32,9 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 
 // wireMediaHealth builds the media observation service
 // (feral-file/ffos-user#392, docs/media-health.md): the bbolt store, the
-// L0 probe over the offline cache's guarded fetcher, the cast-time pass,
+// L0 probe over the offline cache's guarded fetcher, the accept-time pass,
 // and the during-play lookahead. nil when disabled or when the store cannot
-// be opened — the daemon then runs exactly as before #392: casts forwarded
+// be opened — the daemon then runs exactly as before #392: display requests forwarded
 // unprobed, no hints, no per-item status.
 //
 // rewriter is the kiosk's gateway policy, so the probe sees the same wire
@@ -55,7 +55,7 @@ const mediaHealthMinFreeBytes = offlinecache.DefaultMinFreeDiskBytes
 func wireMediaHealth(cfg config.MediaHealthConfig, rewriter *uarewrite.Policy, overrideActive bool, kioskUA func() string, online func() bool, replayable func(string) bool, pushHints mediahealth.HintSender, logger *zap.Logger) (*mediahealth.Service, *mediahealth.Lookahead, *mediahealth.HintPusher) {
 	gateways := mediahealth.NewGateways(cfg.IPFSGateways, cfg.ArweaveGateways)
 	if cfg.Disabled {
-		logger.Warn("media health disabled by config; casts are forwarded unprobed and carry no hints")
+		logger.Warn("media health disabled by config; display requests are forwarded unprobed and carry no hints")
 		return nil, nil, nil
 	}
 	store, err := mediahealth.Open(constants.MEDIA_HEALTH_STORE_FILE, mediahealth.Options{
@@ -285,7 +285,7 @@ type cdpSend func(method string, params map[string]interface{}) (interface{}, er
 // the kiosk CDP client through `window.handleCDPRequest`, the same
 // evaluate the content-policy commands use, fenced on the player-session
 // generation the same way — a reply that crossed a generation change came
-// from a page that is gone, and the new page's boot cast carries its own
+// from a page that is gone, and the new page's boot display carries its own
 // hints. The map holds source URLs: it travels over loopback CDP only, as
 // every displayPlaylist push already does.
 func newHintSender(send cdpSend, generation func() uint64) mediahealth.HintSender {
@@ -325,10 +325,10 @@ func hintMapArgument(hints map[string]mediahealth.Hint) map[string]mediahealth.H
 
 // decodeHintPushReply reads the player's `setMediaHealth` reply, bare or
 // wrapped in the envelope's `message`: {ok:true, skippedIndices} is
-// delivered; {ok:false, error:"staleCast"} is a cast race; any other
+// delivered; {ok:false, error:"staleCast"} is a display request race; any other
 // answer is a refusal — a player whose manifest lists the command but
 // does not implement it answers unknown-command, and must not be retried
-// into for the rest of the cast.
+// into for the rest of the display request.
 func decodeHintPushReply(result interface{}) ([]int, error) {
 	m, ok := result.(map[string]interface{})
 	if !ok {

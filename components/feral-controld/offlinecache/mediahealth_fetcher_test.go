@@ -188,7 +188,7 @@ func dataURIParses(uri string) bool {
 }
 
 // F4 (PR #438 review): a redirect hop's signed URL must not survive into the
-// fetch error that the cast path logs and the store keeps as lastError.
+// fetch error that the display request path logs and the store keeps as lastError.
 func TestMediaHealthFetcher_ErrorsCarryNoCredentials(t *testing.T) {
 	origin := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
 		go_http.Redirect(w, r, "https://gone.example/a.png?X-Amz-Signature=deadbeef", go_http.StatusFound)

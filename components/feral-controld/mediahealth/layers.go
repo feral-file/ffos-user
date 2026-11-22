@@ -127,7 +127,7 @@ func (r *Record) l1Negative() bool {
 // negative corroborated (the caller decides); otherwise it is suspect —
 // advisory, never a hint. A broken render verdict gets the ordinary broken
 // window (and its backoff), so it is hinted and counted toward rejecting
-// an all-broken cast like any other. The gateway route is kept: a render
+// an all-broken display like any other. The gateway route is kept: a render
 // verdict says nothing about which gateway serves the bytes, and the work
 // is retried at the window's end.
 func (r *Record) concludeRender(reason Reason, layer Layer, at time.Time, broken bool) {

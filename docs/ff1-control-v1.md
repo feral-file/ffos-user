@@ -672,8 +672,10 @@ idempotent per `ctl`:
 
 A **display grant** is what a Play site (`@feralfile/play` 0.5 and later)
 holds after an owner approved it through mint pairing: a display-only
-controller record, issued by the FF1, that the site uses to cast as sealed
-envelopes over the v2 relay. It replaces the relayer session token of
+controller record, issued by the FF1, with which the site sends display
+requests as sealed envelopes over the v2 relay. A display request is a
+`displayPlaylist` command in the exact Play shape (§7.2); it is the one
+command a display grant may send. It replaces the relayer session token of
 earlier Play versions (§15.3). The approval UX is the mint pairing one, in
 every control state but `locked`: `legacy` included, where the device
 accepts the decision from whoever it accepts mint pairing decisions from
@@ -834,7 +836,7 @@ update, `shutdown`, which leaves the device off until someone presses its
 button, owner settings, input injection) is owner tier, on every route. A
 command added to the controller tier is checked against this test first.
 
-`connect` is controller tier because every ff-app cast, released and new,
+`connect` is controller tier because every ff-app command, released and new,
 starts with it. Only an owner claims or rebinds: under the protocol (any
 state but `legacy`) a non-owner `connect` to a claimed device is answered
 `ok` and changes nothing, and one to an unclaimed device is refused. In
@@ -844,7 +846,7 @@ The names are the real catalog: `commands/types.go`, the literal names
 `commandrouter` special-cases, and ff-player's `CastCommand` plus
 `CDPRequestHandler` commands. `pause`, `resume`, `pauseCasting`,
 `resumeCasting`, `nextArtwork` and `previousArtwork` exist in neither controld
-nor the player (ff-app's legacy cast enum still names some of them; the
+nor the player (ff-app's legacy command enum still names some of them; the
 player answers them `{ok:false}`), so they are unknown and owner-only.
 
 The implementation MUST keep this list in one table in code
@@ -863,7 +865,7 @@ LAN to plaintext altogether with `setLanControl` (§5.5).
 
 | State | Condition | Plaintext on the LAN (hub, local sources only) | Plaintext via legacy relayer | Envelopes |
 |---|---|---|---|---|
-| `legacy` | no active owner grant | the LAN-open set and `showPairingQRCode` (any arguments; the first-owner path); anything else → `enrollment_required` | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's cast (§5.7) is admitted |
+| `legacy` | no active owner grant | the LAN-open set and `showPairingQRCode` (any arguments; the first-owner path); anything else → `enrollment_required` | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's display (§5.7) is admitted |
 | `enrolled` | ≥1 active owner grant | owner's switch open (`lan.json`, §8; the default): the LAN-open set; anything else, and everything while the switch is closed → `enrollment_required` | controller tier only; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` (display grants included) |
 
@@ -1167,7 +1169,7 @@ browser is not told `approval_unavailable`. On the legacy relayer `SealAll`
 still sends the mint pairing types to every active grant, controllers
 included; "owner only" is a v2 rule. A `legacy` device has no owner
 binding, so after the legacy relayer is retired it cannot deliver an
-approval: existing display grants keep casting, and a new pairing is
+approval: existing display grants keep working, and a new pairing is
 rejected by the device with `approval_expired` once its approval deadline
 (5 min by default) passes, until the device is Secured. The device cannot
 tell earlier that nobody received the request: its own send still succeeds
@@ -1189,7 +1191,7 @@ every new subscriber: `device_status`, `player_status`, `ddc_status` and
 | Route | Request | Reply |
 |---|---|---|
 | LAN | `POST /api/cast`, body `{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}` | 200 `{"v":1,"jwe":"<compact>"}` |
-| legacy relayer | the same JSON as a topic cast | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
+| legacy relayer | the same JSON as a topic command | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
 | v2 relay | frame payload = `{"messageID":<client id>,"message":{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}}`, split into `{"relayChunk":{…}}` frames above 32 KiB (whole message ≤ 4 MiB, reassembled within 180 s) | `{"type":"RPC","messageID":<same>,"message":{"v":1,"jwe":"<compact>"}}`, or `message` = the public `{"error":{"code"}}` |
 
 The `request` carrier is parsed strictly (§1): exactly the members `v` (the
@@ -1197,7 +1199,7 @@ integer 1) and `jwe` (a non-empty string), no duplicate, case-variant or
 extra member; anything else is `bad_envelope`.
 
 The LAN hub caps the whole request body at 4 MiB, so on the LAN the compact
-must leave room for the ~50-byte cast wrapper. The v2 relay caps the whole
+must leave room for the ~50-byte command wrapper. The v2 relay caps the whole
 JSON message at 4 MiB the same way. Because the request is base64url-encoded
 twice (JWS, then JWE), the compact is about 16/9 of the plaintext `req`: the
 effective plaintext limit on any sealed route is about 2.25 MiB. Clients
@@ -1452,7 +1454,7 @@ and the ff1-cli test suite does the same with `jose`.
 ## 13. Security notes
 
 - The relayer's `messageID:"system"` topic message is not a controller path
-  on the legacy relayer: ff-relayer generates every cast's `messageID` server
+  on the legacy relayer: ff-relayer generates every command's `messageID` server
   side (`crypto.randomUUID()` in `handleCast`), and the system message is
   relayer-originated on connect, so a controller cannot forge one. On the v2
   relay the `messageID` is chosen by the client, so a v2 frame with
@@ -1612,7 +1614,7 @@ and the ff1-cli test suite does the same with `jose`.
   and the share of unsecured (`legacy`) devices must be acceptable: on
   those a new 0.5 pairing is rejected `approval_expired` after the
   device's approval deadline (§9; the browser's own timeout may come
-  first) while existing grants keep casting. A grant issued in `legacy` carries
+  first) while existing grants keep sending display requests. A grant issued in `legacy` carries
   the trust of today's session token (display only) and stays valid after
   the device is Secured.
 - Residual, accepted: the mint pairing broker is trusted for the announced
@@ -1764,13 +1766,13 @@ showed what goes wrong without them.
     grant as one record; a re-pair replaces the record only on a
     `mint_succeeded` that carries a `displayGrant`, then self-revokes the
     old grant best-effort with the old keys. It connects to the v2 relay
-    per cast and closes right after (never an idle socket), fans the
+    per display request and closes right after (never an idle socket), fans the
     envelope out and pins the first reply that verifies under the pinned
     `profile.sig`. Rules 4 and 5 apply: every attempt is a new envelope, and
     a `replay` on v2 is an unknown outcome, which the browser (no LAN path
     to resync) answers by moving its counter past the window without a
     resend. A verified `access_revoked` or `expired` deletes the grant and
-    re-pairs on the user's next cast; an unverified public
+    re-pairs on the user's next display request; an unverified public
     `unknown_controller` or `bad_envelope` seen after the deadline is
     reported as "unrecognized" and **never** deletes the grant (rule 3:
     any channel peer can forge it); only a user action re-pairs. A
@@ -2054,7 +2056,7 @@ fetch reads the cached `true` again).
   §5.6 enroll stops there, and a command whose FF1 never listed `relayV2`
   is not tried over v2. Accepted residual (2026-10-30); the remedy is
   updating ff-cli.
-- Play 0.4 sites: their session casts fail (on a 3.0.0 device already, which has no legacy relayer); they move to 0.6 (Gate A).
+- Play 0.4 sites: their session display requests fail (on a 3.0.0 device already, which has no legacy relayer); they move to 0.6 (Gate A).
 
 **No legacy relayer on new images.** Before the 3.0.0 LAN-open build, the
 release operator deletes the `relayer` block from every environment's
