@@ -341,7 +341,8 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     loading_started_=ticks;
   }
   const bool show_loading=loading && ticks-loading_started_>=2000;
-  const int label_phase=show_loading?1+int((ticks-loading_started_-2000)%3000/16):label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
+  const unsigned notes = label_visible ? visible_curator_notes(*occurrence, label_age) : 0;
+  const int label_phase=show_loading?1+int((ticks-loading_started_-2000)%3000/16):label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):int(notes);
   const bool pointer_pressed = pointer_visible && ticks < pointer_press_until_;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
     occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,pointer_pressed,
@@ -403,8 +404,8 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   else if (show_loading) draw_loading(ticks);
   else if((!artwork || playback.online()) && !playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
   else if (occurrence && label_visible) {
-    auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
-    if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed"),key);
+    auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(notes)+":"+std::to_string(width_)+":"+std::to_string(height_);
+    if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed",notes),key);
     if(ui_width_&&ui_height_){
       const float opacity=mode=="timed"&&label_age>30000?1-artwork_ease((label_age-30000)/300.):1;
       quad(ui_,{0,height_-ui_height_,ui_width_,ui_height_},opacity);

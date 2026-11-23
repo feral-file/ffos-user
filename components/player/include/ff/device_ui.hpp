@@ -22,5 +22,6 @@ UIRaster render_panel(const Json& overlay, int width, int height);
 UIRaster render_loading_label();
 UIRaster render_message(const std::string& text, int width, int height, bool full = true);
 bool has_tombstone(const Occurrence& occurrence);
-UIRaster render_tombstone(const Occurrence& occurrence, int width, int height, bool timed);
+unsigned visible_curator_notes(const Occurrence& occurrence, uint64_t age_ms);
+UIRaster render_tombstone(const Occurrence& occurrence, int width, int height, bool timed, unsigned notes = 0);
 }

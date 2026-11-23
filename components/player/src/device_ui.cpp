@@ -270,7 +270,21 @@ UIRaster render_panel(const Json& overlay,int width,int height) {
 bool has_tombstone(const Occurrence& o) {
   return tombstone_label(o).title != nullptr;
 }
-UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed) {
+unsigned visible_curator_notes(const Occurrence& o, uint64_t age_ms) {
+  unsigned visible = 0;
+  for (const auto* source : {&o.playlist, &o.item}) {
+    const auto note = source->find("note");
+    if (note == source->end()) continue;
+    const auto* text = text_field(*note, "text");
+    if (!text || text->find_first_not_of(" \t\r\n") == std::string::npos) continue;
+    const auto duration = note->find("duration");
+    const double seconds = duration != note->end() && duration->is_number()
+        ? duration->get<double>() : 20;
+    if (age_ms < seconds * 1000) visible |= source == &o.item ? 2u : 1u;
+  }
+  return visible;
+}
+UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed,unsigned notes) {
   const double scale=std::min(width,height)/720.0,padding=10*scale,size=16*scale;
   const auto label = tombstone_label(o);
   if (!label.title) return {};
@@ -285,7 +299,24 @@ UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed) {
   }
   Canvas measure(1,1);const int max_width=std::max(1,int(640*scale-padding*2));
   std::vector<std::string> blocks{(artists.empty()?"":escape(artists)+"\n")+"<b><i>"+escape(*label.title)+"</i></b>"};
-  if(!o.curator.empty())blocks.push_back("<span foreground='#A0A0A0'>Curated by: "+escape(o.curator)+"</span>");
+  if (!o.playlist_title.empty() && o.playlist_title != *label.title)
+    blocks.push_back(escape(o.playlist_title));
+  for (const auto* source : {&o.playlist, &o.item}) {
+    if (!(notes & (source == &o.item ? 2u : 1u))) continue;
+    blocks.push_back(escape(source->at("note").at("text").get_ref<const std::string&>()));
+  }
+  std::string credit;
+  auto curators = o.playlist.find("curators");
+  if (curators != o.playlist.end() && curators->is_array()) {
+    for (const auto& person : *curators) {
+      if (auto name = text_field(person, "name")) {
+        if (!credit.empty()) credit += ", ";
+        credit += *name;
+      }
+    }
+  }
+  if (credit.empty()) credit = o.curator;
+  if (!credit.empty()) blocks.push_back("<span foreground='#A0A0A0'>Curated by: "+escape(credit)+"</span>");
   std::vector<std::unique_ptr<Text>> layouts;int text_width=0;double total=0;
   for(const auto& block:blocks){auto t=std::make_unique<Text>(measure.cr,block,size,1.4,max_width,false);text_width=std::max(text_width,t->width);total+=t->css_height;layouts.push_back(std::move(t));}
   const double timer=timed?std::max(1.0,scale):0;
