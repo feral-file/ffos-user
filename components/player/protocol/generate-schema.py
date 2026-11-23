@@ -69,12 +69,13 @@ methods={
     'media.seek':obj({'occurrence':identifier,'seconds':number(0,86400000)},('occurrence','seconds')),
     'presentation.set':obj({'occurrence':identifier,'display':obj({'scaling':display['properties']['scaling'],'margin':display['properties']['margin'],'background':settings['properties']['background']})},('occurrence','display')),
     'artworkPermissions.set':ref('artworkPermissions'),'settings.set':ref('settings'),'policy.set':ref('policy'),
+    'display.rejected':obj(),
     'health.set':{**obj({'thermal':boolean,'serviceFailure':boolean}),'minProperties':1},
     'connectivity.set':obj({'online':boolean,'sources':obj({'bundleRoot':text(4096),'gateway':text(4096),'userAgent':text(1024),'gatewayHosts':{'type':'array','maxItems':1024,'items':text(253)}},('bundleRoot',))},('online',)),
     'overlay.set':obj({'owner':enum('setup','pairing','recovery'),'state':identifier,'fields':{'type':'object','additionalProperties':True}},('owner','state')),
     'input.dispatch':{'oneOf':inputs},
 }
-setup_fields=obj({**{k:text(2048) for k in ('reason','ssid','password','portal_url','url','device_name')},'client_attached':boolean,'progress':{'type':'number'}})
+setup_fields=obj({**{k:text(2048) for k in ('reason','ssid','password','portal_url','url','device_name','version')},'client_attached':boolean,'progress':{'type':'number'}})
 setup_fields['properties']['password']=text(128)
 methods['overlay.set']['allOf']=[{'if':{'properties':{'owner':{'const':'setup'}}},'then':{'properties':{
  'state':enum('softap_qr','joining','join_failed','updating','claim_qr','ready','hidden','scanning','finalizing','factory_reset','connecting','setup_error'),'fields':setup_fields}}}]

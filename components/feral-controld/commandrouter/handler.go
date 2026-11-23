@@ -826,6 +826,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			defer func() {
 				if err != nil {
 					status.RecordPlaybackFailure()
+					if IsSourceUnreachable(err) && h.nativeControls != nil {
+						noticeCtx, cancel := context.WithTimeout(ctx, time.Second)
+						noticeErr := h.nativeControls.Call(noticeCtx, "display.rejected", map[string]any{}, nil, nil)
+						cancel()
+						if noticeErr != nil {
+							h.logger.Warn("Player could not show the display rejection", zap.Error(noticeErr))
+						}
+					}
 					// SyncPlaylist below already switched replay's live
 					// Fetch-interception scope to the NEW playlist before
 					// this CDP send ran (see that call site's doc for why

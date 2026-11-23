@@ -153,6 +153,7 @@ replay promise.
 | `schedule.set` | `{playlist,context?,atMs}` or `{clear:true}`; one durable scheduled cast, executed by host |
 | `boot.set` | Store/clear boot intent; boot execution/recovery is still being completed |
 | `connectivity.set` | `{online, sources?}`; controld's connectivity observation, offline bundle directory, and configured gateway routing; no renderer can declare device connectivity |
+| `display.rejected` | Empty object. Show a temporary source-unreachable notice while preserving the current playback selection. |
 | `overlay.set` | `{owner,state,fields?}`; owner setup/pairing/recovery; only matching owner may hide an overlay; focus/input released on show |
 | `input.dispatch` | Occurrence-fenced input; one connection owns held state; disconnect releases it. The host owns pointer coordinates, buttons and physical keys. See the event forms below. |
 

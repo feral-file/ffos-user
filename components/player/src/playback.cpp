@@ -420,6 +420,13 @@ Json Playback::command(std::string_view method, const Json& p) {
     if(selected_&&(sources_changed||(was_online&&!online_)||(!was_online&&online_&&(selected_->stage=="failed"||incomplete_offline)))){clear_recovery();select(true);}
     ++revision_;return {{"outcome","applied"}};
   }
+  if (method == "display.rejected") {
+    fields(p, {});
+    rejection_until_ = now_ + 8000;
+    rejection_generation_ = generation_;
+    ++revision_;
+    return {{"outcome", "applied"}};
+  }
   if (method == "overlay.set") {
     validate_overlay(p);
     auto owner=p["owner"].get<std::string>(),state=p["state"].get<std::string>();
@@ -699,6 +706,10 @@ void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
   wall_now_=wall_time_ms;
   if (!clock_started_) { selected_at_ = presented_at_ = pause_at_ = monotonic_ms; clock_started_ = true; }
   now_ = monotonic_ms;
+  if (rejection_until_ && now_ >= rejection_until_) {
+    rejection_until_ = 0;
+    ++revision_;
+  }
   // A native QR/approval panel can cover an already captured artwork for an
   // arbitrary time. It has loaded successfully but must not enter history or
   // start its duration until uncovered. Navigation alone still times out.

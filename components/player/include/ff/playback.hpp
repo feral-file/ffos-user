@@ -71,6 +71,7 @@ class Playback {
   const Json& presentation_failure() const { return presentation_failure_; }
   void set_input_handler(std::function<void(const Json&)> fn) { input_ = std::move(fn); }
   void set_seek_handler(std::function<void(const std::string&, double)> fn) { seek_ = std::move(fn); }
+  bool display_rejected() const { return rejection_until_ != 0 && rejection_generation_ == generation_; }
   Json runtime_notice() const { return selected_&&!runtime_notice_.is_null()&&runtime_notice_.value("occurrence","")==selected_->id?runtime_notice_:Json(nullptr); }
   void runtime_notice(const std::string& id,const std::string& message);
   void engine_status(const Json& info) { engine_status_=info;++revision_; }
@@ -92,6 +93,8 @@ class Playback {
   bool eos_pending_ = false;
   int64_t now_ = 0, selected_at_ = 0, presented_at_ = 0, pause_at_ = 0;
   bool clock_started_ = false;
+  int64_t rejection_until_ = 0;
+  uint64_t rejection_generation_ = 0;
   int64_t wall_now_ = 0;
   std::function<void(const Json&)> input_;
   std::function<void(const std::string&, double)> seek_;

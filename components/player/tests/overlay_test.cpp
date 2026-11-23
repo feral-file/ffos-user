@@ -15,6 +15,12 @@ int main(){
    auto request=setup(state);p.command("overlay.set",request);
    check(!ff::overlay_panel(request).before_qr.empty(),"Every visible setup state needs native copy");
   }
+  p.tick(1000, 1000);
+  p.command("display.rejected", ff::Json::object());
+  check(p.display_rejected(), "A rejected request must reach the presentation layer");
+  p.tick(9000, 9000);
+  check(!p.display_rejected(), "The failure notice must expire over the previous artwork");
+  p.command("overlay.set", setup("joining", {{"version", "3.1.0"}}));
   auto wifi=setup("softap_qr",{{"ssid","FF1: test;"},{"password","p\\;\""},{"portal_url","http://10.42.0.1/"}});
   p.command("overlay.set",wifi);
   check(ff::overlay_panel(wifi).qr=="WIFI:T:WPA;S:FF1\\: test\\;;P:p\\\\\\;\\\";;","Wi-Fi QR must escape credentials");

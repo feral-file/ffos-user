@@ -121,7 +121,11 @@ func TestCPPHostRestart(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	socket, stop := launchCPPHost(t, directory)
 	client := New(socket)
-	defer client.Close()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	before, err := client.Snapshot(ctx)

@@ -297,7 +297,7 @@ bool Presentation::can_present_direct(const Occurrence& occurrence,const Playbac
      display_color(occurrence.display.value("background","#000000"))!="#000000")return false;
   auto now=SDL_GetTicks64();
   if(pointer_active_ && now-pointer_active_<5000)return false;
-  if(!playback.runtime_notice().is_null() || !playback.presentation_failure().is_null() ||
+  if(playback.display_rejected() || !playback.runtime_notice().is_null() || !playback.presentation_failure().is_null() ||
      !playback.storage_error().empty() || playback.thermal_hold())return false;
   auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
   auto update=playback.state().value("updateOutcome",Json(nullptr));
@@ -323,7 +323,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   const bool label_visible = has_title && blend.opacity>0 && (mode=="on" || (mode=="timed" && label_age<30300));
   auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
   auto update=playback.state().value("updateOutcome",Json(nullptr));
-  bool overlay_panel=(schedule.is_object() && schedule.value("outcome","")=="failed") ||
+  bool overlay_panel=playback.display_rejected() || (schedule.is_object() && schedule.value("outcome","")=="failed") ||
                      (update.is_object() && update.value("contentBlocked",false)) ||
                      (playback.desired() && playback.desired()->stage=="failed") ||
                      !playback.recovery_error().empty() ||!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
@@ -389,6 +389,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     quad(ui_,{0,0,width_,height_});
   } else if (playback.thermal_hold()) ui("Cooling down\nPlayback will resume when the device cools.","",true);
   else if(playback.service_failure()) ui("Service failed\nReconnecting device controls.","",true);
+  else if (playback.display_rejected()) ui("Artwork could not be displayed\nThe requested artwork source could not be reached.","",false);
   else if (playback.desired() && playback.desired()->stage == "failed") ui("Artwork could not be displayed\n"+playback.desired()->error,"",true);
   else if (playback.desired() && playback.desired()->stage != "presented" && !playback.recovery_error().empty())
     ui("Retrying artwork\n"+playback.recovery_error(),"",!artwork);
