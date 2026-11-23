@@ -117,12 +117,12 @@ int main(int argc, char** argv) {
       check(p.state()["settings"]["tombstone"] == "timed", "Failed persistence does not change live setting");
       check(p.snapshot()["storage"]["health"]=="write_failed"&&!p.storage_error().empty(),"Storage failure is visible to status and native UI");
       sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr); sqlite3_close(db);
-      auto manual = playlist(); manual["items"][0]["display"] = {{"autoPlay",false}};
+      auto manual = playlist(); manual["items"][0]["display"] = {{"autoplay",false}};
       p.command("playback.replace",{{"playlist",manual}});
-      check(p.media_paused(),"An autoPlay false item remains paused despite periodic controls");
+      check(p.media_paused(),"An autoplay false item remains paused despite periodic controls");
       p.command("settings.set",{{"volume",0.5}});
       check(p.storage_error().empty(),"Successful durable write clears storage failure");
-      check(p.media_paused(),"Volume does not override autoPlay false");
+      check(p.media_paused(),"Volume does not override autoplay false");
       p.command("playback.pause",{{"paused",false}});
       check(!p.media_paused(),"Explicit resume releases the autoplay hold");
       auto active=p.desired()->id;p.committed(active);p.presented(active);

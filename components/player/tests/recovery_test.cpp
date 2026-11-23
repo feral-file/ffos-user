@@ -81,7 +81,7 @@ int main(){
     revision=p.revision();p.failed(outgoing,"Duplicate");check(p.revision()==revision,"Retired outgoing callback must be ignored");
     p.committed(incoming);p.presented(incoming);
     check(p.snapshot()["presentationFailure"].is_null(),"New presentation must clear outgoing failure");
-    auto held=playlist();held["items"][0]["display"]={{"autoPlay",false}};
+    auto held=playlist();held["items"][0]["display"]={{"autoplay",false}};
     p.command("playback.replace",{{"playlist",held}});check(p.media_paused(),"Fixture must begin on autoplay hold");
     p.command("playback.pause",{{"paused",false}});check(!p.media_paused(),"Resume must release autoplay hold");
     p.failed(p.desired()->id,"Temporary decoder failure");p.tick(now+201000,now+201000);

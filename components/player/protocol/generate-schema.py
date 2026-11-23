@@ -37,7 +37,7 @@ policy=obj({'version':{'const':1},'showMatureContent':boolean,'strictPersonal':b
            ('version','showMatureContent','strictPersonal','blockUnratedCurated'))
 display={'type':'object','properties':{'scaling':enum('fit','fill','stretch','auto'),
     'margin':{'anyOf':[number(0,16384),{'type':'string','maxLength':96,'description':'One to four nonnegative CSS lengths, parsed and range-checked by the host.'}]},
-    'background':text(64),'autoPlay':boolean,'loop':boolean,'imageRendering':enum('auto','pixelated'),'userOverrides':{'anyOf':[boolean,{'type':'object','additionalProperties':boolean}]}},'additionalProperties':True}
+    'background':text(64),'autoplay':boolean,'loop':boolean,'imageRendering':enum('auto','pixelated'),'userOverrides':{'anyOf':[boolean,{'type':'object','additionalProperties':boolean}]}},'additionalProperties':True}
 item={'type':'object','required':['source'],'properties':{'source':{**text(16384),'pattern':'^(https?://|data:|ipfs://|onchfs://|(?:file://)?/home/feralfile/artworks/)'},
     **{key:text() for key in ('id','title','slug','license','ref','refHash')},'mimeType':text(256),'duration':{'type':'number','minimum':0},
     'contentRating':{'type':'string'},'contentReasons':{'type':'array','items':{'type':'string'}},'display':ref('display'),

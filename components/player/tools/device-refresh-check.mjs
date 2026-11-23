@@ -17,7 +17,7 @@ async function wait(predicate){
   }
   throw new Error(`state did not settle: ${JSON.stringify(state)}`);
 }
-const media={id:'twin',source:'http://127.0.0.1:18990/media-h264-aac.mp4',duration:0,contentRating:'general',display:{loop:false,autoPlay:false}};
+const media={id:'twin',source:'http://127.0.0.1:18990/media-h264-aac.mp4',duration:0,contentRating:'general',display:{loop:false,autoplay:false}};
 const software={id:'software',source:'http://127.0.0.1:18990/input.html',duration:0,contentRating:'general'};
 try{
   await client.call('settings.set',{durationSeconds:null,muted:true});

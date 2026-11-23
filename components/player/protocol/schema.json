@@ -1900,7 +1900,7 @@
           "maxLength": 64,
           "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers."
         },
-        "autoPlay": {
+        "autoplay": {
           "type": "boolean"
         },
         "loop": {

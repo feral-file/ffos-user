@@ -66,7 +66,7 @@ class PublicBrowser {
   std::optional<std::chrono::steady_clock::time_point> resize_started_at_;
   double mouse_x_=0,mouse_y_=0;
   int writer_ = -1, reader_ = -1;
-  std::string buffer_, session_, profile_, main_frame_, navigation_url_, document_url_, navigation_error_;
+  std::string buffer_, session_, profile_, main_frame_, main_document_request_, navigation_url_, document_url_, navigation_error_;
   bool initial_response_seen_ = false, decoration_ = false;
   struct Pending {
     std::string data;

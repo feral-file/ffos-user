@@ -303,14 +303,18 @@ void PublicBrowser::message(const Json& m) {
       send("Target.setAutoAttach",
            {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
       send("Runtime.runIfWaitingForDebugger", {}, child);
-      send("Page.navigate",
-           {{"url", bundled_ ? Json(bundle_prefix_ +
-                                    (decoration_ ? "setup-artwork/index.html" : "index.html"))
-                             : occurrence_.item.at("source")}},
-           child, [this](const Json& result) {
-             navigation_error_ = result.value("errorText", "");
-             main_frame_ = result.value("frameId", "");
-           });
+      // Request events can precede the navigate reply. Identify the root
+      // frame before starting the load so child documents cannot claim it.
+      send("Page.getFrameTree", {}, child, [this, child](const Json& tree) {
+        main_frame_ = tree.at("frameTree").at("frame").at("id").get<std::string>();
+        send("Page.navigate",
+             {{"url", bundled_ ? Json(bundle_prefix_ +
+                                     (decoration_ ? "setup-artwork/index.html" : "index.html"))
+                              : occurrence_.item.at("source")}},
+             child, [this](const Json& result) {
+               navigation_error_ = result.value("errorText", "");
+             });
+      });
     } else if (type == "page") {
       // Popups never become device windows, including script-created blank tabs.
       send("Target.closeTarget", {{"targetId", p.at("targetInfo").at("targetId")}});
@@ -333,7 +337,10 @@ void PublicBrowser::message(const Json& m) {
     }
   } else if (method == "Page.frameNavigated" && session == session_) {
     const auto& frame = p.at("frame");
-    if (!frame.contains("parentId")) document_url_ = frame.at("url").get<std::string>() + frame.value("urlFragment", "");
+    if (!frame.contains("parentId")) {
+      main_frame_ = frame.at("id").get<std::string>();
+      document_url_ = frame.at("url").get<std::string>() + frame.value("urlFragment", "");
+    }
   } else if (method == "Page.navigatedWithinDocument" && session == session_ &&
              p.value("frameId", "") == main_frame_) {
     document_url_ = p.at("url").get<std::string>();
@@ -365,11 +372,12 @@ void PublicBrowser::message(const Json& m) {
       cache_queue_.push_back({session, request, std::move(query)});
     }
   } else if (method == "Network.requestWillBeSent" && session == session_ &&
-             p.contains("redirectResponse")) {
-    if (p.at("redirectResponse").value("url", "") == navigation_url_)
+             p.value("type", "") == "Document" && p.value("frameId", "") == main_frame_) {
+    main_document_request_ = p.at("requestId").get<std::string>();
+    if (p.contains("redirectResponse") && p.at("redirectResponse").value("url", "") == navigation_url_)
       navigation_url_ = p.at("request").value("url", navigation_url_);
   } else if (method == "Network.responseReceived" && session == session_ &&
-             !initial_response_seen_ && p.at("response").value("url", "") == navigation_url_ &&
+             p.value("frameId", "") == main_frame_ && !initial_response_seen_ && p.at("response").value("url", "") == navigation_url_ &&
              (p.value("type", "") == "Document" ||
               ((p.value("type", "") == "Media" || p.value("type", "") == "Image") &&
                p.at("response").value("url", "") == navigation_url_))) {
@@ -386,7 +394,7 @@ void PublicBrowser::message(const Json& m) {
     if (native_media(classified)) resolved_native_mime = mime;
   } else if (method == "Page.lifecycleEvent" && (!bundled_ || decoration_) && session == session_ &&
              p.value("name", "") == "load" && p.value("frameId", "") == main_frame_) {
-    if(direct() && document_url_=="about:blank")return;
+    if(document_url_.empty() || document_url_=="about:blank")return;
     loaded_ = true;
     loaded_at_=std::chrono::steady_clock::now();
     navigation_load_ns_=static_cast<uint64_t>(p.value("timestamp",0.)*1e9);
@@ -394,7 +402,8 @@ void PublicBrowser::message(const Json& m) {
     if(view_)ff_browser_view_redraw(view_);
     if (!decoration_) playback_.committed(id);
   } else if (method == "Network.loadingFailed" && session == session_ &&
-             p.value("type", "") == "Document" && !p.value("canceled", false))
+             p.value("type", "") == "Document" && !main_document_request_.empty() &&
+             p.value("requestId", "") == main_document_request_ && !p.value("canceled", false))
     fail("Artwork navigation failed: " + p.value("errorText", "network error"));
   else if (method == "Target.targetCrashed" || method == "Inspector.targetCrashed")
     fail("Public Chromium renderer crashed");
@@ -734,7 +743,7 @@ void PublicBrowser::input(const Json& p) {
                                (p.value("meta",false)?4:0)|(p.value("shift",false)?8:0);
       Json event={{"x",mouse_x_},{"y",mouse_y_},{"buttons",buttons},{"modifiers",modifiers}};
       if(kind=="move")event["type"]="mouseMoved";
-      if(kind=="wheel"){event["type"]="mouseWheel";event["deltaX"]=p.value("dx",0.);event["deltaY"]=p.value("dy",0.);}
+      if(kind=="wheel"){event["type"]="mouseWheel";event["deltaX"]=-p.value("dx",0.);event["deltaY"]=-p.value("dy",0.);}
       if(kind=="button"){
         event["type"]=p.value("down",false)?"mousePressed":"mouseReleased";
         auto b=p.value("button",1);event["button"]=b==1?"left":b==2?"middle":"right";

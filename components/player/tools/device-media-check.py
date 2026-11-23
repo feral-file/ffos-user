@@ -71,16 +71,16 @@ try:
     state = cast('media-4096-square-h264.mp4')
     state = wait(lambda s:(s['media'] or {}).get('hwdec-current') in ('no',''))
     record('4096-square H.264 software fallback', state)
-    state = cast('media-h264-aac.mp4', {'loop':False,'autoPlay':False})
+    state = cast('media-h264-aac.mp4', {'loop':False,'autoplay':False})
     assert state['mediaPaused'] is True
     time.sleep(1.2)
     before = call('state.get')['media']['time-pos']
     time.sleep(1.2)
     assert abs(call('state.get')['media']['time-pos']-before)<0.05
-    record('autoPlay false holds first frame', state)
+    record('autoplay false holds first frame', state)
     call('playback.pause', {'paused':False})
     state = wait(lambda s:(s['media'] or {}).get('time-pos',0)>0.4)
-    record('explicit resume releases autoPlay hold', state)
+    record('explicit resume releases autoplay hold', state)
     items = [{'id':str(i),'source':'http://127.0.0.1:18990/media-h264-aac.mp4','duration':0,
               'display':{'loop':False}} for i in range(2)]
     call('playback.replace', {'playlist':{'items':items}})

@@ -141,7 +141,7 @@ replay promise.
 | `playback.select` | `{index}`; select an allowed item as a new occurrence |
 | `playback.refresh` | `{}`; reload the selected work as a new occurrence, resetting its recovery budget. No active selection returns `no_artwork` without changing durable state. |
 | `playback.stop`, `playback.cancel` | `{}`; durable stop, release input and presentation |
-| `playback.pause` | `{paused}`; pause/resume progression and native media; explicit resume releases an autoPlay hold |
+| `playback.pause` | `{paused}`; pause/resume progression and native media; explicit resume releases an autoplay hold |
 | `playback.sleep` | `{sleeping}`; durable sleep intent; suspend presentation, restore selection on wake |
 | `playback.mode` | `{loop?,shuffle?}`; loop is none, playlist or one; shuffle order is host-owned and durable |
 | `media.seek` | `{occurrence,seconds}`; only the currently presented seekable native media; acceptance is not seek completion |

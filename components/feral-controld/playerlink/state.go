@@ -129,7 +129,7 @@ type Display struct {
 	Scaling       string          `json:"scaling"`
 	Margin        json.RawMessage `json:"margin"`
 	Background    string          `json:"background"`
-	AutoPlay      bool            `json:"autoPlay"`
+	AutoPlay      bool            `json:"autoplay"`
 	Loop          bool            `json:"loop"`
 	UserOverrides bool            `json:"userOverrides"`
 }

@@ -33,7 +33,7 @@ void validate_display(const Json& p){
     require(value.is_boolean() || (value.is_object() && std::all_of(value.begin(),value.end(),
       [](const Json& field){return field.is_boolean();})),"playlist_invalid","Invalid display override permissions");
   }
-  for(auto key:{"autoPlay","loop"})if(p.contains(key))require(p[key].is_boolean(),"playlist_invalid","Display flags must be booleans");
+  for(auto key:{"autoplay","loop"})if(p.contains(key))require(p[key].is_boolean(),"playlist_invalid","Display flags must be booleans");
   if(p.contains("scaling"))require(p["scaling"]=="fit"||p["scaling"]=="fill"||p["scaling"]=="stretch"||p["scaling"]=="auto","playlist_invalid","Invalid display scaling");
   if(p.contains("imageRendering"))require(p["imageRendering"]=="auto" || p["imageRendering"]=="pixelated","playlist_invalid","Invalid image rendering");
   optional_text(p,"background",64);
@@ -249,7 +249,7 @@ void Playback::select(bool recovering,bool skipping_failure) {
   selected_ = Occurrence{uuid(), items[index], resolve_display(state_["settings"], defaults, items[index]), index, generation_, "loading", "", false,
     defaults,state_["context"].get<std::string>(),state_["playlist"].value("title",""),state_["playlist"].value("curator",""),
     state_["playlist"],state_.value("playlistUrl", ""),cast_id_};
-  if(!recovering)autoplay_hold_ = !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoPlay", true);
+  if(!recovering)autoplay_hold_ = !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoplay", true);
   selected_at_ = now_;
 }
 bool Playback::media_paused(const std::string& occurrence) const {

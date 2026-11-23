@@ -29,6 +29,14 @@ void check_display_policy() {
   check(ff::resolve_display(settings, defaults, item, adjustment) == locked,
         "Authored input cannot set the derived permission map");
 
+  item["display"]["autoPlay"] = false;
+  const auto legacy = ff::resolve_display(settings, defaults, item);
+  check(legacy.at("autoplay") == false && !legacy.contains("autoPlay"),
+        "Previously stored native playlists retain their autoplay hold");
+  item["display"]["autoplay"] = true;
+  check(ff::resolve_display(settings, defaults, item).at("autoplay") == true,
+        "DP-1 spelling takes precedence in the same layer");
+
   item["display"]["userOverrides"] = true;
   auto unlocked = ff::resolve_display(settings, defaults, item, adjustment);
   check(!unlocked.contains("overridePermissions") && unlocked.at("margin") == 7 &&

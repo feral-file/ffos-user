@@ -7,6 +7,12 @@ void apply_display_layer(Json& display, const Json& layer) {
     // overridePermissions is derived snapshot state. DP-1 authors express
     // both blanket rules and per-field exceptions through userOverrides.
     if (field == "overridePermissions") continue;
+    // Earlier native builds persisted this spelling. Normalize it while
+    // resolving the layer, leaving the signed playlist bytes untouched.
+    if (field == "autoPlay") {
+      if (!layer.contains("autoplay") && value.is_boolean()) display["autoplay"] = value;
+      continue;
+    }
     if (field == "userOverrides") {
       if (value.is_object()) {
         display["overridePermissions"].update(value);
@@ -32,7 +38,7 @@ Json resolve_display(const Json& settings, const Json& defaults, const Json& ite
   Json display = {{"scaling", settings.value("scaling", "fit")},
                   {"margin", settings.value("margin", Json(0))},
                   {"background", settings.value("background", "#000000")},
-                  {"autoPlay", true}, {"loop", true}, {"userOverrides", true}};
+                  {"autoplay", true}, {"loop", true}, {"userOverrides", true}};
   const Json empty = Json::object();
   apply_display_layer(display, defaults.value("display", empty));
   for (const auto* manifest : {"inlineManifest", "resolvedManifest"}) {

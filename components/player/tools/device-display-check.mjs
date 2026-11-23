@@ -36,7 +36,7 @@ try{
  assert.equal(s.composition.display.margin,0);
  await assert.rejects(c.call('presentation.set',{occurrence:retired,display:{margin:200}}),e=>e.code==='stale_occurrence');
  evidence.checks.push('same URL replacement resets preview and rejects delayed prior-occurrence write');
- s=await cast('media-h264-aac.mp4',{autoPlay:false,loop:true});
+ s=await cast('media-h264-aac.mp4',{autoplay:false,loop:true});
  s=await waitFor(x=>x.presented?.id===s.presented.id&&x.media?.surfaceWidth>0&&x.media?.surfaceHeight>0);
  const [width,height]=[s.media.surfaceWidth,s.media.surfaceHeight];
  s=await preview(s,{margin:'10%',background:'#008000',scaling:'fill'});
@@ -46,7 +46,7 @@ try{
  s=await preview(s,{margin:'10%'});
  evidence.checks.push('no-op preview receives a later causal composition revision');
  for(const background of ['#fff','white','rgba(255, 0, 0, 0.5)']){
-  s=await cast('media-h264-aac.mp4',{autoPlay:false,loop:true,margin:100,background});
+  s=await cast('media-h264-aac.mp4',{autoplay:false,loop:true,margin:100,background});
   assert.equal(s.composition.display.background,background);
   const expected=background.startsWith('rgba')?[128,0,0]:[255,255,255];
   assert.deepEqual((await capture('authored-'+background.replace(/[^a-z0-9]/gi,'')))[0],expected);
