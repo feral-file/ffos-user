@@ -2290,8 +2290,11 @@ func nativeRefreshMatches(s *status.PlayerStatus, fence *playerlink.Precondition
 		return false
 	}
 	r := s.Runtime
-	if r.Instance != fence.Instance || r.Generation != fence.Generation || r.Presented == nil {
+	if r.Instance != fence.Instance || r.Generation != fence.Generation {
 		return false
+	}
+	if r.Presented == nil {
+		return r.Selected == nil && r.WaitingForSource
 	}
 	if r.PresentedOwnsCast != nil {
 		return *r.PresentedOwnsCast

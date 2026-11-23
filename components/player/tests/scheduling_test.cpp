@@ -87,6 +87,7 @@ int main(){
       refresh["retireBlockedCurrent"]=true;
       p.command("playback.update",refresh);
       check(!p.visible()&&!p.desired(),"Future refresh retires blocked outgoing work immediately");
+      check(p.snapshot()["waitingSource"]["playlist"]["items"]==refresh["items"],"Retired plan exposes a durable refresh source");
       check(p.state()["boot"]["playlist"]["items"]==refresh["items"] &&
             p.state()["boot"]["activationTimes"]==refresh["activationTimes"],"Boot retains the refreshed full plan");
       p.system_boot("second");
@@ -100,6 +101,11 @@ int main(){
       replacement["contentRating"]="general";
       p.command("playback.update",{{"items",{replacement}},{"activationTimes",{4500}}});
       check(p.desired()&&p.desired()->item==replacement,"A corrected activation time resumes an eligible timed work");
+      p.command("playback.update",{{"items",{replacement}},{"activationTimes",{8000}},{"retireBlockedCurrent",true}});
+      p.command("playback.update",{{"items",{replacement}}});
+      check(p.desired()&&p.desired()->item==replacement&&p.state()["cohortPlan"].is_null(),
+            "Removing the final activation time resumes retired playback");
+      check(!p.state()["boot"].contains("activationTimes"),"Untimed refresh removes obsolete boot activation times");
     }
     {
       ff::Store store(path);ff::Playback p(store);p.tick(1,1000);

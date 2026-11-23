@@ -60,20 +60,27 @@ void Playback::update_order(Json& next,int index) const {
 
 Json Playback::update_playlist(const Json& p,const Json& plan) {
   fields(p,{"items","context","retireBlockedCurrent"});
-  require(!state_["playlist"].is_null(),"invalid_params","No playlist to update");
+  const Json no_plan=nullptr;
+  const auto& previous_plan=state_.contains("cohortPlan")?state_["cohortPlan"]:no_plan;
+  const bool timed_owner=!previous_plan.is_null();
+  require(timed_owner||!state_["playlist"].is_null(),"invalid_params","No playlist to update");
   require(p.contains("items"),"invalid_params","Missing items");
   if(p.contains("retireBlockedCurrent"))require(p["retireBlockedCurrent"].is_boolean(),"invalid_params","Expected retirement flag");
-  auto playlist=state_["playlist"];playlist["items"]=p["items"];
+  const auto& source=timed_owner?previous_plan["playlist"]:state_["playlist"];
+  auto playlist=source;playlist["items"]=p["items"];
   validate_playlist(playlist);
-  auto context=p.value("context",state_["context"].get<std::string>());
+  const auto& source_context=timed_owner?previous_plan["context"]:state_["context"];
+  auto context=p.value("context",source_context.get<std::string>());
   require(context=="curated"||context=="personal","invalid_params","Invalid content context");
   // A source refresh cannot widen a curated cast's trust domain.
-  require(state_["context"]!="curated"||context!="personal","invalid_params","Refresh cannot reclassify curated playback as personal");
-  const auto& old_items=state_["playlist"]["items"];
+  require(source_context!="curated"||context!="personal","invalid_params","Refresh cannot reclassify curated playback as personal");
+  const Json empty=Json::array();
+  const auto& old_items=state_["playlist"].is_null()?empty:state_["playlist"]["items"];
   const auto& items=playlist["items"];
   const bool unchanged=old_items==items&&state_["context"]==context;
-  if(!unchanged){playlist.erase("signature");playlist.erase("signatures");}
+  if(!unchanged || source["items"]!=items){playlist.erase("signature");playlist.erase("signatures");}
   auto next=state_;next["context"]=context;
+  if(timed_owner)next["playlistUrl"]=previous_plan["playlistUrl"];
  const bool plan_changed=state_.value("cohortPlan",Json(nullptr))!=plan;
  next["cohortPlan"]=plan;
   const bool retire_selected=selected_&&refresh_blocks(*selected_,items,next);
@@ -93,7 +100,7 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   auto id=uuid();
   next["pendingUpdate"]=nullptr;
   next["updateOutcome"]={{"id",id},{"outcome",defer?"deferred":"applied"},{"contentBlocked",!any}};
-  refresh_boot(next, plan.is_null() ? state_["playlist"] : state_["cohortPlan"]["playlist"],
+  refresh_boot(next, source,
                plan.is_null() ? playlist : plan["playlist"], context, plan);
   if(defer){
     next["pendingUpdate"]={{"id",id},{"playlist",playlist},{"context",context}};
@@ -108,7 +115,7 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
     if(items.empty())next["stopped"]=true;
     // An explicit stop cancels the plan. A surviving timed owner can resume
     // its automatically retired slot when a refresh advances activation.
-    else if(!plan.is_null())next["stopped"]=false;
+    else if(timed_owner)next["stopped"]=false;
   }
   persist(std::move(next));
   // Identical refreshes cancel a deferred update without remounting, changing

@@ -16,7 +16,14 @@ type RuntimeNotice struct {
 	Message    string `json:"message"`
 }
 
+type WaitingSource struct {
+	Playlist    json.RawMessage `json:"playlist"`
+	PlaylistURL string          `json:"playlistUrl"`
+	Context     string          `json:"context"`
+}
+
 type Snapshot struct {
+	WaitingSource        *WaitingSource       `json:"waitingSource,omitempty"`
 	PresentedOwnsCast    *bool                `json:"presentedOwnsCast,omitempty"`
 	Notice               *RuntimeNotice       `json:"notice,omitempty"`
 	Engine               json.RawMessage      `json:"engine,omitempty"`

@@ -47,6 +47,19 @@ func TestNativeStatusReportsPresentedPlaylistDuringReplacement(t *testing.T) {
 	require.Equal(t, 2, *got.RenderStatus)
 }
 
+func TestNativeStatusRetainsWaitingSourceWithoutReportingArtwork(t *testing.T) {
+	s := nativeSnapshot()
+	s.Selected, s.Presented = nil, nil
+	s.WaitingSource = &playerlink.WaitingSource{Playlist: s.Playlist, PlaylistURL: "https://example.org/new-feed", Context: "curated"}
+	got, err := NativePlayerStatus(s)
+	require.NoError(t, err)
+	require.True(t, got.Runtime.WaitingForSource)
+	require.Equal(t, "https://example.org/new-feed", *got.PlaylistURL)
+	require.Equal(t, "curated", got.ContentContext)
+	require.Nil(t, got.RenderStatus)
+	require.Nil(t, got.DeviceSettings.ShowingKey)
+}
+
 func TestNativeStatusNeverPromotesNavigationToReady(t *testing.T) {
 	s := nativeSnapshot()
 	s.Presented = nil

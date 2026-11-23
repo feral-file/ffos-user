@@ -28,3 +28,15 @@ func TestNativeRefreshDoesNotUseOutgoingPlaylistWithIncomingFence(t *testing.T) 
 	s.Runtime = nil
 	require.False(t, nativeRefreshMatches(s, fence))
 }
+
+func TestWaitingSourceRequiresCurrentFenceAndNoOutgoingArtwork(t *testing.T) {
+	fence := &playerlink.Preconditions{Instance: "host", Generation: 2}
+	r := &status.RuntimeStatus{Instance: "host", Generation: 2, WaitingForSource: true}
+	s := &status.PlayerStatus{Runtime: r}
+	require.True(t, nativeRefreshMatches(s, fence))
+	r.Generation++
+	require.False(t, nativeRefreshMatches(s, fence))
+	r.Generation--
+	r.WaitingForSource = false
+	require.False(t, nativeRefreshMatches(s, fence))
+}

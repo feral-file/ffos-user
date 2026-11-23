@@ -612,7 +612,12 @@ Json Playback::overlay() const {
 }
 
 Json Playback::snapshot() const {
-  return {{"instance", instance_}, {"generation", generation_}, {"revision", revision_}, {"protection",{{"thermal",thermal_hold_},{"serviceFailure",service_failure_}}},
+  Json waiting_source = nullptr;
+  if (!selected_ && !presented_ && state_.contains("cohortPlan") && !state_["cohortPlan"].is_null()) {
+    const auto& plan = state_["cohortPlan"];
+    waiting_source = {{"playlist",plan["playlist"]},{"playlistUrl",plan["playlistUrl"]},{"context",plan["context"]}};
+  }
+  return {{"waitingSource",std::move(waiting_source)},{"instance", instance_}, {"generation", generation_}, {"revision", revision_}, {"protection",{{"thermal",thermal_hold_},{"serviceFailure",service_failure_}}},
           {"host", "responsive"}, {"engine",engine_status_}, {"notice",runtime_notice()}, {"renderer", selected_ ? selected_->stage : "absent"},
           {"storage", {{"health",storage_error_.empty()?"available":"write_failed"},{"error",storage_error_}}},
           {"presentationFailure",presentation_failure_},

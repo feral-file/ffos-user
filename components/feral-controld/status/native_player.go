@@ -24,6 +24,7 @@ type NativePlayer struct{ Source NativeSnapshotSource }
 // It preserves admission/loading/failure information even while an outgoing
 // occurrence remains visible. No artist-supplied health or trust fields enter it.
 type RuntimeStatus struct {
+	WaitingForSource    bool                            `json:"-"`
 	PresentedOwnsCast   *bool                           `json:"-"` // Internal refresh ownership from the native host.
 	Notice              *playerlink.RuntimeNotice       `json:"notice,omitempty"`
 	Media               json.RawMessage                 `json:"media,omitempty"`
@@ -84,6 +85,11 @@ func NativePlayerStatus(s playerlink.Snapshot) (*PlayerStatus, error) {
 	// a showing key or manufacture successful rendering after restart.
 	document, playlistURL, occurrence := s.Playlist, s.PlaylistURL, s.Selected
 	out.ContentContext = s.Context
+	if s.Selected == nil && s.Presented == nil && s.WaitingSource != nil {
+		document, playlistURL = s.WaitingSource.Playlist, s.WaitingSource.PlaylistURL
+		out.ContentContext = s.WaitingSource.Context
+		out.Runtime.WaitingForSource = true
+	}
 	if s.Presented != nil {
 		document, playlistURL, occurrence = s.PresentedPlaylist, s.PresentedPlaylistURL, s.Presented
 		out.ContentContext = occurrence.Context
