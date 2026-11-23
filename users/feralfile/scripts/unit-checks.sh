@@ -44,10 +44,24 @@ is_root() { [ "$(id -u)" -eq 0 ]; }
 # so every outside command has a deadline, and a kill behind it.
 run() { timeout -k 5 "$@"; }
 
-# result <name> <status> <detail>: the one line a person and factory-check read.
+# zh <text>: the same line again in Simplified Chinese, for the line's
+# engineers. The Linux text console cannot draw Chinese (its fonts hold 512
+# glyphs, so it would show boxes): there only the English shows. The factory
+# ISO runs the check in kmscon, which draws it with the image's Noto CJK font.
+# The English line always comes first and stays as it was, so whatever reads
+# the output (factory-check.sh, the tests) keeps reading English.
+zh() { [ "${TERM:-}" = linux ] || printf '%s\n' "$*"; }
+
+# result <name> <status> <detail> <detail in Chinese>: the line a person and
+# factory-check read ("== ", English, also the JSON detail), then its Chinese
+# line ("-- ").
 result() {
+  local name status
   STATUS=$2 DETAIL=$3
   printf '== %-10s %-6s %s\n' "$1" "$2" "$3"
+  case "$1" in Brightness) name=亮度 ;; Speakers) name=扬声器 ;; Bluetooth) name=蓝牙 ;; *) name=$1 ;; esac
+  case "$2" in PASS) status=通过 ;; FAIL) status=失败 ;; SKIP) status=跳过 ;; PLAYED) status=已播放 ;; NO-DDC) status=无DDC ;; *) status=$2 ;; esac
+  zh "-- $name $status：$4"
 }
 
 # json <jq args...>: DATA for the JSON record; null when jq is missing.
@@ -102,15 +116,17 @@ brightness_restore() {
 check_brightness() {
   local reading cur max low high target steps="" ok=1 back owed
   DATA=null
-  if ! have ddcutil; then result Brightness SKIP "ddcutil is not on this image"; return; fi
+  if ! have ddcutil; then result Brightness SKIP "ddcutil is not on this image" "此镜像没有 ddcutil"; return; fi
   # ddcutil's package loads i2c-dev at boot; make sure before blaming the panel.
   if is_root && ! compgen -G '/dev/i2c-*' >/dev/null; then run 15 modprobe i2c-dev 2>/dev/null || true; fi
 
   if ! reading=$(ddc_get); then
     if run 60 ddcutil detect --brief 2>/dev/null | grep -q '^Display [0-9]'; then
-      result Brightness FAIL "a DDC/CI display answers but its brightness (VCP 10) cannot be read"
+      result Brightness FAIL "a DDC/CI display answers but its brightness (VCP 10) cannot be read" \
+        "显示器有 DDC/CI 响应，但读不到亮度（VCP 10）"
     else
-      result Brightness NO-DDC "no DDC/CI display found (a bench monitor without DDC/CI reads this way; on the art panel it is a failure)"
+      result Brightness NO-DDC "no DDC/CI display found (a bench monitor without DDC/CI reads this way; on the art panel it is a failure)" \
+        "找不到 DDC/CI 显示器（不支持 DDC/CI 的测试显示器会这样显示；在艺术屏上就是失败）"
     fi
     json --arg status "$STATUS" --arg detail "$DETAIL" '{status: $status, detail: $detail}'
     return
@@ -121,13 +137,15 @@ check_brightness() {
   owed=$(cat "$BRIGHTNESS_OWED" 2>/dev/null) || owed=""
   if [[ "$owed" =~ ^[0-9]+$ ]] && [ "$owed" -le "$max" ]; then cur=$owed; fi
   if [ "$max" -lt 4 ]; then
-    result Brightness FAIL "the panel reports a brightness range of 0-$max, too small to step through"
+    result Brightness FAIL "the panel reports a brightness range of 0-$max, too small to step through" \
+      "屏幕报告的亮度范围是 0-$max，太小，无法测试"
     json --arg status "$STATUS" --arg detail "$DETAIL" '{status: $status, detail: $detail}'
     return
   fi
   low=$((max / 4)) high=$((max * 3 / 4))
 
   echo "Brightness: the panel dims, brightens, and returns to $cur. Keep the power on until it has."
+  zh "亮度：屏幕会先变暗、再变亮，然后回到 $cur。完成前请勿断电。"
   BRIGHTNESS_RESTORE=$cur
   echo "$cur" >"$BRIGHTNESS_OWED" 2>/dev/null || true
   for target in "$low" "$high"; do
@@ -140,11 +158,14 @@ check_brightness() {
   [ "$back" = "$cur" ] && BRIGHTNESS_RESTORE=""
 
   if [ "$back" != "$cur" ]; then
-    result Brightness FAIL "the panel was at $cur and would not go back: it now reads $back; set:read $steps (max $max)"
+    result Brightness FAIL "the panel was at $cur and would not go back: it now reads $back; set:read $steps (max $max)" \
+      "屏幕原本是 $cur，调不回去：现在读到 $back；设置:读回 $steps（最大 $max）"
   elif [ "$ok" -eq 1 ]; then
-    result Brightness PASS "the panel follows the set value; set:read $steps, back at $cur (max $max)"
+    result Brightness PASS "the panel follows the set value; set:read $steps, back at $cur (max $max)" \
+      "屏幕亮度跟随设置值；设置:读回 $steps，已回到 $cur（最大 $max）"
   else
-    result Brightness FAIL "the panel does not follow the set value; set:read $steps, back at $cur (max $max)"
+    result Brightness FAIL "the panel does not follow the set value; set:read $steps, back at $cur (max $max)" \
+      "屏幕亮度不跟随设置值；设置:读回 $steps，已回到 $cur（最大 $max）"
   fi
   json --arg status "$STATUS" --arg detail "$DETAIL" --arg steps "$steps" \
     --argjson original "$cur" --argjson max "$max" --arg restored "$back" '
@@ -217,11 +238,11 @@ check_speakers() {
   local i sink="" volumes="" mute="" level played=1
   DATA=null
   for i in pactl pacat gawk; do
-    if ! have "$i"; then result Speakers SKIP "$i is not on this image"; return; fi
+    if ! have "$i"; then result Speakers SKIP "$i is not on this image" "此镜像没有 $i"; return; fi
   done
   if is_root; then
     if ! have runuser || ! AUDIO_UID=$(id -u "$AUDIO_USER" 2>/dev/null); then
-      result Speakers SKIP "no $AUDIO_USER user to play the tone as"
+      result Speakers SKIP "no $AUDIO_USER user to play the tone as" "没有 $AUDIO_USER 用户可以播放测试音"
       return
     fi
     # On the live ISO nothing has logged feralfile in; its user manager (and
@@ -236,9 +257,11 @@ check_speakers() {
     sleep 1
   done
   if [ -z "$sink" ]; then
-    result Speakers FAIL "no PulseAudio server answers for $AUDIO_USER, nothing was played"
+    result Speakers FAIL "no PulseAudio server answers for $AUDIO_USER, nothing was played" \
+      "$AUDIO_USER 的 PulseAudio 没有响应，没有播放任何声音"
   elif [ "$sink" = auto_null ]; then
-    result Speakers FAIL "PulseAudio has no sound output (only its dummy sink): is the HDMI cable carrying audio?"
+    result Speakers FAIL "PulseAudio has no sound output (only its dummy sink): is the HDMI cable carrying audio?" \
+      "PulseAudio 没有声音输出（只有虚拟输出）：HDMI 线有没有传输音频？"
   fi
   if [ -z "$sink" ] || [ "$sink" = auto_null ]; then
     json --arg status "$STATUS" --arg detail "$DETAIL" '{status: $status, detail: $detail}'
@@ -261,16 +284,20 @@ check_speakers() {
   fi
 
   echo "Speakers: >>> LEFT speaker, LOW tone, now"
+  zh "扬声器：>>> 左扬声器，低音，正在播放"
   play left 440 "$sink" || played=0
   sleep "$TONE_GAP"
   echo "Speakers: >>> RIGHT speaker, HIGH tone, now"
+  zh "扬声器：>>> 右扬声器，高音，正在播放"
   play right 880 "$sink" || played=0
   if ! audio_restore; then
-    result Speakers FAIL "the tones played, but the volume could not be put back on $sink (it is at $level, unmuted)"
+    result Speakers FAIL "the tones played, but the volume could not be put back on $sink (it is at $level, unmuted)" \
+      "测试音已播放，但 $sink 的音量调不回去（现在是 $level，未静音）"
   elif [ "$played" -eq 1 ]; then
-    result Speakers PLAYED "listen: low tone LEFT, then high tone RIGHT, each from its own side only (output $sink, volume $level)"
+    result Speakers PLAYED "listen: low tone LEFT, then high tone RIGHT, each from its own side only (output $sink, volume $level)" \
+      "请听：先是左边低音，再是右边高音，每个音只能从它那一侧发出（输出 $sink，音量 $level）"
   else
-    result Speakers FAIL "the tone could not be played to $sink"
+    result Speakers FAIL "the tone could not be played to $sink" "无法向 $sink 播放测试音"
   fi
   json --arg status "$STATUS" --arg detail "$DETAIL" --arg sink "$sink" --arg volume "$level" \
     '{status: $status, detail: $detail, sink: $sink, volume: $volume, left_hz: 440, right_hz: 880}'
@@ -336,10 +363,10 @@ PY
 }
 
 check_bluetooth() {
-  local i adapter="" path address powered tree err devices count strongest top powered_here=0
+  local i adapter="" path address powered tree err why devices count strongest top powered_here=0
   DATA=null
   for i in busctl jq python3; do
-    if ! have "$i"; then result Bluetooth SKIP "$i is not on this image"; return; fi
+    if ! have "$i"; then result Bluetooth SKIP "$i is not on this image" "此镜像没有 $i"; return; fi
   done
   adapter=$(bt_adapter)
   if [ -z "$adapter" ] && is_root; then
@@ -353,9 +380,10 @@ check_bluetooth() {
   done
   if [ -z "$adapter" ]; then
     if run 15 busctl --system status org.bluez >/dev/null 2>&1; then
-      result Bluetooth FAIL "no Bluetooth adapter (bluetoothd runs but has none): check the M.2 card"
+      result Bluetooth FAIL "no Bluetooth adapter (bluetoothd runs but has none): check the M.2 card" \
+        "没有蓝牙适配器（bluetoothd 在运行但没有适配器）：请检查 M.2 网卡"
     else
-      result Bluetooth FAIL "no Bluetooth adapter (bluetoothd is not running)"
+      result Bluetooth FAIL "no Bluetooth adapter (bluetoothd is not running)" "没有蓝牙适配器（bluetoothd 没有运行）"
     fi
     json --arg status "$STATUS" --arg detail "$DETAIL" '{status: $status, detail: $detail}'
     return
@@ -368,13 +396,15 @@ check_bluetooth() {
   fi
 
   echo "Bluetooth: listening for $BT_WINDOW s on $address"
+  zh "蓝牙：在 $address 上搜索 $BT_WINDOW 秒"
   err=$(mktemp)
   tree=$(bt_discover "$path" "$BT_WINDOW" 2>"$err") || tree=""
   if [ "$powered_here" -eq 1 ]; then
     run 15 busctl --system set-property org.bluez "$path" org.bluez.Adapter1 Powered b false >/dev/null 2>&1 || true
   fi
   if [ -z "$tree" ]; then
-    result Bluetooth FAIL "the adapter $address would not run a discovery ($(tail -n 1 "$err" | cut -c 1-80))"
+    why=$(tail -n 1 "$err" | cut -c 1-80)
+    result Bluetooth FAIL "the adapter $address would not run a discovery ($why)" "适配器 $address 无法搜索（$why）"
     rm -f "$err"
     json --arg status "$STATUS" --arg detail "$DETAIL" --arg address "$address" \
       '{status: $status, detail: $detail, adapter: $address}'
@@ -391,11 +421,13 @@ check_bluetooth() {
   [ -n "$devices" ] || devices="[]"
   count=$(jq 'length' <<<"$devices")
   if [ "$count" -eq 0 ]; then
-    result Bluetooth FAIL "nothing heard in $BT_WINDOW s on $address: check the second antenna lead (a room with no Bluetooth device in it reads the same)"
+    result Bluetooth FAIL "nothing heard in $BT_WINDOW s on $address: check the second antenna lead (a room with no Bluetooth device in it reads the same)" \
+      "$BT_WINDOW 秒内在 $address 上没有搜到任何设备：请检查第二根天线线（周围没有蓝牙设备时也会这样显示）"
   else
     strongest=$(jq '.[0].rssi_dbm' <<<"$devices")
     top=$(jq -r '.[:5] | map(.rssi_dbm | tostring) | join(" ")' <<<"$devices")
-    result Bluetooth PASS "$count devices heard in $BT_WINDOW s, strongest $strongest dBm (top: $top) on $address"
+    result Bluetooth PASS "$count devices heard in $BT_WINDOW s, strongest $strongest dBm (top: $top) on $address" \
+      "$BT_WINDOW 秒内搜到 $count 个设备，最强 $strongest dBm（前五：$top），适配器 $address"
   fi
   json --arg status "$STATUS" --arg detail "$DETAIL" --arg address "$address" --argjson window "$BT_WINDOW" \
     --argjson devices "$devices" '
@@ -419,6 +451,7 @@ record() {
   done
   host=$(cat /etc/hostname 2>/dev/null || hostname 2>/dev/null || echo unknown)
   echo "$host  label=$label  unit checks"
+  zh "$host  标签=$label  单元检查"
   for name in brightness speakers bluetooth; do
     case "$skip" in *" $name "*) continue ;; esac
     "check_$name"
@@ -440,9 +473,11 @@ record() {
       echo "saved $path"
     else
       echo "unit-checks: could not write $path; the screen is the record"
+      zh "unit-checks：无法写入 $path；以屏幕为准"
     fi
   else
     echo "unit-checks: results not saved (jq or $out_dir unavailable); the screen is the record"
+    zh "unit-checks：结果没有保存（没有 jq 或 $out_dir 不可用）；以屏幕为准"
   fi
   return "$failed"
 }

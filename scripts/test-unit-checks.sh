@@ -337,7 +337,7 @@ jq -e '[.checks[].status] == ["SKIP", "SKIP", "SKIP"]' "$saved" >/dev/null || fa
 ddcutil_stub; pulse_stubs; bluez_stubs
 : > "$tmp_dir/ddcutil.log"
 # shellcheck disable=SC2016
-out=$(FF_TEST_DDC=follow FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_BLUEZ=adapter FF_TEST_DISCOVERY=heard \
+out=$(TERM=xterm-256color FF_TEST_DDC=follow FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_BLUEZ=adapter FF_TEST_DISCOVERY=heard \
   FF_SCRIPTS="$(dirname "$unit_checks")" FF_SCREEN=/dev/null run -c '
     source "$1"; RESULTS="$2"
     unit_checks 1; echo "$checks"; sets=$(grep -c setvcp "$FF_TEST_DIR/ddcutil.log")
@@ -350,6 +350,17 @@ expect "brightness line kept from reading 1" '^== Brightness +PASS .*\(reading 1
 [ "$(grep -c '^== ' <<<"$second")" = 3 ] || fail "reading 2 does not show three result lines:
 $second"
 grep -q 'STEPPED AGAIN' <<<"$out" && fail "the factory check stepped the brightness again after it passed"
+[ "$(grep -c '^-- ' <<<"$second")" = 3 ] || fail "reading 2 does not show the three Chinese result lines:
+$second"
+expect "Chinese brightness line kept from reading 1" '^-- 亮度 通过：.*（第 1 轮）$' "$second"
+
+# The Linux text console cannot draw Chinese: there the lines are English only.
+out=$(TERM=linux FF_TEST_DDC=follow FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_BLUEZ=adapter FF_TEST_DISCOVERY=heard \
+  check record r1 -o "$tmp_dir/out") || fail "record failed on the Linux text console"
+grep -q '^-- ' <<<"$out" && fail "Chinese lines were printed on the Linux text console:
+$out"
+out=$(TERM=xterm-256color FF_TEST_DDC=follow check brightness)
+expect "Chinese brightness line" '^-- 亮度 通过：屏幕亮度跟随设置值' "$out"
 
 # shellcheck disable=SC2016
 out=$(FF_SCRIPTS="$tmp_dir/nowhere" FF_SCREEN=/dev/null run -c '
