@@ -26,14 +26,16 @@ void optional_text(const Json& p,const char* key,size_t limit=4096){
   if(p.contains(key))require(p[key].is_string()&&p[key].get_ref<const std::string&>().size()<=limit,
     "playlist_invalid",std::string("Invalid text field: ")+key);
 }
-void validate_display(const Json& p){
+void validate_display(const Json& p, bool restoring = false){
   require(p.is_object(),"playlist_invalid","Display must be an object");
   if(p.contains("userOverrides")){
     const auto& value=p.at("userOverrides");
     require(value.is_boolean() || (value.is_object() && std::all_of(value.begin(),value.end(),
       [](const Json& field){return field.is_boolean();})),"playlist_invalid","Invalid display override permissions");
   }
-  for(auto key:{"autoplay","loop"})if(p.contains(key))require(p[key].is_boolean(),"playlist_invalid","Display flags must be booleans");
+  if(p.contains("loop"))require(p["loop"].is_boolean(),"playlist_invalid","loop must be boolean");
+  // Older hosts treated the lowercase field as unknown, including in history.
+  if(!restoring && p.contains("autoplay"))require(p["autoplay"].is_boolean(),"playlist_invalid","autoplay must be boolean");
   if(p.contains("scaling"))require(p["scaling"]=="fit"||p["scaling"]=="fill"||p["scaling"]=="stretch"||p["scaling"]=="auto","playlist_invalid","Invalid display scaling");
   if(p.contains("imageRendering"))require(p["imageRendering"]=="auto" || p["imageRendering"]=="pixelated","playlist_invalid","Invalid image rendering");
   optional_text(p,"background",64);
@@ -55,13 +57,13 @@ void validate_metadata(const Json& p){
     }
   }
 }
-void validate_layer(const Json& p){
+void validate_layer(const Json& p, bool restoring){
   require(p.is_object(),"playlist_invalid","Manifest/defaults/override must be an object");
-  if(p.contains("display"))validate_display(p["display"]);
+  if(p.contains("display"))validate_display(p["display"], restoring);
   if(p.contains("metadata"))validate_metadata(p["metadata"]);
   if(p.contains("controls")){
     require(p["controls"].is_object(),"playlist_invalid","Manifest controls must be an object");
-    if(p["controls"].contains("display"))validate_display(p["controls"]["display"]);
+    if(p["controls"].contains("display"))validate_display(p["controls"]["display"], restoring);
   }
 }
 void validate_settings(const Json& p) {
@@ -108,15 +110,15 @@ Playback::Playback(Store& store) : store_(store), state_(store.load()) {
   auto expected = initial_state();
   for (auto it = expected.begin(); it != expected.end(); ++it)
     require(state_.contains(it.key()) && (it.value().is_null() || (it.value().is_number_integer() && state_[it.key()].is_number_integer()) || state_[it.key()].type() == it.value().type()), "storage_corrupt", "Invalid persistent state field: " + it.key());
-  if (!state_["playlist"].is_null()) validate_playlist(state_["playlist"]);
+  if (!state_["playlist"].is_null()) validate_playlist(state_["playlist"], true);
   validate_settings(state_["settings"]);
   validate_state();
-  if(state_.contains("cohortPlan")&&!state_["cohortPlan"].is_null()) { validate_plan(state_["cohortPlan"]);validate_playlist(state_["cohortPlan"]["playlist"]); }
+  if(state_.contains("cohortPlan")&&!state_["cohortPlan"].is_null()) { validate_plan(state_["cohortPlan"]);validate_playlist(state_["cohortPlan"]["playlist"], true); }
   if(state_.contains("pendingUpdate")&&!state_["pendingUpdate"].is_null()){
     const auto& pending=state_["pendingUpdate"];
     fields(pending,{"id","playlist","context"});string_field(pending,"id",64);
     require(pending.contains("playlist"),"storage_corrupt","Pending refresh has no playlist");
-    validate_playlist(pending["playlist"]);
+    validate_playlist(pending["playlist"], true);
     require(pending.value("context","")=="curated"||pending.value("context","")=="personal","storage_corrupt","Invalid pending refresh context");
   }
   if(state_.contains("updateOutcome")&&!state_["updateOutcome"].is_null()){
@@ -155,15 +157,15 @@ void Playback::validate_state() const {
     require(std::find(ids.begin(),ids.end(),id)==ids.end(),"storage_corrupt","Duplicate history identity");ids.push_back(id);
     require(record.contains("playedAtMs")&&record["playedAtMs"].is_number_integer()&&record["playedAtMs"]>=0,"storage_corrupt","Invalid history timestamp");
     require(record.contains("item"),"storage_corrupt","History item is missing");
-    validate_playlist({{"items",Json::array({record["item"]})}});
+    validate_playlist({{"items",Json::array({record["item"]})}}, true);
     require(record.value("context","curated")=="curated"||record.value("context","curated")=="personal","storage_corrupt","Invalid history context");
-    if(record.contains("defaults"))validate_layer(record["defaults"]);
+    if(record.contains("defaults"))validate_layer(record["defaults"], true);
   }
   for(auto key:{"boot","schedule"}){
     const auto& entry=state_[key];if(entry.is_null())continue;
     fields(entry,{"playlist","context","atMs","clear","id","activationTimes","playlistUrl","index"});
     if(entry.contains("id"))string_field(entry,"id",64);
-    require(entry.contains("playlist"),"storage_corrupt","Stored boot/schedule playlist is missing");validate_playlist(entry["playlist"]);
+    require(entry.contains("playlist"),"storage_corrupt","Stored boot/schedule playlist is missing");validate_playlist(entry["playlist"], true);
     require(entry.value("context","curated")=="curated"||entry.value("context","curated")=="personal","storage_corrupt","Invalid boot/schedule context");
     if(std::string_view(key)=="schedule")require(entry.contains("atMs")&&entry["atMs"].is_number_integer()&&entry["atMs"]>0,"storage_corrupt","Invalid stored schedule time");
   }
@@ -193,13 +195,13 @@ bool Playback::allowed(const Json& item, const Json& s) const {
   if (rating == "mature") return false;
   return rating == "general" || s["context"] == "personal" || !s["policy"].value("blockUnratedCurated", false);
 }
-void Playback::validate_playlist(const Json& playlist) const {
+void Playback::validate_playlist(const Json& playlist, bool restoring) const {
   require(playlist.is_object() && playlist.contains("items") && playlist["items"].is_array(), "playlist_invalid", "Playlist must contain items");
   require(playlist["items"].size() <= 4096, "playlist_invalid", "At most 4096 items are allowed");
   // Leave room for occurrence snapshots and durable history within 4 MiB.
   require(playlist.dump().size()<=1024*1024,"playlist_invalid","Playlist exceeds 1 MiB");
   for(auto key:{"id","title","curator","dpVersion","slug","created"})optional_text(playlist,key);
-  if(playlist.contains("defaults"))validate_layer(playlist["defaults"]);
+  if(playlist.contains("defaults"))validate_layer(playlist["defaults"], restoring);
   for (const auto& item : playlist["items"]) {
     require(item.is_object(), "playlist_invalid", "Every item must be an object");
     require(item.dump().size()<=65536,"playlist_invalid","Artwork item exceeds 64 KiB");
@@ -213,9 +215,9 @@ void Playback::validate_playlist(const Json& playlist) const {
       for (const auto& reason : item["contentReasons"]) require(reason.is_string(), "playlist_invalid", "contentReasons must contain strings");
     }
     if (item.contains("duration")) require(item["duration"].is_number() && item["duration"].get<double>() >= 0, "playlist_invalid", "duration must be nonnegative");
-    if(item.contains("display"))validate_display(item["display"]);
+    if(item.contains("display"))validate_display(item["display"], restoring);
     if(item.contains("metadata"))validate_metadata(item["metadata"]);
-    for (auto key : {"override", "inlineManifest", "resolvedManifest"}) if(item.contains(key))validate_layer(item[key]);
+    for (auto key : {"override", "inlineManifest", "resolvedManifest"}) if(item.contains(key))validate_layer(item[key], restoring);
   }
 }
 void Playback::refresh_display(Occurrence& occurrence) {

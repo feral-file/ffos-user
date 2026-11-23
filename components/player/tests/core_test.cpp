@@ -34,6 +34,20 @@ int main(int argc, char** argv) {
     }
     auto directory = std::filesystem::temp_directory_path() / ("ff-native-test-" + ff::uuid());
     std::filesystem::create_directory(directory);
+    {
+      const auto legacy_dir = directory / "legacy";
+      std::filesystem::create_directory(legacy_dir);
+      ff::Store legacy_store(legacy_dir / "state.sqlite");
+      auto legacy_state = ff::initial_state();
+      auto item = playlist()["items"][0];
+      item["display"]["autoplay"] = nullptr;
+      legacy_state["history"].push_back({{"recordId","old-play"},{"playedAtMs",1},{"item",item}});
+      legacy_store.save(legacy_state);
+      ff::Playback restored(legacy_store);
+      check(restored.state()["history"].size() == 1, "Old autoplay extensions cannot prevent startup");
+      fails([&]{restored.command("playback.replace", {{"playlist",{{"items",ff::Json::array({item})}}}});},
+            "playlist_invalid");
+    }
     auto path = directory / "state.sqlite";
     {
       ff::Store store(path);

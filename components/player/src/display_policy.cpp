@@ -9,8 +9,9 @@ void apply_display_layer(Json& display, const Json& layer) {
     if (field == "overridePermissions") continue;
     // Earlier native builds persisted this spelling. Normalize it while
     // resolving the layer, leaving the signed playlist bytes untouched.
+    if (field == "autoplay" && !value.is_boolean()) continue;
     if (field == "autoPlay") {
-      if (!layer.contains("autoplay") && value.is_boolean()) display["autoplay"] = value;
+      if ((!layer.contains("autoplay") || !layer["autoplay"].is_boolean()) && value.is_boolean()) display["autoplay"] = value;
       continue;
     }
     if (field == "userOverrides") {

@@ -127,7 +127,7 @@ class Playback {
   void update_order(Json& next, int index) const;
   void refresh_display(Occurrence& occurrence);
   bool allowed(const Json& item, const Json& state) const;
-  void validate_playlist(const Json& playlist) const;
+  void validate_playlist(const Json& playlist, bool restoring = false) const;
   void validate_state() const;
   double duration() const;
 };
