@@ -1364,3 +1364,32 @@ func TestDP1_ProcessDynamicPlaylist_RejectsWrongTypedResolvedRatings(t *testing.
 	// or fetched document — not as a generic 500.
 	assert.ErrorIs(t, err, dp1.ErrPlaylistInvalid)
 }
+
+// A vendor itemSchema is refused by name before any request. The retired
+// Raster wallet walk (`raster/tokensOwned/1.0`, feral-file/feral-file#3576)
+// is pinned here explicitly: an older ff-app still sends it, and the device
+// must answer with a named error rather than page api.raster.art (which
+// now needs a key the device does not carry) or validate Raster nodes as
+// DP-1 items. Its `pagination` block decodes without error and is ignored.
+func TestDP1_ProcessDynamicPlaylist_VendorItemSchemaIsRefusedByName(t *testing.T) {
+	for _, schema := range []string{"raster/tokensOwned/1.0", "objkt/collection/2.0"} {
+		t.Run(schema, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+			// No mockHTTP expectation: any request fails the test.
+			doc := `{"dpVersion":"1.0.0","id":"p","title":"t","items":[],"dynamicQuery":{` +
+				`"profile":"graphql-v1","endpoint":"https://api.raster.art/graphql","method":"POST",` +
+				`"query":"query($after: String) { tokensOwned(after: $after) { nodes { id } } }",` +
+				`"responseMapping":{"itemsPath":"data.tokensOwned.nodes","itemSchema":"` + schema + `"},` +
+				`"pagination":{"variable":"after","cursorPath":"data.tokensOwned.pageInfo.endCursor","hasNextPath":"data.tokensOwned.pageInfo.hasNextPage"}}}`
+			var playlist dp1.Playlist
+			require.NoError(t, json.Unmarshal([]byte(doc), &playlist))
+
+			result, err := ts.client.ProcessDynamicPlaylist(t.Context(), playlist, false)
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.ErrorIs(t, err, dp1.ErrUnsupportedItemSchema)
+			assert.Contains(t, err.Error(), `"`+schema+`"`)
+		})
+	}
+}
