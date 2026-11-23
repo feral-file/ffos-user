@@ -1,6 +1,8 @@
 package relayer
 
 import (
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -53,7 +55,7 @@ func TestDeviceSessionReportsARequestLeftUnfinished(t *testing.T) {
 	chunk := func(index int) []byte {
 		frame, err := relaywire.Encode(
 			relaywire.Header{Version: 2, ID: "frame", To: "player", From: "browser"},
-			[]byte(`{"relayChunk":{"id":"transfer","index":`+string(rune('0'+index))+`,"count":3,"data":"eA=="}}`))
+			[]byte(`{"relayChunk":{"id":"transfer","index":`+strconv.Itoa(index)+`,"count":3,"data":"eA=="}}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +102,7 @@ func TestDeviceSessionReportsATransferItsSenderReplaced(t *testing.T) {
 	chunk := func(transfer string, index int) []byte {
 		frame, err := relaywire.Encode(
 			relaywire.Header{Version: 2, ID: "frame", To: "player", From: "browser"},
-			[]byte(`{"relayChunk":{"id":"`+transfer+`","index":`+string(rune('0'+index))+`,"count":2,"data":"eyJhIjoxfQ=="}}`))
+			[]byte(`{"relayChunk":{"id":"`+transfer+`","index":`+strconv.Itoa(index)+`,"count":2,"data":"eyJhIjoxfQ=="}}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,5 +160,55 @@ func TestDeviceSessionReportsWhatItDiscards(t *testing.T) {
 		if drops[i] != want[i] {
 			t.Fatalf("drops = %v, want %v", drops, want)
 		}
+	}
+}
+
+// failingAckConn refuses every write, as a socket does once its far end is gone.
+type failingAckConn struct{ fakeShedConn }
+
+func (c *failingAckConn) WriteMessage(int, []byte) error { return errors.New("write: broken pipe") }
+
+func TestDeviceSessionReportsARequestWhoseReceiptCouldNotBeWritten(t *testing.T) {
+	type drop struct{ reason, peer string }
+	var drops []drop
+	s := newDeviceSession(&failingAckConn{})
+	s.onDrop = func(reason, peer string) { drops = append(drops, drop{reason, peer}) }
+	defer s.close()
+	if _, _, err := s.receive(websocket.TextMessage, []byte(`{"type":"hello","peers":["browser"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := relaywire.Encode(relaywire.Header{Version: 2, ID: "frame", To: "player", From: "browser"}, []byte(`{"messageID":"m"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, _, err := s.receive(websocket.BinaryMessage, frame); err == nil || body != nil {
+		t.Fatalf("request dispatched without its receipt: body=%v err=%v", body, err)
+	}
+	if len(drops) != 1 || drops[0] != (drop{dropReceiptFailed, "browser"}) {
+		t.Fatalf("drops = %v", drops)
+	}
+}
+
+// A frame whose receipt was being written while the socket closed must not
+// land in an assembly nobody will read again.
+func TestDeviceSessionReportsAFrameThatArrivesAsTheSessionCloses(t *testing.T) {
+	type drop struct{ reason, peer string }
+	var drops []drop
+	s := newDeviceSession(&fakeShedConn{})
+	s.onDrop = func(reason, peer string) { drops = append(drops, drop{reason, peer}) }
+	if _, _, err := s.receive(websocket.TextMessage, []byte(`{"type":"hello","peers":["browser"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	s.close()
+	frame, err := relaywire.Encode(relaywire.Header{Version: 2, ID: "frame", To: "player", From: "browser"},
+		[]byte(`{"relayChunk":{"id":"transfer","index":0,"count":2,"data":"eA=="}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, _, err := s.receive(websocket.BinaryMessage, frame); err == nil || body != nil {
+		t.Fatalf("frame accepted after close: body=%v err=%v", body, err)
+	}
+	if len(drops) != 1 || drops[0] != (drop{dropSessionClosed, "browser"}) {
+		t.Fatalf("drops = %v", drops)
 	}
 }

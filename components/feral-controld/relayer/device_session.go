@@ -70,6 +70,8 @@ const (
 	dropBadFrame      = "malformed frame"
 	dropBadChunk      = "malformed payload, or chunk out of order or expired"
 	dropNotJSON       = "body is not JSON"
+	dropReceiptFailed = "receipt could not be written"
+	dropSessionClosed = "arrived as the connection closed"
 	// The sender left, the socket closed, or the sender began another
 	// transfer, with a chunked request part way in: what a page suspended
 	// mid-send looks like from the device. A sender that stays connected and
@@ -195,20 +197,28 @@ func (s *deviceSession) receive(kind int, body []byte) ([]byte, string, error) {
 		s.dropped(dropBadFrame, "")
 		return nil, "", err
 	}
-	s.mu.Lock()
-	peer := s.peers[h.From]
-	s.mu.Unlock()
 	// Receipt credit belongs to transport, even when application data is invalid.
 	if err = s.control(map[string]string{"type": "ack", "from": h.From, "id": h.ID}); err != nil {
+		s.dropped(dropReceiptFailed, h.From)
 		return nil, "", err
 	}
+	// The peer is looked up after the receipt, and the assembly changed, under
+	// s.mu: close and peer_disconnected clear s.peers and read assemblies from
+	// other goroutines, and the receipt write can outlast either. A frame that
+	// lost that race must not land in an assembly nobody reads again.
+	s.mu.Lock()
+	peer := s.peers[h.From]
 	if peer == nil {
+		s.mu.Unlock()
+		select {
+		case <-s.done:
+			s.dropped(dropSessionClosed, h.From)
+			return nil, "", ErrNotConnected
+		default:
+		}
 		s.dropped(dropUnknownSource, h.From)
 		return nil, "", errors.New("unknown relay source")
 	}
-	// Under s.mu: close and peer_disconnected read the assembly from other
-	// goroutines to report a request left unfinished.
-	s.mu.Lock()
 	complete, err := peer.assembly.Add(payload, time.Now())
 	replaced := peer.assembly.TakeReplaced()
 	s.mu.Unlock()
