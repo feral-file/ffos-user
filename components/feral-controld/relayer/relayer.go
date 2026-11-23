@@ -762,8 +762,8 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					}
 					continue
 				}
+				var source string
 				if session != nil {
-					var source string
 					msg, source, err = session.receive(kind, msg)
 					if err != nil || msg == nil {
 						continue
@@ -783,7 +783,7 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					logInvalid := r.logger.Error
 					if session != nil {
 						logInvalid = r.logger.Debug // any stranger on the channel can send this
-						session.dropped(dropNotJSON, "")
+						session.dropped(dropNotJSON, source)
 					}
 					logInvalid("Invalid JSON received",
 						zap.ByteString("message", logMsg),

@@ -89,6 +89,43 @@ func TestDeviceSessionReportsARequestLeftUnfinished(t *testing.T) {
 	}
 }
 
+func TestDeviceSessionReportsATransferItsSenderReplaced(t *testing.T) {
+	type drop struct{ reason, peer string }
+	var drops []drop
+	s := newDeviceSession(&fakeShedConn{})
+	s.onDrop = func(reason, peer string) { drops = append(drops, drop{reason, peer}) }
+	if _, _, err := s.receive(websocket.TextMessage, []byte(`{"type":"hello","peers":["browser"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	chunk := func(transfer string, index int) []byte {
+		frame, err := relaywire.Encode(
+			relaywire.Header{Version: 2, ID: "frame", To: "player", From: "browser"},
+			[]byte(`{"relayChunk":{"id":"`+transfer+`","index":`+string(rune('0'+index))+`,"count":2,"data":"eyJhIjoxfQ=="}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return frame
+	}
+	// A is begun and never finished; B begins over it and completes.
+	_, _, _ = s.receive(websocket.BinaryMessage, chunk("transfer-a", 0))
+	if len(drops) != 0 {
+		t.Fatalf("drops after one chunk = %v", drops)
+	}
+	_, _, _ = s.receive(websocket.BinaryMessage, chunk("transfer-b", 0))
+	if len(drops) != 1 || drops[0] != (drop{dropUnfinished, "browser"}) {
+		t.Fatalf("drops after the replacing chunk = %v", drops)
+	}
+	body, _, err := s.receive(websocket.BinaryMessage, chunk("transfer-b", 1))
+	if err != nil || body == nil {
+		t.Fatalf("completed transfer: body=%v err=%v", body, err)
+	}
+	// A transfer that completed leaves nothing to report when its sender goes.
+	s.close()
+	if len(drops) != 1 {
+		t.Fatalf("drops after a completed transfer and close = %v", drops)
+	}
+}
+
 func TestDeviceSessionReportsWhatItDiscards(t *testing.T) {
 	type drop struct{ reason, peer string }
 	var drops []drop

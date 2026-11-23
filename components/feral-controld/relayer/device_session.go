@@ -70,8 +70,11 @@ const (
 	dropBadFrame      = "malformed frame"
 	dropBadChunk      = "malformed payload, or chunk out of order or expired"
 	dropNotJSON       = "body is not JSON"
-	// The sender left, or the socket closed, with a chunked request part way
-	// in: what a page suspended mid-send looks like from the device.
+	// The sender left, the socket closed, or the sender began another
+	// transfer, with a chunked request part way in: what a page suspended
+	// mid-send looks like from the device. A sender that stays connected and
+	// sends nothing more is reported when it leaves, not when its transfer
+	// expires.
 	dropUnfinished = "chunked request left unfinished"
 )
 
@@ -203,7 +206,15 @@ func (s *deviceSession) receive(kind int, body []byte) ([]byte, string, error) {
 		s.dropped(dropUnknownSource, h.From)
 		return nil, "", errors.New("unknown relay source")
 	}
+	// Under s.mu: close and peer_disconnected read the assembly from other
+	// goroutines to report a request left unfinished.
+	s.mu.Lock()
 	complete, err := peer.assembly.Add(payload, time.Now())
+	replaced := peer.assembly.TakeReplaced()
+	s.mu.Unlock()
+	if replaced {
+		s.dropped(dropUnfinished, h.From)
+	}
 	if err != nil {
 		s.dropped(dropBadChunk, h.From)
 		return nil, "", err

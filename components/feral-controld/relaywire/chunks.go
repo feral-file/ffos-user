@@ -50,12 +50,24 @@ type Assembler struct {
 	next    int
 	body    []byte
 	expires time.Time
+	// replaced is set when a new transfer's first chunk discards one still
+	// being assembled; TakeReplaced reads and clears it.
+	replaced bool
 }
 
 // Partial reports a chunked message still being assembled: the chunks held
 // and the chunks its sender announced.
 func (a *Assembler) Partial() (held, announced int, ok bool) {
 	return a.next, a.count, a.count > 0 && a.next < a.count
+}
+
+// TakeReplaced reports, once, that the last first chunk discarded a transfer
+// still being assembled: its sender began again, or began something else,
+// without finishing.
+func (a *Assembler) TakeReplaced() bool {
+	replaced := a.replaced
+	a.replaced = false
+	return replaced
 }
 
 // Add validates a fragment before retaining it and returns nil until complete.
@@ -72,7 +84,8 @@ func (a *Assembler) Add(body []byte, now time.Time) ([]byte, error) {
 		return nil, errors.New("invalid relay chunk")
 	}
 	if c.Index == 0 {
-		*a = Assembler{id: c.ID, count: c.Count, expires: now.Add(180 * time.Second)}
+		_, _, partial := a.Partial()
+		*a = Assembler{id: c.ID, count: c.Count, expires: now.Add(180 * time.Second), replaced: partial}
 	}
 	if a.id != c.ID || a.count != c.Count || a.next != c.Index || !now.Before(a.expires) || len(a.body)+len(c.Data) > MaxMessageBytes {
 		*a = Assembler{}
@@ -84,6 +97,6 @@ func (a *Assembler) Add(body []byte, now time.Time) ([]byte, error) {
 		return nil, nil
 	}
 	result := a.body
-	*a = Assembler{}
+	*a = Assembler{replaced: a.replaced}
 	return result, nil
 }
