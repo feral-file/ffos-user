@@ -323,17 +323,17 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   const bool label_visible = has_title && blend.opacity>0 && (mode=="on" || (mode=="timed" && label_age<30300));
   auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
   auto update=playback.state().value("updateOutcome",Json(nullptr));
-  bool overlay_panel=playback.display_rejected() || (schedule.is_object() && schedule.value("outcome","")=="failed") ||
+  bool overlay_panel=(schedule.is_object() && schedule.value("outcome","")=="failed") ||
                      (update.is_object() && update.value("contentBlocked",false)) ||
                      (playback.desired() && playback.desired()->stage=="failed") ||
                      !playback.recovery_error().empty() ||!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
                      !playback.presentation_failure().is_null() || !playback.storage_error().empty() ||
                      !playback.runtime_notice().is_null();
-  if(external && blend.opacity==1 && !pointer_visible && !label_visible && !overlay_panel){
+  if(external && blend.opacity==1 && !pointer_visible && !label_visible && !overlay_panel && !playback.display_rejected()){
     browser_overlay_.reset();draw_key_.reset();return false;
   }
   if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
-  const bool loading=!external && !artwork && playback.desired() && !overlay_panel &&
+  const bool loading=!external && !artwork && playback.desired() && !overlay_panel && !playback.display_rejected() &&
                      playback.state()["sleeping"]==false;
   if(!loading)loading_occurrence_.clear();
   else if(loading_occurrence_!=playback.desired()->id){
