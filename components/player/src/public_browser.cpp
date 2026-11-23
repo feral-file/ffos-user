@@ -377,17 +377,24 @@ void PublicBrowser::message(const Json& m) {
     if (p.contains("redirectResponse") && p.at("redirectResponse").value("url", "") == navigation_url_)
       navigation_url_ = p.at("request").value("url", navigation_url_);
   } else if (method == "Network.responseReceived" && session == session_ &&
-             p.value("frameId", "") == main_frame_ && !initial_response_seen_ && p.at("response").value("url", "") == navigation_url_ &&
-             (p.value("type", "") == "Document" ||
-              ((p.value("type", "") == "Media" || p.value("type", "") == "Image") &&
-               p.at("response").value("url", "") == navigation_url_))) {
-    initial_response_seen_ = true;
-    auto response = p.at("response");
-    auto status = response.value("status", 0);
+             p.value("frameId", "") == main_frame_) {
+    const auto& response = p.at("response");
+    const auto type = p.value("type", "");
+    const bool main_document = type == "Document" && !main_document_request_.empty() &&
+                               p.value("requestId", "") == main_document_request_;
+    const bool initial_source = !initial_response_seen_ &&
+                                response.value("url", "") == navigation_url_ &&
+                                (main_document || type == "Media" || type == "Image");
+    if (!main_document && !initial_source) return;
+    // A script or meta refresh can navigate after the first successful load.
+    // Validate each top-level response, but classify the original source once.
+    const auto status = response.value("status", 0);
     if (status >= 400) {
       fail("Artwork HTTP " + std::to_string(status));
       return;
     }
+    if (!initial_source) return;
+    initial_response_seen_ = true;
     auto mime = response.value("mimeType", "");
     Json classified = occurrence_.item;
     classified["mimeType"] = mime;
