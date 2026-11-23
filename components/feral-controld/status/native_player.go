@@ -134,7 +134,13 @@ func NativePlayerStatus(s playerlink.Snapshot) (*PlayerStatus, error) {
 		}
 		out.RenderStatus = &render
 	}
-	if s.Notice != nil {
+	// Keep the retained artwork's identity, but report a terminal failure of
+	// the requested artwork to controllers that only read the legacy status.
+	if s.Selected != nil && s.Selected.Stage == "failed" && s.Recovery != nil && s.Recovery.Exhausted {
+		failed := 3
+		out.RenderStatus = &failed
+		out.Error = &s.Selected.Error
+	} else if s.Notice != nil {
 		out.Error = &s.Notice.Message
 	}
 	return out, nil

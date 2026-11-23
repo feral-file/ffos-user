@@ -45,6 +45,12 @@ func TestNativeStatusReportsPresentedPlaylistDuringReplacement(t *testing.T) {
 	require.Equal(t, "outgoing", got.Playlist.ID)
 	require.Equal(t, "renderer terminated", got.Runtime.Selected.Error)
 	require.Equal(t, 2, *got.RenderStatus)
+	s.Recovery = &playerlink.RecoveryStatus{Exhausted: true}
+	got, err = NativePlayerStatus(s)
+	require.NoError(t, err)
+	require.Equal(t, 3, *got.RenderStatus)
+	require.Equal(t, "renderer terminated", *got.Error)
+	require.Equal(t, "first", *got.DeviceSettings.ShowingKey)
 }
 
 func TestNativeStatusRetainsWaitingSourceWithoutReportingArtwork(t *testing.T) {
