@@ -222,6 +222,7 @@ type relayer struct {
 	endpoint         string
 	deviceID         string
 	session          *deviceSession
+	drops            *dropLog
 	peerDisconnected func(Peer)
 	apiKey           string
 	conn             wrapper.WebSocketConn
@@ -552,6 +553,13 @@ func (r *relayer) Connect(ctx context.Context) error {
 		conn.SetReadLimit(relaywire.MaxFrameBytes)
 		r.session = newDeviceSession(conn)
 		r.session.onDisconnect = r.peerDisconnected
+		if r.drops == nil {
+			r.drops = newDropLog(r.logger, time.Now)
+		}
+		drops := r.drops
+		r.session.onDrop = func(reason, peer string) {
+			drops.note(reason, zap.String("peer", peer))
+		}
 		r.v2ConnectedAt = r.clock.Now()
 	}
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
@@ -775,6 +783,7 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					logInvalid := r.logger.Error
 					if session != nil {
 						logInvalid = r.logger.Debug // any stranger on the channel can send this
+						session.dropped(dropNotJSON, "")
 					}
 					logInvalid("Invalid JSON received",
 						zap.ByteString("message", logMsg),

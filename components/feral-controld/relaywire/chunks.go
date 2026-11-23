@@ -52,6 +52,12 @@ type Assembler struct {
 	expires time.Time
 }
 
+// Partial reports a chunked message still being assembled: the chunks held
+// and the chunks its sender announced.
+func (a *Assembler) Partial() (held, announced int, ok bool) {
+	return a.next, a.count, a.count > 0 && a.next < a.count
+}
+
 // Add validates a fragment before retaining it and returns nil until complete.
 func (a *Assembler) Add(body []byte, now time.Time) ([]byte, error) {
 	var envelope chunkEnvelope

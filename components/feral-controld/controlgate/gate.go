@@ -114,6 +114,9 @@ func parseEnvelopeRequest(raw json.RawMessage) (string, error) {
 func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*Wire, *control.PublicError) {
 	compact, err := parseEnvelopeRequest(raw)
 	if err != nil {
+		// Logged like every other refusal: a carrier that does not parse was
+		// the one refusal that left no line (feral-file/feral-file#3644).
+		g.logger.Warn("Control envelope refused", zap.String("code", control.CodeBadEnvelope), zap.Error(err))
 		return nil, &control.PublicError{Code: control.CodeBadEnvelope, Err: err}
 	}
 	adm, err := g.auth.OpenFrom(compact, origin)
