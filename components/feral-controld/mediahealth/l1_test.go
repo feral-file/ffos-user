@@ -464,7 +464,7 @@ func TestL1_RunStopsOnContext(t *testing.T) {
 // Regressions from the PR #443 review (feralfile-bot, round 1).
 
 // F19: the render asks for the record's OWN source, fragment kept — never
-// the wire URL the cast pass copied from a sibling. Routing it like the
+// the wire URL the display request pass copied from a sibling. Routing it like the
 // kiosk (policy, recorded fallback, bare-CID rule) is the renderer's job,
 // per request (offlinecache TestMediaHealthRenderer_RoutesLikeTheKiosk).
 func TestL1_RendersTheRecordsOwnSource(t *testing.T) {

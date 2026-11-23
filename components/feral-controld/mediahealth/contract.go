@@ -23,7 +23,7 @@ const ContractVersion = 1
 // sent and outcomes are not expected — and a failed read never latches.
 //
 // The manifest is re-read when its mtime changes, so a player updated on
-// the package rail under a running daemon is picked up on the next cast.
+// the package rail under a running daemon is picked up on the next display request.
 type PlayerContract struct {
 	Path string
 
@@ -45,10 +45,10 @@ type support struct {
 }
 
 // HintPushCommand is the player command that replaces the held hint map
-// for the cast on the wall without a playlist push (#392 follow-up).
+// for the display request on the wall without a playlist push (#392 follow-up).
 const HintPushCommand = "setMediaHealth"
 
-// manifestRecheck bounds how often the file is stat'ed; a cast storm must
+// manifestRecheck bounds how often the file is stat'ed; a display request storm must
 // not become a stat storm.
 const manifestRecheck = 5 * time.Second
 

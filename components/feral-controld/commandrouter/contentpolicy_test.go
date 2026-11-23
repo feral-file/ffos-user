@@ -220,7 +220,7 @@ func (c *capturingScheduler) SetProjector(p playlistschedule.Projector) { c.proj
 
 // The router must install the scheduler projector when the content policy is
 // wired, and that projector must apply the CURRENT policy — a displayAt cutover
-// replays a cohort of a document the router filtered once, at cast time, so a
+// replays a cohort of a document the router filtered once, at accept time, so a
 // policy tightened afterwards reaches those cohorts only here.
 func TestSetContentPolicyInstallsTheSchedulerProjector(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -474,7 +474,7 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossResolution(t *testing.T) {
 	require.True(t, lockFree, "the policy lock was held through playlist resolution")
 }
 
-// stallingProber stands in for a slow playlist origin during the cast-time
+// stallingProber stands in for a slow playlist origin during the accept-time
 // source preflight, which is the other network-bound stretch the policy lock
 // must not span.
 type stallingProber struct {
@@ -497,7 +497,7 @@ func (p *stallingProber) Preflight(_ context.Context, sources []string) []mediah
 }
 
 // The policy lock must not span the source preflight either: the probe has a
-// 10s phase ceiling and several heavy casts can be admitted at once, so holding
+// 10s phase ceiling and several heavy display requests can be admitted at once, so holding
 // it there makes the History and Content controls wait on whatever an
 // unauthenticated caller's origin decides to do.
 func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossSourcePreflight(t *testing.T) {
@@ -544,7 +544,7 @@ func TestDisplayPlaylistDoesNotHoldThePolicyLockAcrossSourcePreflight(t *testing
 	require.True(t, lockFree, "the policy lock was held through the source preflight")
 }
 
-// Releasing the lock for the probe must not let a cast outrun a policy
+// Releasing the lock for the probe must not let a display request outrun a policy
 // tightened while that probe ran: the projection is reapplied under the policy
 // in force at send time.
 func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T) {
@@ -591,18 +591,18 @@ func TestDisplayPlaylistReprojectsAfterAPolicyChangeDuringPreflight(t *testing.T
 	require.NoError(t, err)
 	require.Contains(t, sent, "https://ok.example/a")
 	require.NotContains(t, sent, "https://mature.example/b",
-		"a policy tightened during the probe must still govern the cast")
+		"a policy tightened during the probe must still govern the display request")
 }
 
-// LOCK ORDER. The cast path and the playlist-refresher both nest the content
+// LOCK ORDER. The display path and the playlist-refresher both nest the content
 // policy store lock and the kiosk playback lock, and both are non-reentrant, so
-// they must take them in the SAME order or a concurrent cast and refresh can
+// they must take them in the SAME order or a concurrent display request and refresh can
 // deadlock permanently — no further policy update, refresh or playback command
 // until controld restarts. The refresher's order is policy, then LockPlayback
-// (processPlayingPlaylist), so the cast must match.
+// (processPlayingPlaylist), so the display request must match.
 //
 // Asserted with TryLock at the moment LockPlayback is called: a store lock that
-// is NOT free proves the cast already holds it, which is the invariant. No
+// is NOT free proves the display request already holds it, which is the invariant. No
 // timing, no sleeps.
 func TestDisplayPlaylistTakesThePolicyLockBeforeThePlaybackLock(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -643,7 +643,7 @@ func TestDisplayPlaylistTakesThePolicyLockBeforeThePlaybackLock(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, policyHeldAtPlaybackLock,
-		"the cast took the playback lock before the policy lock; the refresher takes them the other way round, so the two can deadlock")
+		"the display request took the playback lock before the policy lock; the refresher takes them the other way round, so the two can deadlock")
 }
 
 // The reconnect sync must take the player-push barrier too, not only the policy
@@ -675,7 +675,7 @@ func TestSyncContentPolicySerializesWithSchedulerPushes(t *testing.T) {
 }
 
 // A policy tightened while the probe runs can remove the very item whose
-// reachability made the cast acceptable, leaving only sources already proven
+// reachability made the display request acceptable, leaving only sources already proven
 // dead. Unknown sources after an early exit must continue to fail open.
 func TestDisplayPlaylistProjectionRechecksKnownSourceVerdicts(t *testing.T) {
 	for _, verdict := range []mediahealth.Verdict{mediahealth.VerdictDead, mediahealth.VerdictInconclusive} {
@@ -874,7 +874,7 @@ func TestSetContentPolicyRejectsAPartialAcknowledgement(t *testing.T) {
 // A wrong-typed rating fails generic JSON decoding before the extension
 // validator ever sees it, so validating the raw bytes first is what makes this
 // the documented playlistInvalid classification instead of a generic failure
-// the caster cannot act on.
+// the sender cannot act on.
 func TestDisplayPlaylistClassifiesAWrongTypedRatingAsPlaylistInvalid(t *testing.T) {
 	for name, rating := range map[string]interface{}{
 		"number": float64(123),
@@ -951,7 +951,7 @@ func TestSetContentPolicyRestoresThePlayerWhenTheWriteFails(t *testing.T) {
 // so the final-policy re-check must key its retained verdicts by the RAW source
 // it probed. Keying on the result field made every signed URL miss its own
 // verdict, and a miss makes the re-check fail open — forwarding exactly the
-// known-dead cast it exists to stop.
+// known-dead display request it exists to stop.
 func TestDisplayPlaylistRechecksSignedURLsAfterTheProjection(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	player := mocks.NewMockCDP(ctrl)
@@ -984,7 +984,7 @@ func TestDisplayPlaylistRechecksSignedURLsAfterTheProjection(t *testing.T) {
 		},
 	}, zaptest.NewLogger(t))
 
-	// No player.EXPECT(): the known-dead remainder must not be cast.
+	// No player.EXPECT(): the known-dead remainder must not be displayed.
 	poller.EXPECT().ForceRefresh().AnyTimes()
 
 	_, err = h.Process(context.Background(), commands.Command{
@@ -1297,7 +1297,7 @@ func TestDisplayPlaylistAcceptsAnUnknownRatingStringEndToEnd(t *testing.T) {
 			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
 		}).Times(1)
 
-	// Default policy: mature is hidden from a curated cast, so if "teen" were
+	// Default policy: mature is hidden from a curated display request, so if "teen" were
 	// read as anything mature-like the item would not survive.
 	_, err := h.Process(context.Background(), commands.Command{
 		Type: commands.CMD_DISPLAY_PLAYLIST,
@@ -1326,7 +1326,7 @@ func TestDisplayPlaylistAppliesTheUnratedGateToAnUnknownRatingString(t *testing.
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t))
 	commandrouter.SetContentPolicy(h, store, zaptest.NewLogger(t))
 
-	// No player.EXPECT(): every item is withheld, so the cast is blocked.
+	// No player.EXPECT(): every item is withheld, so the display request is blocked.
 	_, err = h.Process(context.Background(), commands.Command{
 		Type: commands.CMD_DISPLAY_PLAYLIST,
 		Arguments: map[string]any{"dp1_call": map[string]interface{}{
@@ -1343,7 +1343,7 @@ func TestDisplayPlaylistAppliesTheUnratedGateToAnUnknownRatingString(t *testing.
 
 // dp1-go's format assertions print the offending VALUE whole, and the hub and
 // the relayer return err.Error() verbatim — so wrapping that message handed a
-// caster the source URL, query credentials and all. The error carries JSON
+// sender the source URL, query credentials and all. The error carries JSON
 // pointers only.
 func TestPlaylistInvalidCarriesThePathNotTheValue(t *testing.T) {
 	h, _, _ := newPolicyHandler(t)
@@ -1364,10 +1364,10 @@ func TestPlaylistInvalidCarriesThePathNotTheValue(t *testing.T) {
 	require.True(t, commandrouter.IsPlaylistInvalid(err))
 
 	text := err.Error()
-	require.NotContains(t, text, "SECRET", "the offending value reached the caster: %s", text)
-	require.NotContains(t, text, "token=", "a query string reached the caster: %s", text)
-	require.NotContains(t, text, "/media/a", "the source path reached the caster: %s", text)
-	// The pointer is what a caster needs to fix its own document.
+	require.NotContains(t, text, "SECRET", "the offending value reached the sender: %s", text)
+	require.NotContains(t, text, "token=", "a query string reached the sender: %s", text)
+	require.NotContains(t, text, "/media/a", "the source path reached the sender: %s", text)
+	// The pointer is what a sender needs to fix its own document.
 	require.Contains(t, text, "/items/0/contentRating", "the failing field must be named: %s", text)
 }
 
@@ -1385,14 +1385,14 @@ func (*barrierScheduler) SetHintSource(playlistschedule.HintSource) {}
 
 func (*capturingScheduler) SetHintSource(playlistschedule.HintSource) {}
 
-// startItem names the work a controller wants a cast to open on. controld
+// startItem names the work a controller wants a display request to open on. controld
 // forwards it to the player untouched and never turns it into an index: the
 // list the player counts in is the one left after the player's own
 // admission, which can be shorter than the one controld forwards. Here the
 // projection has already dropped the first item, so an index computed
 // against the caller's document would point at the wrong work; the identity
 // cannot. A malformed value is the player's to ignore, so it must not fail
-// the cast here either.
+// the display request here either.
 func TestDisplayPlaylistForwardsStartItemToThePlayerUntouched(t *testing.T) {
 	for name, startItem := range map[string]any{
 		"id and source": map[string]interface{}{"id": "c", "source": "https://example.test/c"},
@@ -1424,7 +1424,7 @@ func TestDisplayPlaylistForwardsStartItemToThePlayerUntouched(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			require.NotContains(t, sent, "https://example.test/a", "the mature item is projected out of a curated cast")
+			require.NotContains(t, sent, "https://example.test/a", "the mature item is projected out of a curated display request")
 			wantJSON, marshalErr := json.Marshal(startItem)
 			require.NoError(t, marshalErr)
 			require.Contains(t, sent, `"startItem":`+string(wantJSON))

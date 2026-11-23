@@ -36,7 +36,7 @@ import (
 // and written as an Automatic record with every resource fresh for
 // onchfsFreshFor: Automatic keeps it out of the app's Downloads list (it is
 // not something the user downloaded) and lets the cache's own policies evict
-// it like any automatic warm; it is rebuilt on the next cast that needs it.
+// it like any automatic warm; it is rebuilt on the next display request that needs it.
 //
 // What the kiosk will ask for, and the resources that answer it:
 //   - each file at <origin>/<escaped path>;
@@ -71,9 +71,9 @@ const onchfsJobTimeout = 2 * time.Minute
 
 // onchfsConcurrentJobs bounds works read at once, foreground and background
 // together; onchfsBackgroundJobs of them may be background reads. The slot
-// background work can never take is what keeps a cast's first work from
+// background work can never take is what keeps a display request's first work from
 // waiting behind slow background reads (PR #461 review F13) without letting
-// casts add unbounded reads on top (F14). Each read fans out to its own
+// display requests add unbounded reads on top (F14). Each read fans out to its own
 // chain reads (onchfs.DefaultLimits.ConcurrentReads) and keeps at most
 // onchfs.MaxTreeBytes.
 const (
@@ -150,7 +150,7 @@ type OnchfsMaterializer struct {
 	resolver OnchfsResolver
 	logger   *zap.Logger
 	now      func() time.Time
-	// base is the daemon's lifetime: a job outlives the cast that started
+	// base is the daemon's lifetime: a job outlives the display request that started
 	// it and ends with the daemon.
 	base context.Context
 	// standalone means no offline-cache Service runs on this device, so
@@ -188,7 +188,7 @@ type OnchfsMaterializer struct {
 type onchfsJob struct {
 	done chan struct{}
 	err  error
-	// foreground marks the work a cast is waiting to show; admission puts
+	// foreground marks the work a display request is waiting to show; admission puts
 	// it ahead of background work (onchfsAdmission).
 	foreground atomic.Bool
 	// barrier is the clear epoch when the job was created (fence only).
@@ -258,7 +258,7 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 }
 
 // Ensure makes every onchfs item among items replayable from the store. It
-// waits for the first onchfs item in playlist order, the one a cast shows
+// waits for the first onchfs item in playlist order, the one a display request shows
 // first, at most wait (and no longer than ctx); every other item, and the
 // first one if it takes longer, continues in the background and calls
 // OnReady when it saves a record. Items whose record is already fresh cost
@@ -267,7 +267,7 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 //
 // Errors are logged, not returned: an item that cannot be read stays
 // unplayable, which the player handles like any failed source, and must not
-// fail the rest of the cast.
+// fail the rest of the display request.
 func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int {
 	ready := 0
 	var first *onchfsJob
@@ -291,7 +291,7 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 			ready++
 			continue
 		}
-		// The first work is what the cast waits for; it must not queue
+		// The first work is what the display request waits for; it must not queue
 		// behind background reads of the rest (PR #461 review F13).
 		job := m.start(item, isFirst && wait > 0)
 		if isFirst {
@@ -320,7 +320,7 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 // It also checks every blob the record names is on disk. A record whose blobs
 // went missing (swept by a store without the publish guard, or removed by
 // hand) would otherwise stay "fresh" and unplayable until it expired; this
-// way the next cast rebuilds it.
+// way the next display request rebuilds it.
 func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
 	rec, err := m.store.LoadItem(SourceKey(source))
 	if err != nil || rec == nil || !rec.Coverage.Complete || !rec.freshForPlayback(m.now().Add(margin)) {
@@ -339,9 +339,9 @@ func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
 
 // start begins (or joins) the job for item.
 //
-// A foreground job (the work a cast is waiting for) goes ahead of background
+// A foreground job (the work a display request is waiting for) goes ahead of background
 // work for a read slot, and a background job already queued for the work is
-// promoted when a cast asks for it; see onchfsAdmission for the bound both
+// promoted when a display request asks for it; see onchfsAdmission for the bound both
 // share.
 func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground bool) *onchfsJob {
 	key := SourceKey(item.Source)

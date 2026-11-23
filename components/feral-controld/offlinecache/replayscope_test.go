@@ -1,0 +1,819 @@
+package offlinecache_test
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+)
+
+const replayScopeFile = "replay-scope.json"
+
+// bootedKiosk is a controld process as it stands right after a start: a
+// real replayer over the given store, and a kiosk replay whose every dial
+// lands on one scripted DevTools peer. Nothing has called SyncPlaylist.
+type bootedKiosk struct {
+	kr   offlinecache.KioskReplay
+	conn *fakeWSConn
+	logs *observer.ObservedLogs
+}
+
+// bootKiosk boots with the device known to have no network, the one case
+// the remembered scope is restored for.
+func bootKiosk(t *testing.T, store offlinecache.Store) *bootedKiosk {
+	t.Helper()
+	return bootKioskWithSignal(t, store, func() bool { return true })
+}
+
+func bootKioskWithSignal(t *testing.T, store offlinecache.Store, offline func() bool) *bootedKiosk {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
+	mockHTTP, mockDialer, conn := scriptedKiosk(t, ctrl)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	replayer := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed,
+		constants.WEBAPP_URL, wrapper.NewJSON(), logger)
+	kr := offlinecache.NewKioskReplay(replayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), logger)
+	if offline != nil {
+		setOffline(t, kr, offline)
+	}
+	return &bootedKiosk{kr: kr, conn: conn, logs: logs}
+}
+
+// scriptedKiosk returns the HTTP client and dialer whose every dial lands
+// on the one returned DevTools peer.
+func scriptedKiosk(t *testing.T, ctrl *gomock.Controller) (*mocks.MockHTTPClient, *mocks.MockWebSocketDialer, *fakeWSConn) {
+	t.Helper()
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
+	conn := newFakeWSConn()
+	t.Cleanup(func() { _ = conn.Close() })
+
+	mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil).DoAndReturn(
+		func(method, url string, _ io.Reader) (*http.Request, error) { return http.NewRequest(method, url, nil) }).AnyTimes()
+	mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`))}, nil
+	}).AnyTimes()
+	mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).
+		Return(conn, nil, nil).AnyTimes()
+	return mockHTTP, mockDialer, conn
+}
+
+func setOffline(t *testing.T, kr offlinecache.KioskReplay, offline func() bool) {
+	t.Helper()
+	sink, ok := kr.(interface{ SetOffline(func() bool) })
+	require.True(t, ok, "kiosk replay takes the no-network signal")
+	sink.SetOffline(offline)
+}
+
+// attach runs AttachOnReconnect against the scripted peer and returns the
+// methods it sent, in order.
+func (b *bootedKiosk) attach(t *testing.T, wantCalls int) []string {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() { errCh <- b.kr.AttachOnReconnect(context.Background()) }()
+	methods := make([]string, 0, wantCalls)
+	for i := 0; i < wantCalls; i++ {
+		methods = append(methods, ackOutbound(t, b.conn)["method"].(string))
+	}
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttachOnReconnect did not complete")
+	}
+	return methods
+}
+
+// request delivers a paused kiosk request and returns replay's answer.
+func (b *bootedKiosk) request(t *testing.T, requestID, url string) map[string]interface{} {
+	t.Helper()
+	evt, err := json.Marshal(map[string]interface{}{
+		"method": "Fetch.requestPaused",
+		"params": json.RawMessage(requestPausedEvent(t, requestID, url)),
+	})
+	require.NoError(t, err)
+	b.conn.pushReply(evt)
+	return ackOutbound(t, b.conn)
+}
+
+// rememberScope plays the previous run: a SyncPlaylist that succeeded for
+// sources, which is what leaves the scope file behind.
+func rememberScope(t *testing.T, store offlinecache.Store, sources ...string) {
+	t.Helper()
+	require.NoError(t, syncErr(syncingKiosk(t, store).SyncPlaylist(context.Background(), sources)))
+}
+
+// syncingKiosk is a kiosk replay whose every scope change succeeds.
+func syncingKiosk(t *testing.T, store offlinecache.Store) offlinecache.KioskReplay {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	mockReplayer.EXPECT().Disable(gomock.Any()).Return(nil).AnyTimes()
+	return offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		mocks.NewMockHTTPClient(ctrl), mocks.NewMockWebSocketDialer(ctrl),
+		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+}
+
+// TestKioskReplay_AttachOnReconnect_RestoresRememberedScopeBeforeAnySync is
+// the regression test for feral-file/feral-file#3635: an FF1 rebooted with
+// no network showed the player's bundled fallback first, because replay had
+// no scope until a refresher pass had asked the hydrated player what it was
+// showing. The kept work must be served to a request that arrives right
+// after the attach, with no displayPlaylist and no refresher pass.
+func TestKioskReplay_AttachOnReconnect_RestoresRememberedScopeBeforeAnySync(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	methods := b.attach(t, 2)
+	assert.Equal(t, []string{"Fetch.enable", "Target.setAutoAttach"}, methods,
+		"interception is armed as soon as the session exists, ahead of child auto-attach")
+
+	// The player's first load of the kept work: answered from the cache.
+	answer := b.request(t, "req-1", kept.URL)
+	require.Equal(t, "Fetch.fulfillRequest", answer["method"], "the kept copy answers the first request")
+	params := answer["params"].(map[string]interface{})
+	body, err := base64.StdEncoding.DecodeString(params["body"].(string))
+	require.NoError(t, err)
+	assert.Equal(t, "<html>kept work</html>", string(body))
+}
+
+// TestKioskReplay_AttachOnReconnect_RestoredScopePassesMissesThrough pins
+// the network-present half: nothing has confirmed what the reloaded page
+// shows, so under fail_closed a request the restored scope does not hold
+// must still reach the network, not be failed.
+func TestKioskReplay_AttachOnReconnect_RestoredScopePassesMissesThrough(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	b.attach(t, 2)
+
+	answer := b.request(t, "req-1", "https://other.example/live.html")
+	assert.Equal(t, "Fetch.continueRequest", answer["method"],
+		"a miss on a restored scope passes through even under fail_closed")
+}
+
+// TestKioskReplay_AttachOnReconnect_NothingRememberedLeavesInterceptionOff
+// pins that a device with no remembered scope attaches exactly as before:
+// Fetch is never enabled, so every request goes to the network untouched.
+func TestKioskReplay_AttachOnReconnect_NothingRememberedLeavesInterceptionOff(t *testing.T) {
+	store, _ := newTestStore(t)
+	seedItem(t, store, "cached-but-never-shown", "<html>")
+
+	b := bootKiosk(t, store)
+	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_AttachOnReconnect_ClearedItemIsNotRestored covers a clear
+// whose scope resync never ran (the clear landed and the device lost power):
+// the remembered file still names the item, the record is gone, and the
+// item must not come back.
+func TestKioskReplay_AttachOnReconnect_ClearedItemIsNotRestored(t *testing.T) {
+	store, root := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	cleared := seedItem(t, store, "cleared", "<html>cleared</html>")
+	rememberScope(t, store, kept.URL, cleared.URL)
+
+	deleted, err := store.DeleteItem(offlinecache.SourceKey(cleared.URL))
+	require.NoError(t, err)
+	require.True(t, deleted)
+	require.FileExists(t, filepath.Join(root, replayScopeFile))
+
+	b := bootKiosk(t, store)
+	b.attach(t, 2)
+	assert.Equal(t, "Fetch.continueRequest", b.request(t, "req-1", cleared.URL)["method"],
+		"a cleared item is never served from the cache after the clear")
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-2", kept.URL)["method"])
+}
+
+// TestKioskReplay_AttachOnReconnect_EverythingClearedRestoresNothing: when
+// every remembered item has been cleared, the attach arms nothing at all.
+func TestKioskReplay_AttachOnReconnect_EverythingClearedRestoresNothing(t *testing.T) {
+	store, _ := newTestStore(t)
+	cleared := seedItem(t, store, "cleared", "<html>cleared</html>")
+	rememberScope(t, store, cleared.URL)
+	_, err := store.DeleteItem(offlinecache.SourceKey(cleared.URL))
+	require.NoError(t, err)
+
+	b := bootKiosk(t, store)
+	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_SyncPlaylist_EmptyScopeForgetsRememberedScope: a sync that
+// ends with nothing cached in scope (the playlist was cleared, or the kiosk
+// moved to uncached work) removes the file, so the old scope is not
+// restored at the next start.
+func TestKioskReplay_SyncPlaylist_EmptyScopeForgetsRememberedScope(t *testing.T) {
+	store, root := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	rememberScope(t, store, kept.URL)
+	require.FileExists(t, filepath.Join(root, replayScopeFile))
+
+	rememberScope(t, store, sourceFor("not-cached"))
+	assert.NoFileExists(t, filepath.Join(root, replayScopeFile))
+
+	b := bootKiosk(t, store)
+	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_AttachOnReconnect_CorruptRememberedScopeIsIgnored: a
+// damaged file, or one naming things that are not source keys, restores
+// nothing and never fails the attach.
+func TestKioskReplay_AttachOnReconnect_CorruptRememberedScopeIsIgnored(t *testing.T) {
+	for name, content := range map[string]string{
+		"truncated json": `{"sourceKeys":["`,
+		"not json":       "\x00\x01garbage",
+		"wrong shape":    `{"sourceKeys":"abc"}`,
+		"not keys":       `{"sourceKeys":["../../etc/passwd","https://example.com/a?sig=secret",""]}`,
+		"empty":          ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, root := newTestStore(t)
+			seedItem(t, store, "kept", "<html>kept</html>")
+			require.NoError(t, os.WriteFile(filepath.Join(root, replayScopeFile), []byte(content), 0o600))
+
+			b := bootKiosk(t, store)
+			assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+		})
+	}
+}
+
+// TestKioskReplay_RememberedScopeKeepsSourceURLsOutOfFileAndLogs: sources
+// can be signed URLs. The remembered file holds keys only, and neither the
+// restore nor a failed restore writes a query string to the log.
+func TestKioskReplay_RememberedScopeKeepsSourceURLsOutOfFileAndLogs(t *testing.T) {
+	store, root := newTestStore(t)
+	signed := "https://cdn.example.com/work/index.html?X-Amz-Signature=topsecret"
+	seedSniffedItem(t, store, "signed", signed, "text/html", "<html>signed</html>")
+	rememberScope(t, store, signed)
+
+	data, err := os.ReadFile(filepath.Join(root, replayScopeFile)) //nolint:gosec // path is inside this test's t.TempDir.
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "topsecret")
+	assert.NotContains(t, string(data), "cdn.example.com")
+	assert.Contains(t, string(data), offlinecache.SourceKey(signed))
+
+	b := bootKiosk(t, store)
+	b.attach(t, 2)
+	require.Equal(t, 1, b.logs.FilterMessageSnippet("restored remembered replay scope").Len())
+	for _, entry := range b.logs.All() {
+		assert.NotContains(t, entry.Message, "topsecret")
+		for _, field := range entry.Context {
+			assert.NotContains(t, field.String, "topsecret")
+			if field.Interface != nil {
+				if e, ok := field.Interface.(error); ok {
+					assert.NotContains(t, e.Error(), "topsecret")
+				}
+			}
+		}
+	}
+}
+
+// TestReplayer_EnableForPlaylist_LoadErrorRedactsTheSource: the one error on
+// this path that names a source must not carry its query string, because
+// every SyncPlaylist caller logs it.
+func TestReplayer_EnableForPlaylist_LoadErrorRedactsTheSource(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	err := ts.replayer.EnableForPlaylist(context.Background(),
+		[]string{"https://cdn.example.com/missing.html?X-Amz-Signature=topsecret"}, false)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "topsecret")
+	assert.Contains(t, err.Error(), "cdn.example.com/missing.html")
+}
+
+// TestKioskReplay_AttachOnReconnect_GivesWayToADisplayInFlight: a display
+// path holding the playback lock is mid sync+send and knows what is on
+// screen; the restore must neither wait for it nor arm over it.
+func TestKioskReplay_AttachOnReconnect_GivesWayToADisplayInFlight(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	b.kr.LockPlayback()
+	defer b.kr.UnlockPlayback()
+	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_AttachOnReconnect_KeepsASyncThatFinishedBeforeRestore: a
+// display path can sync the freshly attached session and release the
+// playback lock before the restore gets to it. That scope is authoritative
+// (strict here: everything in it is cached), and the restore must not
+// reinstall it as a mixed one, which would pass a miss through under
+// fail_closed.
+func TestKioskReplay_AttachOnReconnect_KeepsASyncThatFinishedBeforeRestore(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	rememberScope(t, store, kept.URL)
+
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+	mockHTTP, mockDialer, conn := scriptedKiosk(t, ctrl)
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+	setOffline(t, kr, func() bool { return true })
+
+	// The sync lands inside Attach: after the session is the replayer's,
+	// before the restore runs. The only scope ever installed is its strict
+	// one; a mixed EnableForPlaylist is an unexpected call and fails here.
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{kept.URL}, false).Return(nil).Times(1)
+	mockReplayer.EXPECT().Attach("", gomock.Any()).Do(func(string, offlinecache.CDPSession) {
+		kr.LockPlayback()
+		defer kr.UnlockPlayback()
+		assert.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{kept.URL})))
+	})
+
+	b := &bootedKiosk{kr: kr, conn: conn}
+	assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1))
+}
+
+// TestKioskReplay_SyncPlaylist_RetriesRememberingAfterAFailedWrite: a write
+// can replace the file and still fail (the rename lands, the directory sync
+// does not). The file then holds the new scope while the last one recorded
+// as saved is the old one, so a sync back to the old scope must write again
+// rather than leave the other scope on disk for the next start.
+func TestKioskReplay_SyncPlaylist_RetriesRememberingAfterAFailedWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not bind root")
+	}
+	store, root := newTestStore(t)
+	a := seedItem(t, store, "a", "<html>a</html>")
+	b := seedItem(t, store, "b", "<html>b</html>")
+	kr := syncingKiosk(t, store)
+	scopeOnDisk := func() string {
+		data, err := os.ReadFile(filepath.Join(root, replayScopeFile)) //nolint:gosec // path is inside this test's t.TempDir.
+		require.NoError(t, err)
+		return string(data)
+	}
+
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{a.URL})))
+	require.Contains(t, scopeOnDisk(), offlinecache.SourceKey(a.URL))
+
+	// Write and search but no read: the rename succeeds, opening the
+	// directory to sync it does not.
+	require.NoError(t, os.Chmod(root, 0o300))       //nolint:gosec // G302: a test directory, made unreadable on purpose.
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) }) //nolint:gosec // G302: restores the test directory for cleanup.
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{b.URL})))
+	require.NoError(t, os.Chmod(root, 0o700)) //nolint:gosec // G302: restores the test directory.
+	require.Contains(t, scopeOnDisk(), offlinecache.SourceKey(b.URL), "the failed write did replace the file")
+
+	require.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{a.URL})))
+	assert.Contains(t, scopeOnDisk(), offlinecache.SourceKey(a.URL), "the next sync writes its scope again")
+}
+
+// TestBootstrapCore_LazyKioskReplayRestoresRememberedScopeAtStart: with the
+// offline cache feature off, replay dials the kiosk only for an onchfs
+// scope. A scope remembered from the last run counts, so such a work is
+// also served after a start with no network.
+func TestBootstrapCore_LazyKioskReplayRestoresRememberedScopeAtStart(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+	root := t.TempDir()
+	newCore := func(dials *int) offlinecache.Core {
+		mockHTTP := mocks.NewMockHTTPClient(ctrl)
+		mockDialer := mocks.NewMockWebSocketDialer(ctrl)
+		mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil).DoAndReturn(
+			func(method, url string, _ io.Reader) (*http.Request, error) { return http.NewRequest(method, url, nil) }).AnyTimes()
+		mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`))}, nil
+		}).AnyTimes()
+		mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).DoAndReturn(
+			func(context.Context, string, http.Header) (wrapper.WebSocketConn, *http.Response, error) {
+				*dials++
+				conn := newFakeWSConn()
+				go conn.drainAndAckRemaining(t)
+				t.Cleanup(func() { _ = conn.Close() })
+				return conn, nil, nil
+			}).AnyTimes()
+		opts := offlinecache.OptionsFromConfig(nil, "http://127.0.0.1:9222")
+		opts.RootDir = root
+		opts.MaxDiskPercent = 0 // the disk budget reads this machine's free space; not under test
+		core, _ := offlinecache.BootstrapCore(opts, mockHTTP, mockDialer, wrapper.NewOS(), wrapper.NewIO(),
+			wrapper.NewJSON(), wrapper.NewClock(), zap.NewNop(), true)
+		return core
+	}
+
+	firstDials := 0
+	first := newCore(&firstDials)
+	cached := seedItem(t, first.Store, "onchfs-like", "<html>")
+	n, err := first.KioskReplay.SyncPlaylist(context.Background(), []string{cached.URL})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	// The next start: nothing armed in this process yet.
+	secondDials := 0
+	second := newCore(&secondDials)
+	setOffline(t, second.KioskReplay, func() bool { return true })
+	require.NoError(t, second.KioskReplay.AttachOnReconnect(context.Background()))
+	assert.Equal(t, 1, secondDials, "a remembered scope makes the lazy replay attach at start")
+}
+
+// TestKioskReplay_AttachOnReconnect_NetworkPresentRestoresNothing is the
+// shared-URL sequence: playlist A is remembered with an old capture of a
+// URL that uncached playlist B also requests. With network present the
+// attach must arm nothing, so B's request reaches the live origin exactly
+// as it did before the remembered scope existed; a restored scope would
+// have answered it with A's old bytes.
+func TestKioskReplay_AttachOnReconnect_NetworkPresentRestoresNothing(t *testing.T) {
+	for name, signal := range map[string]func() bool{
+		"online":          func() bool { return false },
+		"no signal wired": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			shared := seedItem(t, store, "playlist-a-shared-script", "old bytes")
+			rememberScope(t, store, shared.URL)
+
+			b := bootKioskWithSignal(t, store, signal)
+			assert.Equal(t, []string{"Target.setAutoAttach"}, b.attach(t, 1),
+				"Fetch is never enabled, so no request can be answered from the remembered scope")
+		})
+	}
+}
+
+func dropRestoredScope(t *testing.T, kr offlinecache.KioskReplay) func(context.Context) {
+	t.Helper()
+	dropper, ok := kr.(interface{ DropRestoredScope(context.Context) })
+	require.True(t, ok, "kiosk replay takes the internet-is-back signal")
+	return dropper.DropRestoredScope
+}
+
+// dropAndAck runs DropRestoredScope and answers the one call it sends.
+func (b *bootedKiosk) dropAndAck(t *testing.T, reply func(id int64) map[string]interface{}) string {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dropRestoredScope(t, b.kr)(context.Background())
+	}()
+	msg := b.conn.nextOutbound(t)
+	data, err := json.Marshal(reply(int64(msg["id"].(float64))))
+	require.NoError(t, err)
+	b.conn.pushReply(data)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DropRestoredScope did not complete")
+	}
+	return msg["method"].(string)
+}
+
+func cdpOK(id int64) map[string]interface{} {
+	return map[string]interface{}{"id": id, "result": map[string]interface{}{}}
+}
+
+func cdpError(id int64) map[string]interface{} {
+	return map[string]interface{}{"id": id, "error": map[string]interface{}{"code": -32000, "message": "refused"}}
+}
+
+// dropSendsNothing runs DropRestoredScope and requires that it returned
+// promptly having sent the kiosk nothing.
+func (b *bootedKiosk) dropSendsNothing(t *testing.T) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dropRestoredScope(t, b.kr)(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DropRestoredScope did not return; it is waiting on a call it should not have sent")
+	}
+	select {
+	case data := <-b.conn.outbound:
+		t.Fatalf("DropRestoredScope sent %s", data)
+	default:
+	}
+}
+
+// bootOfflineKiosk boots a kiosk known to be offline and returns the switch that
+// turns the verdict to online.
+func bootOfflineKiosk(t *testing.T, store offlinecache.Store) (*bootedKiosk, func()) {
+	t.Helper()
+	var online atomic.Bool
+	return bootKioskWithSignal(t, store, func() bool { return !online.Load() }), func() { online.Store(true) }
+}
+
+// TestKioskReplay_DropRestoredScope_InternetBackStopsServingTheRestoredScope
+// reproduces the review finding on ffos-user#469: playlist A's scope is
+// restored at an offline attach, internet returns before any SyncPlaylist,
+// and a different work then asks for a URL A's capture holds. The origin is
+// reachable, so replay must be off, not answering with A's bytes.
+func TestKioskReplay_DropRestoredScope_InternetBackStopsServingTheRestoredScope(t *testing.T) {
+	store, _ := newTestStore(t)
+	shared := seedItem(t, store, "playlist-a-shared-script", "old bytes")
+	rememberScope(t, store, shared.URL)
+
+	b, goOnline := bootOfflineKiosk(t, store)
+	b.attach(t, 2)
+	require.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", shared.URL)["method"],
+		"while offline the restored scope answers")
+
+	goOnline()
+	assert.Equal(t, "Fetch.disable", b.dropAndAck(t, cdpOK))
+	// Dropped once; a repeated verdict has nothing left to drop.
+	b.dropSendsNothing(t)
+}
+
+// TestKioskReplay_DropRestoredScope_StillOfflineKeepsTheRestoredScope: the
+// drop is for internet being back. Run while the device still has none (a
+// late signal after the network went away again), it leaves the restored
+// scope serving the kept work.
+func TestKioskReplay_DropRestoredScope_StillOfflineKeepsTheRestoredScope(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	b.attach(t, 2)
+	b.dropSendsNothing(t)
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"])
+}
+
+// TestKioskReplay_DropRestoredScope_RetriesAfterTheKioskRefuses: a refused
+// Fetch.disable leaves the capture installed, so the next "available"
+// verdict must try again rather than find nothing to drop.
+func TestKioskReplay_DropRestoredScope_RetriesAfterTheKioskRefuses(t *testing.T) {
+	store, _ := newTestStore(t)
+	shared := seedItem(t, store, "playlist-a-shared-script", "old bytes")
+	rememberScope(t, store, shared.URL)
+
+	b, goOnline := bootOfflineKiosk(t, store)
+	b.attach(t, 2)
+	goOnline()
+	assert.Equal(t, "Fetch.disable", b.dropAndAck(t, cdpError))
+	assert.Equal(t, "Fetch.disable", b.dropAndAck(t, cdpOK))
+	b.dropSendsNothing(t)
+}
+
+// TestKioskReplay_DropRestoredScope_KeepsAScopeASyncInstalled: once a
+// SyncPlaylist has scoped the session from what is on screen, internet
+// returning must not turn replay off under it.
+func TestKioskReplay_DropRestoredScope_KeepsAScopeASyncInstalled(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b, goOnline := bootOfflineKiosk(t, store)
+	b.attach(t, 2)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- syncErr(b.kr.SyncPlaylist(context.Background(), []string{kept.URL})) }()
+	assert.Equal(t, "Fetch.enable", ackOutbound(t, b.conn)["method"])
+	require.NoError(t, <-errCh)
+
+	goOnline()
+	b.dropSendsNothing(t)
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"],
+		"the synced scope still answers")
+}
+
+// TestKioskReplay_DropRestoredScope_NeverRestoredLeavesASyncedScope: with
+// network present at the attach nothing was restored, so the signal never
+// touches the scope a sync installed.
+func TestKioskReplay_DropRestoredScope_NeverRestoredLeavesASyncedScope(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKioskWithSignal(t, store, func() bool { return false })
+	b.attach(t, 1)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- syncErr(b.kr.SyncPlaylist(context.Background(), []string{kept.URL})) }()
+	assert.Equal(t, "Fetch.enable", ackOutbound(t, b.conn)["method"])
+	require.NoError(t, <-errCh)
+
+	b.dropSendsNothing(t)
+	assert.Equal(t, "Fetch.fulfillRequest", b.request(t, "req-1", kept.URL)["method"])
+}
+
+// countRestores registers a restored-scope callback and returns its count.
+func countRestores(t *testing.T, kr offlinecache.KioskReplay) *atomic.Int32 {
+	t.Helper()
+	notifier, ok := kr.(interface {
+		SetOnScopeRestored(func(context.Context))
+	})
+	require.True(t, ok, "kiosk replay reports a restored scope")
+	var restores atomic.Int32
+	notifier.SetOnScopeRestored(func(context.Context) { restores.Add(1) })
+	return &restores
+}
+
+// restoreContexts registers a restored-scope callback that keeps each
+// context it is handed, in order.
+func restoreContexts(t *testing.T, kr offlinecache.KioskReplay) func() []context.Context {
+	t.Helper()
+	notifier, ok := kr.(interface {
+		SetOnScopeRestored(func(context.Context))
+	})
+	require.True(t, ok, "kiosk replay reports a restored scope")
+	var mu sync.Mutex
+	var got []context.Context
+	notifier.SetOnScopeRestored(func(ctx context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, ctx)
+	})
+	return func() []context.Context {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]context.Context(nil), got...)
+	}
+}
+
+// twoAttachKiosk is a kiosk replay that can attach twice: a scripted
+// replayer whose every scope change succeeds, so the only call an attach
+// sends its peer is the child auto-attach, and a separate peer per dial.
+// next switches the returned kiosk to the second dial's peer.
+func twoAttachKiosk(t *testing.T, offline func() bool) (b *bootedKiosk, next func()) {
+	t.Helper()
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept</html>")
+	rememberScope(t, store, kept.URL)
+	ctrl := gomock.NewController(t)
+	t.Cleanup(ctrl.Finish)
+
+	conns := []*fakeWSConn{newFakeWSConn(), newFakeWSConn()}
+	for _, conn := range conns {
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil).DoAndReturn(
+		func(method, url string, _ io.Reader) (*http.Request, error) { return http.NewRequest(method, url, nil) }).Times(2)
+	mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`))}, nil
+	}).Times(2)
+	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
+	gomock.InOrder(
+		mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).Return(conns[0], nil, nil),
+		mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).Return(conns[1], nil, nil),
+	)
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	mockReplayer.EXPECT().Attach("", gomock.Any()).Times(2)
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{kept.URL}, true).Return(nil).AnyTimes()
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+	setOffline(t, kr, offline)
+	b = &bootedKiosk{kr: kr, conn: conns[0]}
+	return b, func() { b.conn = conns[1] }
+}
+
+// TestKioskReplay_AttachOnReconnect_NextAttachEndsTheEarlierRestoresWork is
+// the first sequence in the review finding on ffos-user#469: attach A
+// restores and starts a refresh that is still waiting on the player, the
+// connection drops, attach B restores and starts its own. A's context must
+// be done by then, so only B's refresh can reach B's page.
+func TestKioskReplay_AttachOnReconnect_NextAttachEndsTheEarlierRestoresWork(t *testing.T) {
+	b, next := twoAttachKiosk(t, func() bool { return true })
+	contexts := restoreContexts(t, b.kr)
+
+	b.attach(t, 1)
+	require.Len(t, contexts(), 1)
+	require.NoError(t, contexts()[0].Err(), "A's work is live while A is the current attach")
+
+	next()
+	b.attach(t, 1)
+	got := contexts()
+	require.Len(t, got, 2)
+	assert.ErrorIs(t, got[0].Err(), context.Canceled, "A's work ended when B attached")
+	assert.NoError(t, got[1].Err(), "B's work is live")
+}
+
+// TestKioskReplay_AttachOnReconnect_AttachThatRestoresNothingEndsEarlierWork
+// is the second sequence: internet returns before attach B, so B restores
+// nothing. A's pending refresh must still be ended, or it would reach B.
+func TestKioskReplay_AttachOnReconnect_AttachThatRestoresNothingEndsEarlierWork(t *testing.T) {
+	var online atomic.Bool
+	b, next := twoAttachKiosk(t, func() bool { return !online.Load() })
+	contexts := restoreContexts(t, b.kr)
+
+	b.attach(t, 1)
+	require.Len(t, contexts(), 1)
+
+	online.Store(true)
+	next()
+	b.attach(t, 1)
+	got := contexts()
+	require.Len(t, got, 1, "B restored nothing and started nothing")
+	assert.ErrorIs(t, got[0].Err(), context.Canceled, "A's work ended when B attached")
+}
+
+// TestKioskReplay_AttachOnReconnect_ReportsARestoredScopeOnce: the
+// callback is what asks the player to load the work again, so it runs once
+// for an attach that armed the remembered scope.
+func TestKioskReplay_AttachOnReconnect_ReportsARestoredScopeOnce(t *testing.T) {
+	store, _ := newTestStore(t)
+	kept := seedItem(t, store, "kept", "<html>kept work</html>")
+	rememberScope(t, store, kept.URL)
+
+	b := bootKiosk(t, store)
+	restores := countRestores(t, b.kr)
+	b.attach(t, 2)
+	assert.EqualValues(t, 1, restores.Load())
+}
+
+// TestKioskReplay_AttachOnReconnect_NoRestoreReportsNothing: every way the
+// restore can decline leaves the player alone.
+func TestKioskReplay_AttachOnReconnect_NoRestoreReportsNothing(t *testing.T) {
+	t.Run("nothing cached", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		b := bootKiosk(t, store)
+		restores := countRestores(t, b.kr)
+		b.attach(t, 1)
+		assert.Zero(t, restores.Load())
+	})
+	t.Run("network present", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		kept := seedItem(t, store, "kept", "<html>kept</html>")
+		rememberScope(t, store, kept.URL)
+		b := bootKioskWithSignal(t, store, func() bool { return false })
+		restores := countRestores(t, b.kr)
+		b.attach(t, 1)
+		assert.Zero(t, restores.Load())
+	})
+	t.Run("a display holds the playback lock", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		kept := seedItem(t, store, "kept", "<html>kept</html>")
+		rememberScope(t, store, kept.URL)
+		b := bootKiosk(t, store)
+		restores := countRestores(t, b.kr)
+		b.kr.LockPlayback()
+		defer b.kr.UnlockPlayback()
+		b.attach(t, 1)
+		assert.Zero(t, restores.Load())
+	})
+
+	// The last two need a scripted replayer.
+	mocked := func(t *testing.T, script func(kr offlinecache.KioskReplay, r *mocks.MockOfflineCacheReplayer, keptURL string)) {
+		store, _ := newTestStore(t)
+		kept := seedItem(t, store, "kept", "<html>kept</html>")
+		rememberScope(t, store, kept.URL)
+		ctrl := gomock.NewController(t)
+		t.Cleanup(ctrl.Finish)
+		mockHTTP, mockDialer, conn := scriptedKiosk(t, ctrl)
+		mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+		kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+			mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zap.NewNop())
+		setOffline(t, kr, func() bool { return true })
+		restores := countRestores(t, kr)
+		script(kr, mockReplayer, kept.URL)
+		(&bootedKiosk{kr: kr, conn: conn}).attach(t, 1)
+		assert.Zero(t, restores.Load())
+	}
+	t.Run("a sync finished first", func(t *testing.T) {
+		mocked(t, func(kr offlinecache.KioskReplay, r *mocks.MockOfflineCacheReplayer, keptURL string) {
+			r.EXPECT().EnableForPlaylist(gomock.Any(), []string{keptURL}, false).Return(nil).Times(1)
+			r.EXPECT().Attach("", gomock.Any()).Do(func(string, offlinecache.CDPSession) {
+				kr.LockPlayback()
+				defer kr.UnlockPlayback()
+				assert.NoError(t, syncErr(kr.SyncPlaylist(context.Background(), []string{keptURL})))
+			})
+		})
+	})
+	t.Run("the enable failed", func(t *testing.T) {
+		mocked(t, func(_ offlinecache.KioskReplay, r *mocks.MockOfflineCacheReplayer, keptURL string) {
+			r.EXPECT().Attach("", gomock.Any())
+			r.EXPECT().EnableForPlaylist(gomock.Any(), []string{keptURL}, true).Return(errors.New("kiosk refused")).Times(1)
+		})
+	})
+}

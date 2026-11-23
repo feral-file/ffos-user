@@ -24,7 +24,7 @@ import (
 
 // Every refresher send carries the media-health hint argument for the items
 // it pushes (feral-file/ffos-user#392): the soft refresh here, and the force
-// casts through the same attach helper.
+// display requests through the same attach helper.
 func TestRefresher_SoftRefreshCarriesMediaHealthHints(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

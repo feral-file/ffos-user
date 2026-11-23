@@ -29,7 +29,7 @@ import (
 // OTA carry includes its directory, full-image updates; only a factory reset
 // clears it) and UNBOUNDED by count — a collector wall can hold hundreds of
 // thousands of works over the years. The hint path needs one point read per
-// playlist item on every cast, and the status path the same on every poll,
+// playlist item on every display request, and the status path the same on every poll,
 // which a B+tree over an mmap answers in microseconds without loading
 // anything at startup. Per-record JSON files (the offline cache's shape) or
 // a JSONL log with an in-memory index would both need a startup scan and
@@ -95,7 +95,7 @@ type Options struct {
 	Build Build
 	// RenderConclusive (mediaHealth.renderConclusive, default false): a
 	// corroborated render negative concludes broken (skipped, counted
-	// toward rejecting an all-broken cast) instead of suspect. Off until
+	// toward rejecting an all-broken display) instead of suspect. Off until
 	// the office fixture shows no false blanks among its healthy works.
 	RenderConclusive bool
 	// MinFreeBytes refuses writes when the filesystem has less free space.
@@ -803,7 +803,7 @@ type ProbeWrite struct {
 }
 
 // ApplyProbes records many probe results in ONE write transaction, the
-// last write per source winning. The cast pass uses it for the fan-out of
+// last write per source winning. The display request pass uses it for the fan-out of
 // a shared verdict onto wire-identical siblings and for malformed data:
 // URIs: one ApplyProbe per source costs one db.Batch wait each (bbolt
 // coalesces concurrent callers, not a sequential loop), which turned a

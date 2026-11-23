@@ -25,7 +25,7 @@ func TestDrainer_SeqCursorCastResetAndGap(t *testing.T) {
 	assert.Equal(t, int64(6), gap, "the ring wrapped: 4..9 were never seen")
 
 	fresh, gap, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: []Outcome{{Seq: 1, Source: "x"}}})
-	assert.Equal(t, []string{"x"}, sourcesOf(fresh), "a new cast restarts the cursor")
+	assert.Equal(t, []string{"x"}, sourcesOf(fresh), "a new display request restarts the cursor")
 	assert.Equal(t, int64(0), gap)
 
 	fresh, _, _ = d.Drain(nil)

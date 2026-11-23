@@ -16,7 +16,7 @@ import (
 // Service is the one object main.go wires: the store, the prober and the
 // lookahead behind the three seams the rest of the daemon uses.
 //
-//   - commandrouter: Preflight (admission + record) and Hints (the cast
+//   - commandrouter: Preflight (admission + record) and Hints (the display request
 //     field) — through its own consumer-owned interface.
 //   - playlistschedule / playlist-refresher: Hints, for their pushes.
 //   - status: ObservePlayback (outcome drain + lookahead feed) and
@@ -97,10 +97,10 @@ type Service struct {
 	wall      []string
 	wallIndex int
 	// pushed is the last playlist a push asked hints for (Hints): the
-	// sources about to be on the wall. The kiosk loads a cast's first item
+	// sources about to be on the wall. The kiosk loads a display request's first item
 	// before the next status poll reports the new wall, so its document
 	// navigation is matched against these (matchWallSource) — otherwise
-	// the first item of every cast was unobserved, and a frame of its
+	// the first item of every display request was unobserved, and a frame of its
 	// error page healed it (office FF1 learn test, 2026-11-10).
 	pushed []string
 }
@@ -125,7 +125,7 @@ type Config struct {
 	// Replayable, when set, reports whether the offline cache can serve a
 	// source from a confirmed capture. A replayable source is never hinted:
 	// the hint would make the player skip a work that replay interception
-	// could have shown (the same reason the cast rescue exists).
+	// could have shown (the same reason the display request rescue exists).
 	Replayable func(source string) bool
 	Logger     *zap.Logger
 	Now        func() time.Time
@@ -178,7 +178,7 @@ func (s *Service) GatewayOverride(rawURL, referrer string) (string, bool) {
 // Store exposes the store for the surfaces that read it directly.
 func (s *Service) Store() *Store { return s.store }
 
-// Preflight is the cast-time pass; see Prober.Preflight.
+// Preflight is the accept-time pass; see Prober.Preflight.
 func (s *Service) Preflight(ctx context.Context, sources []string) []ProbeResult {
 	return s.prober.Preflight(ctx, sources)
 }
@@ -343,7 +343,7 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 	} else {
 		s.wallCapture.Observe(nil, -1, nil)
 	}
-	// Only a player with the outcome ring has a cast generation to fence a
+	// Only a player with the outcome ring has a display request generation to fence a
 	// hint-only push on; without it the pusher has no wall (nil-safe).
 	if outcomes != nil && items != nil {
 		s.pusher.Observe(sources, outcomes.CastSeq, true)

@@ -116,7 +116,7 @@ void rounded(cairo_t* cr,double x,double y,double width,double height,double rad
   cairo_arc(cr,x+radius,y+height-radius,radius,pi/2,pi);
   cairo_arc(cr,x+radius,y+radius,radius,pi,pi*1.5);cairo_close_path(cr);
 }
-UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block> after,int width,int height) {
+UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block> after,int width,int height,const std::string& version) {
   require(width>0&&height>0&&width<=16384&&height<=16384,"graphics_error","Invalid UI dimensions");
   const double edge=std::min(width,height),qr_size=std::min(edge*.296,400.0),padding=edge*.022;
   auto text_width = [&](const Block& block) { return std::max(1, int(std::min(width*.86, edge*block.width_fraction))); };
@@ -150,7 +150,15 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
     cairo_fill(canvas.cr);cairo_set_antialias(canvas.cr,CAIRO_ANTIALIAS_DEFAULT);QRcode_free(code);
     y+=box;cairo_set_source_rgb(canvas.cr,1,1,1);
   }
-  paint(after);return canvas.pixels();
+  paint(after);
+  if (!version.empty()) {
+    cairo_identity_matrix(canvas.cr);
+    const double margin = edge * .025;
+    Text label(canvas.cr, escape(version), std::clamp(edge * .022, 14., 32.), 1.2, width / 2, false);
+    cairo_set_source_rgba(canvas.cr, 1, 1, 1, .75);
+    label.paint(canvas.cr, width - margin - label.width, height - margin - label.height);
+  }
+  return canvas.pixels();
 }
 }
 PointerRaster render_pointer(int size, bool pressed) {
@@ -255,7 +263,9 @@ UIRaster render_panel(const Json& overlay,int width,int height) {
     }
     return result;
   };
-  return panel(blocks(content.before_qr), content.qr, blocks(content.after_qr), width, height);
+  const auto version = overlay.value("owner", "") == "setup"
+      ? overlay.value("fields", Json::object()).value("version", "") : "";
+  return panel(blocks(content.before_qr), content.qr, blocks(content.after_qr), width, height, version);
 }
 bool has_tombstone(const Occurrence& o) {
   return tombstone_label(o).title != nullptr;

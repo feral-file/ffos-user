@@ -22,7 +22,7 @@ func TestOnchfsOpening(t *testing.T) {
 		wantFirst string // the first item Ensure sees; the list is reordered only when it waits
 		wantWait  time.Duration
 	}{
-		{"onchfs opens the cast: wait for it", []dp1playlist.PlaylistItem{{ID: "a", Source: onchfs}, {ID: "b", Source: ipfs}}, nil, onchfs, onchfsCastWait},
+		{"onchfs opens the display request: wait for it", []dp1playlist.PlaylistItem{{ID: "a", Source: onchfs}, {ID: "b", Source: ipfs}}, nil, onchfs, onchfsCastWait},
 		{"ordinary work opens, onchfs later: no wait", []dp1playlist.PlaylistItem{{ID: "a", Source: ipfs}, {ID: "b", Source: other}, {ID: "c", Source: onchfs}}, nil, ipfs, 0},
 		{"startItem by id names the onchfs work: it goes first", []dp1playlist.PlaylistItem{{ID: "a", Source: ipfs}, {ID: "c", Source: onchfs}}, map[string]interface{}{"id": "c"}, onchfs, onchfsCastWait},
 		{"startItem by source", []dp1playlist.PlaylistItem{{ID: "a", Source: ipfs}, {ID: "c", Source: onchfs}}, map[string]interface{}{"source": onchfs}, onchfs, onchfsCastWait},

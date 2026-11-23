@@ -17,7 +17,7 @@ import (
 
 // Display grants (docs/ff1-control-v1.md §5.7): a Play 0.5 site sends its
 // display-grant keys with its mint request and, once the owner approves, is
-// issued a display-only grant instead of a relayer session. It then casts
+// issued a display-only grant instead of a relayer session. It then sends
 // as sealed envelopes over the v2 relay. The approval UX, the fences and the
 // abandon rules are the session path's; only what is minted differs.
 

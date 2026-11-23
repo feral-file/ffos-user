@@ -13,6 +13,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicename"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -99,7 +100,7 @@ func ReadScreenRotation(os wrapper.OS) string {
 }
 
 // DeviceStatusContract is the API contract version this firmware speaks,
-// reported on every getDeviceStatus reply (relayer and LAN cast alike) so the
+// reported on every getDeviceStatus reply (relayer and LAN command alike) so the
 // app can identify a v2 frame when mDNS is unavailable — multicast-filtering
 // APs, cross-VLAN (docs/app-triggered-wifi-setup.md §4.2; added in the v2
 // release itself because adding it later costs a full OTA convergence cycle
@@ -109,7 +110,7 @@ func ReadScreenRotation(os wrapper.OS) string {
 const DeviceStatusContract = "2"
 
 // NetworkHealth is the additive `network` object on the hub status routes and
-// the relayer/cast getDeviceStatus reply (docs/network-recovery-ux.md §4.7):
+// the relayer and LAN getDeviceStatus reply (docs/network-recovery-ux.md §4.7):
 // the same diagnosis the on-screen narration shows, so the app can surface it
 // and offer "Change Wi-Fi" whenever the device is reachable. All values come
 // from the provisioning machine's mu-guarded snapshot plus the cached
@@ -285,19 +286,9 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Get installed version and latest version
 	g.Go(func() error {
-		configBytes, err := d.os.ReadFile(constants.FF1_CONFIG_FILE)
+		config, err := ff1config.Read(d.os, d.json)
 		if err != nil {
-			return fmt.Errorf("failed to read config file: %w", err)
-		}
-
-		var config struct {
-			Version  string `json:"version"`
-			Branch   string `json:"branch"`
-			Endpoint string `json:"endpoint"`
-		}
-
-		if err := d.json.Unmarshal(configBytes, &config); err != nil {
-			return fmt.Errorf("failed to parse config file: %w", err)
+			return err
 		}
 
 		installedVersion = config.Version

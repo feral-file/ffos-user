@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A render verdict (the work mounted here and failed) answers the cast pass
-// from the store without a request, but as inconclusive: an owner casting
+// A render verdict (the work mounted here and failed) answers the display request pass
+// from the store without a request, but as inconclusive: an owner displaying
 // that one work gets it played, not a sourceUnreachable. A play-layer
 // content-type refusal keeps its fetch category and still reads dead.
 func TestPreflight_RenderVerdictDoesNotRejectACast(t *testing.T) {

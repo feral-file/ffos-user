@@ -8,10 +8,10 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// Store persists the refreshable source identity for the active displayAt cast
+// Store persists the refreshable source identity for the active displayAt display request
 // across controld-only restarts. The full playlist is intentionally not durable:
 // restart recovery refetches the source, and if that fails the player keeps its
-// current artwork instead of controld force-casting stale cached content.
+// current artwork instead of controld force-displaying stale cached content.
 type Store interface {
 	Load() (*Source, error)
 	Save(Source) error

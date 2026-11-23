@@ -911,7 +911,7 @@ func (e *executor) connect(ctx context.Context, args []byte) (interface{}, error
 
 	wasClaimed := e.deviceClaimed()
 
-	// §7.1: connect is controller tier so every controller's cast (which
+	// §7.1: connect is controller tier so every controller's display request (which
 	// starts with connect) works, but only an owner claims or rebinds. Under
 	// the protocol, a non-owner connect to a claimed device is answered ok
 	// and changes nothing; one to an unclaimed device is refused.
@@ -2636,7 +2636,7 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 		}
 	}
 	// The media observation store is the previous owner's playlist evidence
-	// (which works they cast, which failed): best-effort, same rollback
+	// (which works they display, which failed): best-effort, same rollback
 	// reasoning as the content policy above.
 	if e.mediaHealthResetter != nil {
 		if err := e.mediaHealthResetter(); err != nil {

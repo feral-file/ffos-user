@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 )
@@ -44,10 +45,13 @@ type Watcher interface {
 }
 
 type Service struct {
-	sender Sender
-	logger *zap.Logger
-	ctrl   *overlay.Controller
-	mu     sync.Mutex
+	// Only the overlay delivery worker accesses this value. A successful read
+	// pins the running version even if OTA replaces the descriptor.
+	version string
+	sender  Sender
+	logger  *zap.Logger
+	ctrl    *overlay.Controller
+	mu      sync.Mutex
 	// Written in the controller's commit hook, in decision order.
 	narrated     bool
 	hiddenIntent bool
@@ -124,6 +128,16 @@ func (s *Service) trySend(ctx context.Context, req map[string]any) error {
 	for k, v := range req {
 		if k != "state" {
 			fields[k] = v
+		}
+	}
+	if state != stateHidden {
+		if s.version == "" {
+			if build, err := ff1config.ReadInstalled(); err == nil {
+				s.version = strings.TrimSpace(build.Version)
+			}
+		}
+		if s.version != "" {
+			fields["version"] = s.version
 		}
 	}
 	err := s.sender.SetOverlay(ctx, "setup", state, fields)

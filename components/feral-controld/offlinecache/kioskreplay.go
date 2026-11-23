@@ -43,9 +43,12 @@ import (
 type KioskReplay interface {
 	// AttachOnReconnect dials a fresh event-driven CDP session to the
 	// kiosk, re-registers Replayer's Fetch.requestPaused handler on the
-	// top-level page target, and enables flat-mode auto-attach so the
-	// page's cross-origin child iframe targets are intercepted too (see
-	// kiosktargets.go). Call from cdp.CDP's onConnect hook.
+	// top-level page target, re-arms the scope the last successful
+	// SyncPlaylist left on disk when the device is known to have no
+	// network (see replayscope.go), and enables
+	// flat-mode auto-attach so the page's cross-origin child iframe
+	// targets are intercepted too (see kiosktargets.go). Call from
+	// cdp.CDP's onConnect hook.
 	AttachOnReconnect(ctx context.Context) error
 	// SyncPlaylist scopes replay to whichever of the playlist's item
 	// sources are already cached, disabling interception entirely if
@@ -56,8 +59,8 @@ type KioskReplay interface {
 	// enabled reports how many distinct cached sources the applied scope
 	// actually covers — 0 means interception was disabled because
 	// nothing in sources is cached. Most callers only care about err
-	// (scope sync is best-effort for live casts), but the cache-rescued
-	// all-dead cast (#310 review) REQUIRES enabled >= 1: its only path
+	// (scope sync is best-effort for live display requests), but the cache-rescued
+	// all-dead display request (#310 review) REQUIRES enabled >= 1: its only path
 	// to the screen is replay, and HasReplayableItem's answer can be
 	// stale (a clear between lookup and sync) or fail-open (its bounded
 	// scan), so the count from the scope actually installed is the
@@ -148,6 +151,32 @@ type kioskReplay struct {
 	// a non-empty scope has been applied once — see AttachOnReconnect.
 	lazy  bool
 	armed atomic.Bool
+	// scopeMu guards scopeSaved/savedScope, the memo that keeps
+	// rememberScope from rewriting an unchanged file on every refresher
+	// pass — see replayscope.go.
+	scopeMu    sync.Mutex
+	scopeSaved bool
+	savedScope string
+	// syncs counts successful SyncPlaylist calls. restoreScope arms only if
+	// none has completed since just before its session was attached: such a
+	// sync already set this session's scope from what is on screen.
+	syncs atomic.Uint64
+	// restored marks a scope restoreScope armed that no sync has replaced:
+	// the sync count at that restore plus one, zero when there is none. It
+	// is what DropRestoredScope takes back when internet returns.
+	restored atomic.Uint64
+	// onRestored, when set, is told each time restoreScope has armed the
+	// remembered scope — see SetOnScopeRestored.
+	onRestored atomic.Pointer[func(context.Context)]
+	// attachMu guards attachCtx/cancelAttach: a context per
+	// AttachOnReconnect, canceled by the next one, that fences work a
+	// restore started (the onRestored callback) to the attach it belongs to.
+	attachMu     sync.Mutex
+	attachCtx    context.Context
+	cancelAttach context.CancelFunc
+	// offline is the no-network signal restoreScope is gated on — see
+	// SetOffline. Nil until wired, which reads as "not known offline".
+	offline atomic.Pointer[func() bool]
 }
 
 // NewKioskReplay constructs a KioskReplay. endpoint is the kiosk
@@ -184,13 +213,21 @@ func NewKioskReplay(
 // any previously-enabled item scope do not survive a Chromium process
 // restart (whether from a plain kiosk restart or OOM-recovery — both go
 // through the same cdp.CDP reconnect loop), so both the handler
-// registration and the scope must be redone after every reconnect. Scope
-// itself is intentionally NOT re-applied here from stale state: whichever
-// caller next invokes SyncPlaylist (the next displayPlaylist command, or
-// playlist-refresher's next periodic pass, at most PLAYLIST_REFRESH_INTERVAL
-// later) re-establishes it from current cache state, which is simpler and
-// safer than caching "what was enabled before" across a page reload that
-// may have changed what is actually on screen.
+// registration and the scope must be redone after every reconnect.
+//
+// While the device is known to have no network (SetOffline), it also
+// re-arms the scope the last successful SyncPlaylist left on disk
+// (restoreScope, replayscope.go), applied as a MIXED scope so a miss
+// passes through. With network present it arms nothing, as before.
+// Waiting for the next SyncPlaylist instead — the old behavior — left the kept copy unavailable exactly when it is the only
+// copy: after a boot with no network the player restores its last playlist
+// and loads it at once, and the scope sync that follows needs a hydrated
+// page and a refresher pass, so the first load failed and the kept work
+// appeared only on a later player retry (feral-file/feral-file#3635). The
+// authoritative scope still comes from the next SyncPlaylist (the next
+// displayPlaylist, or the refresher pass the "replay-scope-resync"
+// reconciler forces), which replaces this one from what is actually on
+// screen.
 //
 // After attaching the top-level target it enables flat-mode auto-attach
 // (see enableChildTargetAutoAttach) so the kiosk page's cross-origin,
@@ -202,15 +239,25 @@ func NewKioskReplay(
 //
 // A lazy kiosk replay (BootstrapCore with the offline cache feature off,
 // where replay exists only for onchfs works) does nothing here until a
-// non-empty scope has been applied once: a device that never shows an
-// onchfs work never holds a socket to the kiosk for it. The first such
-// scope dials on demand (SyncPlaylist's redial), and every reconnect after
-// that re-attaches as usual.
+// non-empty scope has been applied once in this process or, with no
+// network, is remembered from the last one: a device that never shows an onchfs work never holds
+// a socket to the kiosk for it. The first such scope dials on demand
+// (SyncPlaylist's redial), and every reconnect after that re-attaches as
+// usual.
 func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
-	if k.lazy && !k.armed.Load() {
+	// Before anything else, and whether or not this attach goes on to
+	// restore: whatever an earlier attach's restore set going belongs to a
+	// connection that is gone.
+	k.attachMu.Lock()
+	if k.cancelAttach != nil {
+		k.cancelAttach()
+	}
+	k.attachCtx, k.cancelAttach = context.WithCancel(ctx)
+	k.attachMu.Unlock()
+	if k.lazy && !k.armed.Load() && len(k.restorableSources()) == 0 {
 		return nil
 	}
-	return k.dialAndAttach(ctx)
+	return k.dialAndAttach(ctx, k.restoreScope)
 }
 
 // dialAndAttach is AttachOnReconnect's body, shared with the re-dial
@@ -218,12 +265,23 @@ func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
 // identical dial + Attach + child-auto-attach sequence, and a recovery
 // path that skipped the auto-attach step would silently lose iframe
 // replay for as long as that session lived.
-func (k *kioskReplay) dialAndAttach(ctx context.Context) error {
+//
+// onRoot, when non-nil, runs once the top-level target is attached and
+// before child auto-attach: AttachOnReconnect passes restoreScope there so
+// the remembered scope is armed at the earliest point a session exists.
+// It is given the sync count from just before the attach, so it can tell
+// whether a SyncPlaylist has already scoped this session. SyncPlaylist's
+// re-dial passes nil because it applies its own scope.
+func (k *kioskReplay) dialAndAttach(ctx context.Context, onRoot func(ctx context.Context, syncsBefore uint64)) error {
 	session, err := DialPageSession(ctx, k.endpoint, k.httpClient, k.dialer, k.json, k.io, k.logger)
 	if err != nil {
 		return fmt.Errorf("offline cache: dial kiosk CDP session for replay: %w", err)
 	}
+	syncsBefore := k.syncs.Load()
 	k.replayer.Attach("", session)
+	if onRoot != nil {
+		onRoot(ctx, syncsBefore)
+	}
 	if err := enableChildTargetAutoAttach(ctx, session, k.replayer, k.json, k.logger); err != nil {
 		return fmt.Errorf("offline cache: enable kiosk child-target auto-attach: %w", err)
 	}
@@ -254,7 +312,7 @@ func (k *kioskReplay) redialIfDue(ctx context.Context) (bool, error) {
 	k.lastRedial = now
 	k.redialMu.Unlock()
 
-	return true, k.dialAndAttach(ctx)
+	return true, k.dialAndAttach(ctx, nil)
 }
 
 // SyncPlaylist scopes replay to whichever of sources already have a
@@ -269,6 +327,7 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) (int, 
 
 	err := k.applyScope(ctx, cachedSources, mixed)
 	if err == nil {
+		k.rememberScope(cachedSources)
 		return len(cachedSources), nil
 	}
 
@@ -303,14 +362,13 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, sources []string) (int, 
 
 	// Scope restoration is free here: cachedSources was recomputed from
 	// current store state at the top of this call, so re-applying it to
-	// the fresh session installs exactly what should be in effect now —
-	// no cached "what was enabled before" to go stale, matching the
-	// reasoning in AttachOnReconnect's doc.
+	// the fresh session installs exactly what should be in effect now.
 	k.logger.Info("offline cache: re-dialed kiosk replay session after transport failure, restoring scope",
 		zap.Int("cached_items", len(cachedSources)))
 	if applyErr := k.applyScope(ctx, cachedSources, mixed); applyErr != nil {
 		return 0, applyErr
 	}
+	k.rememberScope(cachedSources)
 	return len(cachedSources), nil
 }
 

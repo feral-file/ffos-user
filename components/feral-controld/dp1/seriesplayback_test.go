@@ -26,7 +26,7 @@ func TestResolveSeriesPlaybackMode_DocumentWinsWhenNoDeviceOverride(t *testing.T
 }
 
 // Owner decision, 2026-10-30: content published before this field existed —
-// or any series item that simply states nothing — keeps casting exactly as
+// or any series item that simply states nothing — keeps displaying exactly as
 // it does today (feral-file/ffos-user#421's always-expand-every-edition
 // behavior), so the default must be full, not first.
 func TestResolveSeriesPlaybackMode_DefaultsToFullWhenNeitherStatesAnything(t *testing.T) {
@@ -56,7 +56,7 @@ func TestNarrowEditions_FullKeepsEveryEdition(t *testing.T) {
 // An empty artworkModel — the catalog did not state it — must not narrow
 // full either: that is the behavior this package had before
 // SeriesArtworkModel existed, and content the catalog cannot yet tell us
-// about must keep casting exactly as it does today.
+// about must keep displaying exactly as it does today.
 func TestNarrowEditions_FullWithUnknownArtworkModelStillKeepsEveryEdition(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackFull, "", editionItem("representative"), editions)
@@ -74,7 +74,7 @@ func TestNarrowEditions_FullNarrowsToRepresentativeForASingleSeries(t *testing.T
 }
 
 // Owner decision, 2026-11-06: a multi series' editions are identical copies
-// of one artwork, so full gains nothing by casting all of them — it must
+// of one artwork, so full gains nothing by displaying all of them — it must
 // narrow to the representative exactly as first would.
 func TestNarrowEditions_FullNarrowsToRepresentativeForAMultiSeries(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
@@ -83,7 +83,7 @@ func TestNarrowEditions_FullNarrowsToRepresentativeForAMultiSeries(t *testing.T)
 	assert.Equal(t, "representative", got[0].ID)
 }
 
-// feralfile-bot F1, 2026-10-30: first must cast the DOCUMENT's own
+// feralfile-bot F1, 2026-10-30: first must display the DOCUMENT's own
 // representative, not editions[0] — the catalog's ordering has no
 // guarantee of matching what the item itself named as representative, so
 // the representative here is deliberately absent from editions.
@@ -95,7 +95,7 @@ func TestNarrowEditions_FirstKeepsOnlyTheRepresentative(t *testing.T) {
 }
 
 // Owner decision, 2026-11-06 (supersedes AC4 of feral-file/ffos-user#425):
-// a genuine random PICK at cast time is both possible and wanted for a
+// a genuine random PICK at display time is both possible and wanted for a
 // multi_unique series, even though FF1 still has no re-roll-per-loop
 // behavior. Run enough trials that more than one distinct edition showing
 // up is a near-certainty under real randomness and a near-impossibility by
@@ -141,9 +141,9 @@ func TestNarrowEditions_RandomWithOneEditionReturnsIt(t *testing.T) {
 
 // feralfile-bot F4, 2026-10-30: first/random used to hand back representative
 // completely unchanged — still carrying the document's own series marker
-// (contract.seriesId, no tokenId) — so a cast built from that output still
+// (contract.seriesId, no tokenId) — so a display request built from that output still
 // satisfied isSeriesItem and re-triggered catalog expansion on any later
-// re-entry (setSeriesPlayback's re-cast, a recently-played replay). The
+// re-entry (setSeriesPlayback's re-display, a recently-played replay). The
 // caller's own representative — kept inside ResolvedSeriesGroup for a later
 // re-narrow under a different mode — must come through unmutated.
 func TestNarrowEditions_FirstClearsTheSeriesMarkerWithoutMutatingTheCallersRepresentative(t *testing.T) {
@@ -158,7 +158,7 @@ func TestNarrowEditions_FirstClearsTheSeriesMarkerWithoutMutatingTheCallersRepre
 	assert.Equal(t, dp1playlist.SeriesID("387"), *representative.Provenance.Contract.SeriesID)
 }
 
-// castPlanBody is the raw dp1_call bytes a static cast would have been
+// castPlanBody is the raw dp1_call bytes a static display request would have been
 // decoded from — the ONE thing ResolveSeriesCastPlan reads seriesPlayback
 // from that the typed dp1playlist.PlaylistItem has no field for.
 func castPlanBody(items ...map[string]any) []byte {
@@ -195,8 +195,8 @@ func TestResolveSeriesCastPlan_ReadsTheItemsOwnSeriesPlaybackFromRawBytes(t *tes
 
 	require.True(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
-	require.Len(t, narrowed, 1, "the item's own seriesPlayback:first must narrow the cast to the representative")
-	assert.Equal(t, "item-series", narrowed[0].ID, "first must cast the item's own representative, not the catalog's first-returned edition")
+	require.Len(t, narrowed, 1, "the item's own seriesPlayback:first must narrow the display request to the representative")
+	assert.Equal(t, "item-series", narrowed[0].ID, "first must display the item's own representative, not the catalog's first-returned edition")
 }
 
 // feralfile-bot F4, 2026-10-30, end to end: recastForMode and
@@ -218,13 +218,13 @@ func TestResolveSeriesCastPlan_ANarrowedRepresentativeNeverReExpands(t *testing.
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, raw, nil, 0)
 	narrowed := plan.Narrow(nil)
-	require.Len(t, narrowed, 1, "the document's own first narrows the initial cast to the representative")
+	require.Len(t, narrowed, 1, "the document's own first narrows the initial display request to the representative")
 
 	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
 	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
 
 	assert.False(t, again.HasSeriesGroups(), "a narrowed representative must never satisfy isSeriesItem again")
-	require.Len(t, again.Narrow(nil), 1, "and must cast through unchanged, not re-fetch and re-expand to full")
+	require.Len(t, again.Narrow(nil), 1, "and must pass through unchanged, not re-fetch and re-expand to full")
 	assert.Equal(t, "item-series", again.Narrow(nil)[0].ID)
 }
 
@@ -245,7 +245,7 @@ func TestResolveSeriesCastPlan_DeviceOverrideWinsOverTheDocument(t *testing.T) {
 	assert.Len(t, narrowed, 3, "a device override of full must win over the document's own first")
 }
 
-// Owner decision, 2026-11-06: a multi series (identical editions) must cast
+// Owner decision, 2026-11-06: a multi series (identical editions) must display
 // only its representative even under full — the config has nothing real to
 // choose between when every edition is the same artwork.
 func TestResolveSeriesCastPlan_FullNarrowsToRepresentativeForAMultiSeries(t *testing.T) {
@@ -319,7 +319,7 @@ func TestResolveSeriesCastPlan_NoDocumentModeDefaultsToFull(t *testing.T) {
 	assert.Len(t, plan.Narrow(nil), 2)
 }
 
-// rawPlaylist may be nil: an internally rebuilt re-cast (setSeriesPlayback's
+// rawPlaylist may be nil: an internally rebuilt re-display (setSeriesPlayback's
 // re-narrow) has no wire form. Every item must then read as absent, falling
 // through to the device override or the built-in default, not error out.
 func TestResolveSeriesCastPlan_NilRawPlaylistFallsThroughToDeviceOrDefault(t *testing.T) {
@@ -348,7 +348,7 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	// 2026-11-02; unresolvedSeriesGroup), not a bare Item, so the document's
 	// mode survives into the cache — but it is NOT a "resolved" group
 	// (Resolved stays false), so HasSeriesGroups must still read false: a
-	// lone unresolved series is not worth tracking for a re-cast, and
+	// lone unresolved series is not worth tracking for a re-display, and
 	// treating it as tracked reintroduced a synchronous catalog retry on the
 	// next setSeriesPlayback call (feralfile-bot F1 on this fix,
 	// 2026-11-02). The marker is cleared unconditionally at construction
@@ -558,8 +558,8 @@ func TestCastPlan_RandomPicksFromNarrowed_SkipsSingleMultiGroupsEvenUnderRandom(
 // pins run-reviewer's consolidated F1 on pass 5 of this fix (2026-11-16):
 // unresolvedSeriesGroup's catalog-failure fallback leaves ArtworkModel at
 // its zero value "", which hasDistinctEditions() treats as true BY DESIGN
-// for the casting decision (empty/unrecognized defaults to "has a real
-// choice" so content pre-dating the field keeps casting as before) — but
+// for the displaying decision (empty/unrecognized defaults to "has a real
+// choice" so content pre-dating the field keeps displaying as before) — but
 // an unresolved group's lone Editions entry is just the representative,
 // behind no real catalog data, so NarrowEditions' "random" pick here is
 // not a genuine choice at all. Resolved must gate the pick the same way
@@ -683,7 +683,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsEither(t 
 	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
 	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
 
-	require.Len(t, again.Narrow(nil), 2, "must cast both through unchanged, not re-fetch and re-expand either")
+	require.Len(t, again.Narrow(nil), 2, "must pass both through unchanged, not re-fetch and re-expand either")
 	assert.Equal(t, "item-a", again.Narrow(nil)[0].ID)
 	assert.Equal(t, "item-b", again.Narrow(nil)[1].ID)
 }
@@ -732,7 +732,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsUnderFull
 	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
 
 	assert.False(t, again.HasSeriesGroups(), "neither A's editions nor B's cleared fallback must look like a series again")
-	require.Len(t, again.Narrow(nil), 4, "must cast all four through unchanged, not re-fetch and re-expand B")
+	require.Len(t, again.Narrow(nil), 4, "must pass all four through unchanged, not re-fetch and re-expand B")
 }
 
 func TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone(t *testing.T) {
@@ -765,7 +765,7 @@ func TestResolveSeriesCastPlan_APlainPlaylistLongerThanTheCastCapIsNotTruncated(
 	}
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: items}}
 
-	// maxItems set exactly as the live-cast call site does, so this
+	// maxItems set exactly as the live-display request call site does, so this
 	// reproduces the handler's real call shape rather than only the
 	// zero-maxItems case TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone
 	// already covers.
@@ -773,7 +773,7 @@ func TestResolveSeriesCastPlan_APlainPlaylistLongerThanTheCastCapIsNotTruncated(
 
 	assert.False(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
-	require.Len(t, narrowed, dp1.CAST_PLAYLIST_ITEMS_LIMIT+1, "no series was expanded, so nothing here is subject to the cast cap")
+	require.Len(t, narrowed, dp1.CAST_PLAYLIST_ITEMS_LIMIT+1, "no series was expanded, so nothing here is subject to the display cap")
 }
 
 // The full edition set is kept on the plan regardless of which mode it
@@ -793,7 +793,7 @@ func TestResolveSeriesCastPlan_KeepsTheFullEditionSetForANetworkFreeRenarrow(t *
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, raw, nil, 0)
 
-	require.Len(t, plan.Narrow(nil), 1, "the document's own first narrows the initial cast")
+	require.Len(t, plan.Narrow(nil), 1, "the document's own first narrows the initial display request")
 	full := mode(dp1.SeriesPlaybackFull)
 	require.Len(t, plan.Narrow(full), 3, "re-narrowing the SAME plan under a new device mode needs no second catalog call")
 }

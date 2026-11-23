@@ -132,7 +132,7 @@ func TestNarrowStable_PrunesPicksForGroupsNoLongerDisplayed(t *testing.T) {
 // TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed pins the fix for
 // run-reviewer's own finding on this branch (round 2, 2026-11-12): the
 // FIRST time narrowStable ever sees a random-mode group — most commonly
-// the first periodic resync after a live cast made its own independent
+// the first periodic resync after a live display made its own independent
 // pick through commandrouter's separate Narrow call, which this package's
 // memory never saw — it must seed from whatever the player already
 // reports as on screen (currentlyDisplayed) instead of rolling a brand
@@ -171,7 +171,7 @@ func TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed(t *testing.T) {
 // feralfile-bot's F6 (2026-11-12) for the case
 // TestNarrowStable_SeedsFromWhatIsAlreadyDisplayed does not cover: a pick
 // is already remembered, and a LATER tick's live display reports a
-// DIFFERENT edition of the same group — the newer accepted cast's own
+// DIFFERENT edition of the same group — the newer accepted display request's own
 // choice (run-reviewer, round 1 on this fix, 2026-11-12, flagged the
 // overwrite path itself had no test). The remembered pick must be
 // overwritten to match the display, not left at the older selection.
@@ -198,7 +198,7 @@ func TestNarrowStable_OverwritesStalePickWhenDisplayDisagrees(t *testing.T) {
 	second := r.narrowStable(randomGroupPlan(), &mode, currentlyDisplayed, nil)
 	require.Len(t, second, 1)
 	assert.Equal(t, editionB.Source, second[0].Source,
-		"a newer accepted cast's own choice, read from the live display, must replace the remembered pick")
+		"a newer accepted display request's own choice, read from the live display, must replace the remembered pick")
 	assert.Equal(t, editionB.Source, r.randomSeriesPicks[key].source,
 		"the overwrite must actually be stored, not just returned for this one tick")
 }
@@ -330,7 +330,7 @@ func TestNarrowStable_SeedSourceCalledAtMostOnce(t *testing.T) {
 // TestNarrowStable_MatchesPickToItsOwnOccurrenceNotAnEarlierExplicitItem pins
 // feralfile-bot's F7 (2026-11-12): a playlist explicitly lists edition A
 // ahead of a multi_unique series that also contains A (alongside B). The
-// live random cast picked B for the series' own slot, so displayed is
+// live random display picked B for the series' own slot, so displayed is
 // [A, B] — A from the explicit item's own position, B from the group's.
 // Matching by whole-list Source scan mistook the explicit A for the
 // group's pick and overwrote the remembered B with it; matching by
@@ -420,7 +420,7 @@ func TestNarrowStable_OccurrenceCountsPastContentPolicyFiltering(t *testing.T) {
 
 	editionB := dp1playlist.PlaylistItem{ID: "b", Source: "https://cdn.example.com/b.mp4"}
 	// What the player actually shows: content policy already removed the
-	// mature item from whatever cast produced this display.
+	// mature item from whatever display produced this display.
 	currentlyDisplayed := func() []dp1playlist.PlaylistItem {
 		return []dp1playlist.PlaylistItem{editionB, explicitA}
 	}
@@ -445,11 +445,11 @@ func TestNarrowStable_OccurrenceCountsPastContentPolicyFiltering(t *testing.T) {
 
 // TestNarrowStable_NilDisplayFilterCountsEveryItem pins the no-content-
 // policy-context fallback: when displayFilter is nil (no store, or the
-// context behind this tick's cast is unknown — processPlayingPlaylist's own
+// context behind this tick's display is unknown — processPlayingPlaylist's own
 // projection guard skips filtering in exactly that case too), occurrence
 // must count every earlier item unfiltered, exactly as narrowStable always
 // did before displayFilter existed — nothing will actually be removed on
-// cast, so occurrence must not pretend otherwise.
+// display, so occurrence must not pretend otherwise.
 func TestNarrowStable_NilDisplayFilterCountsEveryItem(t *testing.T) {
 	r := &refresher{}
 	mode := dp1.SeriesPlaybackRandom
@@ -681,15 +681,15 @@ func TestNarrowStable_PreservesRememberedPickWhenItIsContentWithheld(t *testing.
 
 // TestNarrowStable_AcceptedPickOverridesAWithheldRememberedPick pins the fix
 // for feralfile-bot F6 reopened (2026-11-13): the previous test establishes
-// that narrowStable's own live-display check CANNOT discover a newer cast's
+// that narrowStable's own live-display check CANNOT discover a newer display's
 // choice once the remembered pick is content-withheld (rememberedWithheld
 // skips that check entirely, by design — see F8 above). Without some other
-// path writing the new choice into randomSeriesPicks, that newer cast's own
+// path writing the new choice into randomSeriesPicks, that newer display's own
 // selection is lost forever on every subsequent tick, no matter how the
 // player display is read.
 //
 // RecordAcceptedPicks is that other path: commandrouter calls it the
-// moment a cast is accepted (see refresher.go's own doc), independently of
+// moment a display request is accepted (see refresher.go's own doc), independently of
 // narrowStable's live-display inference. This test calls it directly,
 // exactly as that wiring would, and shows the group over the withheld pick
 // B (editionB) with a newer accepted pick A (editionA) which content
@@ -719,7 +719,7 @@ func TestNarrowStable_AcceptedPickOverridesAWithheldRememberedPick(t *testing.T)
 		key: {mode: dp1.SeriesPlaybackRandom, artworkModel: dp1.SeriesArtworkModelMultiUnique, source: editionB.Source},
 	}
 
-	// A newer cast, independent of this refresher, is accepted and selects
+	// A newer display, independent of this refresher, is accepted and selects
 	// A — the push this test is pinning.
 	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
 		{Key: key, Source: editionA.Source, ArtworkModel: dp1.SeriesArtworkModelMultiUnique},
@@ -744,12 +744,12 @@ func TestNarrowStable_AcceptedPickOverridesAWithheldRememberedPick(t *testing.T)
 }
 
 // TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne pins run-reviewer's
-// consolidated F3 on this fix (2026-11-16): two CMD_DISPLAY_PLAYLIST casts of
+// consolidated F3 on this fix (2026-11-16): two CMD_DISPLAY_PLAYLIST display request requests of
 // the same series group can be in flight together and settle in an order
 // unrelated to which one was actually accepted later. Without a per-key
 // ordering compare, whichever push's defer happened to run last would win
-// regardless of its own Seq — here, the OLDER cast's (Seq 1) push arrives
-// SECOND, after the newer cast's (Seq 2) push already landed, and must not
+// regardless of its own Seq — here, the OLDER display's (Seq 1) push arrives
+// SECOND, after the newer display's (Seq 2) push already landed, and must not
 // be allowed to overwrite it.
 func TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne(t *testing.T) {
 	r := &refresher{}
@@ -760,7 +760,7 @@ func TestRecordAcceptedPicks_OlderSeqNeverOverwritesANewerOne(t *testing.T) {
 	})
 	require.Equal(t, "https://cdn.example.com/newer.mp4", r.randomSeriesPicks[key].source)
 
-	// The older cast's push lands after the newer one's, out of order.
+	// The older display's push lands after the newer one's, out of order.
 	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
 		{Key: key, Source: "https://cdn.example.com/older.mp4", ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 1},
 	})
@@ -799,7 +799,7 @@ func TestNarrowStable_ReconfirmTickPreservesAcceptedSeq(t *testing.T) {
 		}},
 	}}
 
-	// An accepted cast (Seq 5) pushed A.
+	// An accepted display request (Seq 5) pushed A.
 	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
 		{Key: key, Source: editionA.Source, ArtworkModel: dp1.SeriesArtworkModelMultiUnique, Seq: 5},
 	})
@@ -818,7 +818,7 @@ func TestNarrowStable_ReconfirmTickPreservesAcceptedSeq(t *testing.T) {
 	require.Equal(t, uint64(5), r.randomSeriesPicks[key].acceptedSeq,
 		"an ordinary reconfirm tick must not reset acceptedSeq to zero")
 
-	// A stale, out-of-order push for an earlier cast (Seq 2) must still be
+	// A stale, out-of-order push for an earlier display (Seq 2) must still be
 	// rejected, exactly as it would have been immediately after the Seq-5
 	// push, before this tick ever ran.
 	r.RecordAcceptedPicks([]dp1.RandomGroupPick{
@@ -838,7 +838,7 @@ func TestNarrowStable_FreshRollPreservesAcceptedSeq(t *testing.T) {
 	mode := dp1.SeriesPlaybackRandom
 	key := dp1.SeriesGroupKey{Chain: "evm", Address: "0xabc", SeriesID: "42"}
 
-	// An accepted cast (Seq 7) pushed a pick whose source the fresh roll
+	// An accepted display request (Seq 7) pushed a pick whose source the fresh roll
 	// below will not reuse (TestNarrowStable_RandomModeReselectsWhenEditionDisappears's
 	// own shape: the remembered source is no longer among this tick's
 	// editions, forcing a fresh roll rather than a reconfirm).

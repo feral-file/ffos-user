@@ -159,7 +159,7 @@ func newPolicyRefresher(t *testing.T, statusContext string, store *contentpolicy
 
 // A player that predates this feature omits contentContext from its status, so
 // the source the refresher rebuilds carries an UNKNOWN origin — not a curated
-// one. Defaulting it to curated would silently reclassify a cast the owner made
+// one. Defaulting it to curated would silently reclassify a display request the owner made
 // as personal and strip the mature items they deliberately put on the wall on
 // the very next refresh, which is the opposite of the documented guarantee that
 // context survives refresh.
@@ -192,7 +192,7 @@ func TestRefreshProjectsAKnownCuratedContext(t *testing.T) {
 		t.Fatalf("a curated refresh must still withhold mature items; sent=%s", *sent)
 	}
 	if !strings.Contains(*sent, "https://example.test/safe") {
-		t.Fatalf("the allowed item must still be cast; sent=%s", *sent)
+		t.Fatalf("the allowed item must still be sent; sent=%s", *sent)
 	}
 }
 
@@ -244,7 +244,7 @@ func (s *legacySourceScheduler) PrepareWithSource(p *dp1.Playlist, _ playlistsch
 }
 
 // newInlineRefresher builds a refresher whose player is displaying a STATIC
-// inline playlist: the shape an app cast usually takes, and the one with no
+// inline playlist: the shape an app display request usually takes, and the one with no
 // refreshable source to re-resolve.
 func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy.Store) (*refresher, *string) {
 	t.Helper()
@@ -298,7 +298,7 @@ func newInlineRefresher(t *testing.T, statusContext string, store *contentpolicy
 	return r, &sent
 }
 
-// An inline cast has no source to re-resolve, so this path used to send
+// An inline display request has no source to re-resolve, so this path used to send
 // nothing. That left the one case the policy most needs to cover: an owner
 // turning mature content OFF while a mature work is on screen, with no later
 // refresh that would ever remove it.
@@ -367,7 +367,7 @@ func TestStaticInlineRefreshLeavesAnUnknownContextAlone(t *testing.T) {
 }
 
 // authoritySpyScheduler reports a token that has MOVED since the pass started,
-// standing in for a newer cast completing while this refresh was projecting.
+// standing in for a newer display request completing while this refresh was projecting.
 type authoritySpyScheduler struct {
 	playlistschedule.Scheduler
 	pushed bool
@@ -392,7 +392,7 @@ func (s *authoritySpyScheduler) SetProjector(playlistschedule.Projector) {}
 
 // The inline policy re-send is built from a status read taken BEFORE the
 // projection, so it must run under the scheduler push lock and re-check the
-// authority token: a cast that completed in between would otherwise be
+// authority token: a display request that completed in between would otherwise be
 // overwritten by this stale playlist, restoring the previous artwork and its
 // offline-replay scope.
 func TestStaticInlineRefreshSkipsWhenPlaylistAuthorityMoved(t *testing.T) {
@@ -406,7 +406,7 @@ func TestStaticInlineRefreshSkipsWhenPlaylistAuthorityMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if *sent != "" {
-		t.Fatalf("a newer cast must not be overwritten by a stale policy re-send; sent=%s", *sent)
+		t.Fatalf("a newer display request must not be overwritten by a stale policy re-send; sent=%s", *sent)
 	}
 }
 
@@ -676,7 +676,7 @@ func (s *retainedSourceScheduler) PrepareWithSource(p *dp1.Playlist, _ playlists
 func (*retainedSourceScheduler) SetHintSource(playlistschedule.HintSource) {}
 
 // newRecastStatusRefresher builds a refresher whose player status looks
-// exactly like what recastForMode's internal re-cast leaves behind: a static
+// exactly like what recastForMode's internal re-display leaves behind: a static
 // inline document (recastDoc) with no playlistUrl and no dynamicQuery (both
 // are stripped before the rebuilt dp1_call is re-sent — see recastForMode's
 // own doc), so the ONLY way this branch can learn there is something to
@@ -729,7 +729,7 @@ func newRecastStatusRefresher(t *testing.T, recastDocID string, sched playlistsc
 // the retention side (commandrouter/handler.go's SetRefreshSource call) is
 // pinned separately in commandrouter/seriesplayback_test.go; this pins that
 // the refresher actually reads the retained source back and re-resolves from
-// it, rather than treating the recast's static-looking player status as
+// it, rather than treating the re-display's static-looking player status as
 // nothing to refresh.
 func TestRecastedPlaylistRefreshesFromTheRetainedURLSource(t *testing.T) {
 	const originalURL = "https://feed.example.test/unscheduled-series.json"
@@ -758,7 +758,7 @@ func TestRecastedPlaylistRefreshesFromTheRetainedURLSource(t *testing.T) {
 
 // TestRecastedPlaylistRefreshesFromTheRetainedDynamicSource is the dynamic-
 // origin sibling of the URL test above: a dp1_call carrying a top-level
-// dynamicQuery hits the exact same recast path (DynamicQuery is cleared
+// dynamicQuery hits the exact same re-display path (DynamicQuery is cleared
 // before re-entry, see recastForMode's doc), so it needs the same retained-
 // source lookup, not just the playlistUrl shape.
 func TestRecastedPlaylistRefreshesFromTheRetainedDynamicSource(t *testing.T) {

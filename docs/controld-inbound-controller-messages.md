@@ -56,22 +56,22 @@ for relayer topic assignment:
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`. Controld defaults missing CDP
-  `intent.action` to `now_display` so the player accepts the cast. When the
+  `intent.action` to `now_display` so the player accepts the request. When the
   playlist contains item-level `displayAt` values, controld filters them to the
   current active set before CDP, commits only the refreshable source identity to
-  durable cache after the player accepts that filtered cast, keeps the resolved
+  durable cache after the player accepts that filtered request, keeps the resolved
   full playlist in memory, and advances the player on the next `displayAt`
-  (timer), sleep-schedule wake, or CDP reconnect with a force cast
+  (timer), sleep-schedule wake, or CDP reconnect with a force display
   (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
   until the current artwork duration ends. URL / dynamic playlist refresh still
   uses `refresh: true`, except the first scheduled reconstruction after a
-  controld restart force-casts because scheduler ownership may need to be
-  restored from persisted state. Every cast is then filtered against the
-  device's content policy for the cast's `contentContext` before it reaches
+  controld restart force-displays because scheduler ownership may need to be
+  restored from persisted state. Every display request is then filtered against the
+  device's content policy for the request's `contentContext` before it reaches
   CDP, so a playlist without item-level `displayAt` is forwarded unchanged only
   when the policy admits all of its items (see "Content policy effect on
   playlists" below). An optional `request.startItem`
-  (`{ "id", "source" }`, either member optional) names the work the cast
+  (`{ "id", "source" }`, either member optional) names the work the display request
   opens on; controld forwards it to the player untouched and the player
   resolves it against the list it admits, starting at the beginning when the
   work is absent (contract in `api-design.md`).
@@ -124,10 +124,10 @@ should treat this as "device busy", back off, and retry; the command was not
 applied. Control-plane messages (e.g. the `system`/topic-state message above)
 are never shed by command pressure.
 
-The second is the **dead-source cast rejection** on `displayPlaylist`
+The second is the **dead-source display rejection** on `displayPlaylist`
 (feral-file/ffos-user#304): when every resolved item source is definitively
 unreachable (an identity-independent HTTP 4xx, or a malformed `data:` URI),
-the cast is rejected at accept time and the controller receives a reliable
+the request is rejected at accept time and the controller receives a reliable
 RPC response whose `message` body is:
 
 ```json
@@ -309,7 +309,7 @@ Current error cases:
 Current relayer error response: none standardized; command failure is logged.
 
 LAN hub (`POST :1111/api/cast`): `connect` is in the LAN-open set (controller
-tier): the released ff-app sends it LAN-first before every cast. Under the
+tier): the released ff-app sends it LAN-first before every display request. Under the
 control protocol only an owner claims or rebinds with it; a non-owner
 `connect` to a claimed device is answered `ok` and changes nothing
 (`ff1-control-v1.md` §7.1).
@@ -560,7 +560,7 @@ CDP payload if the controller request did not already include an intent action.
 The player rejects `displayPlaylist` without a known DP1 action
 (`Unknown DP1 action: undefined` → `ok: false`). Soft refresh remains on the
 5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
-cast default.
+default.
 
 When a resolved playlist contains `displayAt`, controld validates and compiles
 its dates into a parallel native `activationTimes` array. Timezone-less values
@@ -596,7 +596,7 @@ beside the decoded map — never a re-marshal of the map (whose HTML escaping
 of `&`/`<`/`>` can inflate a valid document past the verifier bound)
 and never the typed struct (which drops fields the signer covered). The offline
 cached-copy fallback carries NO verdict — the stored body is a typed,
-hydrated re-marshal, not the signed bytes — so a cast served from it omits
+hydrated re-marshal, not the signed bytes — so a display request served from it omits
 the fields below. Bounds, all aimed at untrusted ingress, and no longer one figure: the inline
 paths refuse a document larger than 4 MiB before decoding (hub body limit,
 relayer frame limit, control v1 compact-form limit) while a URL fetch refuses
@@ -615,7 +615,7 @@ siblings as `unverified`. The outcome is one of three `signatureStatus` values:
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, malformed entry), or `unsigned` (no `signatures[]`; a
 legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
-Verification is informational only: the cast reply, `player_status`, and device
+Verification is informational only: the display reply, `player_status`, and device
 logs retain diagnostic verdicts, but signatures never block playback or trigger
 alerts. The silent/notify/strict modes and their setter are retired, and existing
 `signature-verification.json` records are ignored. `device_status` omits the
@@ -690,7 +690,7 @@ Dynamic DP1 example:
 }
 ```
 
-Raster wallet-walk example (what ff-app casts for an address playlist with
+Raster wallet-walk example (what ff-app sends for an address playlist with
 no hidden works; the address is inlined in the query, the page cursor is the
 only variable, and no API key travels anywhere — Raster's read API is
 unauthenticated; contract in
@@ -727,7 +727,7 @@ unauthenticated; contract in
 }
 ```
 
-A wallet with hidden works is cast as a static snapshot (items, no
+A wallet with hidden works is displayed as a static snapshot (items, no
 `dynamicQuery`) and takes the inline path above unchanged.
 
 Current success response: Chromium/player response from
@@ -759,7 +759,7 @@ unsigned or when the document exceeded the entry cap (`too many
 signatures (N > 16)` is then the document-level reason). `legacySignature: true` appears only when a v1.0 `signature`
 string was present. Kids are DIDs (public keys) and safe to relay; no field
 ever carries a URL. All three keys are absent when verification is disabled
-by config, when the cast was served from the offline cached copy, or on
+by config, when the request was served from the offline cached copy, or on
 firmware that predates it — controllers must treat absence as "not
 verified", never as unsigned. `ok` alone still decides success.
 
@@ -798,7 +798,7 @@ Current error cases:
   a missing `pagination` block, a non-Raster or non-https endpoint, a
   GraphQL `errors` array, a non-2xx page, a page whose `cursorPath`/
   `hasNextPath` cannot be read, or a walk past 200 pages fails the whole
-  cast with no partial playlist (`raster dynamicQuery: …`); an individual
+  request with no partial playlist (`raster dynamicQuery: …`); an individual
   node the wall cannot play is skipped, not fatal.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
@@ -810,7 +810,7 @@ Current error cases:
   standardized error envelopes near the top of this document for the RPC body (`ok:false`, capped index+status detail)
   and the LAN hub's 422 mapping. Anything short of a definitive dead
   verdict for every item (network errors, timeouts, 401/403/406/407/408/
-  416/429, 5xx) fails open and the cast proceeds. The preflight stops after
+  416/429, 5xx) fails open and the request proceeds. The preflight stops after
   its first reachable or inline source; unfinished probes are canceled and
   remain inconclusive. It is an all-dead admission check, not a full playlist
   health audit. Completed verdicts still govern a policy change that removes
@@ -1872,6 +1872,15 @@ the same pairing code. If a browser request is already pending controller
 approval, `status` is `pending_approval`; `feral-controld` re-displays the
 request-received overlay instead of showing the QR/code again.
 
+The code's deadline is the broker's channel expiry, and it follows the broker:
+a browser that joins the channel and sends its request renews the broker's
+idle deadline, so the approval runs to the renewed deadline (bounded by the
+approval timeout) rather than to what was left of the code's own. An unused
+code is refreshed when it expires: a new channel and code replace it on screen
+and the old channel is closed. Before closing, `feral-controld` polls the
+broker once more, so a browser that joined in the last poll interval keeps its
+channel instead of finding it gone (issue #333).
+
 Error response:
 
 ```json
@@ -1900,7 +1909,12 @@ Error cases:
   then carry `topicID: ""`, and a Play 0.4 session request (no display
   keys) on it is refused on the channel before the owner is asked.
 - `broker_unavailable`: broker channel creation failed before a pairing code
-  was available.
+  was available. When the broker (or the proxy in front of it) answered, the
+  error also carries `brokerStatus` (the HTTP status) and, when its body named
+  one, `brokerCode` (for example `rate_limited`), and `message` names the
+  status; `retryable` is false for a refusal other than 408/429. With no
+  answer (unreachable, timed out) neither field is present and `retryable` is
+  true.
 - `broker_response_invalid`: broker did not return a pairing code.
 - `display_unavailable`: Chromium/CDP did not accept the player overlay
   display command.
@@ -1946,6 +1960,16 @@ becomes the channel's minter, and from there runs the same flow as
 `mintPairingApprovalDecision`, and the session is minted and delivered. Nothing
 is shown on the panel for a joined channel: no `mintPairingDisplay` call is
 made at any stage, including the terminal `hidden`.
+
+A site on a library that announces its mint request at create (play#17) hands
+the request to the device in the broker's join response. The device then sends
+the `mint_pairing_approval_request` as soon as it joins, while the visitor is
+still in the app, instead of waiting for the site's page to poll again (a phone
+browser stops polling in the background). The site still sends the encrypted
+`mint_request` under the same message id for older devices; a device that
+answered the announcement never reads it, because a joined pairing answers one
+request. Sites that announce nothing are answered from the encrypted request as
+before.
 
 Arguments, exactly one of:
 
@@ -2065,7 +2089,10 @@ A joined pairing waits for the site's request until the broker's channel
 expiry as reported at join, or for the device's idle TTL when the broker
 reports none. The broker extends its idle deadline on every accepted message,
 so once the request arrives the deadline moves to the later of the two, and
-the approval wait (bounded by the approval timeout) runs to that.
+the approval wait (bounded by the approval timeout) runs to that. A
+device-created channel follows the broker the same way (see
+`startMintPairingSession`), and both ask the broker once more at the deadline
+before ending the wait.
 
 ### Outbound Approval Request
 
@@ -3183,7 +3210,7 @@ extra field would miss dedupe and repeat the same resolve-and-replay work.
 The command never accepts a controller-supplied source. Controld resolves the
 opaque record on the device, rebuilds a one-work unsigned DP-1 call from the
 retained item, and re-enters its ordinary `displayPlaylist` path — which is what
-preserves scheduler ownership, playback/replay-scope locking, cast-time source
+preserves scheduler ownership, playback/replay-scope locking, accept-time source
 preflight, and the content-policy gate. Extracting one item from a signed
 playlist invalidates that playlist's signature, so the rebuilt call carries no
 signature; only the work's `defaults` are preserved.
@@ -3200,7 +3227,7 @@ It does not claim a successful wall render. Callers still wait for `player_statu
 particularly when the same work is deliberately replayed twice.
 
 Error cases: `recordId is required`; an evicted, malformed, or unknown record;
-`contentBlocked` if policy refuses the rebuilt cast; plus every
+`contentBlocked` if policy refuses the rebuilt request; plus every
 `displayPlaylist` error, since that is the path it re-enters. A source that was
 valid when recorded can still fail later during rendering; that is reported
 honestly rather than promised away.
@@ -3258,12 +3285,12 @@ which is the accepted trade: a work the owner has just blocked must not keep
 playing. An item the policy has nothing to say about — unrated, or carrying a
 label this build does not recognize — is left alone.
 
-That applies to a **static inline** cast too — the shape an app cast usually
+That applies to a **static inline** request too — the shape an app's request usually
 takes, with no URL or dynamic query to re-resolve. A newly blocked item is
 removed and the player is told to retire it if it is the frame on screen.
 Restoring items a previous projection removed is the one thing this cannot do:
-the device holds only the filtered set that was cast, so relaxing a policy takes
-effect on the next cast rather than retroactively.
+the device holds only the filtered set that was displayed, so relaxing a policy takes
+effect on the next display request rather than retroactively.
 
 Success is reported only after the atomic durable write succeeds *and* the
 player returns a matching acknowledgement. A repeated identical set performs no
@@ -3336,14 +3363,14 @@ Unlike `setContentPolicy`, there is no CDP round trip: the player never sees
 this setting, so a write either commits durably or it does not — there is no
 second, player-held state to reconcile against it.
 
-An accepted change re-casts the currently displayed playlist **only if** it
+An accepted change re-displays the currently displayed playlist **only if** it
 currently holds a series controld resolved this way (a static `dp1_call`
-cast with at least one `seriesRegistry` item). The full edition set for every
-such series is kept from the cast that resolved it, so the re-cast narrows
+request with at least one `seriesRegistry` item). The full edition set for every
+such series is kept from the request that resolved it, so the re-display narrows
 under the new setting without a second catalog call. If nothing currently
 displayed went through that resolution this boot — a freshly started process,
 or the screen simply shows non-series content — the setting is saved with no
-re-cast: once a series is narrowed and cast, the playlist the player holds
+re-display: once a series is narrowed and displayed, the playlist the player holds
 carries no marker telling controld a series was ever there, so there is
 nothing to re-narrow.
 
@@ -3425,7 +3452,7 @@ acted on) or `unknown` (never observed). `category` is the closed app-facing
 set — `source_missing`, `source_unreachable`, `source_blocked`, `not_media`, `corrupt_file`,
 `unsupported`, `render_failed`, `render_blank`, `device_limit` — and `reason`
 the detail code beneath it; `layer` says which probe set the state (`l0`,
-`play`, `l1`). `castSeq` echoes the player's outcome-ring cast sequence when
+`play`, `l1`). `castSeq` echoes the player's outcome-ring display sequence when
 the player declares the `mediaHealth` contract.
 
 `issue` is the latest real attempt's problem when there is no verdict to say
@@ -3475,16 +3502,16 @@ ingress that is a malformed request, and silently widening it into the default
 audience would hide the client bug. (Scheduler state persisted before this
 field existed omits the key entirely, which stays compatible.)
 
-The device filters the playlist against its policy before casting:
+The device filters the playlist against its policy before displaying:
 
 - A `mature`-labelled item is withheld unless `showMatureContent` is on, or the
-  cast is `personal` and `strictPersonal` is off.
-- An *unrated* item is withheld only from a `curated` cast, and only while the
+  request is `personal` and `strictPersonal` is off.
+- An *unrated* item is withheld only from a `curated` request, and only while the
   operator's `blockUnratedCurated` gate is on.
 - When any item is removed, the projection's signatures are cleared: the source
   document's signature does not describe the projection. Rating fields
   themselves remain signed in the source.
-- When the projection is empty, the cast is refused with `contentBlocked`
+- When the projection is empty, the request is refused with `contentBlocked`
   (HTTP 422 on the LAN hub, `"error":"contentBlocked"` over the relayer). A
   scheduled **cutover** whose cohort projects empty is different: there is no
   caller to refuse, so the empty list is sent with `retireBlockedCurrent` —
@@ -3516,7 +3543,7 @@ The context survives refresh. When a periodic refresh has to rebuild the source
 from player status and that status omits `contentContext` — only a player
 predating this feature does — the origin is treated as **unknown** and that
 refresh is left unprojected, rather than reclassified as `curated`. Guessing
-`curated` would strip the mature items an owner deliberately cast as
+`curated` would strip the mature items an owner deliberately sent as
 `personal`. Such a player has no policy mirror of its own either
 (`setContentPolicy` answers `unsupported`).
 

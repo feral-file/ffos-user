@@ -12,7 +12,7 @@ import (
 )
 
 // MediaHealth is the router's view of mediahealth.Service
-// (feral-file/ffos-user#392): the cast-time L0 pass, the per-item hint
+// (feral-file/ffos-user#392): the accept-time L0 pass, the per-item hint
 // field, and the getMediaHealth report. Consumer-owned so the router never
 // depends on the service's construction; nil (tests, a build with the
 // feature disabled) skips the pass entirely — fail-open, the pre-#304

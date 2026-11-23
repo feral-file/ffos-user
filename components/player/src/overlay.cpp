@@ -25,12 +25,12 @@ void validate_overlay(const Json& p) {
   require(owner=="setup"||owner=="pairing"||owner=="recovery","invalid_params","Invalid overlay owner");
   auto f=p.value("fields",Json::object());
   require(f.is_object()&&p.dump().size()<=16384,"invalid_params","Invalid overlay payload");
-  for(auto key:{"title","reason","ssid","password","device_name","pairingCode","browserName","url","portal_url"})
+  for(auto key:{"title","reason","ssid","password","device_name","version","pairingCode","browserName","url","portal_url"})
     if(f.contains(key)) require(f[key].is_string()&&f[key].get_ref<const std::string&>().size()<=2048&&f[key].get_ref<const std::string&>().find('\0')==std::string::npos,"invalid_params","Invalid overlay text");
   if(owner!="setup")return; // Pairing/recovery schemas are migrated separately.
   static const std::set<std::string> states{"softap_qr","joining","join_failed","updating","claim_qr","ready","hidden","scanning","finalizing","factory_reset","connecting","setup_error"};
   require(states.contains(state),"unsupported","Unsupported setup overlay state");
-  fields(f,{"reason","ssid","password","portal_url","client_attached","url","device_name","progress"});
+  fields(f,{"reason","ssid","password","portal_url","client_attached","url","device_name","version","progress"});
   // Wi-Fi escaping can double byte length; cap credentials well below QR
   // byte-mode capacity instead of accepting a panel with an unencodable code.
   if(f.contains("password"))require(f["password"].get_ref<const std::string&>().size()<=128,"invalid_params","SoftAP password exceeds 128 bytes");

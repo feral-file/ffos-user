@@ -23,7 +23,7 @@ address before anything is stored or shown.
 
 ```
 dp1 (every exit)          onchfs://<root>/?fxhash=…  ->  https://<base32 root>.onchfs.invalid/?fxhash=…
-commandrouter (cast)      OnchfsMaterializer.Ensure(items, 15 s for the opening work if onchfs)
+commandrouter (display)      OnchfsMaterializer.Ensure(items, 15 s for the opening work if onchfs)
 offlinecache              materializer: onchfs.Resolver -> verified tree -> blobs + Automatic ItemRecord
 onchfs                    Resolver -> chain readers (EVM eth_call / Tezos run_script_view) -> verify
 offlinecache replay       Fetch interception serves the record to the kiosk, as for any cached work
@@ -184,16 +184,16 @@ Every resource carries the verified `Content-Type` (or none) and
 carries `Content-Encoding`.
 
 Records are `Automatic`, which keeps them out of the app's Downloads list. They stay fresh
-for 30 days and are rebuilt on the next cast that needs them. They are rebuilt early when
+for 30 days and are rebuilt on the next display request that needs them. They are rebuilt early when
 within three days of expiry.
 
-The cast path (`commandrouter`) calls `Ensure` after the content-policy filter and before the
+The display request path (`commandrouter`) calls `Ensure` after the content-policy filter and before the
 preflight, outside both locks:
-- It waits up to 15 s only when the work the cast opens on (item 0, or the one `startItem`
+- It waits up to 15 s only when the work the display request opens on (item 0, or the one `startItem`
   names, found as the player finds it: `id` first, then `source`) is onchfs; the rest land
-  in the background. A cast that opens on an ordinary work never waits, even with onchfs
+  in the background. A display request that opens on an ordinary work never waits, even with onchfs
   works further down and the chain RPCs unreachable (`commandrouter/onchfs_open.go`). At most three works are read at once; background reads may use two, and
-  the work a cast waits for goes ahead of them (promoted if a refresh already queued it).
+  the work a display request waits for goes ahead of them (promoted if a refresh already queued it).
 - A read never restores a work the app cleared while it was in flight: the Service's
   clear epoch is checked before and after the record is saved.
 - With automatic caching on, an onchfs work stays in the warmer's playing and protected
@@ -222,7 +222,7 @@ saved and sweeps after deletes its new blobs; a check after the save cannot see 
 that has not happened yet (PR #461 review F3). So the store `BootstrapCore` builds is a
 publish guard: GC takes it exclusively, and the materializer writes its blobs and saves
 its record while holding it shared. `fresh` also checks that every blob a record names is
-on disk, so a damaged record is rebuilt on the next cast instead of reported ready.
+on disk, so a damaged record is rebuilt on the next display request instead of reported ready.
 
 **A full cache.** The cache shares one disk budget, so when it refuses a new work's
 blobs, older onchfs works make room, least recently played first. A work the current
@@ -263,7 +263,7 @@ cannot load. The bytes are verified when they are read.
 - **A first play needs the network and a reachable node per chain.** A work that cannot be
   read stays unplayable, and the player skips it like any failed source.
 - **An absent root is reported by the first node that answers.** A lying node can make a work
-  look absent until the next cast. It cannot make one show wrong bytes.
+  look absent until the next display request. It cannot make one show wrong bytes.
 - **ff-app and art-catalog-service** still map onchfs to the dead gateway. They must pass the
   URI through and resolve it themselves (follow-ups outside this repository).
 - **The app sees device-local sources in `player_status`.** The offline-cache download and
@@ -284,6 +284,6 @@ cannot load. The bytes are verified when they are read.
   - `playlist-refresher`, `mediahealth`, `config`.
 - Live, against default nodes (2026-11-13): the Casey Reas tree on Ethereum and two Tezos
   trees resolve and verify, and a missing root is not-found on all three chains in 1 s.
-- On a device: cast an Ethereum and a Tezos onchfs work. Check `location.search` carries
+- On a device: display an Ethereum and a Tezos onchfs work. Check `location.search` carries
   the seed, sub-resources load, and a second play works with the WAN unplugged. Do this
   before `develop → staging`.

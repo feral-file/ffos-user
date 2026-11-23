@@ -59,14 +59,14 @@ func annotateCastReply(result any, v *sigverify.Verdict) any {
 	return m
 }
 
-// logSignatureVerdict writes the one structured line per cast that makes the
+// logSignatureVerdict writes the one structured line per display request that makes the
 // verdict greppable on a device: status, each signer's identity and outcome,
 // and the playlist identity. Warn for a false claim (invalid), Info
-// otherwise — an unsigned app cast is the ordinary case today and must not
+// otherwise — an unsigned app display request is the ordinary case today and must not
 // page. Kids are DIDs bounded by sigverify (MaxKidLen), safe to log; the
-// playlist URL is the caster's own input and already logged by the cast
-// path. The playlist id is caster-controlled and unbounded on the open hub
-// (a 4 MiB inline cast may carry a 4 MiB id), so it is cut to the daemon's
+// playlist URL is the sender's own input and already logged by the display request
+// path. The playlist id is sender-controlled and unbounded on the open hub
+// (a 4 MiB inline display request may carry a 4 MiB id), so it is cut to the daemon's
 // standard log-field cap before it reaches the journal.
 func (h *handler) logSignatureVerdict(v *sigverify.Verdict, playlistID, playlistURL string) {
 	source := "inline"

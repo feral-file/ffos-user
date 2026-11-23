@@ -133,7 +133,7 @@ func (p Policy) Filter(in *dp1playlist.Playlist, origin Context) (*dp1playlist.P
 }
 
 // Project also returns an empty projection. Refresh uses that shape to retire
-// content newly labeled blocked; independent casts use Filter and do not send it.
+// content newly labeled blocked; independent display requests use Filter and do not send it.
 func (p Policy) Project(in *dp1playlist.Playlist, origin Context) (*dp1playlist.Playlist, bool, error) {
 	if in == nil {
 		return nil, false, fmt.Errorf("nil playlist")
@@ -158,12 +158,12 @@ func (p Policy) Project(in *dp1playlist.Playlist, origin Context) (*dp1playlist.
 }
 
 // Store serializes policy mutation and playlist admission. Holding this lock
-// across the player's acknowledgement makes the accepted policy and casts one
+// across the player's acknowledgement makes the accepted policy and display requests one
 // order instead of two independently-racing views.
 type Store struct {
 	mu   sync.Mutex
 	path string
-	// policy is the acknowledged admission policy: the one casts, refreshes and
+	// policy is the acknowledged admission policy: the one display requests, refreshes and
 	// scheduler cutovers are filtered against, and the only thing this file ever
 	// holds. A value the player has not acknowledged is never written and never
 	// enforced, so there is no second state to keep, to persist, or to restore
@@ -367,7 +367,7 @@ func (s *Store) Unlock() { s.mu.Unlock() }
 // TryLock reports whether the store lock was free, acquiring it if so. It
 // exists so a caller can ASSERT lock state without blocking — specifically the
 // lock-order test that pins "content policy before the kiosk playback lock" on
-// the cast path. Do not use it to skip work: a policy read that silently
+// the display path. Do not use it to skip work: a policy read that silently
 // no-ops when the lock is busy would answer from a policy nobody applied.
 func (s *Store) TryLock() bool { return s.mu.TryLock() }
 

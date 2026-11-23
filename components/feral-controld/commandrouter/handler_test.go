@@ -890,7 +890,7 @@ const inlineManifestJSON = `{"refVersion":"1.1.0","id":"manifest-1",` +
 // typed value is what gets re-emitted to the player. dp1.Playlist embeds
 // dp1playlist.Playlist and carries no catch-all map, so any field the pinned
 // dp1-go does not model is erased at that first unmarshal — silently, with the
-// cast still succeeding. That is how ff-player's non-standard item.metadata and
+// display request still succeeding. That is how ff-player's non-standard item.metadata and
 // playlist.curator are lost today.
 //
 // So this test is the executable statement of the version floor: it fails on
@@ -965,7 +965,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 // A recent-played replay must not become a side channel to CanvasService. The
 // cast below is the ordinary displayPlaylist command, so it keeps
 // the scheduler, offline-replay scope, validation and future policy seam that
-// every other cast uses. The controller-only request contains an opaque id;
+// every other display request uses. The controller-only request contains an opaque id;
 // only the device-internal resolver ever sees the retained source.
 func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *testing.T) {
 	ctrl := gomock.NewController(t)
