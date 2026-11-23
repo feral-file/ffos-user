@@ -23,11 +23,10 @@ Font licensing remains the existing product's distribution responsibility.
 The native panel follows SetupOverlay's short-edge font sizes, line heights,
 82% scrim, rounded QR panel and two-module quiet margin. Claim copy follows the
 newer installed homelab player. The tombstone uses short-edge sizing, a white
-content-hugging plaque, italic bold title, artist, exhibition name and optional
-gray curator line. Timed mode resets for a new occurrence, mode change or first
+content-hugging plaque, italic bold artwork title, artist and optional gray
+curator credit. The exhibition name and authored curator notes are deferred. Timed mode resets for a new occurrence, mode change or first
 title, depletes for 30 seconds and fades for 300 ms. Always-on mode omits the
-timer. The plaque shows authored playlist and item notes for their individual
-durations (20 seconds by default). Curator credit alone does not create a note.
+timer.
 
 The bundled setup artwork is the original p5 sketch and seed. Its two inline
 scripts were extracted unchanged to permit strict CSP. Provenance and hashes
