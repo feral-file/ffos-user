@@ -76,7 +76,17 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   if(!next["boot"].is_null()){
     const auto& boot=next["boot"]["playlist"];
     if((!playlist.value("id","").empty()&&playlist["id"]==boot.value("id",""))||boot==state_["playlist"]){
-      next["boot"]["playlist"]=plan.is_null()?playlist:plan["playlist"];next["boot"]["context"]=context;
+      auto& saved = next["boot"];
+      const auto& refreshed = plan.is_null() ? playlist : plan["playlist"];
+      if (saved.contains("index")) {
+        const int old_index = saved["index"].get<int>();
+        const auto& fresh_items = refreshed["items"];
+        int mapped = match_slot(boot["items"], old_index, fresh_items);
+        if (mapped < 0) mapped = match_slot(boot["items"], old_index, fresh_items, false);
+        saved["index"] = std::max(mapped, 0);
+      }
+      saved["playlist"] = refreshed;
+      saved["context"] = context;
       if(plan.is_null())next["boot"].erase("activationTimes");else next["boot"]["activationTimes"]=plan["activationTimes"];
     }
   }

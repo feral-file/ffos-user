@@ -333,11 +333,16 @@ void Playback::system_boot(const std::string& id){
   // executes the saved boot playlist. A host restart keeps the same boot ID.
   if(state_.contains("systemBootId")&&!state_["boot"].is_null()){
     auto params=state_["boot"];params.erase("clear");params.erase("id");params.erase("atMs");
+    // Older refreshes could leave the saved index beyond the new playlist.
+    const bool stale_index = params.contains("index") && params["index"] > 0 &&
+                             params["index"] >= params["playlist"]["items"].size();
+    if (stale_index) params["index"] = 0;
     try{action=prepare_replace(next,params);}
     catch(const Error& error){
       if(error.code!="content_blocked")throw;
       next=state_;next["scheduleOutcome"]={{"id",uuid()},{"atMs",0},{"executedAtMs",wall_ms()},{"instance",instance_},{"generation",generation_},{"outcome","failed"},{"error",{{"code",error.code},{"message",error.what()}}}};
     }
+    if (stale_index) next["boot"]["index"] = 0;
   }
   next["systemBootId"]=id;persist(std::move(next));
   if(action){++generation_;cast_id_=uuid();if(action==2)select();}

@@ -26,14 +26,16 @@ int main(){
    check(p.desired()->id==occurrence&&p.state()["order"]==order,"No-op refresh retains mount and shuffle order");
    auto items=ff::Json::array({item("b"),item("a"),item("twin","same"),item("twin","same")});
    items[3]["title"]="Second twin";
-   p.command("boot.set",{{"playlist",original}});
+   p.command("boot.set",{{"playlist",original},{"index",2}});
    auto generation=p.generation();p.command("playback.update",{{"items",items}});
    check(p.desired()->id==occurrence&&p.visible()->index==3,"Exact duplicate slots remap by ordinal without remount");
    check(p.visible()->item["title"]=="Second twin"&&p.visible()->generation==generation+1,"Fresh labels and trust generation follow retained occurrence");
    check(!p.visible()->playlist.contains("signature")&&!p.state()["boot"]["playlist"].contains("signature"),"Modified document cannot retain signature");
    check(p.state()["boot"]["playlist"]["items"]==items,"Boot projection follows matching refresh");
+   check(p.state()["boot"]["index"]==3,"Boot selection follows its duplicate ordinal");
    check(p.state()["loop"]=="none"&&p.state()["shuffle"]==true,"Refresh retains playback modes");
    auto receipt=p.command("playback.update",{{"items",ff::Json::array({item("replacement")})}});
+   check(p.state()["boot"]["index"]==0,"Removed boot selection resets to the first refreshed work");
    update_id=receipt["updateId"];
    check(receipt["outcome"]=="accepted"&&p.visible()->id==occurrence&&p.desired()->id==occurrence,"Removed current work defers without false presentation");
    check(p.snapshot()["pendingUpdate"]["id"]==update_id&&p.state()["playlist"]["items"]==items,"Current document remains authoritative until boundary");
@@ -85,6 +87,17 @@ int main(){
    check(!p.desired()&&!p.visible(),"Tightening policy immediately retires old work");
    p.tick(17000,17000);
    check(p.desired()&&p.desired()->item["id"]=="allowed","Policy retirement must not strand an allowed deferred replacement");
+  }
+  {
+   ff::Store store(path);
+   auto legacy=store.load();
+   legacy["boot"]={{"playlist",{{"items",ff::Json::array({item("b")})}}},{"index",1}};
+   legacy["systemBootId"]="previous";
+   store.save(legacy);
+   ff::Playback p(store);
+   p.system_boot("next");
+   check(p.desired() && p.desired()->item["id"]=="b" && store.load()["boot"]["index"]==0,
+         "Boot repairs the stale saved index from a previous build");
   }
   std::filesystem::remove_all(directory);std::cout<<"Playlist refresh identity, policy, persistence and boundary tests passed\n";return 0;
  }catch(const std::exception& error){std::filesystem::remove_all(directory);std::cerr<<error.what()<<'\n';return 1;}
