@@ -24,6 +24,7 @@ type NativePlayer struct{ Source NativeSnapshotSource }
 // It preserves admission/loading/failure information even while an outgoing
 // occurrence remains visible. No artist-supplied health or trust fields enter it.
 type RuntimeStatus struct {
+	PresentedOwnsCast   *bool                           `json:"-"` // Internal refresh ownership from the native host.
 	Notice              *playerlink.RuntimeNotice       `json:"notice,omitempty"`
 	Media               json.RawMessage                 `json:"media,omitempty"`
 	Engine              json.RawMessage                 `json:"engine,omitempty"`
@@ -76,7 +77,7 @@ func NativePlayerStatus(s playerlink.Snapshot) (*PlayerStatus, error) {
 	loop := LoopMode(s.Loop)
 	paused := s.Paused || s.MediaPaused || s.Stopped || s.Sleeping
 	out := &PlayerStatus{Ok: true, IsPaused: &paused, LoopMode: &loop, Shuffle: &s.Shuffle,
-		Runtime: &RuntimeStatus{Notice: s.Notice, Media: s.Media, Engine: s.Engine, Instance: s.Instance, Generation: s.Generation, Host: s.Host, Renderer: s.Renderer, Stopped: s.Stopped, Sleeping: s.Sleeping, Storage: s.Storage,
+		Runtime: &RuntimeStatus{PresentedOwnsCast: s.PresentedOwnsCast, Notice: s.Notice, Media: s.Media, Engine: s.Engine, Instance: s.Instance, Generation: s.Generation, Host: s.Host, Renderer: s.Renderer, Stopped: s.Stopped, Sleeping: s.Sleeping, Storage: s.Storage,
 			Selected: occurrenceStatus(s.Selected), Presented: occurrenceStatus(s.Presented), ScheduleOutcome: s.ScheduleOutcome, PendingUpdate: s.PendingUpdate, UpdateOutcome: s.UpdateOutcome, Recovery: s.Recovery, PresentationFailure: s.PresentationFailure},
 		DeviceSettings: &PlayerDeviceSettings{Framing: &s.Settings.Framing, Tombstone: &s.Settings.Tombstone, DefaultDuration: s.Settings.DurationSeconds}}
 	// Global intent remains readable when stopped/asleep, but it must not create

@@ -97,6 +97,9 @@ int main(){
       replacement["contentRating"]="mature";
       p.command("playback.update",{{"items",{replacement}},{"activationTimes",{7000}}});
       check(!p.visible()&&!p.desired(),"A future refresh retires a work blocked by its new labels");
+      replacement["contentRating"]="general";
+      p.command("playback.update",{{"items",{replacement}},{"activationTimes",{4500}}});
+      check(p.desired()&&p.desired()->item==replacement,"A corrected activation time resumes an eligible timed work");
     }
     {
       ff::Store store(path);ff::Playback p(store);p.tick(1,1000);

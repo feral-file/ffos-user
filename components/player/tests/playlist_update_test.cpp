@@ -36,6 +36,7 @@ int main(){
    check(p.state()["loop"]=="none"&&p.state()["shuffle"]==true,"Refresh retains playback modes");
    auto receipt=p.command("playback.update",{{"items",ff::Json::array({item("replacement")})}});
    check(p.state()["boot"]["index"]==0,"Removed boot selection resets to the first refreshed work");
+   check(p.snapshot()["presentedOwnsCast"]==true,"Deferred refresh retains cast ownership across command generations");
    update_id=receipt["updateId"];
    check(receipt["outcome"]=="accepted"&&p.visible()->id==occurrence&&p.desired()->id==occurrence,"Removed current work defers without false presentation");
    check(p.snapshot()["pendingUpdate"]["id"]==update_id&&p.state()["playlist"]["items"]==items,"Current document remains authoritative until boundary");

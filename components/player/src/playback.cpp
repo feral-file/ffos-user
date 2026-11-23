@@ -622,6 +622,7 @@ Json Playback::snapshot() const {
             {"lastError",recovery_error_},{"failedOccurrence",recovery_occurrence_},
             {"retryDelayMs",recovery_at_?1000<<recovery_attempt_:0}}},
           {"selected", occurrence_json(selected_)}, {"presented", occurrence_json(presented_)},
+          {"presentedOwnsCast", presented_ && presented_->cast_id == cast_id_},
           {"presentedPlaylist", presented_ ? presented_->playlist : Json(nullptr)},
           {"presentedPlaylistUrl", presented_ ? presented_->playlist_url : ""},
           {"stopped", state_["stopped"]}, {"sleeping", state_["sleeping"]}, {"paused", state_["paused"]},

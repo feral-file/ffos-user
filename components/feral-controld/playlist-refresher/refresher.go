@@ -2290,5 +2290,12 @@ func nativeRefreshMatches(s *status.PlayerStatus, fence *playerlink.Precondition
 		return false
 	}
 	r := s.Runtime
-	return r.Instance == fence.Instance && r.Generation == fence.Generation && r.Presented != nil && r.Presented.Generation == fence.Generation
+	if r.Instance != fence.Instance || r.Generation != fence.Generation || r.Presented == nil {
+		return false
+	}
+	if r.PresentedOwnsCast != nil {
+		return *r.PresentedOwnsCast
+	}
+	// Older hosts omit cast ownership. Keep the conservative generation check.
+	return r.Presented.Generation == fence.Generation
 }

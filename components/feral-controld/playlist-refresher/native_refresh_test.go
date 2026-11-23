@@ -16,6 +16,13 @@ func TestNativeRefreshDoesNotUseOutgoingPlaylistWithIncomingFence(t *testing.T) 
 	require.False(t, nativeRefreshMatches(s, fence), "status source A cannot be refreshed under B's command fence")
 	s.Runtime.Presented = &status.OccurrenceStatus{ID: "B", Generation: 2}
 	require.True(t, nativeRefreshMatches(s, fence))
+	sameCast := true
+	s.Runtime.PresentedOwnsCast = &sameCast
+	s.Runtime.Presented.Generation = 1
+	require.True(t, nativeRefreshMatches(s, fence), "a retained occurrence can supersede a deferred refresh")
+	sameCast = false
+	require.False(t, nativeRefreshMatches(s, fence))
+	sameCast = true
 	s.Runtime.Instance = "replacement-host"
 	require.False(t, nativeRefreshMatches(s, fence))
 	s.Runtime = nil

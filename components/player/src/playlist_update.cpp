@@ -106,6 +106,9 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
     }
     if(!unchanged)update_order(next,index);
     if(items.empty())next["stopped"]=true;
+    // An explicit stop cancels the plan. A surviving timed owner can resume
+    // its automatically retired slot when a refresh advances activation.
+    else if(!plan.is_null())next["stopped"]=false;
   }
   persist(std::move(next));
   // Identical refreshes cancel a deferred update without remounting, changing

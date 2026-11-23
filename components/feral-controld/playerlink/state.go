@@ -17,6 +17,7 @@ type RuntimeNotice struct {
 }
 
 type Snapshot struct {
+	PresentedOwnsCast    *bool                `json:"presentedOwnsCast,omitempty"`
 	Notice               *RuntimeNotice       `json:"notice,omitempty"`
 	Engine               json.RawMessage      `json:"engine,omitempty"`
 	Instance             string               `json:"instance"`
