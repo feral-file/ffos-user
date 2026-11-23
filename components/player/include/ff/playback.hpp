@@ -122,6 +122,9 @@ class Playback {
   void advance(bool skipping_failure = false);
   void execute_schedule(int64_t wall_time_ms);
   void replace(Json& next, const Json& params);
+  bool refresh_blocks(const Occurrence& occurrence, const Json& items, const Json& policy) const;
+  static void refresh_boot(Json& next, const Json& old_playlist, const Json& refreshed,
+                           const std::string& context, const Json& plan);
   Json update_playlist(const Json& params,const Json& plan = nullptr);
   bool apply_pending_update();
   void update_order(Json& next, int index) const;

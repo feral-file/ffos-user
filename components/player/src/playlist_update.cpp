@@ -21,6 +21,32 @@ int match_slot(const Json& old_items, int old_index, const Json& items, bool sou
 }
 }
 
+bool Playback::refresh_blocks(const Occurrence& occurrence, const Json& items, const Json& policy) const {
+  const auto& old = occurrence.playlist["items"];
+  int index = match_slot(old, occurrence.index, items);
+  if (index < 0) index = match_slot(old, occurrence.index, items, false);
+  return !allowed(index < 0 ? occurrence.item : items[index], policy);
+}
+
+void Playback::refresh_boot(Json& next, const Json& old_playlist, const Json& refreshed,
+                            const std::string& context, const Json& plan) {
+  auto& saved = next["boot"];
+  if (saved.is_null()) return;
+  const auto& previous = saved["playlist"];
+  if (previous != old_playlist && (old_playlist.value("id","").empty() ||
+      old_playlist["id"] != previous.value("id",""))) return;
+  if (saved.contains("index")) {
+    const int index = saved["index"].get<int>();
+    int mapped = match_slot(previous["items"], index, refreshed["items"]);
+    if (mapped < 0) mapped = match_slot(previous["items"], index, refreshed["items"], false);
+    saved["index"] = std::max(mapped, 0);
+  }
+  saved["playlist"] = refreshed;
+  saved["context"] = context;
+  if (plan.is_null()) saved.erase("activationTimes");
+  else saved["activationTimes"] = plan["activationTimes"];
+}
+
 void Playback::update_order(Json& next,int index) const {
   std::vector<int> order(next["playlist"]["items"].size());
   std::iota(order.begin(),order.end(),0);
@@ -50,16 +76,11 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   auto next=state_;next["context"]=context;
  const bool plan_changed=state_.value("cohortPlan",Json(nullptr))!=plan;
  next["cohortPlan"]=plan;
-  auto updated_item=[&](const Occurrence& o)->Json{
-    auto exact=match_slot(o.playlist["items"],o.index,items);
-    if(exact<0)exact=match_slot(o.playlist["items"],o.index,items,false);
-    return exact<0?o.item:items[exact];
-  };
-  const bool retire_selected=selected_&&!allowed(updated_item(*selected_),next);
+  const bool retire_selected=selected_&&refresh_blocks(*selected_,items,next);
   // An outgoing occurrence from a different cast keeps its own context and
   // labels; this refresh has no authority to relabel that other document.
   const bool same_presented=presented_&&presented_->cast_id==cast_id_;
-  const bool retire_presented=same_presented&&!allowed(updated_item(*presented_),next);
+  const bool retire_presented=same_presented&&refresh_blocks(*presented_,items,next);
   const bool retire=p.value("retireBlockedCurrent",false)||retire_selected||retire_presented;
   bool any=items.empty();for(const auto& item:items)any|=allowed(item,next);
   // When fresh labels block the current work, retirement must not be undone
@@ -72,24 +93,8 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   auto id=uuid();
   next["pendingUpdate"]=nullptr;
   next["updateOutcome"]={{"id",id},{"outcome",defer?"deferred":"applied"},{"contentBlocked",!any}};
-  // A matching boot projection must not resurrect removed or relabelled work.
-  if(!next["boot"].is_null()){
-    const auto& boot=next["boot"]["playlist"];
-    if((!playlist.value("id","").empty()&&playlist["id"]==boot.value("id",""))||boot==state_["playlist"]){
-      auto& saved = next["boot"];
-      const auto& refreshed = plan.is_null() ? playlist : plan["playlist"];
-      if (saved.contains("index")) {
-        const int old_index = saved["index"].get<int>();
-        const auto& fresh_items = refreshed["items"];
-        int mapped = match_slot(boot["items"], old_index, fresh_items);
-        if (mapped < 0) mapped = match_slot(boot["items"], old_index, fresh_items, false);
-        saved["index"] = std::max(mapped, 0);
-      }
-      saved["playlist"] = refreshed;
-      saved["context"] = context;
-      if(plan.is_null())next["boot"].erase("activationTimes");else next["boot"]["activationTimes"]=plan["activationTimes"];
-    }
-  }
+  refresh_boot(next, plan.is_null() ? state_["playlist"] : state_["cohortPlan"]["playlist"],
+               plan.is_null() ? playlist : plan["playlist"], context, plan);
   if(defer){
     next["pendingUpdate"]={{"id",id},{"playlist",playlist},{"context",context}};
   }else{

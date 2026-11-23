@@ -73,6 +73,32 @@ int main(){
     }
 
     {
+      ff::Store store(path+".future-refresh");ff::Playback p(store);
+      p.tick(1,3000);
+      p.system_boot("first");
+      auto source=playlist();
+      p.command("playback.replace",{{"playlist",source},{"activationTimes",{2000,3000}},{"boot",true}});
+      auto current=p.desired()->id;p.committed(current);p.presented(current);
+      auto replacement=source["items"][0];replacement["source"]="https://example.org/new";
+      ff::Json refresh={{"items",{replacement}},{"activationTimes",{5000}}};
+      auto receipt=p.command("playback.update",refresh);
+      check(receipt["updateId"]==p.state()["updateOutcome"]["id"] && p.state()["updateOutcome"]["outcome"]=="applied","Future refresh has a durable terminal outcome");
+      check(p.visible()&&p.visible()->id==current,"Future refresh preserves the outgoing work until activation");
+      refresh["retireBlockedCurrent"]=true;
+      p.command("playback.update",refresh);
+      check(!p.visible()&&!p.desired(),"Future refresh retires blocked outgoing work immediately");
+      check(p.state()["boot"]["playlist"]["items"]==refresh["items"] &&
+            p.state()["boot"]["activationTimes"]==refresh["activationTimes"],"Boot retains the refreshed full plan");
+      p.system_boot("second");
+      check(!p.desired(),"Boot before activation cannot restore retired artwork");
+      p.tick(2,5000);
+      check(p.desired()&&p.desired()->item==replacement,"Only the replacement activates after boot");
+      current=p.desired()->id;p.committed(current);p.presented(current);
+      replacement["contentRating"]="mature";
+      p.command("playback.update",{{"items",{replacement}},{"activationTimes",{7000}}});
+      check(!p.visible()&&!p.desired(),"A future refresh retires a work blocked by its new labels");
+    }
+    {
       ff::Store store(path);ff::Playback p(store);p.tick(1,1000);
       p.command("playback.replace",{{"playlist",playlist()}});auto old=p.desired()->id;
       p.command("schedule.set",{{"playlist",playlist()},{"atMs",1500}});

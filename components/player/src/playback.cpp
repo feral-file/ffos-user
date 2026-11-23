@@ -392,12 +392,44 @@ Json Playback::command(std::string_view method, const Json& p) {
     if(!p.contains("activationTimes"))return update_playlist(p);
     fields(p,{"items","context","retireBlockedCurrent","activationTimes"});
     require(state_.contains("cohortPlan")&&!state_["cohortPlan"].is_null(),"stale_generation","Timed source no longer owns playback");
-    auto plan=state_["cohortPlan"];plan["playlist"]["items"]=p.at("items");plan["activationTimes"]=p["activationTimes"];
+    const auto& previous = state_["cohortPlan"];
+    auto plan=previous;
+    require(p.contains("items"),"invalid_params","Missing items");
+    if (plan["playlist"]["items"] != p["items"]) {
+      plan["playlist"].erase("signature");
+      plan["playlist"].erase("signatures");
+    }
+    if (p.contains("retireBlockedCurrent")) boolean(p,"retireBlockedCurrent");
+    require(previous["context"]!="curated" || p.value("context","curated")!="personal",
+            "invalid_params","Refresh cannot reclassify curated playback as personal");
+    plan["playlist"]["items"]=p["items"];plan["activationTimes"]=p["activationTimes"];
     plan["context"]=p.value("context",plan["context"].get<std::string>());validate_plan(plan);validate_playlist(plan["playlist"]);
     Json active;auto list=cohort(plan,clock_started_?wall_now_:wall_ms(),active);plan["activeAt"]=active;
     if(list["items"].empty()){
-      auto next=state_;next["cohortPlan"]=plan;persist(std::move(next));++generation_;
-      return {{"outcome","applied"},{"generation",generation_},{"revision",revision_}};
+      auto next=state_;
+      const auto& items = plan["playlist"]["items"];
+      auto policy = state_;
+      policy["context"] = plan["context"];
+      const auto blocked = [&](const std::optional<Occurrence>& o) {
+        return o && o->cast_id == cast_id_ && refresh_blocks(*o,items,policy);
+      };
+      const bool retire=p.value("retireBlockedCurrent",false) || items.empty() ||
+                        blocked(selected_) || blocked(presented_);
+      const auto update_id=uuid();
+      next["updateOutcome"]={{"id",update_id},{"outcome","applied"},{"contentBlocked",false}};
+      refresh_boot(next, previous["playlist"], plan["playlist"], plan["context"], plan);
+      next["pendingUpdate"]=nullptr;
+      if (retire) {
+        next["playlist"]=list;
+        next["context"]=plan["context"];
+        next["playlistUrl"]=plan["playlistUrl"];
+        update_order(next,0);
+        next["stopped"]=true;
+      }
+      next["cohortPlan"]=plan;
+      persist(std::move(next));++generation_;
+      if (retire) select();
+      return {{"outcome","applied"},{"generation",generation_},{"revision",revision_},{"updateId",update_id}};
     }
     auto params=p;params.erase("activationTimes");params["items"]=list["items"];
     return update_playlist(params,plan);
