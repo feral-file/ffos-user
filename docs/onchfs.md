@@ -52,16 +52,17 @@ exact source, sees one key per work. It is applied at every exit an item can tak
 `dp1`:
 
 - `Playlist.UnmarshalJSON` (every decoded document);
-- `processDynamicPlaylist` (DP-1 hydration, the Raster walk, the legacy indexer);
+- `processDynamicPlaylist` (DP-1 hydration, the legacy indexer);
 - series expansion and `CastPlan.Narrow` (catalog editions).
 
 It runs after signature verification, which covers the document's original bytes. A
 source on fxhash's dead gateway (`https://onchfs.fxhash2.xyz/<root>…`) is read as the URI it
 came from, as the indexer does at ingest. That host is never dialed.
 
-`rasterSourceURL` no longer maps onchfs to a host. The gateway table shared with ff-app and
-art-catalog-service keeps `ipfs` and `ar` only. For onchfs, the cross-repo rule is that the
-URI passes through unchanged and each player resolves it itself.
+The device no longer maps Raster tokens itself (the Raster wallet walk was removed,
+feral-file/feral-file#3576). The gateway table ff-app and art-catalog-service share keeps
+`ipfs` and `ar` only. For onchfs, the cross-repo rule is that the URI passes through
+unchanged and each player resolves it itself.
 
 ### 2. Reading and verifying (`onchfs/`)
 

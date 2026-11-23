@@ -691,45 +691,13 @@ Dynamic DP1 example:
 }
 ```
 
-Raster wallet-walk example (what ff-app sends for an address playlist with
-no hidden works; the address is inlined in the query, the page cursor is the
-only variable, and no API key travels anywhere — Raster's read API is
-unauthenticated; contract in
-[`api-design.md`](api-design.md), "DP-1 `dynamicQuery` resolution"):
-
-```json
-{
-  "messageID": "msg-display-4",
-  "message": {
-    "command": "displayPlaylist",
-    "request": {
-      "dp1_call": {
-        "id": "7c1b1f7e-5b2a-4d2e-9d7a-1a2b3c4d5e6f",
-        "items": [],
-        "dynamicQuery": {
-          "profile": "graphql-v1",
-          "endpoint": "https://api.raster.art/graphql",
-          "method": "POST",
-          "headers": { "Content-Type": "application/json" },
-          "query": "query WalletWalk($after: String) { address(address: \"0xabc…\") { tokensOwned(first: 250, after: $after) { pageInfo { hasNextPage endCursor } nodes { quantity lastAcquiredAt token { id chainId contractAddress tokenId tokenStandard name media { previewHash previewType contentUrl normalizedContentUrl contentType } artworks { id slug title isSeries platform { name } artists { id name slug addresses } } artists { id name slug addresses } } } } } }",
-          "pagination": {
-            "variable": "after",
-            "cursorPath": "data.address.tokensOwned.pageInfo.endCursor",
-            "hasNextPath": "data.address.tokensOwned.pageInfo.hasNextPage"
-          },
-          "responseMapping": {
-            "itemsPath": "data.address.tokensOwned.nodes",
-            "itemSchema": "raster/tokensOwned/1.0"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-A wallet with hidden works is displayed as a static snapshot (items, no
-`dynamicQuery`) and takes the inline path above unchanged.
+An address playlist (a wallet) is sent as a static DP-1 list (items, no
+`dynamicQuery`) and takes the inline path above. The device-side Raster
+wallet walk (`itemSchema: "raster/tokensOwned/1.0"`) was removed: Raster
+needs a key the device does not carry, so ff-app reads the wallet through
+ff-source-resolver-service and casts the list (feral-file/feral-file#3576;
+see [`api-design.md`](api-design.md), "DP-1 `dynamicQuery` resolution").
+A display request that still carries the walk is refused by name, below.
 
 Current success response: Chromium/player response from
 `window.handleCDPRequest(...)`, with the signature verdict merged in as
@@ -795,12 +763,8 @@ Current error cases:
 - Dynamic query resolution fails. For a `dynamicQuery` whose
   `responseMapping.itemSchema` names a vendor shape this firmware has no
   mapper for, the error names the schema (`dynamicQuery: unsupported
-  itemSchema "<schema>"`) and no request is made. For a Raster wallet walk,
-  a missing `pagination` block, a non-Raster or non-https endpoint, a
-  GraphQL `errors` array, a non-2xx page, a page whose `cursorPath`/
-  `hasNextPath` cannot be read, or a walk past 200 pages fails the whole
-  request with no partial playlist (`raster dynamicQuery: …`); an individual
-  node the wall cannot play is skipped, not fatal.
+  itemSchema "<schema>"`) and no request is made. This includes the
+  retired Raster wallet walk, `raster/tokensOwned/1.0`.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP

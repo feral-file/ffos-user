@@ -805,9 +805,11 @@ func TestControlTuning(t *testing.T) {
 }
 
 // TestLeftoverRasterBlockIsIgnored: controld once read a device Raster key
-// from a `raster` block. Raster's read API needs no key, so the block is gone
-// from the schema, but a device whose controld.json still carries one must
-// keep booting: config.Load failing is fatal under Restart=always.
+// from a `raster` block. The device no longer calls Raster at all (the key
+// lives only in ff-source-resolver-service, feral-file/feral-file#3612), so
+// the block is gone from the schema, but a device whose controld.json still
+// carries one must keep booting: config.Load failing is fatal under
+// Restart=always.
 func TestLeftoverRasterBlockIsIgnored(t *testing.T) {
 	var c config.Config
 	err := json.Unmarshal([]byte(`{"raster": {"apiKey": "rk_live_abc"}, "enableHub": true}`), &c)
