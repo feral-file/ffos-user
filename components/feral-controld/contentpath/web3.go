@@ -49,8 +49,10 @@ import (
 // host invertible; onchfs can afford an origin per work because its whole
 // identity is one 32-byte root (owner's call, feral-file#3599).
 //
-// ParseWeb3 and ParseWeb3SourceURL are each other's inverse; nothing else may
-// build or parse either form.
+// ParseWeb3 and ParseWeb3SourceURL are each other's inverse, for every path
+// and not only for paths that arrived escaped: ParseWeb3 canonicalises the
+// path to the spelling a browser will ask for (canonicalWeb3Path). Nothing
+// else may build or parse either form.
 
 // Web3HostSuffix ends every device-local web3 source host.
 const Web3HostSuffix = ".web3.invalid"
@@ -128,8 +130,92 @@ func ParseWeb3(raw string) (Web3, bool) {
 	if !cleanWeb3Path(after) {
 		return Web3{}, false
 	}
-	w.Path = after
+	w.Path = canonicalWeb3Path(after)
 	return w, true
+}
+
+// canonicalWeb3Path spells a web3 path so that it survives being written into
+// an https URL and read back out: every byte that would not come back
+// unchanged is escaped, every percent triplet already written is left alone,
+// and nothing else is touched.
+//
+// This is what makes ParseWeb3 and ParseWeb3SourceURL an inverse pair for
+// every path, rather than only for paths that arrived escaped. SourceURL
+// writes Path into an https URL verbatim and ParseWeb3SourceURL reads it back
+// through url.URL.EscapedPath, which re-escapes — so a path carrying a raw
+// space, quote, angle bracket or brace used to be stored under one spelling
+// and requested by Chromium under another. Replay matches method and URL
+// exactly, so the entry document missed on every play and the work never
+// appeared; nothing reported it either, because a device-local source is
+// exempt from every media-health verdict (round 4 review, F2).
+//
+// A `string` argument containing a space is the ordinary case under
+// ERC-4804's auto-mode typing, so this is not an edge shape.
+//
+// The call is unaffected: web3.pathSegments unescapes every segment before it
+// builds the calldata, and escaping is only a different spelling of the same
+// bytes. Existing triplets are preserved rather than normalised, so a URI
+// that encoded an argument on purpose keeps its exact source string and its
+// cache key. It is idempotent: escaping an already-escaped path changes
+// nothing, so one work has one cache key however it was spelled.
+//
+// Only web3 is canonicalised here. Onchfs.SourceURL writes its path verbatim
+// the same way and is pre-existing on the base branch; see the branch's
+// `Root cause` field for where that is recorded.
+func canonicalWeb3Path(escaped string) string {
+	var b strings.Builder
+	for i := 0; i < len(escaped); {
+		c := escaped[i]
+		// An existing, valid percent-triplet is left exactly as written. It
+		// is already a spelling a browser asks for, and rewriting it would
+		// change the source string — and so the cache key — for a work whose
+		// URI deliberately encoded an argument (a `string!` separator, a
+		// slash inside an argument).
+		if c == '%' && i+2 < len(escaped) && isHexDigit(escaped[i+1]) && isHexDigit(escaped[i+2]) {
+			b.WriteString(escaped[i : i+3])
+			i += 3
+			continue
+		}
+		if web3MustEscape[c] {
+			b.WriteString("%")
+			b.WriteByte(upperHex[c>>4])
+			b.WriteByte(upperHex[c&0x0f])
+		} else {
+			b.WriteByte(c)
+		}
+		i++
+	}
+	return b.String()
+}
+
+const upperHex = "0123456789ABCDEF"
+
+// web3MustEscape is the set of bytes that have to be percent-escaped for a
+// device-local path to survive the round trip, and nothing more.
+//
+// It is DERIVED, not written down: for each byte, the URL is built with that
+// byte literal in its path and asked whether net/url hands the same path
+// back. A hand-kept table of "what a browser escapes" would be a second
+// source of truth for the one property that matters here — that SourceURL
+// writes exactly what ParseWeb3SourceURL will read — and would drift from
+// net/url on the next Go release. Deriving it also keeps the escaping
+// minimal: a byte a URL path may carry literally is left literal, so a URI
+// that spelled an argument one way keeps that spelling and its cache key.
+var web3MustEscape = func() [256]bool {
+	var set [256]bool
+	for c := 0; c < 256; c++ {
+		if c == '/' {
+			continue // the segment separator, written literally
+		}
+		raw := "https://h" + Web3HostSuffix + "/x" + string(rune(c))
+		u, err := url.Parse(raw)
+		set[c] = err != nil || u.EscapedPath() != "/x"+string(rune(c))
+	}
+	return set
+}()
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // URI is the canonical `web3://` form: lower-case contract, the chain id

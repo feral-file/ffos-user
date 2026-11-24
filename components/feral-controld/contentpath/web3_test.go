@@ -267,3 +267,71 @@ func TestParseWeb3StripsAnUpperCasePrefix(t *testing.T) {
 		t.Fatalf("SourceURL %q is not a web3 source", w.SourceURL())
 	}
 }
+
+// A web3 path is canonicalised to the spelling a browser will ask for, so
+// ParseWeb3 and ParseWeb3SourceURL are an inverse pair for EVERY path and not
+// only for paths that arrived escaped. Before this, a raw space — the ordinary
+// case for a `string` argument under ERC-4804's auto-mode typing — was stored
+// under one spelling and requested by Chromium under another, so replay's
+// exact method+URL match missed and the work never appeared (round 4, F2).
+func TestWeb3PathsSurviveTheRoundTripWhateverTheirSpelling(t *testing.T) {
+	// Derived, not sampled: every character the WHATWG path percent-encode
+	// set escapes and that a DP-1 JSON string can carry literally, plus the
+	// already-escaped spelling of one of them.
+	for _, arg := range []string{
+		"hello world", `a"b`, "a<b", "a>b", "a`b", "a{b", "a}b", "a#b", "a?b",
+		"a%25b", "a|b", "a^b", "a\x7fb", "plain", "hello%20world", "café",
+	} {
+		raw := "web3://" + digitalSoulContract + ":1/greet/" + arg
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Errorf("ParseWeb3(%q) refused a path a browser could ask for", raw)
+			continue
+		}
+		source := w.SourceURL()
+		back, ok := contentpath.ParseWeb3SourceURL(source)
+		if !ok {
+			t.Errorf("%q: ParseWeb3SourceURL refused %q", arg, source)
+			continue
+		}
+		if back != w {
+			t.Errorf("%q: the inverse does not hold:\n stored %+v\n   back %+v", arg, w, back)
+		}
+		if back.SourceURL() != source {
+			t.Errorf("%q: the source does not round trip:\n %q\n %q", arg, source, back.SourceURL())
+		}
+		// Canonicalising must be idempotent, or one work gets two cache keys
+		// depending on how its URI was spelled.
+		again, ok := contentpath.ParseWeb3(w.URI())
+		if !ok || again.SourceURL() != source {
+			t.Errorf("%q: re-parsing the canonical URI gives %q, want %q", arg, again.SourceURL(), source)
+		}
+	}
+}
+
+// Malformed percent-encoding is refused rather than guessed at: a lone "%" is
+// not a path a browser would ask for, and inventing a spelling for it would
+// give the work a source no request can match.
+func TestWeb3RefusesMalformedPercentEncoding(t *testing.T) {
+	for _, arg := range []string{"a%b", "a%", "a%2", "a%zzb"} {
+		raw := "web3://" + digitalSoulContract + ":1/greet/" + arg
+		if w, ok := contentpath.ParseWeb3(raw); ok {
+			t.Errorf("ParseWeb3(%q) = %+v, want refused", raw, w)
+		}
+	}
+}
+
+// Two spellings of one argument are one work and one cache key.
+func TestWeb3EscapedAndRawSpellingsAreOneWork(t *testing.T) {
+	rawSpace, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/greet/hello world")
+	if !ok {
+		t.Fatal("raw-space form refused")
+	}
+	escaped, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/greet/hello%20world")
+	if !ok {
+		t.Fatal("escaped form refused")
+	}
+	if rawSpace.SourceURL() != escaped.SourceURL() {
+		t.Fatalf("one work, two sources:\n %q\n %q", rawSpace.SourceURL(), escaped.SourceURL())
+	}
+}
