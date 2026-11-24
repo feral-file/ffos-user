@@ -1,4 +1,5 @@
 #pragma once
+#include "ff/cef_health_probe.hpp"
 #include <sys/types.h>
 
 #include <deque>
@@ -71,6 +72,7 @@ class PublicBrowser {
   struct Pending {
     std::string data;
     size_t offset = 0;
+    bool health_probe = false;
   };
   std::deque<Pending> writes_;
   uint64_t sequence_ = 0, load_frame_ = 0;
@@ -96,8 +98,7 @@ class PublicBrowser {
   std::string bundle_root_;
   std::shared_ptr<CacheInbox> cache_ = std::make_shared<CacheInbox>();
   uint64_t compositor_gpu_passes_ = 0;
-  bool health_pending_ = false;
-  std::chrono::steady_clock::time_point health_at_ = std::chrono::steady_clock::now();
+  CefHealthProbe health_;
   struct PausedRequest {
     std::string session, request;
     Json query;

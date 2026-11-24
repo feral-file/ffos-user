@@ -56,7 +56,10 @@ def pause_renderers(host_pid, launcher, stack):
         raise RuntimeError("Reported browser is outside the test host")
 
     def is_test_renderer(pid):
-        if b"--type=renderer" not in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0"):
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        # Chromium's zygote may rewrite argv[0] as a space-separated process title.
+        renderer_title = argv[0].split()[:2] == [os.fsencode(Path(f"/proc/{host_pid}/exe").readlink()), b"--type=renderer"]
+        if b"--type=renderer" not in argv and not renderer_title:
             return False
         while pid > 1:
             status = Path(f"/proc/{pid}/status").read_text().splitlines()

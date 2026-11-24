@@ -211,7 +211,7 @@ void PublicBrowser::send(const std::string& method, Json params, const std::stri
           "Engine output exceeds 64 MiB");
   queued_bytes_ += data.size() + 1;
   data.push_back('\0');
-  writes_.push_back({std::move(data), 0});
+  writes_.push_back({std::move(data), 0, method == "Page.getLayoutMetrics"});
   replies_.emplace(sequence_,
                    Reply{method, session, reply ? std::move(reply) : [](const Json&) {}});
 }
@@ -493,6 +493,7 @@ void PublicBrowser::poll() {
       require(n > 0, "browser_exit", "Engine command pipe closed");
       pending.offset += n;
       if (pending.offset == pending.data.size()) {
+        if (pending.health_probe) health_.written(std::chrono::steady_clock::now());
         queued_bytes_ -= pending.data.size();
         writes_.pop_front();
       }
@@ -512,6 +513,13 @@ void PublicBrowser::poll() {
       buffer_.erase(0, end + 1);
       message(value);
     }
+    const auto probe = health_.poll(std::chrono::steady_clock::now(), loaded_);
+    require(probe != CefHealthProbe::Action::write_timeout, "browser_backpressure",
+            "Could not write the artwork layout health probe while polling the DevTools pipe");
+    require(probe != CefHealthProbe::Action::reply_timeout, "renderer_unresponsive",
+            "Artwork renderer did not answer its layout health probe during 5 seconds of polling");
+    if (probe == CefHealthProbe::Action::send)
+      send("Page.getLayoutMetrics", Json::object(), session_, [this](const Json&) { health_.answered(); });
     // Only materialize one archived response at a time. A 32 MiB range
     // expands to almost 43 MiB on the pipe; drain it before admitting the
     // next response so parallel fetches cannot exhaust the output budget.
@@ -682,15 +690,6 @@ void PublicBrowser::poll() {
     }
     require(loaded_ || std::chrono::steady_clock::now() - started_ < std::chrono::seconds(30),
             "browser_timeout", "Artwork did not complete navigation within 30 seconds");
-    const auto now = std::chrono::steady_clock::now();
-    require(!health_pending_ || now - health_at_ < std::chrono::seconds(5), "renderer_unresponsive",
-            "Artwork renderer did not answer its layout health probe for 5 seconds");
-    if (loaded_ && !health_pending_ && now - health_at_ >= std::chrono::seconds(5)) {
-      health_pending_ = true;
-      health_at_ = now;
-      send("Page.getLayoutMetrics", Json::object(), session_,
-           [this](const Json&) { health_pending_ = false; });
-    }
     update();
   } catch (const std::exception& error) {
     fail(error.what());
