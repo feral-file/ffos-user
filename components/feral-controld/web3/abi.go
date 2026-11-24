@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ABI encoding for the argument types ERC-4804's auto mode can produce, and
@@ -42,9 +43,11 @@ func typeArgument(raw string) (argument, error) {
 		if t == "" {
 			return argument{}, fmt.Errorf("%w: argument %q has an empty type", ErrUnsupported, raw)
 		}
-		return argument{typ: t, val: v}, nil
+		return argument{typ: canonicalType(t), val: v}, nil
 	}
 	switch {
+	case raw == "true" || raw == "false":
+		return argument{typ: "bool", val: raw}, nil
 	case isDecimalDigits(raw):
 		return argument{typ: "uint256", val: raw}, nil
 	case hasHexPrefix(raw) && len(raw) == 66 && isHexDigits(raw[2:]):
@@ -55,6 +58,19 @@ func typeArgument(raw string) (argument, error) {
 		return argument{typ: "bytes", val: raw}, nil
 	}
 	return argument{typ: "string", val: raw}, nil
+}
+
+// canonicalType spells the `uint`/`int` aliases as the ABI's `uint256`/
+// `int256`. The function selector is the hash of the canonical signature, so
+// hashing the alias verbatim would call a function that does not exist.
+func canonicalType(t string) string {
+	switch t {
+	case "uint":
+		return "uint256"
+	case "int":
+		return "int256"
+	}
+	return t
 }
 
 func hasHexPrefix(s string) bool {
@@ -94,9 +110,9 @@ func encodeArgument(a argument) (head, tail []byte, err error) {
 	case intType.MatchString(a.typ):
 		// A negative int is accepted and taken two's complement, as the
 		// ABI does; the URL form for one is `int256!-1`.
-		n, ok := new(big.Int).SetString(a.val, 0)
-		if !ok {
-			return nil, nil, fmt.Errorf("%w: %s value %q is not an integer", ErrUnsupported, a.typ, a.val)
+		n, err := parseABIInt(a.typ, a.val)
+		if err != nil {
+			return nil, nil, err
 		}
 		return word(n), nil, nil
 	case a.typ == "address":
@@ -138,6 +154,48 @@ func encodeArgument(a argument) (head, tail []byte, err error) {
 		return nil, dynamicTail([]byte(a.val)), nil
 	}
 	return nil, nil, fmt.Errorf("%w: argument type %q", ErrUnsupported, a.typ)
+}
+
+// parseABIInt reads val as a value of the integer type typ and refuses one
+// the type cannot hold. word() panics on a value wider than 256 bits, and a
+// value outside its declared width would be encoded as a different number, so
+// the range is checked here, once, before any encoding.
+//
+// Decimal is the default notation: a leading zero is not an octal prefix, so
+// `010` is ten. Only an explicit `0x` prefix selects hexadecimal.
+func parseABIInt(typ, val string) (*big.Int, error) {
+	neg := strings.HasPrefix(val, "-")
+	digits := strings.TrimPrefix(val, "-")
+	base := 10
+	if hasHexPrefix(digits) {
+		base, digits = 16, digits[2:]
+	}
+	// SetString would also accept a sign, underscores and a second prefix;
+	// only bare digits are a URL integer.
+	if digits == "" || (base == 10 && !isDecimalDigits(digits)) || (base == 16 && !isHexDigits(digits)) {
+		return nil, fmt.Errorf("%w: %s value %q is not an integer", ErrUnsupported, typ, val)
+	}
+	n, _ := new(big.Int).SetString(digits, base)
+	if neg {
+		n.Neg(n)
+	}
+	bits := 256
+	if w := strings.TrimPrefix(strings.TrimPrefix(typ, "u"), "int"); w != "" {
+		bits, _ = strconv.Atoi(w)
+	}
+	var lo, hi *big.Int
+	if strings.HasPrefix(typ, "uint") {
+		lo = new(big.Int)
+		hi = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(bits)), big.NewInt(1))
+	} else {
+		half := new(big.Int).Lsh(big.NewInt(1), uint(bits-1))
+		lo = new(big.Int).Neg(half)
+		hi = new(big.Int).Sub(half, big.NewInt(1))
+	}
+	if n.Cmp(lo) < 0 || n.Cmp(hi) > 0 {
+		return nil, fmt.Errorf("%w: %s value is out of range", ErrUnsupported, typ)
+	}
+	return n, nil
 }
 
 // dynamicTail is a length word then the bytes, padded to a whole word.
@@ -218,6 +276,19 @@ func readWord(out []byte, i int) (int, error) {
 // offset points at a length word, and the bytes follow it. The result is
 // copied out of out, so nothing holds the node's buffer alive.
 func abiDynamic(out []byte, i int) ([]byte, error) {
+	view, err := abiDynamicView(out, i)
+	if err != nil {
+		return nil, err
+	}
+	body := make([]byte, len(view))
+	copy(body, view)
+	return body, nil
+}
+
+// abiDynamicView is abiDynamic without the copy: the bounds are checked and
+// the value is returned as a slice of out. A caller that has to charge a
+// budget before it allocates reads the view first.
+func abiDynamicView(out []byte, i int) ([]byte, error) {
 	off, err := readWord(out, i)
 	if err != nil {
 		return nil, err
@@ -238,9 +309,53 @@ func abiDynamic(out []byte, i int) ([]byte, error) {
 	if length > MaxWorkBytes {
 		return nil, fmt.Errorf("%w: %d bytes, over %d", ErrTooLarge, length, MaxWorkBytes)
 	}
-	body := make([]byte, length)
-	copy(body, out[start:start+length])
-	return body, nil
+	return out[start : start+length], nil
+}
+
+// jsonStringSize is the size encoding/json writes for s as a string,
+// quotes included, counted without allocating. Escaping makes a value larger
+// than its bytes (HTML characters, controls and invalid UTF-8 become six-byte
+// \uXXXX escapes), so a budget on decoded bytes alone would let a 16 MiB
+// answer marshal to about 96 MiB. Where json's exact choice is two bytes or
+// six, six is counted: this is an upper bound, never an under-count.
+func jsonStringSize(s []byte) int {
+	n := 2
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+				n += 6
+			} else {
+				n++
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(s[i:])
+		if (r == utf8.RuneError && size == 1) || r == 0x2028 || r == 0x2029 {
+			n += 6
+		} else {
+			n += size
+		}
+		i += size
+	}
+	return n
+}
+
+// decodeBudget charges the serialized size of every value of one
+// `returns=` answer against MaxWorkBytes, before the value is copied out of
+// the node's answer or marshaled. Each value passing its own bound is not
+// enough: many offsets can point at the same large value, so the sum is what
+// a hostile answer multiplies.
+type decodeBudget struct{ used int }
+
+func (b *decodeBudget) charge(n int) error {
+	// n and used are each bounded by the budget, so the sum cannot overflow.
+	if n > MaxWorkBytes-b.used {
+		return fmt.Errorf("%w: decoded values exceed %d bytes", ErrTooLarge, MaxWorkBytes)
+	}
+	b.used += n
+	return nil
 }
 
 // hexNumber renders a word the way the reference implementation's hex()
@@ -257,41 +372,60 @@ func hexNumber(w []byte) string {
 // values are rendered the way the reference implementation renders them, so
 // a work that reads its own JSON sees the same shape on the device.
 func abiDecodeValues(out []byte, types []string) ([]string, error) {
+	var budget decodeBudget
 	if len(types) == 0 {
 		// `returns=()`: hand back the raw result, hex-encoded.
+		if err := budget.charge(2*len(out) + 6); err != nil {
+			return nil, err
+		}
 		return []string{"0x" + hex.EncodeToString(out)}, nil
+	}
+	// The brackets and one comma per value.
+	if err := budget.charge(2 + len(types)); err != nil {
+		return nil, err
 	}
 	values := make([]string, 0, len(types))
 	for i, t := range types {
 		switch {
 		case t == "string" || t == "bytes":
-			b, err := abiDynamic(out, i)
+			view, err := abiDynamicView(out, i)
 			if err != nil {
 				return nil, err
 			}
 			if t == "string" {
-				values = append(values, string(b))
+				if err := budget.charge(jsonStringSize(view)); err != nil {
+					return nil, err
+				}
+				values = append(values, string(view))
 			} else {
-				values = append(values, "0x"+hex.EncodeToString(b))
+				// 0x, two hex digits a byte, and the quotes.
+				if err := budget.charge(2*len(view) + 4); err != nil {
+					return nil, err
+				}
+				values = append(values, "0x"+hex.EncodeToString(view))
 			}
-		case intType.MatchString(t) || t == "bool":
+		case intType.MatchString(t) || t == "bool" || t == "address" || fixedBytesType.MatchString(t):
 			start := i * wordBytes
 			if start+wordBytes > len(out) {
 				return nil, fmt.Errorf("%w: value %d is past the %d-byte answer", ErrUnsupported, i, len(out))
 			}
-			values = append(values, hexNumber(out[start:start+wordBytes]))
-		case t == "address":
-			start := i * wordBytes
-			if start+wordBytes > len(out) {
-				return nil, fmt.Errorf("%w: value %d is past the %d-byte answer", ErrUnsupported, i, len(out))
+			w := out[start : start+wordBytes]
+			var v string
+			switch {
+			case t == "address":
+				v = "0x" + hex.EncodeToString(w[12:])
+			case fixedBytesType.MatchString(t):
+				// bytesN is left-aligned in its word and the rest is
+				// padding, so only the first N bytes are the value.
+				size, _ := strconv.Atoi(strings.TrimPrefix(t, "bytes"))
+				v = "0x" + hex.EncodeToString(w[:size])
+			default:
+				v = hexNumber(w)
 			}
-			values = append(values, "0x"+hex.EncodeToString(out[start+12:start+wordBytes]))
-		case fixedBytesType.MatchString(t):
-			start := i * wordBytes
-			if start+wordBytes > len(out) {
-				return nil, fmt.Errorf("%w: value %d is past the %d-byte answer", ErrUnsupported, i, len(out))
+			if err := budget.charge(len(v) + 2); err != nil {
+				return nil, err
 			}
-			values = append(values, "0x"+hex.EncodeToString(out[start:start+wordBytes]))
+			values = append(values, v)
 		default:
 			return nil, fmt.Errorf("%w: return type %q", ErrUnsupported, t)
 		}

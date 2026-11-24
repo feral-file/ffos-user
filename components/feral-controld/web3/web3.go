@@ -189,30 +189,42 @@ type Plan struct {
 // NewPlan builds the call for r under mode. mode is what resolveMode()
 // answered; use ModeAuto when the contract has no resolveMode.
 func NewPlan(r Request, mode string) (Plan, error) {
-	returns, hasReturns, err := parseReturns(r.Query)
-	if err != nil {
-		return Plan{}, err
-	}
-	p := Plan{Mode: mode, Returns: returns, HasReturns: hasReturns}
-	segs, err := pathSegments(r.Path)
-	if err != nil {
-		return Plan{}, err
-	}
 	switch mode {
 	case ModeManual:
 		// ERC-6860 manual mode: the path and query go to the contract as
-		// raw calldata and the contract decides everything.
+		// raw calldata and the contract decides everything. Nothing in
+		// auto mode's vocabulary applies, so the query is not read for a
+		// `returns=` attribute (it is the contract's own query, carried
+		// unchanged), the answer is decoded as ABI bytes, and the type is
+		// the extension of the complete resource path.
 		raw := "/" + r.Path
 		if r.Query != "" {
 			raw += "?" + r.Query
 		}
-		p.Calldata = []byte(raw)
+		return Plan{
+			Mode:        mode,
+			Calldata:    []byte(raw),
+			ContentType: contentTypeForPath(r.Path),
+		}, nil
 	case ModeAuto:
-		if len(segs) == 0 {
-			// No method: ERC-4804's empty calldata, which reaches the
-			// contract's fallback function.
-			break
-		}
+		return newAutoPlan(r)
+	}
+	return Plan{}, fmt.Errorf("%w: resolve mode %q", ErrUnsupported, mode)
+}
+
+// newAutoPlan is ERC-4804's auto mode: the first path segment is the method
+// and the rest are its arguments, typed by their spelling.
+func newAutoPlan(r Request) (Plan, error) {
+	returns, hasReturns, err := parseReturns(r.Query)
+	if err != nil {
+		return Plan{}, err
+	}
+	p := Plan{Mode: ModeAuto, Returns: returns, HasReturns: hasReturns}
+	segs, err := pathSegments(r.Path)
+	if err != nil {
+		return Plan{}, err
+	}
+	if len(segs) > 0 {
 		args := make([]argument, 0, len(segs)-1)
 		for _, raw := range segs[1:] {
 			a, err := typeArgument(raw)
@@ -230,10 +242,10 @@ func NewPlan(r Request, mode string) (Plan, error) {
 			return Plan{}, err
 		}
 		p.Calldata = append(selector(segs[0]+"("+strings.Join(types, ",")+")"), encoded...)
-	default:
-		return Plan{}, fmt.Errorf("%w: resolve mode %q", ErrUnsupported, mode)
 	}
-	p.ContentType = contentTypeFor(segs, hasReturns)
+	// With no segment there is no method: ERC-4804's empty calldata, which
+	// reaches the contract's fallback function.
+	p.ContentType = contentTypeForAuto(segs, hasReturns)
 	return p, nil
 }
 
@@ -268,10 +280,10 @@ func (p Plan) Decode(out []byte) ([]byte, error) {
 	return body, nil
 }
 
-// contentTypeFor reads the type off the URL's last segment. A `returns=`
+// contentTypeForAuto reads the type off the URL's last segment. A `returns=`
 // attribute makes the answer JSON whatever the path says, because the decoded
 // values are what is served.
-func contentTypeFor(segs []string, hasReturns bool) string {
+func contentTypeForAuto(segs []string, hasReturns bool) string {
 	if hasReturns {
 		return "application/json"
 	}
@@ -281,7 +293,24 @@ func contentTypeFor(segs []string, hasReturns bool) string {
 		// extension *and* must not have its name parsed for one.
 		return defaultContentType
 	}
-	if ct, ok := mimeByExt[strings.ToLower(path.Ext(segs[len(segs)-1]))]; ok {
+	return typeByExt(segs[len(segs)-1])
+}
+
+// contentTypeForPath is manual mode's: the whole path is the resource, so
+// even a sole segment (`/image.svg`) names a file.
+func contentTypeForPath(p string) string {
+	last := p
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		last = p[i+1:]
+	}
+	if dec, err := url.PathUnescape(last); err == nil {
+		last = dec
+	}
+	return typeByExt(last)
+}
+
+func typeByExt(name string) string {
+	if ct, ok := mimeByExt[strings.ToLower(path.Ext(name))]; ok {
 		return ct
 	}
 	return defaultContentType
