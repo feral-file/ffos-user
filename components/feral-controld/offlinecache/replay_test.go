@@ -2070,3 +2070,94 @@ func TestReplayer_OnRequestPaused_ChildSaturationRetiresTheRootSession(t *testin
 
 	close(release)
 }
+
+// bareCIDSource is a kept work whose source is a bare IPFS CID with no
+// extension: capture stores it under exactly this key, while the kiosk's
+// uarewrite heals any query-carrying request for it into the slashed
+// directory form before replay sees it (ffos-user#484).
+const bareCIDSource = "https://ipfs.feralfile.com/ipfs/Qme21hLhjMPm5BUVYpDMKrVxrp57SGWmaQ5yH4SGorNFm6"
+
+// TestReplayer_ProcessRequestPaused_SlashedProbeOfBareCIDHitsBareKey is the
+// regression test for ffos-user#484: the player's content-type probe for a
+// bare-CID work arrives as `HEAD …/<cid>/?v=…&x-request=xhr`. Without the
+// unslashed retry it missed and failed closed, so the work never displayed
+// offline (measured on FF1-8EVTK3RE).
+func TestReplayer_ProcessRequestPaused_SlashedProbeOfBareCIDHitsBareKey(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedMediaItem(t, ts.store, "item-cid", bareCIDSource, "image/jpeg", "jpeg bytes",
+		map[string]string{"Access-Control-Allow-Origin": "*"})
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), bareCIDSource))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-1", bareCIDSource+"/?v=1&x-request=xhr", "HEAD"))
+	params := awaitSend(t, done)
+
+	assert.EqualValues(t, 200, params["responseCode"])
+	_, hasBody := params["body"]
+	assert.False(t, hasBody, "a HEAD response must never carry a body")
+	ct, ok := headerValue(t, params, "Content-Type")
+	require.True(t, ok)
+	assert.Equal(t, "image/jpeg", ct)
+}
+
+// TestReplayer_ProcessRequestPaused_SlashedGETOfBareCIDHitsBareKey covers the
+// other player param: an iframe navigation with display_mode, healed into the
+// slashed form, still finds the bare capture.
+func TestReplayer_ProcessRequestPaused_SlashedGETOfBareCIDHitsBareKey(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedMediaItem(t, ts.store, "item-cid", bareCIDSource, "image/jpeg", "jpeg bytes", nil)
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), bareCIDSource))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", bareCIDSource+"/?display_mode=fit"))
+	params := awaitSend(t, done)
+	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("jpeg bytes")), params["body"])
+}
+
+// TestReplayer_ProcessRequestPaused_SlashedBareCIDKeepsOtherQueryExact pins
+// that the unslashed retry removes the slash only: a query the capture did
+// not store still misses and fails closed, never matches the bare key.
+func TestReplayer_ProcessRequestPaused_SlashedBareCIDKeepsOtherQueryExact(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedMediaItem(t, ts.store, "item-cid", bareCIDSource, "image/jpeg", "jpeg bytes", nil)
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), bareCIDSource))
+
+	done := ts.expectSend("Fetch.failRequest")
+	ts.handler(requestPausedEvent(t, "req-1", bareCIDSource+"/?fxhash=abc"))
+	awaitSend(t, done)
+}
+
+// TestReplayer_ProcessRequestPaused_SlashedFxhashWorkStillFailsClosed pins
+// the limit of the unslashed retry (PR review, #484): a directory-CID work
+// whose source carries its own query was captured unhealed, so its bare key
+// is the gateway's 301 that drops the query. Following it would serve the
+// null-hash page — a different iteration, silently. The healed request must
+// keep failing closed until capture heals the same way the kiosk does.
+func TestReplayer_ProcessRequestPaused_SlashedFxhashWorkStillFailsClosed(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	dir := "https://gw.example/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+	src := dir + "?fxhash=abc"
+	hash := writeBlobString(t, ts.store, "<html>null hash</html>")
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:  dp1playlist.PlaylistItem{ID: "fx", Source: src},
+		Entry: dir + "/",
+		Resources: []offlinecache.Resource{
+			{URL: src, Status: 301, RedirectTo: dir + "/"},
+			{URL: dir + "/", Status: 200, SHA256: hash, ContentType: "text/html"},
+		},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), src))
+
+	done := ts.expectSend("Fetch.failRequest")
+	ts.handler(requestPausedEvent(t, "req-1", dir+"/?fxhash=abc&display_mode=fit"))
+	awaitSend(t, done)
+}
