@@ -45,7 +45,7 @@ extern "C" int ff_host(int argc, char** argv) {
     std::getline(boot_file, boot_id);
     ff::require(!boot_id.empty(), "boot_identity", "Cannot read boot identity");
     playback.system_boot(boot_id);
-    ff::Protocol protocol(playback);
+    ff::Protocol protocol(playback, true, true);
     ff::Server server(socket, protocol);
     auto root = std::filesystem::canonical("/proc/self/exe").parent_path();
     auto worker = (root / "ff-player-native").string(),
@@ -140,9 +140,12 @@ extern "C" int ff_host(int argc, char** argv) {
       std::shared_ptr<const ff::CaptureSnapshot> capture;
     } resolution;
     auto resolve_source = [&](const ff::Occurrence& occurrence) -> std::optional<std::string> {
+      const auto capsule_id = occurrence.item.value("ffCapsuleId", "");
       if (occurrence.item.at("source").get<std::string>().starts_with("data:") ||
-          !ff::local_artwork_name(occurrence.item.at("source")).empty())
+          !ff::local_artwork_name(occurrence.item.at("source")).empty()) {
+        ff::require(capsule_id.empty(), "bundle", "Capsule requires an offline capture");
         return "";
+      }
       if (resolution.id != occurrence.id) {
         resolution = {occurrence.id, std::make_shared<ff::CacheInbox>(), std::nullopt,
                       std::chrono::steady_clock::now()};
@@ -150,6 +153,7 @@ extern "C" int ff_host(int argc, char** argv) {
                                {{"source", occurrence.item.at("source")},
                                 {"url", occurrence.item.at("source")},
                                 {"method", "GET"},
+                                {"capsuleId", capsule_id},
                                 {"headers", ff::Json::object()}},
                                false, true))
           throw ff::Error("cache_backpressure", "Cache mode request queue is full");
@@ -166,6 +170,8 @@ extern "C" int ff_host(int argc, char** argv) {
           auto mode = reply.metadata.value("replayMode", "");
           ff::require(mode.empty() || mode == "isolated" || mode == "mixed", "cache_protocol",
                       "Unknown artwork cache mode");
+          ff::require(capsule_id.empty() || (mode == "isolated" && reply.capture),
+                      "bundle", "Required capsule capture is unavailable");
           resolution.capture = reply.capture;
           resolution.streams = reply.metadata.value("streams", ff::Json::object());
           resolution.mode = (mode == "isolated" || mode == "mixed") ? mode : "";

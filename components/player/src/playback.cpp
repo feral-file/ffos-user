@@ -207,6 +207,11 @@ void Playback::validate_playlist(const Json& playlist, bool restoring) const {
     require(item.dump().size()<=65536,"playlist_invalid","Artwork item exceeds 64 KiB");
     optional_text(item,"mimeType",256);
     for(auto key:{"id","title","slug","license","ref","refHash"})optional_text(item,key);
+    if (item.contains("ffCapsuleId")) {
+      const auto digest = string_field(item, "ffCapsuleId", 64);
+      require(digest.size() == 64 && digest.find_first_not_of("0123456789abcdef") == digest.npos,
+              "playlist_invalid", "Invalid offline capsule digest");
+    }
     auto source = string_field(item, "source", 16384);
     require(source.starts_with("https://") || source.starts_with("http://") || source.starts_with("data:") || source.starts_with("ipfs://") || source.starts_with("onchfs://") || (!local_artwork_name(source).empty() && native_media(item)), "playlist_invalid", "Unsupported artwork URL scheme");
     if (item.contains("contentRating")) require(item["contentRating"].is_string(), "playlist_invalid", "contentRating must be a string");

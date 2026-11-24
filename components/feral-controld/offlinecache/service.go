@@ -853,6 +853,9 @@ type service struct {
 	// call closes that window: a clear that races an active capture
 	// simply waits for it to finish saving before sweeping.
 	captureMu sync.Mutex
+	// clearing covers the interval between a clear's state reservation and
+	// its disk deletion. Capsule publication checks it under mu.
+	clearing map[string]int
 
 	// playlistRecordMu serializes writes to the playlist INDEX record (the
 	// offline displayPlaylist-by-URL fallback) against ClearPlaylist's
@@ -1389,8 +1392,12 @@ func (s *service) reserveForClear(keys map[string]bool) (res clearReservation, b
 			return clearReservation{}, key, ErrItemBusy
 		}
 	}
+	if s.clearing == nil {
+		s.clearing = make(map[string]int)
+	}
 	res.settled = make(map[string]bool, len(keys))
 	for key := range keys {
+		s.clearing[key]++
 		if st, tracked := s.state[key]; tracked && st != StateNotCached {
 			res.settled[key] = true
 		}
@@ -1421,6 +1428,17 @@ func (s *service) reserveForClear(keys map[string]bool) (res clearReservation, b
 	// and is cosmetic: dequeueAdmitted re-derives it from whatever is
 	// actually queued on the next scan.
 	return res, "", nil
+}
+
+func (s *service) finishClear(keys map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range keys {
+		s.clearing[key]--
+		if s.clearing[key] == 0 {
+			delete(s.clearing, key)
+		}
+	}
 }
 
 // clearReservation is what a reserveForClear call took away from clients,
@@ -2907,10 +2925,12 @@ func (s *service) oldestEvictableItem(excludeKey string, warmingSet map[string]b
 // without bound — purely as a side effect of having been cleared.
 func (s *service) ClearItem(source string) error {
 	key := SourceKey(source)
-	res, _, err := s.reserveForClear(map[string]bool{key: true})
+	keys := map[string]bool{key: true}
+	res, _, err := s.reserveForClear(keys)
 	if err != nil {
 		return fmt.Errorf("offline cache: clear item %s: %w", truncateSourceForLog(source), err)
 	}
+	defer s.finishClear(keys)
 	removed, err := s.store.DeleteItem(key)
 	if err != nil {
 		// Knowingly silent on the observer: the record survived, so the
@@ -3054,6 +3074,7 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w",
 			playlistID, truncateSourceForLog(sourceOf[busyKey]), err)
 	}
+	defer s.finishClear(keys)
 	// Before any not_cached is emitted below — see
 	// awaitQueuedNotifications' doc for the inversion it prevents.
 	res.awaitQueuedNotifications()

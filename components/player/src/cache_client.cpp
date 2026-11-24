@@ -107,6 +107,7 @@ struct Pool {
     auto root = std::filesystem::path(job.root);
     reply.metadata = {{"requestUrl", url}};
     if (job.policy && url != source) return;
+    const auto capsule_id = query.value("capsuleId", "");
     auto capture = job.capture;
     std::shared_ptr<CaptureSnapshot> loaded;
     if (!capture) {
@@ -114,7 +115,7 @@ struct Pool {
       auto path = root / "items" / (std::string(key) + ".json");
       g_free(key);
       std::ifstream stream(path, std::ios::binary);
-      if (!stream && errno == ENOENT && job.policy) return;
+      if (!stream && errno == ENOENT && job.policy && capsule_id.empty()) return;
       require(stream.good() && std::filesystem::file_size(path) <= 16 * 1024 * 1024, "bundle", "Cannot read capture manifest");
       auto manifest = Json::parse(stream);
       const bool wrapped = manifest.value("automaticCacheVersion", 0) != 0;
@@ -128,6 +129,10 @@ struct Pool {
     if (!capture->root.empty()) root = capture->root;
     require(record.at("item").at("source") == source, "bundle", "Capture identity mismatch");
     if (job.policy) {
+      if (!capsule_id.empty()) {
+        require(record.contains("capsule") && record.at("capsule").at("archiveSHA256") == capsule_id,
+                "bundle", "Offline capture does not match the requested capsule");
+      }
       const Json* entry = nullptr;
       bool browser_ready = true;
       for (const auto& resource : record.at("resources")) {

@@ -5,14 +5,16 @@
 
 namespace ff {
 namespace {
-// Match duplicate slots by ordinal within (id, source), never by URL alone.
+// Match duplicate slots by ordinal within the same source and cache identity.
 // ID-only fallback is only for source replacement / fresh policy labels.
 int match_slot(const Json& old_items, int old_index, const Json& items, bool source = true) {
   if(old_index<0||old_index>=static_cast<int>(old_items.size()))return -1;
   const auto& item=old_items[old_index];
   const auto same=[&](const Json& candidate){
     if(candidate.value("id","")!=item.value("id",""))return false;
-    return source?candidate["source"]==item["source"]:!item.value("id","").empty();
+    return source ? candidate["source"] == item["source"] &&
+                    candidate.value("ffCapsuleId", "") == item.value("ffCapsuleId", "") :
+                    !item.value("id","").empty();
   };
   int ordinal=0;
   for(int i=0;i<old_index;++i)if(same(old_items[i]))++ordinal;

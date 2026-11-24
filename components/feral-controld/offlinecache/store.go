@@ -969,6 +969,9 @@ func (s *fsStore) GC() (int, int64, error) {
 			// — a failing disk — is addressed).
 			return 0, 0, fmt.Errorf("offline cache: GC aborted, item record %s unreadable (would orphan its blobs): %w", id, err)
 		}
+		if rec.Capsule != nil && validSourceKey(rec.Capsule.ArchiveSHA256) {
+			keep[rec.Capsule.ArchiveSHA256] = true
+		}
 		for _, res := range rec.Resources {
 			if res.SHA256 != "" {
 				keep[res.SHA256] = true

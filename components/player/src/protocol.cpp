@@ -34,6 +34,7 @@ Json Protocol::receive(Connection& connection, const Json& r) {
       result = {{"version", 1}, {"instance", playback_.instance()}, {"maxFrameBytes", max_frame}, {"receiptWindow", 1024},
                 {"capabilities", {"playback", "playback.update.v1", "presentation.v1", "settings", "overlays", "overlay.setup.v1", "history", "schedule", "input", "snapshots"}}, {"snapshot", playback_.snapshot()}};
       if (artwork_permissions_) result["capabilities"].push_back("artworkPermissions.v1");
+      if (offline_capsules_) result["capabilities"].push_back("offlineCapsule.v1");
     } else {
       require(connection.negotiated, "not_negotiated", "Send hello first");
       if (method == "artworkPermissions.get" || method == "artworkPermissions.set")

@@ -368,6 +368,11 @@ a snapshot proves correct physical output.
 
 ## Coordinated cast, scheduling and health
 
+`offlineCapsule.v1` advertises support for controld's internal `ffCapsuleId`
+item field. The field binds the ordinary offline capture to an archive
+SHA-256 at source resolution. A missing or mismatched record fails the
+occurrence before the renderer starts.
+
 `playback.replace` accepts `playlistUrl`, `index`, `boot` and
 `onlyIfNoPlaylist`. Boot intent and current cast commit atomically. Conditional
 fallback checks current state at the serialized commit boundary, after fetching.

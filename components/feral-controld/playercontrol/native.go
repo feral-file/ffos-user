@@ -100,6 +100,11 @@ func (h *Native) Send(ctx context.Context, command commands.Command) (interface{
 	if prior, ok := ctx.Value(fenceKey{}).(*playerlink.Preconditions); ok && prior != nil {
 		fence = prior
 	}
+	if command.OfflineCapsuleID != "" {
+		required := *fence
+		required.RequiredCapability = "offlineCapsule.v1"
+		fence = &required
+	}
 	var receipt playerlink.Receipt
 	if err = h.Player.Call(ctx, method, params, &receipt, fence); err != nil {
 		var remote *playerlink.RemoteError
@@ -174,6 +179,10 @@ func castOperationWithRoutes(command commands.Command, lookup func(string, strin
 			item, _ := raw.(map[string]any)
 			// Only the local media-health store may supply an observed route.
 			delete(item, "ffObservedGateway")
+			delete(item, "ffCapsuleId")
+			if command.OfflineCapsuleID != "" {
+				item["ffCapsuleId"] = command.OfflineCapsuleID
+			}
 			if source, ok := item["source"].(string); ok && lookup != nil {
 				if target, ok := lookup(source, ""); ok {
 					item["ffObservedGateway"] = target

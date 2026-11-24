@@ -136,6 +136,7 @@ func DefaultGateConfig() GateConfig {
 
 		// Heavy: the externally reachable display path and other costly work.
 		commands.CMD_DISPLAY_PLAYLIST:         heavy,
+		commands.CMD_DISPLAY_CAPSULE:          {Rate: heavy.Rate, Burst: heavy.Burst, Weight: heavy.Weight},
 		commands.CMD_DISPLAY_DEFAULT_PLAYLIST: heavy,
 		commands.CMD_REFRESH_ARTWORK:          heavy,
 		commands.CMD_PLAY_RECENTLY_PLAYED:     heavy,

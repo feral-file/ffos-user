@@ -50,10 +50,11 @@ type Hello struct {
 // decision. Without it, mutations use the last generation observed by this
 // command connection. A watch delivery does not silently update that fence.
 type Preconditions struct {
-	Instance   string
-	Generation uint64
-	Revision   *uint64
-	Key        string
+	Instance           string
+	Generation         uint64
+	Revision           *uint64
+	Key                string
+	RequiredCapability string
 }
 
 func (c *Client) Call(ctx context.Context, method string, params, result any, expected *Preconditions) (callErr error) {
@@ -110,6 +111,9 @@ func (c *Client) Call(ctx context.Context, method string, params, result any, ex
 		}
 		c.instance, c.generation = hello.Instance, hello.Snapshot.Generation
 		c.capabilities = hello.Capabilities
+	}
+	if expected != nil && expected.RequiredCapability != "" && !slices.Contains(c.capabilities, expected.RequiredCapability) {
+		return &RemoteError{Code: "unsupported", Message: "native player lacks " + expected.RequiredCapability}
 	}
 	if method == "overlay.set" {
 		if p, ok := params.(map[string]any); ok && p["owner"] == "setup" && !slices.Contains(c.capabilities, "overlay.setup.v1") {

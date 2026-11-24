@@ -482,6 +482,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return nil, ErrPermissionDenied
 	}
 
+	if commandType == commands.CMD_DISPLAY_CAPSULE {
+		return h.handleDisplayCapsule(ctx, command.Arguments)
+	}
+
 	if commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST {
 		if owner, ok := h.player.(interface{ OwnsSchedule() bool }); ok && owner.OwnsSchedule() {
 			return h.player.Send(ctx, command)
@@ -982,7 +986,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// signer covered every field, so verifying after the typed
 				// decode would misreport an honest document as tampered.
 				// Also before dynamic hydration below, which rewrites items.
-				if h.verifySignatures {
+				if h.verifySignatures && !isCapsuleCast(ctx) {
 					verdict := sigverify.Verify(playlistBytes)
 					playlist.Verification = &verdict
 				}
@@ -1192,7 +1196,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// (see that comment). err must be assigned, not just returned,
 			// so the deferred playback-failure accounting above records the
 			// rejection.
-			if h.mediaHealth != nil && playlist != nil && len(playlist.Items) > 0 {
+			if h.mediaHealth != nil && playlist != nil && len(playlist.Items) > 0 && !isCapsuleCast(ctx) {
 				sources := make([]string, 0, len(playlist.Items))
 				// scheduledPlaylist: any item carrying displayAt makes this
 				// a scheduler-filtered playlist, and the probe would see

@@ -88,6 +88,13 @@ int main(){
    check(!p.desired()&&!p.visible(),"Tightening policy immediately retires old work");
    p.tick(17000,17000);
    check(p.desired()&&p.desired()->item["id"]=="allowed","Policy retirement must not strand an allowed deferred replacement");
+   auto source = item("capsule");
+   p.command("playback.replace", {{"playlist", {{"items", ff::Json::array({source})}}}});
+   occurrence = show(p);
+   source["ffCapsuleId"] = std::string(64, 'a');
+   p.command("playback.update", {{"items", ff::Json::array({source})}});
+   check(p.desired()->id != occurrence && !p.visible()->item.contains("ffCapsuleId"),
+         "A capsule capture must select a new occurrence instead of relabeling live playback");
   }
   {
    ff::Store store(path);

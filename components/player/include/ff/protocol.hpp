@@ -13,14 +13,15 @@ struct Connection {
 };
 class Protocol {
  public:
-  explicit Protocol(Playback& playback, bool artwork_permissions = true)
-      : playback_(playback), artwork_permissions_(artwork_permissions) {}
+  explicit Protocol(Playback& playback, bool artwork_permissions = true, bool offline_capsules = false)
+      : playback_(playback), artwork_permissions_(artwork_permissions), offline_capsules_(offline_capsules) {}
   Json receive(Connection& connection, const Json& request);
   std::optional<Json> event(Connection& connection);
   void disconnected(const Connection& connection);
  private:
   Playback& playback_;
   const bool artwork_permissions_;
+  const bool offline_capsules_;
   struct Receipt { std::string fingerprint; Json response; };
   std::unordered_map<std::string, Receipt> receipts_;
   std::deque<std::string> receipt_order_;

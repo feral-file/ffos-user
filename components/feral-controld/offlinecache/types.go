@@ -375,8 +375,9 @@ func SourceKey(source string) string {
 // them, and deleting it removes the cached artifact for all of them (no
 // refcount, by design — see Store.DeleteItem's doc).
 type ItemRecord struct {
-	LastPlayedAt time.Time `json:"lastPlayedAt,omitempty"`
-	Automatic    bool      `json:"automatic,omitempty"`
+	Capsule      *CapsuleRecord `json:"capsule,omitempty"`
+	LastPlayedAt time.Time      `json:"lastPlayedAt,omitempty"`
+	Automatic    bool           `json:"automatic,omitempty"`
 	// Item is the DP-1 playlist item as resolved by dp1.DP1. Item.Source
 	// is this record's identity (see SourceKey) and is never rewritten —
 	// replay interception keys on the original URL — which preserves the
