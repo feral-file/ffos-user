@@ -179,6 +179,10 @@ func (c *chainReader) read(ctx context.Context, req Request) (*Work, error) {
 // answers *differently* returns ErrDisagree, because with no content address
 // there is nothing to decide between the two and showing either would be
 // showing bytes the device cannot stand behind.
+//
+// "Differently" includes a revert. A node that reverts the call is not a node
+// that could not answer: it is saying there is no work at that address, at
+// the same block the first node returned bytes for.
 func (c *chainReader) confirm(ctx context.Context, rest []string, work *Work) error {
 	block, ok := new(big.Int).SetString(work.Block, 10)
 	if !ok {
@@ -190,13 +194,35 @@ func (c *chainReader) confirm(ctx context.Context, rest []string, work *Work) er
 			continue
 		}
 		out, err := caller.Call(ctx, work.Contract, work.Calldata, block)
+		if errors.Is(err, errReverted) {
+			// Not silence: this node, reachable and on the right chain, has
+			// affirmatively answered "there is no work at that address" at
+			// the very block the first node returned bytes for. That is the
+			// strongest disagreement there is, and treating it as "no
+			// opinion" is what let one dishonest node serve fabricated
+			// bytes while an honest one said the work did not exist
+			// (round 3 review, F-A).
+			c.logger.Error("web3: a node reverted the call another node answered; the work is not shown",
+				zap.Uint64("chain", c.chain), zap.String("contract", work.Contract),
+				zap.String("answered", work.ReadFrom), zap.String("reverted", ep),
+				zap.String("block", work.Block))
+			return fmt.Errorf("%w: %s returned %d bytes at block %s where %s reverted",
+				ErrDisagree, work.ReadFrom, len(work.Body), work.Block, ep)
+		}
 		if err != nil {
 			// Unreachable, or behind that block: no second opinion to be
-			// had from this node.
+			// had from this node. Every error but a revert stays here on
+			// purpose (the boundary the review's recommendation drew): a
+			// revert is the node answering, while a transport failure or an
+			// over-cap answer is ambiguous between a node's own bug and an
+			// attack, and failing the read on those would let one flaky
+			// endpoint make a work unplayable.
 			continue
 		}
 		body, err := work.plan.Decode(out)
 		if err != nil {
+			// Same boundary: an answer that will not decode is not a
+			// second opinion about the work's bytes.
 			continue
 		}
 		if bytes.Equal(body, work.Body) {

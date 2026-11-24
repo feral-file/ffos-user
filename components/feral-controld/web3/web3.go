@@ -175,9 +175,13 @@ type Caller interface {
 	Call(ctx context.Context, contract string, data []byte, block *big.Int) ([]byte, error)
 }
 
-// Plan is what a Request resolves to before any node is asked: the calldata
-// to send and how to read the answer back. Building it needs no network, so a
-// malformed URL fails before a node is dialed.
+// Plan is what a Request resolves to once the resolve mode is known: the
+// calldata to send and how to read the answer back. Building it needs no
+// network of its own — but it is not the first thing the resolver does: the
+// real path spends eth_chainId, eth_blockNumber and resolveMode() on one
+// endpoint before NewPlan, so a malformed URL costs three RPCs to that
+// endpoint and then ends the read for every node (read() stops on
+// ErrUnsupported).
 type Plan struct {
 	Mode        string
 	Calldata    []byte

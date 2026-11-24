@@ -41,6 +41,11 @@ The device does the two things that are available without a content address, and
   the work `Confirmed`. **Differing bytes fail the read with `ErrDisagree`** — there is
   nothing to decide between them, and showing either would be showing bytes the device
   cannot stand behind.
+- **A revert is a disagreement, not a silence.** A node that reverts the call is not a node
+  that could not answer: it is saying there is no work at that address, at the same block the
+  first node returned bytes for. That is the strongest disagreement available, and reading it
+  as "no opinion" is what let one dishonest node serve fabricated bytes while an honest node
+  said the work did not exist (round 3 review, F-A).
 
 A second node that cannot answer — unreachable, or behind that block — is **not** a failure.
 The work plays on one node and the log says it was not confirmed. A read that required two
@@ -86,13 +91,36 @@ Blocks' `getTokenHtml/<core>/<tokenId>` — share an origin, and so share localS
 service workers. That is the cost of keeping the host invertible; onchfs can afford an origin
 per work because its whole identity is one 32-byte root. Owner's call, feral-file#3599.
 
+**And it is why a web3 record stores its entry URL and nothing else.** A shared origin means
+any other URL under it is one a sibling work could also claim, and replay's scope is a single
+flat method+URL map across every record in the playlist where the last one wins — so an alias
+is a way to serve the wrong work's bytes for a correct URL, silently, since a device-local
+source is exempt from every media-health verdict. The origin root is stored only by a work
+whose entry *is* the origin root (a URI with no method path). Found in this branch's third
+review round (F-B); the consequence is larger than the `localStorage` one the original
+decision weighed.
+
 A **name** is not a contract the device reads: `web3://example.eth/artpiece` is refused.
 Resolving one would mean a second trusted system (an ENS resolver) in the path of every
 work, which is the shape of the problem this issue is about.
 
-The mapping runs at every exit an item can take from `dp1`, after signature verification,
-beside the onchfs mapping (`dp1/devicelocal.go`): `Playlist.UnmarshalJSON`,
-`processDynamicPlaylist`, series expansion, `CastPlan.Narrow`.
+The mapping runs at **every call site of `dp1.mapDeviceLocalSources`**, after signature
+verification, beside the onchfs mapping (`dp1/devicelocal.go`). That is the rule, stated so it
+cannot go stale; the sites today are six, not the four an earlier draft of this document
+listed:
+
+| site | what exits there |
+|---|---|
+| `dp1/dp1.go:172` | `Playlist.UnmarshalJSON` — every decoded document |
+| `dp1/dp1.go:420` | `processDynamicPlaylist` — DP-1 hydration and the legacy indexer |
+| `dp1/series.go:226` | series expansion |
+| `dp1/seriesplayback.go:323` | `CastPlan.Narrow` |
+| `dp1/seriesplayback.go:461`, `:471` | `CastPlan.Full` — the other flatten of a plan, taken by the offline-cache download path |
+| `dp1/seriesplayback.go:628` | the series cast plan's inherited editions |
+
+**Both `CastPlan` flattens are exits.** `Full` was the one that did not map, found in this
+branch's own first review round; the offline-cache key is sha256 of the exact source string,
+so a flatten that skips the mapping gives one work two identities.
 
 ### 2. Reading (`web3/`)
 
@@ -122,7 +150,9 @@ A method name is not a file name, so `/artpiece` is not parsed for an extension.
 
 The ABI decoder treats every node answer as hostile, as onchfs's does: no length or offset
 may exceed the answer it came from, bounds are checked by subtraction, offsets must be word
-aligned, and the body is copied out of the answer rather than aliased into it.
+aligned, and the body is copied out of the answer rather than aliased into it. One exception,
+immaterial but stated rather than left wrong: `Plan.Decode`'s shortcut for a result too short
+to carry an offset and a length (under 64 bytes) returns that slice of the answer directly.
 
 `MaxWorkBytes` is 16 MiB — about seventy times the largest work measured (Art Blocks'
 generator, 224 KiB) — and bounds the hex-encoded RPC answer at roughly 33 MiB.
@@ -196,10 +226,14 @@ load.
 
 ## Known limitations
 
-- **A sub-resource misses.** The call returns one document; a work whose markup pulls a
-  relative sub-resource has nothing to pull it from, and an absolute URL to another origin
-  leaves the replay scope and goes to the network as it would from any page. Both measured
-  works are self-contained, which is what a work behind a view function has to be.
+- **A sub-resource misses, and so does a self-reference.** The call returns one document; a
+  work whose markup pulls a relative sub-resource has nothing to pull it from, and an absolute
+  URL to another origin leaves the replay scope and goes to the network as it would from any
+  page. A work that references *itself* by `/` or by its bare path misses too, deliberately:
+  on a shared origin those URLs belong to whichever sibling work is the root or carries that
+  exact path (§1). It fails closed at a `.invalid` host rather than open onto another work.
+  Both measured works are self-contained single documents, which is what a work behind a view
+  function has to be.
 - **A first play needs the network and a reachable node for that chain.** A work that cannot
   be read stays unplayable and the player skips it like any failed source.
 - **A lying node is the residual risk**, bounded as described above. There is no content

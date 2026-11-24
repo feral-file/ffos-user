@@ -12,8 +12,36 @@ package contentpath
 // scheme had to re-thread all eleven and a third would have been missed at
 // whichever one nobody remembered — the mechanism this seam retires
 // (feral-file#3599). A caller that only needs to know "the device holds this,
-// do not dial it, do not probe it, do not capture it" asks here; only the
-// resolver and the materializer for a scheme need to know which scheme it is.
+// do not dial it, do not probe it, do not capture it" asks here.
+//
+// # Adding a third scheme: the complete list of places that must know
+//
+// An earlier version of this comment said only the resolver and the
+// materializer need to know which scheme it is. That was wrong, and wrong in
+// the way that costs: a scheme registered in only those two places falls
+// through `offlinecache.Classify`'s switch into the source guard, which
+// refuses the unresolvable host, so the work still plays (replay and the
+// materializer are predicate-driven) while the app's download command answers
+// a classification failure and the queue logs a failed item (round 3 review,
+// F-D). The places are:
+//
+//  1. this file — a `DeviceLocalScheme` constant and its case in
+//     `DeviceLocalSourceScheme`;
+//  2. the scheme's own parser beside `onchfs.go` / `web3.go` here, with its
+//     `SourceURL` / `Parse…SourceURL` inverse pair;
+//  3. `offlinecache/classify.go` — a `MediaClass`, its case in `Classify`,
+//     and its case in `IsDeviceHeldClass`;
+//  4. `offlinecache.DeviceLocalMaterializer.resources` — the resolver call
+//     and the resources it produces, plus the config field that wires it;
+//  5. `dp1/devicelocal.go` — `deviceLocalItemSource`, and the three raw-URI
+//     helpers `DeviceLocalSource`, `DeviceLocalSourceVariants` and
+//     `SameDeviceLocalWork`.
+//
+// Everything else — mediahealth's five device-held passes, the offline cache's
+// queue skips and warming, the commandrouter's open wait, the retention pool —
+// is predicate-driven and needs no edit. That is what the seam bought; it did
+// not buy a one-line registration, and saying it did is how the next scheme
+// gets step 3 wrong.
 
 // DeviceLocalScheme names the scheme behind a device-local source.
 type DeviceLocalScheme string

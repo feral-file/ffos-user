@@ -77,10 +77,18 @@ const (
 	// ClassWeb3 is a device-local web3 source
 	// (https://<contract>.<chain>.web3.invalid/…, feral-file#3599). It
 	// behaves exactly as ClassOnchfs does — unresolvable host, written by
-	// Web3Materializer rather than captured, classified with no round trip
-	// ahead of the guard — and differs only in which materializer produces
+	// DeviceLocalMaterializer rather than captured, classified with no round
+	// trip ahead of the guard — and differs only in which resolver produces
 	// it. The two are told apart by IsDeviceHeldClass, never by a list a
 	// third scheme could be left out of.
+	//
+	// A scheme added to contentpath but NOT given a class here and a case in
+	// Classify below falls through to the source guard, which refuses the
+	// unresolvable host: the work still plays, because replay and the
+	// materializer go by the predicate, but the app's download command gets
+	// a classification failure instead of ErrItemInlineNotQueued and the
+	// queue logs a failed item. This file is step 3 of the five in
+	// contentpath/devicelocal.go's list (round 3 review, F-D).
 	ClassWeb3 MediaClass = "web3"
 )
 

@@ -92,9 +92,12 @@ func TestWeb3MaterializerWritesARecordReplayServes(t *testing.T) {
 	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{source}, false))
 
 	w, _ := contentpath.ParseWeb3(digitalSoulURI)
+	// The entry, and only the entry. A method work must not also claim the
+	// origin root: that URL belongs to whichever work on this contract is
+	// the root, and replay's scope map would hand it to whichever record
+	// loaded last (see web3Resources).
 	for i, url := range []string{
-		source,           // the entry the kiosk navigates to
-		w.Origin() + "/", // what a relative "/" in the document resolves to
+		source, // the entry the kiosk navigates to
 	} {
 		done := ts.expectSend("Fetch.fulfillRequest")
 		ts.handler(requestPausedEvent(t, "r"+string(rune('a'+i)), url))
@@ -126,9 +129,12 @@ func TestWeb3MaterializerWritesARecordReplayServes(t *testing.T) {
 	awaitSend(t, done)
 }
 
-// A work whose URL carries a query is served under the query too: fxhash-style
-// works read their seed from it, and the kiosk navigates to the exact string.
-func TestWeb3MaterializerKeepsTheQueryAndAlsoServesThePath(t *testing.T) {
+// The query survives on the entry — fxhash-style works read their seed from
+// it and the kiosk navigates to the exact string — and the entry is the only
+// URL stored. The bare path is NOT stored: it is another work's entry
+// verbatim (`/artpiece` is the entry of `web3://…/artpiece`), and replay's
+// scope map would answer that work from this one's bytes (round 3, F-B).
+func TestWeb3MaterializerStoresTheEntryAloneWithItsQuery(t *testing.T) {
 	store, _ := newTestStore(t)
 	source := web3Source(t, digitalSoulURI+"?seed=0x06ec")
 	m := newWeb3Materializer(t, store, &fakeWeb3Resolver{body: digitalSoulBody})
@@ -146,8 +152,9 @@ func TestWeb3MaterializerKeepsTheQueryAndAlsoServesThePath(t *testing.T) {
 	}
 	w, _ := contentpath.ParseWeb3(digitalSoulURI + "?seed=0x06ec")
 	assert.True(t, urls[source], "the entry carries the seed: %v", urls)
-	assert.True(t, urls[w.Origin()+"/"], "the origin root is served: %v", urls)
-	assert.True(t, urls[w.Origin()+"/artpiece"], "the path without the query is served: %v", urls)
+	assert.Len(t, urls, 1, "the entry is the only URL a method work may claim: %v", urls)
+	assert.False(t, urls[w.Origin()+"/"], "the origin root belongs to a root work: %v", urls)
+	assert.False(t, urls[w.Origin()+"/artpiece"], "the bare path is another work's entry: %v", urls)
 	assert.Equal(t, source, rec.Entry)
 }
 
@@ -226,4 +233,77 @@ func TestRetentionPoolSpansBothSchemes(t *testing.T) {
 	}
 	assert.True(t, seen["onchfs"], "the onchfs record is in the device-local pool: %v", seen)
 	assert.True(t, seen["web3"], "the web3 record is in the device-local pool: %v", seen)
+}
+
+// the kiosk navigates to one work's source and is served another's bytes, with
+// no way to notice: a device-local source is exempt from every media-health
+// verdict, so nothing probes it and no outcome is recorded against it.
+func TestTwoWeb3WorksOnOneContractCannotClaimEachOthersURLs(t *testing.T) {
+	store, _ := newTestStore(t)
+	plain := web3Source(t, digitalSoulURI)
+	seeded := web3Source(t, digitalSoulURI+"?seed=0x06ec")
+	m := newWeb3Materializer(t, store, &fakeWeb3Resolver{body: digitalSoulBody})
+
+	// One Ensure per work, each as the item the display opens on, so each is
+	// read in the foreground and waited for. Handing both to one Ensure
+	// would wait only for the first and leave the second to the background,
+	// which makes the assertion wall-clock dependent — it passed alone and
+	// failed under full-suite load.
+	for _, src := range []string{plain, seeded} {
+		require.Equal(t, 1, m.Ensure(context.Background(),
+			[]dp1playlist.PlaylistItem{{ID: src, Source: src}}, 10*time.Second),
+			"%s must be materialized before its URLs can be compared", src)
+	}
+
+	// Build the same map replay builds, in playlist order.
+	owner := map[string]string{}
+	for _, src := range []string{plain, seeded} {
+		rec, err := store.LoadItem(offlinecache.SourceKey(src))
+		require.NoError(t, err)
+		for _, res := range rec.Resources {
+			if prev, taken := owner[res.URL]; taken && prev != src {
+				t.Errorf("%s is stored by two works: %s and %s — replay keeps only the last",
+					res.URL, prev, src)
+			}
+			owner[res.URL] = src
+		}
+	}
+
+	// The sharpest form: each work's own entry must still be its own.
+	for _, src := range []string{plain, seeded} {
+		if got := owner[src]; got != src {
+			t.Errorf("the entry %s is answered from %s, so the wall shows the wrong work", src, got)
+		}
+	}
+}
+
+// A root-path work is the one case where the entry IS the origin root, so that
+// is the only time the root may be stored.
+func TestWeb3OriginRootIsStoredOnlyByARootWork(t *testing.T) {
+	store, _ := newTestStore(t)
+	root := web3Source(t, "web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1")
+	m := newWeb3Materializer(t, store, &fakeWeb3Resolver{body: digitalSoulBody})
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{ID: "a", Source: root}}, 10*time.Second))
+
+	w, ok := contentpath.ParseWeb3("web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1")
+	require.True(t, ok)
+	rec, err := store.LoadItem(offlinecache.SourceKey(root))
+	require.NoError(t, err)
+	var urls []string
+	for _, res := range rec.Resources {
+		urls = append(urls, res.URL)
+	}
+	assert.Contains(t, urls, w.Origin()+"/", "a root work's entry is the origin root: %v", urls)
+
+	// And a method work must not claim it.
+	store2, _ := newTestStore(t)
+	m2 := newWeb3Materializer(t, store2, &fakeWeb3Resolver{body: digitalSoulBody})
+	method := web3Source(t, digitalSoulURI)
+	require.Equal(t, 1, m2.Ensure(context.Background(), []dp1playlist.PlaylistItem{{ID: "a", Source: method}}, 10*time.Second))
+	rec2, err := store2.LoadItem(offlinecache.SourceKey(method))
+	require.NoError(t, err)
+	for _, res := range rec2.Resources {
+		assert.NotEqual(t, w.Origin()+"/", res.URL,
+			"a work with a method path must not claim the origin root a sibling could be")
+	}
 }

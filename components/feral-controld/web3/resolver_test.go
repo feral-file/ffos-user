@@ -321,3 +321,46 @@ func TestChainIDFromString(t *testing.T) {
 		}
 	}
 }
+
+// A second node that REVERTS the call is not a node that could not answer: it
+// is saying there is no work at that address, at the very block the first node
+// returned bytes for. That is the strongest disagreement there is, and it used
+// to be swallowed as "no opinion", so one dishonest node's fabricated bytes
+// were served while an honest node said the work did not exist (round 3
+// review, F-A). No earlier test covered it: the revert test reverts the FIRST
+// node, and the no-second-opinion test uses an HTTP 502.
+func TestResolveFailsWhenASecondNodeRevertsWhatTheFirstAnswered(t *testing.T) {
+	liar := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: abiBytes("fabricated")}}
+	// No answers: every eth_call reverts, including the work call.
+	honest := &node{chainID: 1, head: 100}
+	r := resolverOver(t, 1, liar.serve(t), honest.serve(t))
+
+	_, err := r.Resolve(context.Background(), web3.Request{Contract: testContract, ChainID: 1, Path: "artpiece"})
+	if !errors.Is(err, web3.ErrDisagree) {
+		t.Fatalf("Resolve err = %v, want ErrDisagree: the second node reverted what the first answered", err)
+	}
+	if honest.calls.Load() == 0 {
+		t.Fatal("the second node was never asked, so the test proves nothing")
+	}
+}
+
+// The boundary the fix draws, stated as a test: only a revert is an answer. A
+// node that cannot be reached at all is still "no opinion", so one flaky
+// endpoint cannot make a work unplayable.
+func TestASecondNodeThatCannotBeReachedIsStillNoOpinion(t *testing.T) {
+	const want = "the work"
+	first := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: abiBytes(want)}}
+	unreachable := &node{chainID: 1, httpStatus: http.StatusGatewayTimeout}
+	r := resolverOver(t, 1, first.serve(t), unreachable.serve(t))
+
+	work, err := r.Resolve(context.Background(), web3.Request{Contract: testContract, ChainID: 1, Path: "artpiece"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if string(work.Body) != want {
+		t.Fatalf("Body = %q, want %q", work.Body, want)
+	}
+	if work.Confirmed {
+		t.Fatal("Confirmed = true, but no second node answered")
+	}
+}

@@ -24,27 +24,38 @@ import (
 // and the one blob behind them.
 //
 // The kiosk navigates to the exact source URL, query and all, so that URL is
-// the entry and must be stored verbatim (replay matches method and URL
-// exactly). Two more spellings are stored for the same bytes, because a work
-// may name itself in its own markup:
+// the entry and is stored verbatim (replay matches method and URL exactly).
 //
-//   - the origin root (`https://<host>/`), which is what a relative "/" in
-//     the document resolves to;
-//   - the path without the query, for a document that links to itself by
-//     path.
+// **It is the only URL stored, and that is a correctness rule, not economy.**
+// A web3 host is a pure function of contract and chain (the owner's recorded
+// choice), so every work on one contract shares one origin — unlike onchfs,
+// whose host comes from the work's own root. Replay builds one flat
+// method+URL map over every record in the playlist and the last record wins
+// (replay.go, EnableForPlaylist), so any URL a sibling work could also emit
+// is a URL that can be answered from the wrong work's bytes. Two aliases
+// were stored here and both collided: the origin root, which every edition
+// of a contract would claim, and the path without its query, which is
+// another work's entry exactly (`/artpiece` is the entry of
+// `web3://…/artpiece`, and the alias of `web3://…/artpiece?seed=…`). The
+// kiosk would navigate to one work's source and be served another's
+// document, and nothing could report it — a device-local source is exempt
+// from every media-health verdict, so no probe runs and no outcome is
+// recorded (round 3 review, F-B).
 //
-// All three carry the content type the URL's own extension gave the work
-// (web3.Work.ContentType — a contract call has no header to carry one, and
-// sniffing would let the bytes choose how they are rendered) and
+// The origin root is therefore stored only when the entry *is* the origin
+// root: a URI with no method path, which no sibling with a method can be.
+//
+// What this gives up: a document that references itself by `/` or by its
+// bare path now misses. That is the same "a sub-resource misses" limitation
+// the scheme already documents, and it fails closed — a miss reaches a
+// `.invalid` host and dies — where the alias failed open, by serving a
+// different work.
+//
+// Each resource carries the content type the URL's own extension gave the
+// work (web3.Work.ContentType — a contract call has no header to carry one,
+// and sniffing would let the bytes choose how they are rendered) and
 // Access-Control-Allow-Origin, which the player's cross-origin HEAD probe
 // needs. None carries Content-Encoding: the bytes are stored plain.
-//
-// Anything else the document asks for misses. A work whose markup pulls a
-// sub-resource by a relative path has nothing to pull it from — the call
-// returned one document — and an absolute URL to another origin leaves the
-// replay scope and goes to the network as it would from any page. Both
-// measured works are self-contained, which is what a work behind a view
-// function has to be.
 func web3Resources(w contentpath.Web3, source string, work *web3.Work, freshUntil time.Time) ([]Resource, map[string][]byte, error) {
 	if work == nil || len(work.Body) == 0 {
 		return nil, nil, fmt.Errorf("%w: the call returned an empty body", web3.ErrNotFound)
@@ -58,14 +69,12 @@ func web3Resources(w contentpath.Web3, source string, work *web3.Work, freshUnti
 		contentType = "text/html"
 	}
 	entry := entryURL(source)
-	urls := []string{entry, w.Origin() + "/"}
-	// The path without a query, when the source carried one. A work that
-	// links to itself by path (`<a href="/artpiece">`) then resolves.
-	if w.HasQuery {
-		bare := w
-		bare.Query, bare.HasQuery = "", false
-		bare.Fragment, bare.HasFragment = "", false
-		urls = append(urls, bare.SourceURL())
+	urls := []string{entry}
+	// The origin root, only when this work's entry is the origin root. A
+	// work with a method path must never claim it: a sibling on the same
+	// contract would claim the same URL (see above).
+	if root := w.Origin() + "/"; entry == root {
+		urls = append(urls, root)
 	}
 
 	seen := map[string]bool{}
