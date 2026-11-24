@@ -2201,9 +2201,13 @@ func truncateLabel(s string) string {
 //
 // The documented contract is that this query exposes only a bounded label
 // snapshot: record id, timestamp, active flag, item id, title, artist,
-// thumbnail. Item sources and the full retained DP-1 item stay device-local —
-// they can be signed URLs carrying credentials in their query strings, and this
-// reply is reachable from the unauthenticated LAN hub. Forwarding the player's
+// thumbnail. Item sources and the full retained DP-1 item stay out of it — they
+// can be signed URLs carrying credentials in their query strings, and this
+// reply is reachable from the unauthenticated LAN hub. (A KEPT work's source
+// does reach controllers, on three surfaces: the getOfflineCacheStatus and
+// `displayed` downloadPlaylistItem replies, and the offline_cache_status
+// notification. That policy is stated once, in the Security Notes of
+// docs/controld-inbound-controller-messages.md.) Forwarding the player's
 // object verbatim made that contract true only for as long as the player
 // happened to honor it; a daemon that OWNS the shape cannot be widened by a
 // change on the other side of CDP.

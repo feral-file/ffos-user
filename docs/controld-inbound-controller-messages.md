@@ -2491,6 +2491,60 @@ is best-effort and never changes this command's own response: a failure
 to index is logged, not surfaced as an error here, since the requested
 item is genuinely queued either way.
 
+#### Keeping what is on display: `displayed`
+
+A controller that never held the document (another phone or ff-cli sent
+it, or it is the default playlist) cannot name an on-screen item by
+`source`, because `player_status` blanks item sources. It names the item by
+position instead (feral-file/feral-file#3633):
+
+```json
+{
+  "messageID": "msg-dl-item-2",
+  "message": {
+    "command": "downloadPlaylistItem",
+    "request": { "displayed": { "index": 3, "id": "<the item's DP-1 id>" } }
+  }
+}
+```
+
+- `index` is the item's position in `player_status` `items`. That list is
+  the player's admitted list (after content policy, schedule, series
+  narrowing and shuffle), and the device reads the same list.
+- `id`, when given, must equal that item's DP-1 `id`. Send it whenever the
+  item has one. If the display changed since the caller's status, the id no
+  longer matches and nothing is queued. A selector without `id` is accepted,
+  because DP-1 makes ids optional, but it has no such guard. ff-app and ff-cli
+  never send it for an id-less item.
+- `displayed` cannot be combined with `source`, `playlistUrl` or `dp1_call`.
+- Success is the usual `{ok, status, source}`. Here `source` is the item's
+  real source, and it is how such a controller learns the cache identity that
+  `getOfflineCacheStatus`, `clearPlaylistItemCache` and `offline_cache_status`
+  key on.
+- What is persisted depends on how the work was cast:
+  - **By URL** (`player_status` carries `playlistURL`, the default playlist
+    included): the request is handled exactly as `{playlistUrl, source}`. The
+    playlist is resolved fresh, the record and its URL index are written as
+    above, and `not_found` is returned if the live document no longer holds
+    that source.
+  - **Inline or dynamic:** the item is queued and no playlist record is
+    written. The status list is already narrowed and filtered, so a record
+    built from it could replace a fuller one with the same id. Replay after an
+    offline reboot does not need a record (it is armed from source keys). As a
+    result, `clearPlaylistCache` for that playlist does not include a work kept
+    this way, while `clearPlaylistItemCache` by its source does. A `data:` item
+    answers `not_queued_inline` and nothing is saved: the source carries its
+    own bytes, and the reply returns it.
+
+Errors:
+
+| Code | Retryable | When |
+|---|---|---|
+| `invalid_request` | no | `displayed` is not an object; `index` is not an integer; `id` is not a non-empty string; or it is combined with another way of naming the item. An FF OS without this selector also answers `invalid_request` (`source is required`). |
+| `not_found` | no | Nothing is on display, the cast is not a playlist, `index` is out of range, or `id` does not match the item at `index`. |
+| `resolve_failed` | yes | The device could not read its own player status. |
+| `busy` | yes | As in the main table above. |
+
 ### downloadPlaylist
 
 Purpose: resolve a playlist and queue every cacheable item it contains (up
@@ -3553,6 +3607,26 @@ Rules:
 - The current command envelope can contain secrets such as `uploadLogs.apiKey`;
   avoid full-payload logs.
 - Mint-pairing approval messages must never include raw browser session tokens.
+- **Item sources** (which can be signed URLs carrying credentials) are left
+  out of what describes the display: `player_status` blanks them, and
+  `getRecentlyPlayed` returns a bounded label snapshot without them.
+- **Kept works are a different matter.** Their sources reach controllers on
+  exactly three surfaces:
+  - `getOfflineCacheStatus` (reply) reports the source of each work someone
+    asked to keep.
+  - `offline_cache_status` (notification) pushes each kept work's source to
+    every connected controller and every local hub WebSocket client.
+  - `downloadPlaylistItem` with `displayed` (reply) returns the source of the
+    on-screen work the caller asked to keep. That work may never have been
+    kept before, for example one with only an automatic capture. Once it is
+    kept, the notification above broadcasts its source as well.
+
+  The two commands are controller tier, so on the device's own network they
+  are in the LAN-open plaintext set (§7.2 of `docs/ff1-control-v1.md`).
+  Anyone there can therefore learn the source of any work on screen by
+  asking the device to keep it, one heavy-tier call per work. This was
+  accepted for feral-file/feral-file#3633. A change that needs sources to stay
+  secret has to close all three surfaces, not one.
 - DP1 feed URLs are allowed in `displayPlaylist`, but DP1 playlist content must
   not be sent to `ff-controller` as part of mint approval.
 - Device-control commands with destructive side effects (`shutdown`, `reboot`,
