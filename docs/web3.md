@@ -41,6 +41,11 @@ The device does the two things that are available without a content address, and
   the work `Confirmed`. **Differing bytes fail the read with `ErrDisagree`** — there is
   nothing to decide between them, and showing either would be showing bytes the device
   cannot stand behind.
+- **The resolve mode is part of the question.** The confirming node is asked `resolveMode()`
+  too, at the same block, and a different answer (or a mode this reader does not know) fails the
+  read with `ErrDisagree`: the calldata was built from the first node's mode, so matching bytes
+  from the same calldata say nothing about which entry point the contract wants (round 6
+  review, F11). A node that cannot answer `resolveMode()` is "no opinion".
 - **A revert, or an empty return, is a disagreement, not a silence.** A node that reverts the call (or returns nothing, `"0x"`) is not a node
   that could not answer: it is saying there is no work at that address, at the same block the
   first node returned bytes for. That is the strongest disagreement available, and reading it

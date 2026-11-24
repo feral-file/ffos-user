@@ -222,3 +222,26 @@ func TestAnEmptyReturnsAttributeIsDefaultDecoding(t *testing.T) {
 		t.Errorf("returns=(): HasReturns=%v Returns=%v err=%v, want the raw-result mode", p.HasReturns, p.Returns, err)
 	}
 }
+
+// ERC-6860 makes returnTypes an alias of returns and the last attribute wins,
+// whichever name it used (round 6 review, F13).
+func TestTheLastReturnsAliasWinsInQueryOrder(t *testing.T) {
+	for _, c := range []struct {
+		query string
+		want  []string
+		has   bool
+	}{
+		{"returns=(uint256)&returnTypes=(bool)", []string{"bool"}, true},
+		{"returnTypes=(bool)&returns=(uint256)", []string{"uint256"}, true},
+		{"returns=(uint256)&returnTypes=", nil, false},
+		{"returnTypes=(bool)&returns=(uint256)&returns=(address)", []string{"address"}, true},
+	} {
+		p, err := planFor(t, "artpiece", c.query, web3.ModeAuto)
+		if err != nil {
+			t.Fatalf("query %q: %v", c.query, err)
+		}
+		if p.HasReturns != c.has || strings.Join(p.Returns, ",") != strings.Join(c.want, ",") {
+			t.Errorf("query %q: HasReturns=%v Returns=%v, want %v %v", c.query, p.HasReturns, p.Returns, c.has, c.want)
+		}
+	}
+}

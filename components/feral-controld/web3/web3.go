@@ -342,27 +342,37 @@ func parseReturns(rawQuery string) ([]string, bool, error) {
 	if rawQuery == "" {
 		return nil, false, nil
 	}
-	q, err := url.ParseQuery(rawQuery)
-	if err != nil {
+	if _, err := url.ParseQuery(rawQuery); err != nil {
 		// A query that does not parse is not an error for the call: a work's
 		// own seed may be spelled in ways url.ParseQuery refuses, and the
 		// query is carried to the kiosk byte for byte either way. It just
 		// cannot carry a returns attribute.
 		return nil, false, nil
 	}
-	for _, key := range []string{"returns", "returnTypes"} {
-		v, ok := q[key]
-		if !ok || len(v) == 0 {
+	// ERC-6860 defines returnTypes as an alias of returns and the last
+	// attribute applies, whichever name it used, so walk the raw query in
+	// order instead of checking one name before the other (round 6 review,
+	// F13). q parsed, so every pair here unescapes.
+	var key, last string
+	found := false
+	for _, pair := range strings.Split(rawQuery, "&") {
+		k, v, _ := strings.Cut(pair, "=")
+		k, kerr := url.QueryUnescape(k)
+		v, verr := url.QueryUnescape(v)
+		if kerr != nil || verr != nil || (k != "returns" && k != "returnTypes") {
 			continue
 		}
-		inner := strings.TrimSpace(v[len(v)-1])
+		key, last, found = k, v, true
+	}
+	if found {
+		inner := strings.TrimSpace(last)
 		if inner == "" {
 			// ERC-6860 auto mode: an empty attribute is the default
 			// decoding, the same as no attribute, and is distinct from
 			// `returns=()` (the raw result). It must be answered before the
 			// parentheses check, which would refuse it (round 5 review,
-			// F10).
-			continue
+			// F10). As the last attribute it also cancels an earlier one.
+			return nil, false, nil
 		}
 		if !strings.HasPrefix(inner, "(") || !strings.HasSuffix(inner, ")") {
 			return nil, false, fmt.Errorf("%w: %s must look like (type,type)", ErrUnsupported, key)

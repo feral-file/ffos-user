@@ -314,6 +314,7 @@ func TestWeb3OriginRootIsStoredOnlyByARootWork(t *testing.T) {
 func TestWeb3EntryIsStoredInTheBrowsersSpelling(t *testing.T) {
 	cases := []struct{ uri, path string }{
 		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/artpiece?seed=it's", "/artpiece?seed=it%27s"},
+		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/artpiece/string!a^b", "/artpiece/string!a%5Eb"},
 		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/greet/string!hello world", "/greet/string!hello%20world"},
 		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/a%21b?q=%27x%27&r=é", "/a%21b?q=%27x%27&r=%C3%A9"},
 	}

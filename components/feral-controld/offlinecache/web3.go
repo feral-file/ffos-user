@@ -126,11 +126,11 @@ func browserEntryURL(w contentpath.Web3, source string) string {
 }
 
 // whatwgEscape applies the WHATWG URL standard's path percent-encode set
-// (controls, space, non-ASCII, and " # < > ? ` { }) to a path, or the
+// (controls, space, non-ASCII, and " # < > ? ^ ` { }) to a path, or the
 // special-query set (controls, space, non-ASCII, " # < > and ') to a query.
 // Every other byte, % included, is kept.
 func whatwgEscape(s string, query bool) string {
-	set := "\"#<>?`{}"
+	set := "\"#<>?^`{}"
 	if query {
 		set = "\"#<>'"
 	}

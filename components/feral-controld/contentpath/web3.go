@@ -112,7 +112,9 @@ func ParseWeb3(raw string) (Web3, bool) {
 	if !isHex40Address(contract) {
 		return Web3{}, false
 	}
-	w.Contract = strings.ToLower(strings.TrimPrefix(contract, "0x"))
+	// isHex40Address accepts a "0X" prefix as well as "0x", so remove the
+	// validated two characters rather than only the lower-case spelling.
+	w.Contract = strings.ToLower(contract[2:])
 	w.ChainID = Web3DefaultChainID
 	if hasChain {
 		// Leading zeros would give one chain two spellings and so one work
@@ -123,7 +125,7 @@ func ParseWeb3(raw string) (Web3, bool) {
 		}
 		w.ChainID = id
 	}
-	if !cleanTreePath(after) {
+	if !cleanWeb3Path(after) {
 		return Web3{}, false
 	}
 	w.Path = after
@@ -194,7 +196,7 @@ func ParseWeb3SourceURL(raw string) (Web3, bool) {
 		return Web3{}, false
 	}
 	p := strings.TrimPrefix(u.EscapedPath(), "/")
-	if !cleanTreePath(p) {
+	if !cleanWeb3Path(p) {
 		return Web3{}, false
 	}
 	w.Path = p
@@ -254,4 +256,32 @@ func isHex40Address(s string) bool {
 	}
 	_, err := hex.DecodeString(s[2:])
 	return err == nil
+}
+
+// cleanWeb3Path reports whether an escaped web3 path is safe to carry as a
+// URL path. Unlike cleanTreePath it does not treat the path as a filesystem
+// tree: the segments are a method name and its arguments (ERC-4804), and a
+// percent-encoded argument may legitimately decode to "//", "a/../b" or a
+// backslash, so the decoded whole is never inspected. Only what a browser
+// would act on in the escaped form is refused: a literal backslash (read as a
+// slash), an empty segment other than a trailing one, and a segment that is
+// itself "." or ".." once decoded (a dot segment, escaped or not).
+func cleanWeb3Path(escaped string) bool {
+	if escaped == "" {
+		return true
+	}
+	if strings.Contains(escaped, `\`) {
+		return false
+	}
+	segments := strings.Split(strings.TrimSuffix(escaped, "/"), "/")
+	for _, seg := range segments {
+		if seg == "" {
+			return false
+		}
+		dec, err := url.PathUnescape(seg)
+		if err != nil || dec == "." || dec == ".." {
+			return false
+		}
+	}
+	return true
 }

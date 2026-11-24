@@ -193,6 +193,26 @@ func (c *chainReader) confirm(ctx context.Context, rest []string, work *Work) er
 		if err := c.checkChain(ctx, caller, ep); err != nil {
 			continue
 		}
+		// The calldata was built from the first node's resolveMode() answer,
+		// so confirming its bytes proves nothing about which entry point the
+		// contract wants unless this node gives the same mode: a node that
+		// lied about the mode could steer the read to a fallback document and
+		// have an honest node "confirm" it (round 6 review, F11). A node that
+		// cannot answer resolveMode() at all is "no opinion", like any other
+		// transport failure; one that answers a mode this reader does not
+		// know, or a different one, is a disagreement.
+		mode, merr := resolveMode(ctx, caller, work.Contract, block)
+		if merr != nil && !errors.Is(merr, ErrUnsupported) {
+			continue
+		}
+		if merr != nil || mode != work.Mode {
+			c.logger.Error("web3: nodes disagree on the resolve mode; the work is not shown",
+				zap.Uint64("chain", c.chain), zap.String("contract", work.Contract),
+				zap.String("first", work.ReadFrom), zap.String("second", ep),
+				zap.String("block", work.Block), zap.String("mode", work.Mode))
+			return fmt.Errorf("%w: %s read resolve mode %q at block %s where %s did not",
+				ErrDisagree, work.ReadFrom, work.Mode, work.Block, ep)
+		}
 		out, err := caller.Call(ctx, work.Contract, work.Calldata, block)
 		if errors.Is(err, errReverted) {
 			// Not silence: this node, reachable and on the right chain, has

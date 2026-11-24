@@ -396,3 +396,22 @@ func TestASecondNodeWithAnUndecodableAnswerIsStillNoOpinion(t *testing.T) {
 		t.Fatalf("Body = %q Confirmed = %v, want %q unconfirmed", work.Body, work.Confirmed, want)
 	}
 }
+
+// A node that lies about resolveMode() picks the entry point, and an honest
+// node confirming the *bytes* of that call proves nothing about the mode
+// (round 6 review, F11). Both nodes return the same document here, so only a
+// mode comparison can tell them apart.
+func TestResolveFailsWhenNodesDisagreeOnTheResolveMode(t *testing.T) {
+	manual := "0x" + hex.EncodeToString(append([]byte("manual"), make([]byte, 26)...))
+	liar := &node{chainID: 1, head: 100, answers: map[string]string{
+		resolveModeSelector:                            manual,
+		"0x" + hex.EncodeToString([]byte("/artpiece")): abiBytes("fallback"),
+	}}
+	honest := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: abiBytes("fallback")}}
+	r := resolverOver(t, 1, liar.serve(t), honest.serve(t))
+
+	_, err := r.Resolve(context.Background(), web3.Request{Contract: testContract, ChainID: 1, Path: "artpiece"})
+	if !errors.Is(err, web3.ErrDisagree) {
+		t.Fatalf("Resolve err = %v, want ErrDisagree: the nodes read different resolve modes", err)
+	}
+}

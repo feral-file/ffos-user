@@ -227,3 +227,43 @@ func TestDeviceLocalSourceScheme(t *testing.T) {
 		}
 	}
 }
+
+// A percent-encoded argument is data, not a filesystem path: it may decode to
+// "//", "a/../b" or a backslash and still be a valid contract argument
+// (round 6 review, F12). A literal dot segment or backslash is still refused.
+func TestWeb3PathAcceptsEncodedArgumentData(t *testing.T) {
+	for _, p := range []string{
+		"render/string!https%3A%2F%2Fexample.com",
+		"render/string!a%2F..%2Fb",
+		"render/string!a%5Cb",
+		"render/string!..",
+	} {
+		raw := "web3://" + digitalSoulContract + ":1/" + p
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Errorf("ParseWeb3(%q) refused, want accepted", raw)
+			continue
+		}
+		back, ok := contentpath.ParseWeb3SourceURL(w.SourceURL())
+		if !ok || back.Path != p {
+			t.Errorf("ParseWeb3SourceURL(%q) = %+v %v, want path %q", w.SourceURL(), back, ok, p)
+		}
+	}
+	for _, p := range []string{"a/%2e%2e/b", "a//b", "a/./b"} {
+		if _, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/" + p); ok {
+			t.Errorf("path %q accepted, want refused", p)
+		}
+	}
+}
+
+// "0X" is accepted by validation, so it must be stripped like "0x"
+// (round 6 review, F14).
+func TestParseWeb3StripsAnUpperCasePrefix(t *testing.T) {
+	w, ok := contentpath.ParseWeb3("web3://0X" + digitalSoulContract[2:] + ":1/artpiece")
+	if !ok || w.Contract != digitalSoulContract[2:] {
+		t.Fatalf("ParseWeb3 = %+v %v, want contract %q", w, ok, digitalSoulContract[2:])
+	}
+	if _, ok := contentpath.ParseWeb3SourceURL(w.SourceURL()); !ok {
+		t.Fatalf("SourceURL %q is not a web3 source", w.SourceURL())
+	}
+}
