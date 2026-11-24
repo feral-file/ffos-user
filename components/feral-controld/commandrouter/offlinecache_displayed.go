@@ -90,10 +90,9 @@ func parseDisplayedSelector(args map[string]any) (displayedSelector, map[string]
 // The reply carries the item's real source on purpose: it is how a
 // controller that never held the document learns the cache identity every
 // other offline-cache command keys on. Sources still never go onto the
-// player_status broadcast, but once the work is kept the
-// offline_cache_status notification carries its source like any kept
-// work's. See the Security Notes in
-// docs/controld-inbound-controller-messages.md for the policy.
+// player_status broadcast. The reply widens nothing: a direct checkStatus
+// reply already carries every on-screen source to the same tier. See the
+// Security Notes in docs/controld-inbound-controller-messages.md.
 func (h *handler) handleDownloadDisplayedItem(ctx context.Context, args map[string]any) (interface{}, error) {
 	sel, invalid := parseDisplayedSelector(args)
 	if invalid != nil {

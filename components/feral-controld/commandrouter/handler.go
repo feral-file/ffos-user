@@ -2203,10 +2203,10 @@ func truncateLabel(s string) string {
 // snapshot: record id, timestamp, active flag, item id, title, artist,
 // thumbnail. Item sources and the full retained DP-1 item stay out of it — they
 // can be signed URLs carrying credentials in their query strings, and this
-// reply is reachable from the unauthenticated LAN hub. (A KEPT work's source
-// does reach controllers, on three surfaces: the getOfflineCacheStatus and
-// `displayed` downloadPlaylistItem replies, and the offline_cache_status
-// notification. That policy is stated once, in the Security Notes of
+// reply is reachable from the unauthenticated LAN hub. (This keeps THIS reply
+// narrow; it is not what keeps sources from a controller-tier caller: a
+// direct checkStatus reply carries every on-screen source. The surfaces are
+// listed once, in the Security Notes of
 // docs/controld-inbound-controller-messages.md.) Forwarding the player's
 // object verbatim made that contract true only for as long as the player
 // happened to honor it; a daemon that OWNS the shape cannot be widened by a

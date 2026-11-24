@@ -3607,26 +3607,29 @@ Rules:
 - The current command envelope can contain secrets such as `uploadLogs.apiKey`;
   avoid full-payload logs.
 - Mint-pairing approval messages must never include raw browser session tokens.
-- **Item sources** (which can be signed URLs carrying credentials) are left
-  out of what describes the display: `player_status` blanks them, and
-  `getRecentlyPlayed` returns a bounded label snapshot without them.
-- **Kept works are a different matter.** Their sources reach controllers on
-  exactly three surfaces:
-  - `getOfflineCacheStatus` (reply) reports the source of each work someone
-    asked to keep.
-  - `offline_cache_status` (notification) pushes each kept work's source to
-    every connected controller and every local hub WebSocket client.
-  - `downloadPlaylistItem` with `displayed` (reply) returns the source of the
-    on-screen work the caller asked to keep. That work may never have been
-    kept before, for example one with only an automatic capture. Once it is
-    kept, the notification above broadcasts its source as well.
+- **Item sources** (which can be signed URLs carrying credentials) are
+  blanked on the **broadcast** that describes the display (`player_status`),
+  and `getRecentlyPlayed` returns a bounded label snapshot without them.
+  They are not secret from a controller-tier caller. These surfaces carry
+  them:
+  - **`checkStatus` (reply).** A direct `checkStatus` is answered with the
+    player's own status: the full `playlist` and every `items[].source`.
+    controld sanitizes only the showing key and the outcome ring. This is the
+    widest surface: everything on screen.
+  - **`getOfflineCacheStatus` (reply).** The source of each work someone asked
+    to keep.
+  - **`offline_cache_status` (notification).** Each kept work's source,
+    pushed to every connected controller and every local hub WebSocket client.
+  - **`downloadPlaylistItem` with `displayed` (reply).** The source of the one
+    on-screen work the caller asked to keep. That is a subset of what
+    `checkStatus` already returns, so this selector widens nothing.
 
-  The two commands are controller tier, so on the device's own network they
-  are in the LAN-open plaintext set (§7.2 of `docs/ff1-control-v1.md`).
-  Anyone there can therefore learn the source of any work on screen by
-  asking the device to keep it, one heavy-tier call per work. This was
-  accepted for feral-file/feral-file#3633. A change that needs sources to stay
-  secret has to close all three surfaces, not one.
+  `checkStatus`, `getOfflineCacheStatus` and `downloadPlaylistItem` are
+  controller tier, so on the device's own network they are in the LAN-open
+  plaintext set (§7.2 of `docs/ff1-control-v1.md`). Anyone there can read the
+  sources of whatever is on display. A change that needs sources to stay
+  secret from that set has to close all four surfaces, starting with
+  `checkStatus`.
 - DP1 feed URLs are allowed in `displayPlaylist`, but DP1 playlist content must
   not be sent to `ff-controller` as part of mint approval.
 - Device-control commands with destructive side effects (`shutdown`, `reboot`,
