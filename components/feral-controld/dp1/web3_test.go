@@ -148,3 +148,28 @@ func TestWeb3SourceVariantsAndSameWork(t *testing.T) {
 		"an ordinary source is not a device-local work")
 	assert.Nil(t, dp1.DeviceLocalSourceVariants("https://cdn.example/x.png"))
 }
+
+// CastPlan.Full() is the second flatten of a plan, beside Narrow(), and the
+// offline-cache download path takes it
+// (commandrouter.resolveOfflineCachePlaylist). It is an exit as much as
+// Narrow is, so it maps too: the two flattens of one plan must not be able to
+// disagree about a work's identity, because the offline-cache key is sha256 of
+// the exact source string.
+func TestCastPlanFullMapsDeviceLocalSources(t *testing.T) {
+	onchfsItem := dp1playlist.PlaylistItem{ID: "a", Source: "onchfs://" + caseyReasRoot}
+	web3Item := dp1playlist.PlaylistItem{ID: "b", Source: "web3://" + digitalSoulContract + ":1/artpiece"}
+	plan := dp1.CastPlan{Segments: []dp1.CastSegment{{Item: &onchfsItem}, {Item: &web3Item}}}
+
+	full := plan.Full()
+	require.Len(t, full, 2)
+	assert.Equal(t, caseyReasHost+"/", full[0].Source)
+	assert.Equal(t, digitalSoulHost+"/artpiece", full[1].Source)
+
+	narrow := plan.Narrow(nil)
+	require.Len(t, narrow, 2)
+	assert.Equal(t, narrow[0].Source, full[0].Source, "the two flattens of one plan must agree")
+	assert.Equal(t, narrow[1].Source, full[1].Source, "the two flattens of one plan must agree")
+
+	assert.Equal(t, "onchfs://"+caseyReasRoot, onchfsItem.Source, "the plan's own items are not written through")
+	assert.Equal(t, "web3://"+digitalSoulContract+":1/artpiece", web3Item.Source, "the plan's own items are not written through")
+}

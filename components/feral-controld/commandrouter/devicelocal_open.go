@@ -9,12 +9,13 @@ import (
 )
 
 // deviceLocalOpening returns the display request's items reordered so the work the display request
-// opens on comes first, and how long the display request should wait for it to be read
-// from chain: deviceLocalOpenWait when that work is onchfs, zero otherwise.
+// opens on comes first, and how long the display request should wait for it to be
+// resolved: deviceLocalOpenWait when that work is device-local (an onchfs tree
+// or a web3 call), zero otherwise.
 //
-// Why: DeviceLocalMaterializer.Ensure waits for the FIRST onchfs work in the list
-// it is given. Handed the list as is, a wall that opens on an ordinary IPFS
-// work but carries one onchfs work at position 40 waited up to 15 s on every
+// Why: DeviceLocalMaterializer.Ensure waits for the FIRST device-local work in
+// the list it is given. Handed the list as is, a wall that opens on an ordinary IPFS
+// work but carries one device-local work at position 40 waited up to 15 s on every
 // display while the chain RPCs were unreachable (a captive or filtered network),
 // for a work nobody would see for an hour. Only the opening work is worth a
 // wait; the rest are read in the background and widen the replay scope when

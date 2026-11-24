@@ -458,10 +458,17 @@ func (p CastPlan) Full() []dp1playlist.PlaylistItem {
 			}
 		}
 		if p.maxItems > 0 && len(items) >= p.maxItems {
-			return items[:p.maxItems]
+			return mapDeviceLocalSources(items[:p.maxItems])
 		}
 	}
-	return items
+	// Full is an exit as much as Narrow is, and the offline-cache download
+	// path takes this one (commandrouter.resolveOfflineCachePlaylist). Every
+	// path that builds a plan today hands it items already mapped, so this
+	// changes nothing live — but the two flattens of one plan must not be
+	// able to disagree about a work's identity, because the offline-cache
+	// key is sha256 of the exact source string. Mapping is pure and
+	// idempotent, so applying it here costs nothing (feral-file#3599).
+	return mapDeviceLocalSources(items)
 }
 
 // editionsHaveSource reports whether editions already carries an item whose
