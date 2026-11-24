@@ -42,7 +42,6 @@ func dynamicPlaylistSourceMatches(a, b *dp1.Playlist) bool {
 		return false
 	}
 	return reflect.DeepEqual(a.DynamicQuery, b.DynamicQuery) &&
-		reflect.DeepEqual(a.DynamicQueryPagination, b.DynamicQueryPagination) &&
 		reflect.DeepEqual(a.DynamicQueries, b.DynamicQueries)
 }
 

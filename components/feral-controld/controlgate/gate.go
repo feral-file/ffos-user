@@ -15,6 +15,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -42,6 +44,11 @@ type Gate struct {
 	onOwnerEnrolled func()
 	onReleased      func()
 	onAdmitted      func(context.Context, *control.Admission)
+
+	// carrierMu guards the bounded log of carriers that do not parse.
+	carrierMu   sync.Mutex
+	carrierLast time.Time
+	carrierHeld int
 }
 
 // New builds a gate over auth that executes admitted commands on handler
@@ -107,6 +114,30 @@ func (g *Gate) ScreenProtected() bool {
 	return live
 }
 
+// carrierRefusalLogInterval bounds the line for a carrier that does not parse.
+const carrierRefusalLogInterval = 30 * time.Second
+
+// carrierRefused logs an ff1Envelope whose carrier does not parse: the one
+// refusal that left no line (feral-file/feral-file#3644). Any stranger on the
+// public relay channel can send one, and the parser's error quotes member
+// names the sender chose, so the line carries no parser text and is written
+// at most once per interval with the count since the last.
+func (g *Gate) carrierRefused() {
+	g.carrierMu.Lock()
+	g.carrierHeld++
+	now := time.Now()
+	if !g.carrierLast.IsZero() && now.Sub(g.carrierLast) < carrierRefusalLogInterval {
+		g.carrierMu.Unlock()
+		return
+	}
+	count := g.carrierHeld
+	g.carrierHeld = 0
+	g.carrierLast = now
+	g.carrierMu.Unlock()
+	g.logger.Warn("Control envelope refused",
+		zap.String("code", control.CodeBadEnvelope), zap.String("detail", "carrier does not parse"), zap.Int("count", count))
+}
+
 func parseEnvelopeRequest(raw json.RawMessage) (string, error) {
 	return control.ParseCarrier(raw)
 }
@@ -117,6 +148,7 @@ func parseEnvelopeRequest(raw json.RawMessage) (string, error) {
 func (g *Gate) HandleEnvelope(ctx context.Context, raw json.RawMessage, origin control.Origin) (*Wire, *control.PublicError) {
 	compact, err := parseEnvelopeRequest(raw)
 	if err != nil {
+		g.carrierRefused()
 		return nil, &control.PublicError{Code: control.CodeBadEnvelope, Err: err}
 	}
 	adm, err := g.auth.OpenFrom(compact, origin)

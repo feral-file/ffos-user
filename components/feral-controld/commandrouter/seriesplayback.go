@@ -400,7 +400,7 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// ProcessPlaylistURLForCast/ProcessDynamicPlaylistForCast returned, so
 	// it still carries the ORIGINAL DynamicQuery/DynamicQueries — rebuilt
 	// here holds the already-resolved, already-narrowed Items instead.
-	// Left alone, MarshalJSON would still emit dynamicQuery(.pagination),
+	// Left alone, the encoded document would still carry dynamicQuery,
 	// so re-entering Process below would see HasDynamicContent() true and
 	// re-run the whole dynamic resolution (a fresh network round trip) on
 	// every setSeriesPlayback call, instead of the free, local re-narrow
@@ -409,7 +409,6 @@ func (h *handler) recastForMode(ctx context.Context, device *dp1.SeriesPlaybackM
 	// for it.
 	rebuilt.DynamicQuery = nil
 	rebuilt.DynamicQueries = nil
-	rebuilt.DynamicQueryPagination = nil
 
 	b, err := h.json.Marshal(rebuilt)
 	if err != nil {

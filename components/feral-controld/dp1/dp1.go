@@ -1,7 +1,6 @@
 package dp1
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -129,32 +128,11 @@ type LegacyDynamicQuery struct {
 	Params   map[string]string `json:"params"`
 }
 
-// DynamicQueryPagination is the `dynamicQuery.pagination` block: cursor
-// paging for a resolver that cannot page by `{{limit}}`/`{{offset}}`
-// placeholders. The next page sends the value read at CursorPath as GraphQL
-// variable Variable, and the walk continues while the boolean at HasNextPath
-// is true. Today only the Raster wallet walk (raster.go) reads it.
-type DynamicQueryPagination struct {
-	Variable    string `json:"variable"`
-	CursorPath  string `json:"cursorPath"`
-	HasNextPath string `json:"hasNextPath"`
-}
-
 // Playlist is a DP-1 playlist plus optional dynamic resolution config.
 type Playlist struct {
 	dp1playlist.Playlist
 	// LEGACY: see LegacyDynamicQuery. Omit from JSON when using spec dynamicQuery only.
 	DynamicQueries []LegacyDynamicQuery `json:"dynamicQueries,omitempty"`
-	// DynamicQueryPagination is `dynamicQuery.pagination`, held beside
-	// DynamicQuery because dp1-go's typed playlists.DynamicQuery has no such
-	// field and a plain decode would silently drop it. It is carried by the
-	// MarshalJSON/UnmarshalJSON hooks below, NOT by a struct tag: it must
-	// survive the round trip through the player (the dp1_call payload comes
-	// back in player_status, and the refresher re-resolves the dynamic source
-	// from that copy), so it is written back INSIDE the `dynamicQuery` object
-	// on marshal, where it came from, never as a sibling key the document's
-	// signer did not cover. nil when the document carries none.
-	DynamicQueryPagination *DynamicQueryPagination `json:"-"`
 	// Verification is the DP-1 signature verdict computed over the document
 	// bytes this playlist was decoded from (feral-file/ffos-user#307). nil
 	// means "not verified": verification disabled by config, or a playlist
@@ -167,67 +145,32 @@ type Playlist struct {
 	Verification *sigverify.Verdict `json:"-"`
 }
 
-// playlistJSON is Playlist without its methods, so the hooks below can lean on
-// encoding/json's struct decoding without recursing into themselves.
+// playlistJSON is Playlist without its methods, so UnmarshalJSON can lean on
+// encoding/json's struct decoding without recursing into itself.
 type playlistJSON Playlist
 
-// UnmarshalJSON decodes the document as the plain struct, then peeks
-// `dynamicQuery.pagination` out of the same bytes (see
-// DynamicQueryPagination on Playlist for why it cannot be a struct field).
-// A `pagination` that is present but not an object is left nil rather than
-// failing the decode: a document that is not a Raster walk is not refused for
-// carrying one, and a Raster walk without a usable block is refused later by
-// name, with a clearer error than a decode failure would give.
+// UnmarshalJSON decodes the document as the plain struct and maps its items'
+// onchfs sources to the device-local form (see onchfs.go).
+//
+// There is deliberately no MarshalJSON. One existed to carry a
+// `dynamicQuery.pagination` block that dp1-go's typed DynamicQuery drops,
+// for the device-side Raster wallet walk. That walk was removed
+// (feral-file/feral-file#3576, section 7 of the 2026-11-23 plan): Raster now
+// needs a key that only ff-source-resolver-service holds, so ff-app casts an
+// address playlist as a fixed DP-1 list. A `pagination` block in an incoming
+// document is now dropped on decode like any other field dp1-go does not
+// model, and nothing reads it. Encoding is now the plain struct's, so each
+// encoder's own settings apply: control's SetEscapeHTML(false) encoder writes
+// `&` in a source raw where the old hook's inner json.Marshal escaped it.
+// Equivalent JSON either way; nothing compares those bytes.
 func (p *Playlist) UnmarshalJSON(data []byte) error {
 	var decoded playlistJSON
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	var peek struct {
-		DynamicQuery *struct {
-			Pagination json.RawMessage `json:"pagination"`
-		} `json:"dynamicQuery"`
-	}
-	// The plain decode above already typed dynamicQuery as an object (or
-	// failed), so this second pass can only fail on `pagination` itself.
-	if err := json.Unmarshal(data, &peek); err == nil && peek.DynamicQuery != nil {
-		var pagination DynamicQueryPagination
-		if json.Unmarshal(peek.DynamicQuery.Pagination, &pagination) == nil &&
-			bytes.HasPrefix(bytes.TrimSpace(peek.DynamicQuery.Pagination), []byte("{")) {
-			decoded.DynamicQueryPagination = &pagination
-		}
-	}
 	*p = Playlist(decoded)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
 	return nil
-}
-
-// MarshalJSON is the plain encoding, plus `pagination` written back inside
-// the `dynamicQuery` object when the playlist carries one. A playlist without
-// pagination encodes exactly as the plain struct does, byte for byte, so
-// nothing that is not a Raster walk changes shape on the wire.
-func (p Playlist) MarshalJSON() ([]byte, error) {
-	out, err := json.Marshal(playlistJSON(p))
-	if err != nil || p.DynamicQueryPagination == nil || p.DynamicQuery == nil {
-		return out, err
-	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(out, &top); err != nil {
-		return nil, err
-	}
-	var dq map[string]json.RawMessage
-	if err := json.Unmarshal(top["dynamicQuery"], &dq); err != nil {
-		return nil, err
-	}
-	pagination, err := json.Marshal(p.DynamicQueryPagination)
-	if err != nil {
-		return nil, err
-	}
-	dq["pagination"] = pagination
-	if top["dynamicQuery"], err = json.Marshal(dq); err != nil {
-		return nil, err
-	}
-	return json.Marshal(top)
 }
 
 // HasDynamicContent returns true when the playlist requests dynamic item resolution (spec or legacy).
@@ -468,7 +411,7 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 
 // processDynamicPlaylist resolves the playlist's dynamic query. Every item it
 // returns already carries its device-local onchfs source (onchfs.go): DP-1
-// hydration, the Raster walk and the legacy indexer all exit here.
+// hydration and the legacy indexer both exit here.
 func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	resolved, err := d.resolveDynamicPlaylist(ctx, playlist, minimal, maxItems)
 	if err != nil {
@@ -560,10 +503,11 @@ func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
 //
 // The resolver is chosen by responseMapping.itemSchema. `dp1/*` (and an
 // absent schema, for documents published before anything checked it) is the
-// dp1-go path above. `raster/tokensOwned/1.0` is the Raster wallet walk in
-// raster.go, which pages by cursor and maps vendor nodes to items itself; it
-// is the one place that departs from the fail-closed rule, per node, and
-// says so on processRasterWalk. Any other schema is refused by name.
+// dp1-go path above. Any other schema is refused by name before any request.
+// That includes `raster/tokensOwned/1.0`, the Raster wallet walk ff-app used
+// to send for an address playlist: the device has no Raster key and must not
+// carry one, so the walk was removed and the app casts a fixed DP-1 list
+// instead (feral-file/feral-file#3576).
 func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	if playlist.DynamicQuery == nil {
 		return nil, fmt.Errorf("internal: dynamicQuery is nil")
@@ -572,8 +516,6 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 	switch schema := playlist.DynamicQuery.ResponseMapping.ItemSchema; {
 	case schema == "" || strings.HasPrefix(schema, "dp1/"):
 		// dp1-go hydration below.
-	case schema == RasterTokensOwnedItemSchema:
-		return d.processRasterWalk(ctx, playlist, minimal, maxItems)
 	default:
 		return nil, fmt.Errorf("%w %q", ErrUnsupportedItemSchema, schema)
 	}
