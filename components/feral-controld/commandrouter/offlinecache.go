@@ -44,6 +44,9 @@ func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType com
 
 	switch commandType {
 	case commands.CMD_DOWNLOAD_PLAYLIST_ITEM:
+		if _, displayed := args[displayedSelectorArg]; displayed {
+			return h.handleDownloadDisplayedItem(ctx, args)
+		}
 		return h.handleDownloadPlaylistItem(ctx, args)
 	case commands.CMD_DOWNLOAD_PLAYLIST:
 		return h.handleDownloadPlaylist(ctx, args)

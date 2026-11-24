@@ -1269,6 +1269,19 @@ There is deliberately **no** top-level manifest, no separate
   queued either way, and only the separate by-URL fallback record would
   be missing if indexing fails — a failure there is logged, not
   propagated to the caller.
+- `downloadPlaylistItem` with `displayed` (feral-file/feral-file#3633) is
+  for a controller that names an on-screen item by position because it never
+  held the document. `commandrouter/offlinecache_displayed.go` handles it and
+  writes no record of its own:
+  - **URL cast:** the request is re-issued as `{playlistUrl, source}` through
+    the path above, so the record, the series sidecar and the URL index come
+    from a fresh resolve.
+  - **Inline or dynamic cast:** the item is queued and no playlist record is
+    written. A record built from the player's already-narrowed list would
+    replace a fuller one with the same id, which a whole-playlist download
+    wrote, and that would orphan the members it drops.
+  - The inline case needs no record: offline replay is armed from
+    `replay-scope.json` (source keys), and the per-work clear is by source.
 - Only fields replay routing and status reporting actually consume are
   kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
