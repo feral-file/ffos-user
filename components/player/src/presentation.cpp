@@ -307,7 +307,7 @@ bool Presentation::can_present_direct(const Occurrence& occurrence,const Playbac
   return !has_tombstone(occurrence) || mode=="off" ||
          (mode=="timed" && label_occurrence_==occurrence.id && label_mode_==mode && now-label_started_>=30300);
 }
-bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
+std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
                         const Playback& playback, const Surface* backdrop,
                         float backdrop_opacity, const ArtworkBlend& blend,bool external) {
   const auto now = std::chrono::steady_clock::now();
@@ -330,7 +330,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
                      !playback.presentation_failure().is_null() || !playback.storage_error().empty() ||
                      !playback.runtime_notice().is_null();
   if(external && blend.opacity==1 && !pointer_visible && !label_visible && !overlay_panel && !playback.display_rejected()){
-    browser_overlay_.reset();draw_key_.reset();return false;
+    browser_overlay_.reset();draw_key_.reset();return std::nullopt;
   }
   if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
   const bool loading=!external && !artwork && playback.desired() && !overlay_panel && !playback.display_rejected() &&
@@ -350,7 +350,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   // Resubmitting an unchanged texture still consumes GPU/compositor work and
   // can block the next capture. UI revisions, geometry, pointer motion/expiry
   // and timed label expiry all independently invalidate composition.
-  if (draw_key_ == key || !draw_clock_.due(now)) return false;
+  if (draw_key_ == key || !draw_clock_.due(now)) return std::nullopt;
   draw_key_ = key;
   activate();
   if(external){
@@ -374,7 +374,7 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
   // absence sleep is black, including recent cursor and retained error UI.
   if(playback.state()["sleeping"]==true&&playback.overlay().is_null()){
     glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
-    swap(nullptr);return true;
+    return FrameSubmission{false, nullptr};
   }
   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   if (stage && blend.outgoing && blend.outgoing->texture && blend.outgoing_opacity > 0)
@@ -419,7 +419,11 @@ bool Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
     }
   }
   if (pointer_visible && overlay.is_null()) draw_pointer(pointer_pressed);
-  if(external)browser_overlay_->submit();else swap(blend.opacity>0?artwork:nullptr);return true;
+  return FrameSubmission{external, blend.opacity > 0 ? artwork : nullptr};
+}
+void Presentation::submit(const FrameSubmission& frame) {
+  if (frame.overlay) browser_overlay_->submit();
+  else swap(frame.artwork);
 }
 bool Presentation::events(const std::function<void(const Json&)>& input) {
   activate();

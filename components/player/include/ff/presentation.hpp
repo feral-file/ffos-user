@@ -29,6 +29,10 @@ struct ArtworkBlend {
   float outgoing_opacity = 0;
   float opacity = 1;
 };
+struct FrameSubmission {
+  bool overlay;
+  const Surface* artwork;
+};
 class Presentation {
  public:
   explicit Presentation(bool diagnostic_cpu, bool timing_samples, const std::string& fonts);
@@ -40,9 +44,10 @@ class Presentation {
   void coalesced_frame() { ++coalesced_frames_; }
   void software(Surface& surface, const void* data, int width, int height);
   void destroy(Surface& surface);
-  bool draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback,
+  std::optional<FrameSubmission> draw(const Surface* artwork, const Occurrence* occurrence, const Playback& playback,
             const Surface* backdrop = nullptr, float backdrop_opacity = 0,
             const ArtworkBlend& blend = {}, bool external = false);
+  void submit(const FrameSubmission& frame);
   bool events(const std::function<void(const Json&)>& input);
   Bounds bounds(const Json& display) const;
   bool can_present_direct(const Occurrence& occurrence,const Playback& playback) const;

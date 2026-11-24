@@ -225,7 +225,18 @@ void Playback::refresh_display(Occurrence& occurrence) {
                                        occurrence.adjustment);
   ++occurrence.display_revision;
 }
-void Playback::release_input() { if (input_) input_({{"kind", "releaseAll"}}); }
+void Playback::release_input() {
+  if (input_release_ != InputRelease::immediate) {
+    input_release_ = InputRelease::pending;
+  } else if (input_) {
+    input_({{"kind", "releaseAll"}});
+  }
+}
+void Playback::defer_input_release(bool defer) {
+  const bool pending = input_release_ == InputRelease::pending;
+  input_release_ = defer ? InputRelease::deferred : InputRelease::immediate;
+  if (!defer && pending) release_input();
+}
 void Playback::clear_recovery() {
   recovery_attempt_=0;recovery_at_=0;recovery_error_.clear();recovery_occurrence_.clear();
 }
@@ -361,9 +372,13 @@ Json Playback::command(std::string_view method, const Json& p) {
     fields(p,{"thermal","serviceFailure"});require(!p.empty(),"invalid_params","Missing health signal");
     bool thermal=p.contains("thermal")?boolean(p,"thermal"):thermal_hold_;
     bool service=p.contains("serviceFailure")?boolean(p,"serviceFailure"):service_failure_;
-    const bool changed=thermal!=thermal_hold_;thermal_hold_=thermal;service_failure_=service;
-    if(changed) select();
-    ++revision_;
+    if (thermal != thermal_hold_ || service != service_failure_) {
+      const bool thermal_changed = thermal != thermal_hold_;
+      thermal_hold_ = thermal;
+      service_failure_ = service;
+      if (thermal_changed) select();
+      ++revision_;
+    }
     return {{"outcome","applied"},{"generation",generation_},{"revision",revision_}};
   }
   if (method == "artworkPermissions.get") { fields(p, {}); return global_policy_; }

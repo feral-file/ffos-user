@@ -178,7 +178,8 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
         }
         ff::Surface* backdrop=nullptr;
         if(auto it=clients.find(backdrop_id);it!=clients.end()&&it->second->has_ready_frame()&&!it->second->decoration_failed)backdrop=&it->second->frames.latest();
-        const bool submitted=presentation.draw(surface,drawing,playback,backdrop,backdrop_opacity);
+        const auto submitted=presentation.draw(surface,drawing,playback,backdrop,backdrop_opacity);
+        if (submitted) presentation.submit(*submitted);
         if(submitted&&!commit.empty()&&configuration_ready&&playback.overlay().is_null()&&backdrop_opacity==0)playback.presented(commit);
         if(submitted&&drawing&&configuration_ready&&playback.overlay().is_null()&&backdrop_opacity==0)playback.composed(drawing->id,surface->display_revision);
         if(submitted&&drawing&&configuration_ready){

@@ -56,7 +56,11 @@ monotonic time and are unaffected by wall-clock correction.
 Mutations also require `instance` and `generation`. Optional `ifRevision`
 rejects a mutation unless the entire observed state still has that revision.
 Omit `ifRevision` when a change should tolerate unrelated telemetry updates.
-Mutations run serially on the host loop in received order per connection.
+Mutations run serially in received order per connection. During a slow display
+swap, the native host continues advancing playback timers and serving the same
+socket. Requests that deliver renderer input, seek media, refresh playlist labels
+or change permissions or content policy wait for the graphics thread. Their original deadlines still
+apply. A frame superseded during the swap cannot acknowledge the new selection.
 Across connections the host's dispatch order is authoritative. A caller that
 needs total order should use one persistent connection, as the Go client does.
 

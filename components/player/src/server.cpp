@@ -53,11 +53,15 @@ Server::~Server() {
   if (listener_ >= 0) { close(listener_); unlink(path_.c_str()); }
   if (lock_ >= 0) close(lock_);
 }
-bool Server::service(Client& c) {
+bool Server::service(Client& c, Phase phase) {
   const auto now = clock_();
+  if (c.waits_for_frame && phase == Phase::frame) {
+    c.waits_for_frame = false;
+    c.reading = now;
+  }
   // Absolute monotonic deadlines: dribbling bytes cannot retain a slot forever.
   if ((!c.protocol.negotiated && now-c.connected >= 5000) ||
-      (!c.input.empty() && now-c.reading >= 5000) ||
+      (!c.input.empty() && !c.waits_for_frame && now-c.reading >= 5000) ||
       (!c.output.empty() && now-c.writing >= 5000)) return false;
   char buffer[16384];
   auto n = recv(c.fd, buffer, sizeof buffer, 0);
@@ -66,13 +70,26 @@ bool Server::service(Client& c) {
   if (n > 0) { if(c.input.empty())c.reading=now; c.input.append(buffer, static_cast<size_t>(n)); }
   if (c.input.size() > max_frame + 4) return false;
   // Limit work per loop to preserve frame/input responsiveness under a flood.
-  for (int handled = 0; handled < 8 && c.input.size() >= 4; ++handled) {
+  for (int handled = 0; handled < 8 && !c.waits_for_frame && c.input.size() >= 4; ++handled) {
     uint32_t length = 0;
     for (int i = 0; i < 4; ++i) length = (length << 8) | static_cast<unsigned char>(c.input[i]);
     if (length == 0 || length > max_frame) return false;
     if (c.input.size() < length + 4) break;
     if(c.output.empty())c.writing=now;
-    try { c.output += frame(protocol_.receive(c.protocol, parse(std::string_view(c.input).substr(4, length)))); }
+    try {
+      auto request = parse(std::string_view(c.input).substr(4, length));
+      const auto method = request.find("method");
+      // These commands require renderer input or enforcement by the worker
+      // lifecycle. Keep the complete frame in order on this connection; its
+      // protocol deadline is still checked when the frame loop resumes.
+      if (phase == Phase::swap && method != request.end() &&
+          (*method == "artworkPermissions.set" || *method == "policy.set" || *method == "playback.update" ||
+           *method == "input.dispatch" || *method == "media.seek")) {
+        c.waits_for_frame = true;
+        break;
+      }
+      c.output += frame(protocol_.receive(c.protocol, request));
+    }
     catch (const Error& e) { c.output += frame({{"v", 1}, {"id", nullptr}, {"error", {{"code", e.code}, {"message", e.what()}}}}); }
     c.input.erase(0, length + 4);
     c.reading=now;
@@ -92,15 +109,85 @@ bool Server::service(Client& c) {
   }
   return true;
 }
-void Server::poll() {
+void Server::poll(Phase phase) {
   int fd = accept(listener_, nullptr, nullptr);
   if (fd >= 0) {
     if (clients_.size() >= 8 || !trusted(fd)) close(fd);
     else { nonblocking(fd); clients_.push_back({fd, {}, {}, {}, 0, clock_(), 0, 0}); }
   }
   for (auto it = clients_.begin(); it != clients_.end();) {
-    if (service(*it)) ++it;
+    if (service(*it, phase)) ++it;
     else { protocol_.disconnected(it->protocol); close(it->fd); it = clients_.erase(it); }
+  }
+}
+
+SwapControl::SwapControl(Server& server, Playback& playback, std::chrono::milliseconds progress_limit)
+    : server_(server), playback_(playback), progress_limit_(progress_limit), worker_([this] { serve(); }) {}
+
+SwapControl::~SwapControl() {
+  {
+    std::lock_guard lock(mutex_);
+    stopping_ = true;
+  }
+  changed_.notify_one();
+  worker_.join();
+}
+
+int64_t SwapControl::poll(Server::Phase phase) {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+  playback_.tick(ms, wall_ms());
+  server_.poll(phase);
+  return ms;
+}
+
+bool SwapControl::submit(const std::function<void()>& swap) {
+  const auto revision = playback_.revision();
+  // Selection, timers and disconnect can synthesize a release. Keep actual
+  // seat/CDP delivery on the graphics owner before its next input dispatch.
+  playback_.defer_input_release(true);
+  {
+    std::lock_guard lock(mutex_);
+    started_ = std::chrono::steady_clock::now();
+  }
+  changed_.notify_one();
+  std::exception_ptr graphics_error;
+  try {
+    swap();
+  } catch (...) {
+    graphics_error = std::current_exception();
+  }
+  {
+    std::lock_guard lock(mutex_);
+    started_.reset();
+    if (!graphics_error) graphics_error = failure_;
+  }
+  changed_.notify_one();
+  playback_.defer_input_release(false);
+  if (graphics_error) std::rethrow_exception(graphics_error);
+  return playback_.revision() == revision;
+}
+
+void SwapControl::serve() {
+  using namespace std::chrono_literals;
+  std::unique_lock lock(mutex_);
+  try {
+    while (!stopping_) {
+      changed_.wait(lock, [&] { return stopping_ || started_; });
+      if (stopping_) break;
+      const auto start = *started_;
+      const auto finished = [&] { return stopping_ || started_ != start; };
+      // Ordinary swaps complete before this first poll. A permanently stuck
+      // swap must eventually stop satisfying the watchdog's liveness check.
+      if (changed_.wait_until(lock, start + 25ms, finished)) continue;
+      while (!finished() && std::chrono::steady_clock::now() < start + progress_limit_) {
+        poll(Server::Phase::swap);
+        changed_.wait_for(lock, 5ms, finished);
+      }
+      changed_.wait(lock, finished);
+    }
+  } catch (...) {
+    failure_ = std::current_exception();
   }
 }
 }

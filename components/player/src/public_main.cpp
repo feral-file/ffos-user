@@ -179,11 +179,9 @@ extern "C" int ff_host(int argc, char** argv) {
     auto applied_permissions = playback.global_policy();
     bool backdrop_attempted = false;
     int64_t backdrop_fade_at = 0;
+    ff::SwapControl swap_control(server, playback);
     auto frame = [&] {
-      auto now = std::chrono::steady_clock::now().time_since_epoch();
-      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-      playback.tick(now_ms, ff::wall_ms());
-      server.poll();
+      const auto now_ms = swap_control.poll();
       bundle_root = playback.artwork_sources().value("bundleRoot", "/home/feralfile/.cache/offline-artworks");
       artwork_cache.maintain(playback.global_policy().at("cache"));
       if (applied_permissions.at("cache") != playback.global_policy().at("cache"))
@@ -489,9 +487,15 @@ extern "C" int ff_host(int argc, char** argv) {
       if (auto it = clients.find(backdrop_id);
           it != clients.end() && it->second->has_ready_frame() && !it->second->failed())
         backdrop = &it->second->frames.latest();
-      const bool submitted =
+      const auto submitted =
           presentation.draw(surface, drawing, playback, backdrop, backdrop_opacity, blend,
                             drawing && clients.contains(drawing->id) && clients.at(drawing->id)->direct());
+      if (submitted) {
+        // Surface storage belongs to this frame loop. submit() uses only that
+        // storage and the display. Socket commands may replace Playback's
+        // occurrences while the driver waits, invalidating drawing and commit.
+        if (!swap_control.submit([&] { presentation.submit(*submitted); })) return;
+      }
       if (submitted && !commit.empty() && configuration_ready && unobscured && blend.opacity > 0)
         playback.presented(commit);
       if (submitted && drawing && configuration_ready && unobscured && blend.opacity > 0) {

@@ -77,6 +77,7 @@ class Playback {
   void engine_status(const Json& info) { engine_status_=info;++revision_; }
   void media_status(const std::string& occurrence, const Json& status);
   void release_input();
+  void defer_input_release(bool defer);
  private:
   Store& store_;
   Json state_;
@@ -97,6 +98,8 @@ class Playback {
   uint64_t rejection_generation_ = 0;
   int64_t wall_now_ = 0;
   std::function<void(const Json&)> input_;
+  enum class InputRelease { immediate, deferred, pending };
+  InputRelease input_release_ = InputRelease::immediate;
   std::function<void(const std::string&, double)> seek_;
   Json media_status_ = nullptr;
   Json engine_status_ = nullptr;
