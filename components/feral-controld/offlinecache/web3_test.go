@@ -307,3 +307,25 @@ func TestWeb3OriginRootIsStoredOnlyByARootWork(t *testing.T) {
 			"a work with a method path must not claim the origin root a sibling could be")
 	}
 }
+
+// Replay matches URLs exactly and Chromium percent-encodes what it is handed,
+// so the stored entry is in Chromium's spelling while the contract call keeps
+// the playlist's (round 5 review, F8).
+func TestWeb3EntryIsStoredInTheBrowsersSpelling(t *testing.T) {
+	cases := []struct{ uri, path string }{
+		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/artpiece?seed=it's", "/artpiece?seed=it%27s"},
+		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/greet/string!hello world", "/greet/string!hello%20world"},
+		{"web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1/a%21b?q=%27x%27&r=é", "/a%21b?q=%27x%27&r=%C3%A9"},
+	}
+	for _, c := range cases {
+		store, _ := newTestStore(t)
+		source := web3Source(t, c.uri)
+		m := newWeb3Materializer(t, store, &fakeWeb3Resolver{body: digitalSoulBody})
+		require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{ID: "a", Source: source}}, 5*time.Second), c.uri)
+		rec, err := store.LoadItem(offlinecache.SourceKey(source))
+		require.NoError(t, err)
+		w, _ := contentpath.ParseWeb3(c.uri)
+		require.Len(t, rec.Resources, 1, c.uri)
+		assert.Equal(t, w.Origin()+c.path, rec.Resources[0].URL, c.uri)
+	}
+}

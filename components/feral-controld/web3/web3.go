@@ -356,6 +356,14 @@ func parseReturns(rawQuery string) ([]string, bool, error) {
 			continue
 		}
 		inner := strings.TrimSpace(v[len(v)-1])
+		if inner == "" {
+			// ERC-6860 auto mode: an empty attribute is the default
+			// decoding, the same as no attribute, and is distinct from
+			// `returns=()` (the raw result). It must be answered before the
+			// parentheses check, which would refuse it (round 5 review,
+			// F10).
+			continue
+		}
 		if !strings.HasPrefix(inner, "(") || !strings.HasSuffix(inner, ")") {
 			return nil, false, fmt.Errorf("%w: %s must look like (type,type)", ErrUnsupported, key)
 		}

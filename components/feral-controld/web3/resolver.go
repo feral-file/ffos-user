@@ -220,9 +220,24 @@ func (c *chainReader) confirm(ctx context.Context, rest []string, work *Work) er
 			continue
 		}
 		body, err := work.plan.Decode(out)
+		if errors.Is(err, ErrNotFound) {
+			// An empty return is an answer, not silence: ErrNotFound's own
+			// doc is "the call reverted, or returned nothing: there is no
+			// work at that address", and read() stops its endpoint loop on
+			// it for that reason. A reachable node on the right chain that
+			// returned nothing at the block the first node returned bytes
+			// for is the same disagreement as a revert (round 5 review,
+			// F7).
+			c.logger.Error("web3: a node returned nothing for a call another node answered; the work is not shown",
+				zap.Uint64("chain", c.chain), zap.String("contract", work.Contract),
+				zap.String("answered", work.ReadFrom), zap.String("empty", ep),
+				zap.String("block", work.Block))
+			return fmt.Errorf("%w: %s returned %d bytes at block %s where %s returned nothing",
+				ErrDisagree, work.ReadFrom, len(work.Body), work.Block, ep)
+		}
 		if err != nil {
-			// Same boundary: an answer that will not decode is not a
-			// second opinion about the work's bytes.
+			// Same boundary: a non-empty answer that will not decode is not
+			// a second opinion about the work's bytes.
 			continue
 		}
 		if bytes.Equal(body, work.Body) {

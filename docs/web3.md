@@ -41,11 +41,12 @@ The device does the two things that are available without a content address, and
   the work `Confirmed`. **Differing bytes fail the read with `ErrDisagree`** — there is
   nothing to decide between them, and showing either would be showing bytes the device
   cannot stand behind.
-- **A revert is a disagreement, not a silence.** A node that reverts the call is not a node
+- **A revert, or an empty return, is a disagreement, not a silence.** A node that reverts the call (or returns nothing, `"0x"`) is not a node
   that could not answer: it is saying there is no work at that address, at the same block the
   first node returned bytes for. That is the strongest disagreement available, and reading it
   as "no opinion" is what let one dishonest node serve fabricated bytes while an honest node
-  said the work did not exist (round 3 review, F-A).
+  said the work did not exist (round 3 review, F-A; the empty return, round 5 review, F7). A
+  non-empty answer that will not decode stays "no opinion".
 
 A second node that cannot answer — unreachable, or behind that block — is **not** a failure.
 The work plays on one node and the log says it was not confirmed. A read that required two
@@ -129,7 +130,7 @@ so a flatten that skips the mapping gives one work two identities.
 | `resolveMode()` | ERC-6860's mode. `"manual"` sends the path and query as raw calldata. `"auto"`, an empty answer, or a **revert** is auto mode — neither measured work implements `resolveMode`, so the revert case is the common one. Any other name is `ErrUnsupported`. |
 | auto-mode calldata | the first path segment is the method; the rest are arguments, typed by the standard's rules below. |
 | `eth_call` | one call, at the pinned block, to one node. |
-| decode | without `returns=`, the result is ABI-encoded bytes (a string encodes the same way); with `returns=(…)`, the decoded values are served as JSON. |
+| decode | without `returns=`, the result is ABI-encoded bytes (a string encodes the same way); with `returns=(…)`, the decoded values are served as JSON (a `bool` as a JSON boolean, every other type as a string). An empty `returns=` or `returnTypes=` is the default decoding; `returns=()` is the raw result. |
 
 Auto-mode argument typing, longest-specific first:
 

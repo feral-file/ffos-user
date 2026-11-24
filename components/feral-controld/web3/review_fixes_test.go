@@ -178,3 +178,47 @@ func TestManualModeIsNotReadAsAutoMode(t *testing.T) {
 		t.Errorf("manual /image.svg ContentType = %q, want image/svg+xml", p.ContentType)
 	}
 }
+
+// ERC-6860 auto mode renders a bool as a JSON boolean, not a hex word
+// (round 5 review, F9). A non-canonical word is refused, not rounded.
+func TestBoolReturnsAreNativeJSONBooleans(t *testing.T) {
+	p, err := planFor(t, "flag", "returns=(bool,uint256,bool)", web3.ModeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := mustHex(t, pad32("1")+pad32("1")+pad32("0"))
+	body, err := p.Decode(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `[true,"0x1",false]`; string(body) != want {
+		t.Errorf("body = %s, want %s", body, want)
+	}
+	for _, word := range []string{pad32("2"), "01" + strings.Repeat("00", 31)} {
+		q, err := planFor(t, "flag", "returns=(bool)", web3.ModeAuto)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.Decode(mustHex(t, word)); !errors.Is(err, web3.ErrUnsupported) {
+			t.Errorf("word %s: err = %v, want ErrUnsupported", word, err)
+		}
+	}
+}
+
+// An empty returns/returnTypes attribute is the default decoding, and is not
+// `returns=()` (round 5 review, F10).
+func TestAnEmptyReturnsAttributeIsDefaultDecoding(t *testing.T) {
+	for _, q := range []string{"returns=", "returnTypes=", "returns=&x=1", "returns=%20"} {
+		p, err := planFor(t, "artpiece", q, web3.ModeAuto)
+		if err != nil {
+			t.Fatalf("query %q: %v", q, err)
+		}
+		if p.HasReturns {
+			t.Errorf("query %q: HasReturns = true, want default decoding", q)
+		}
+	}
+	p, err := planFor(t, "artpiece", "returns=()", web3.ModeAuto)
+	if err != nil || !p.HasReturns || len(p.Returns) != 0 {
+		t.Errorf("returns=(): HasReturns=%v Returns=%v err=%v, want the raw-result mode", p.HasReturns, p.Returns, err)
+	}
+}

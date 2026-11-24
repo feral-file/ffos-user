@@ -368,23 +368,43 @@ func hexNumber(w []byte) string {
 	return "0x" + s
 }
 
+// abiBool reads a canonical ABI bool word: 31 zero bytes and a 0 or a 1.
+func abiBool(w []byte) (bool, error) {
+	for _, c := range w[:wordBytes-1] {
+		if c != 0 {
+			return false, fmt.Errorf("%w: bool word is not 0 or 1", ErrUnsupported)
+		}
+	}
+	switch w[wordBytes-1] {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: bool word is not 0 or 1", ErrUnsupported)
+}
+
 // abiDecodeValues decodes out under an explicit `returns=` type list. The
 // values are rendered the way the reference implementation renders them, so
 // a work that reads its own JSON sees the same shape on the device.
-func abiDecodeValues(out []byte, types []string) ([]string, error) {
+//
+// Values are `any` because the standard's JSON is typed: a bool is a JSON
+// boolean (`[true]`), everything else a string. A `[]string` here is what
+// rendered `bool` as "0x1" (round 5 review, F9).
+func abiDecodeValues(out []byte, types []string) ([]any, error) {
 	var budget decodeBudget
 	if len(types) == 0 {
 		// `returns=()`: hand back the raw result, hex-encoded.
 		if err := budget.charge(2*len(out) + 6); err != nil {
 			return nil, err
 		}
-		return []string{"0x" + hex.EncodeToString(out)}, nil
+		return []any{"0x" + hex.EncodeToString(out)}, nil
 	}
 	// The brackets and one comma per value.
 	if err := budget.charge(2 + len(types)); err != nil {
 		return nil, err
 	}
-	values := make([]string, 0, len(types))
+	values := make([]any, 0, len(types))
 	for i, t := range types {
 		switch {
 		case t == "string" || t == "bytes":
@@ -410,6 +430,21 @@ func abiDecodeValues(out []byte, types []string) ([]string, error) {
 				return nil, fmt.Errorf("%w: value %d is past the %d-byte answer", ErrUnsupported, i, len(out))
 			}
 			w := out[start : start+wordBytes]
+			if t == "bool" {
+				// A canonical ABI bool is the word 0 or 1. Anything else is
+				// not a bool the contract could have meant, and rounding it
+				// to true would show a value it never returned.
+				b, err := abiBool(w)
+				if err != nil {
+					return nil, err
+				}
+				// `false` and `true`, and the comma.
+				if err := budget.charge(len(strconv.FormatBool(b)) + 2); err != nil {
+					return nil, err
+				}
+				values = append(values, b)
+				continue
+			}
 			var v string
 			switch {
 			case t == "address":

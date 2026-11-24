@@ -364,3 +364,35 @@ func TestASecondNodeThatCannotBeReachedIsStillNoOpinion(t *testing.T) {
 		t.Fatal("Confirmed = true, but no second node answered")
 	}
 }
+
+// A second node that RETURNS NOTHING ("0x") is answering too: ErrNotFound's own
+// doc is "the call reverted, or returned nothing". It was swallowed as an
+// undecodable answer, so a fabricated body was served with Confirmed=false
+// and no error (round 5 review, F7). The boundary stays: a non-empty answer
+// that will not decode is still no opinion.
+func TestResolveFailsWhenASecondNodeReturnsNothingWhatTheFirstAnswered(t *testing.T) {
+	liar := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: abiBytes("fabricated")}}
+	empty := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: "0x"}}
+	r := resolverOver(t, 1, liar.serve(t), empty.serve(t))
+
+	_, err := r.Resolve(context.Background(), web3.Request{Contract: testContract, ChainID: 1, Path: "artpiece"})
+	if !errors.Is(err, web3.ErrDisagree) {
+		t.Fatalf("Resolve err = %v, want ErrDisagree: the second node returned nothing", err)
+	}
+}
+
+func TestASecondNodeWithAnUndecodableAnswerIsStillNoOpinion(t *testing.T) {
+	const want = "the work"
+	first := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: abiBytes(want)}}
+	// 64 bytes whose offset points far past the answer: non-empty, not decodable.
+	junk := &node{chainID: 1, head: 100, answers: map[string]string{artpieceSelector: "0x" + strings.Repeat("ff", 64)}}
+	r := resolverOver(t, 1, first.serve(t), junk.serve(t))
+
+	work, err := r.Resolve(context.Background(), web3.Request{Contract: testContract, ChainID: 1, Path: "artpiece"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if string(work.Body) != want || work.Confirmed {
+		t.Fatalf("Body = %q Confirmed = %v, want %q unconfirmed", work.Body, work.Confirmed, want)
+	}
+}
