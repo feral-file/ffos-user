@@ -194,12 +194,16 @@ salvaging rule as `onchfs`:
 
 ### 4. Into the offline cache, out through replay (`offlinecache/web3.go`)
 
-A web3 work is one document, not a tree, so there is one blob and three URLs for it:
+A web3 work is one document, not a tree, so there is one blob and — deliberately — one URL
+for it:
 
 - the **exact source URL**, query included, as the entry — replay matches method and URL
   exactly, and the kiosk navigates to that string;
-- the **origin root** (`https://<host>/`), which is what a relative `/` resolves to;
-- the **path without the query**, for a document that links to itself by path.
+- the **origin root** (`https://<host>/`) as well, but *only* when the entry is itself the
+  origin root (a URI with no method path), because a work with a method path shares its origin
+  with every sibling work on the same contract and must not claim a URL one of them could
+  claim. See §1: an alias under a shared origin is a way to serve the wrong work's bytes for a
+  correct URL.
 
 Each carries the declared content type and `Access-Control-Allow-Origin: *`, which the
 player's cross-origin HEAD probe needs. None carries `Content-Encoding`.
