@@ -73,11 +73,25 @@ func (r *fakeOnchfsResolver) Resolve(ctx context.Context, root, _ string) (*onch
 	return &t, nil
 }
 
-func newTestMaterializer(t *testing.T, store offlinecache.Store, r offlinecache.OnchfsResolver, cfg offlinecache.OnchfsMaterializerConfig) *offlinecache.OnchfsMaterializer {
+func newTestMaterializer(t *testing.T, store offlinecache.Store, r offlinecache.OnchfsTreeResolver, cfg offlinecache.DeviceLocalMaterializerConfig) *offlinecache.DeviceLocalMaterializer {
+	t.Helper()
+	return newTestMaterializerWithWeb3(t, store, r, nil, cfg)
+}
+
+// newTestMaterializerWithWeb3 is newTestMaterializer with both schemes'
+// resolvers. A nil resolver leaves that scheme's works unplayable, which is
+// what a config kill switch does on a device.
+func newTestMaterializerWithWeb3(t *testing.T, store offlinecache.Store, onchfsResolver offlinecache.OnchfsTreeResolver, web3Resolver offlinecache.Web3CallResolver, cfg offlinecache.DeviceLocalMaterializerConfig) *offlinecache.DeviceLocalMaterializer {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg.Store, cfg.Resolver, cfg.Logger, cfg.Base = store, r, zaptest.NewLogger(t), ctx
-	m := offlinecache.NewOnchfsMaterializer(cfg)
+	cfg.Store, cfg.Logger, cfg.Base = store, zaptest.NewLogger(t), ctx
+	if onchfsResolver != nil {
+		cfg.Onchfs = onchfsResolver
+	}
+	if web3Resolver != nil {
+		cfg.Web3 = web3Resolver
+	}
+	m := offlinecache.NewDeviceLocalMaterializer(cfg)
 	// Cancel, then wait for the jobs: a canceled job logs its failure, and
 	// that log must land before the test returns (see DrainForTest).
 	t.Cleanup(func() {
@@ -92,7 +106,7 @@ func TestOnchfsMaterializerWritesARecordReplayServes(t *testing.T) {
 	defer ts.ctrl.Finish()
 	source := onchfsSource(t, "onchfs://"+onchfsTestRoot+"/?fxhash=0x06ec&fxiteration=1")
 	resolver := &fakeOnchfsResolver{tree: onchfsTestTree()}
-	m := newTestMaterializer(t, ts.store, resolver, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, ts.store, resolver, offlinecache.DeviceLocalMaterializerConfig{})
 
 	items := []dp1playlist.PlaylistItem{{ID: "a", Source: source}, {ID: "b", Source: "https://cdn.example/x.png"}}
 	require.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
@@ -168,7 +182,7 @@ func TestOnchfsMaterializerEntryShapes(t *testing.T) {
 			store, _ := newTestStore(t)
 			source := onchfsSource(t, tc.uri)
 			assert.Equal(t, origin+tc.wantURL, source)
-			m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{})
+			m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.DeviceLocalMaterializerConfig{})
 			require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 			rec, err := store.LoadItem(offlinecache.SourceKey(source))
 			require.NoError(t, err)
@@ -203,7 +217,7 @@ func TestOnchfsMaterializerFailuresLeaveNoRecord(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store, _ := newTestStore(t)
 			source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
-			m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+			m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{})
 			assert.Zero(t, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 			keys, err := store.ListItemKeys()
 			require.NoError(t, err)
@@ -220,7 +234,7 @@ func TestOnchfsMaterializerFinishesSlowWorkInTheBackground(t *testing.T) {
 	gate := make(chan struct{})
 	resolver := &fakeOnchfsResolver{tree: onchfsTestTree(), gate: gate}
 	readyCalls := make(chan struct{}, 4)
-	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{
+	m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{
 		OnReady: func() { readyCalls <- struct{}{} },
 	})
 	items := []dp1playlist.PlaylistItem{{Source: onchfsSource(t, "onchfs://"+onchfsTestRoot)}}
@@ -255,7 +269,7 @@ func TestOnchfsMaterializerRewritesBlobsSweptBeforeTheRecordWasSaved(t *testing.
 	base, _ := newTestStore(t)
 	store := &sweepingStore{Store: base}
 	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
-	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.DeviceLocalMaterializerConfig{})
 	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 	assert.Positive(t, store.swept.Load(), "the GC did sweep the unreferenced blobs")
 	rec, err := base.LoadItem(offlinecache.SourceKey(source))
@@ -290,7 +304,7 @@ func TestOnchfsMaterializerStandaloneKeepsItsBudget(t *testing.T) {
 	var sources []string
 	for i, root := range roots {
 		resolver := &fakeOnchfsResolver{tree: treeOf(string(rune('a'+i)) + "0123456789")} // 11 bytes each
-		m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{Standalone: true, MaxBytes: 25, Now: now})
+		m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{Standalone: true, MaxBytes: 25, Now: now})
 		source := onchfsSource(t, "onchfs://"+root)
 		sources = append(sources, source)
 		require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
@@ -373,7 +387,7 @@ func (s *publishRecordingStore) SaveItem(rec *offlinecache.ItemRecord) error {
 func TestOnchfsMaterializerPublishesBlobsAndRecordTogether(t *testing.T) {
 	base, _ := newTestStore(t)
 	store := &publishRecordingStore{Store: base}
-	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.DeviceLocalMaterializerConfig{})
 	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: onchfsSource(t, "onchfs://"+onchfsTestRoot)}}, 5*time.Second))
 	assert.Empty(t, store.outsides, "every blob and the record are written inside one publication")
 }
@@ -383,7 +397,7 @@ func TestOnchfsMaterializerPublishesBlobsAndRecordTogether(t *testing.T) {
 func TestOnchfsMaterializerRebuildsARecordWhoseBlobsWentMissing(t *testing.T) {
 	store, _ := newTestStore(t)
 	resolver := &fakeOnchfsResolver{tree: onchfsTestTree()}
-	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{})
 	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
 	items := []dp1playlist.PlaylistItem{{Source: source}}
 	require.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
@@ -403,7 +417,7 @@ func TestOnchfsMaterializerServesASingleFileRoot(t *testing.T) {
 	store, _ := newTestStore(t)
 	tree := &onchfs.Tree{Files: map[string]*onchfs.File{"": {Plain: []byte("<svg/>"), ContentType: "image/svg+xml"}}}
 	source := onchfsSource(t, "onchfs://"+onchfsTestRoot+"/?fxhash=123")
-	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.DeviceLocalMaterializerConfig{})
 	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 	rec, err := store.LoadItem(offlinecache.SourceKey(source))
 	require.NoError(t, err)
@@ -457,7 +471,7 @@ func TestOnchfsMaterializerReclaimsSpaceForANewWork(t *testing.T) {
 		ready := 0
 		for i, source := range sources {
 			m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: bigTree(byte('a' + i))},
-				offlinecache.OnchfsMaterializerConfig{Now: now, Evict: evict})
+				offlinecache.DeviceLocalMaterializerConfig{Now: now, Evict: evict})
 			items := []dp1playlist.PlaylistItem{{Source: source}}
 			if protectFirst && i == 2 {
 				items = append(items, dp1playlist.PlaylistItem{Source: sources[0]}, dp1playlist.PlaylistItem{Source: sources[1]})
@@ -505,7 +519,7 @@ func TestOnchfsMaterializerReclaimsSpaceForANewWork(t *testing.T) {
 			clock = clock.Add(time.Minute)
 			at := clock
 			m := newTestMaterializer(t, limited, &fakeOnchfsResolver{tree: bigTree(byte('a' + i))},
-				offlinecache.OnchfsMaterializerConfig{Evict: evict, Now: func() time.Time { return at }})
+				offlinecache.DeviceLocalMaterializerConfig{Evict: evict, Now: func() time.Time { return at }})
 			require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 		}
 		assert.Equal(t, []string{sources[0]}, evicted)
@@ -530,11 +544,11 @@ func TestOnchfsMaterializerStandalonePruneKeepsThePlaylist(t *testing.T) {
 	}
 	for i := range 2 {
 		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: bigTree(byte('a' + i))},
-			offlinecache.OnchfsMaterializerConfig{Standalone: true, MaxBytes: 200 << 10, Now: now})
+			offlinecache.DeviceLocalMaterializerConfig{Standalone: true, MaxBytes: 200 << 10, Now: now})
 		require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: sources[i]}}, 5*time.Second))
 	}
 	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: bigTree('c')},
-		offlinecache.OnchfsMaterializerConfig{Standalone: true, MaxBytes: 200 << 10, Now: now})
+		offlinecache.DeviceLocalMaterializerConfig{Standalone: true, MaxBytes: 200 << 10, Now: now})
 	playlist := []dp1playlist.PlaylistItem{{Source: sources[2]}, {Source: sources[0]}, {Source: sources[1]}}
 	require.Equal(t, 3, m.Ensure(context.Background(), playlist, 5*time.Second))
 	for _, s := range sources {
@@ -561,7 +575,7 @@ func TestOnchfsMaterializerServesBrowserSpelledPaths(t *testing.T) {
 	}}
 	store, _ := newTestStore(t)
 	source := onchfsSource(t, "onchfs://"+onchfsTestRoot)
-	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.DeviceLocalMaterializerConfig{})
 	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 	rec, err := store.LoadItem(offlinecache.SourceKey(source))
 	require.NoError(t, err)
@@ -595,7 +609,7 @@ func TestOnchfsMaterializerEscapedEntryOpensItsDecodedFile(t *testing.T) {
 	}}
 	store, _ := newTestStore(t)
 	source := onchfsSource(t, "onchfs://"+onchfsTestRoot+"/a%21b.html")
-	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: tree}, offlinecache.DeviceLocalMaterializerConfig{})
 	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{Source: source}}, 5*time.Second))
 	rec, err := store.LoadItem(offlinecache.SourceKey(source))
 	require.NoError(t, err)
@@ -644,7 +658,7 @@ func TestOnchfsMaterializerFirstWorkSkipsTheQueue(t *testing.T) {
 		background = append(background, dp1playlist.PlaylistItem{Source: onchfsSource(t, "onchfs://"+r)})
 	}
 	first := dp1playlist.PlaylistItem{Source: onchfsSource(t, "onchfs://"+onchfsTestRoot)}
-	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{})
 
 	// A refresh pass starts everything without waiting: the slow works take
 	// both slots and the first work queues behind them.
@@ -680,7 +694,7 @@ func (r *blockingResolver) Resolve(ctx context.Context, _, _ string) (*onchfs.Tr
 func TestOnchfsMaterializerBoundsReadsAcrossCasts(t *testing.T) {
 	store, _ := newTestStore(t)
 	resolver := &blockingResolver{}
-	m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{})
+	m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{})
 	n := 0
 	for range 3 { // waves
 		var wg sync.WaitGroup
@@ -696,7 +710,7 @@ func TestOnchfsMaterializerBoundsReadsAcrossCasts(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	resolver.mu.Lock()
 	defer resolver.mu.Unlock()
-	assert.LessOrEqual(t, resolver.peak, 3, "at most onchfsConcurrentJobs reads in flight")
+	assert.LessOrEqual(t, resolver.peak, 3, "at most deviceLocalConcurrentJobs reads in flight")
 	assert.Positive(t, resolver.peak)
 }
 
@@ -756,7 +770,7 @@ func TestOnchfsMaterializerRespectsAClearDuringTheRead(t *testing.T) {
 		fence := &fakeFence{}
 		gate := make(chan struct{})
 		resolver := &fakeOnchfsResolver{tree: onchfsTestTree(), gate: gate}
-		m := newTestMaterializer(t, store, resolver, offlinecache.OnchfsMaterializerConfig{Fence: fence})
+		m := newTestMaterializer(t, store, resolver, offlinecache.DeviceLocalMaterializerConfig{Fence: fence})
 		assert.Zero(t, m.Ensure(context.Background(), items, 20*time.Millisecond))
 		fence.clear(source) // the app clears the work while it is read
 		close(gate)
@@ -769,7 +783,7 @@ func TestOnchfsMaterializerRespectsAClearDuringTheRead(t *testing.T) {
 		base, _ := newTestStore(t)
 		fence := &fakeFence{}
 		store := &clearOnSaveStore{Store: base, fence: fence}
-		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{Fence: fence})
+		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.DeviceLocalMaterializerConfig{Fence: fence})
 		assert.Zero(t, m.Ensure(context.Background(), items, 5*time.Second))
 		_, err := base.LoadItem(offlinecache.SourceKey(source))
 		assert.Error(t, err, "the publication was undone")
@@ -778,7 +792,7 @@ func TestOnchfsMaterializerRespectsAClearDuringTheRead(t *testing.T) {
 		store, _ := newTestStore(t)
 		fence := &fakeFence{}
 		fence.clear(source)
-		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.OnchfsMaterializerConfig{Fence: fence})
+		m := newTestMaterializer(t, store, &fakeOnchfsResolver{tree: onchfsTestTree()}, offlinecache.DeviceLocalMaterializerConfig{Fence: fence})
 		assert.Equal(t, 1, m.Ensure(context.Background(), items, 5*time.Second))
 	})
 }

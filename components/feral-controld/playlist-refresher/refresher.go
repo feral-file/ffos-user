@@ -167,7 +167,7 @@ type refresher struct {
 
 	// onchfs starts reading onchfs works a refresh brings (ffos-user#427);
 	// nil leaves them unplayable.
-	onchfs OnchfsMaterializer
+	onchfs DeviceLocalMaterializer
 
 	// seriesPlaybackSource, when set (SetSeriesPlaybackSource), is
 	// commandrouter's own device-level series-playback getter
@@ -381,24 +381,24 @@ func SetMediaHealthHints(r Refresher, fn func(items []dp1playlist.PlaylistItem) 
 	setter.setMediaHealthHints(fn)
 }
 
-// OnchfsMaterializer is the consumer-owned view of
-// offlinecache.OnchfsMaterializer (see commandrouter.OnchfsMaterializer).
-type OnchfsMaterializer interface {
+// DeviceLocalMaterializer is the consumer-owned view of
+// offlinecache.DeviceLocalMaterializer (see commandrouter.DeviceLocalMaterializer).
+type DeviceLocalMaterializer interface {
 	Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int
 }
 
-// SetOnchfsMaterializer wires the onchfs reader (ffos-user#427) into the
+// SetDeviceLocalMaterializer wires the onchfs reader (ffos-user#427) into the
 // refresher's scope sync. Same post-construction seam as SetMediaHealthHints.
-func SetOnchfsMaterializer(r Refresher, m OnchfsMaterializer, logger *zap.Logger) {
-	setter, ok := r.(interface{ setOnchfsMaterializer(OnchfsMaterializer) })
+func SetDeviceLocalMaterializer(r Refresher, m DeviceLocalMaterializer, logger *zap.Logger) {
+	setter, ok := r.(interface{ setDeviceLocalMaterializer(DeviceLocalMaterializer) })
 	if !ok {
 		logger.Warn("Playlist refresher does not support onchfs wiring")
 		return
 	}
-	setter.setOnchfsMaterializer(m)
+	setter.setDeviceLocalMaterializer(m)
 }
 
-func (r *refresher) setOnchfsMaterializer(m OnchfsMaterializer) { r.onchfs = m }
+func (r *refresher) setDeviceLocalMaterializer(m DeviceLocalMaterializer) { r.onchfs = m }
 
 func (r *refresher) setMediaHealthHints(fn func(items []dp1playlist.PlaylistItem) interface{}) {
 	r.mediaHealthHints = fn

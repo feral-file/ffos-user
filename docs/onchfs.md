@@ -2,6 +2,12 @@
 
 Status: shipped in feral-controld (ffos-user#427). Reader package: `components/feral-controld/onchfs`.
 
+`docs/web3.md` is the second scheme the device resolves itself (ERC-4804, feral-file#3599).
+The two share everything below the reader — the source mapping, the store, replay, the
+media-health exemptions, the disk budget — and `offlinecache.DeviceLocalMaterializer` (named
+`OnchfsMaterializer` when this document was written) now serves both. Where this document says
+"onchfs" about one of those shared parts, read "device-local".
+
 ## Why
 
 onchfs is the on-chain file system fxhash wrote generative works into, on Ethereum, Base

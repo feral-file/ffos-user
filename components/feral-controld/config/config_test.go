@@ -894,3 +894,47 @@ func TestOnchfsTuning(t *testing.T) {
 		})
 	}
 }
+
+// Web3Tuning follows OnchfsTuning's rule: a typo in a hand-edited optional
+// block must never fail config.Load, which is fatal under Restart=always,
+// and an explicit "disabled": true survives a sibling field that does not
+// decode (feral-file#3599).
+func TestWeb3TuningPermissiveDecode(t *testing.T) {
+	cases := map[string]struct {
+		raw          string
+		wantDisabled bool
+		wantChains   int
+		wantTimeout  int
+	}{
+		"absent block is the built-in defaults":   {"", false, 0, 0},
+		"a full block decodes":                    {`{"chains":{"1":{"rpc":["https://a.example"]}},"requestTimeoutSeconds":20}`, false, 1, 20},
+		"the kill switch decodes":                 {`{"disabled":true}`, true, 0, 0},
+		"a malformed block is the defaults":       {`{"chains":`, false, 0, 0},
+		"a malformed block keeps an explicit off": {`{"disabled":true,"chains":[]}`, true, 0, 0},
+		"a CAIP-2 key is accepted as a map key":   {`{"chains":{"eip155:8453":{"rpc":["https://b.example"]}}}`, false, 1, 0},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := &config.Config{}
+			if tc.raw != "" {
+				c.Web3 = json.RawMessage(tc.raw)
+			}
+			got := c.Web3Tuning(zaptest.NewLogger(t))
+			if got.Disabled != tc.wantDisabled {
+				t.Errorf("Disabled = %v, want %v", got.Disabled, tc.wantDisabled)
+			}
+			if len(got.Chains) != tc.wantChains {
+				t.Errorf("Chains = %v, want %d entries", got.Chains, tc.wantChains)
+			}
+			if got.RequestTimeoutSeconds != tc.wantTimeout {
+				t.Errorf("RequestTimeoutSeconds = %d, want %d", got.RequestTimeoutSeconds, tc.wantTimeout)
+			}
+		})
+	}
+	// A nil logger must not panic: the tuning is read before the logger is
+	// always available in some call paths.
+	c := &config.Config{Web3: json.RawMessage(`{"chains":`)}
+	if got := c.Web3Tuning(nil); got.Disabled {
+		t.Error("a malformed block with a nil logger must still default to enabled")
+	}
+}

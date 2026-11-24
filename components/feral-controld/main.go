@@ -59,6 +59,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/uarewrite"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
+	"github.com/feral-file/ffos-user/components/feral-controld/web3"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -1247,6 +1248,7 @@ func initializeApp(
 	var offlineCacheAdmission offlinecache.AdmissionController
 	var offlineCacheStore offlinecache.Store
 	onchfsConfig := config.Get().OnchfsTuning(logger)
+	web3Config := config.Get().Web3Tuning(logger)
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -1274,21 +1276,34 @@ func initializeApp(
 		}
 	}
 
-	// onchfs works (ffos-user#427). fxhash's gateway is gone, so the device
-	// reads these works from chain and serves them through the offline
-	// cache's replay. With the feature off, only the part of the cache that
-	// serves local artwork runs (BootstrapCore: store, static server,
-	// replay), lazily: it dials the kiosk only once an onchfs scope is first
-	// armed, so a device that never shows an onchfs work behaves as before.
-	// The Service, capture and the app's offline-cache commands stay off;
-	// offlineCache (the Service) remains nil and every guard keyed on it is
-	// unchanged.
-	var onchfsMaterializer *offlinecache.OnchfsMaterializer
-	// onchfsReady is set to the refresher's ForceRefresh once that exists:
-	// a work read in the background widens the replay scope on the next pass.
-	var onchfsReady atomic.Pointer[func()]
+	// Device-local works: onchfs trees (ffos-user#427) and ERC-4804 web3
+	// calls (feral-file#3599). Neither has a host the kiosk can load —
+	// fxhash's onchfs gateway is gone, and a work that is a contract call's
+	// return value never had one — so the device resolves them itself and
+	// serves them through the offline cache's replay. With the feature off,
+	// only the part of the cache that serves local artwork runs
+	// (BootstrapCore: store, static server, replay), lazily: it dials the
+	// kiosk only once a device-local scope is first armed, so a device that
+	// never shows such a work behaves as before. The Service, capture and
+	// the app's offline-cache commands stay off; offlineCache (the Service)
+	// remains nil and every guard keyed on it is unchanged.
+	//
+	// The two schemes share one materializer and so one disk budget and one
+	// LRU order (offlinecache/devicelocal.go). Each has its own kill switch:
+	// with both off nothing below is built at all.
+	var deviceLocalMaterializer *offlinecache.DeviceLocalMaterializer
+	// deviceLocalReady is set to the refresher's ForceRefresh once that
+	// exists: a work resolved in the background widens the replay scope on
+	// the next pass.
+	var deviceLocalReady atomic.Pointer[func()]
 	if onchfsConfig.Disabled {
 		logger.Info("onchfs reader disabled by config; onchfs works stay unplayable")
+	}
+	if web3Config.Disabled {
+		logger.Info("web3 reader disabled by config; web3 works stay unplayable")
+	}
+	if onchfsConfig.Disabled && web3Config.Disabled {
+		logger.Info("every device-local reader is disabled by config")
 	} else {
 		if offlineCacheStore == nil {
 			ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
@@ -1302,32 +1317,65 @@ func initializeApp(
 			// is not listening as a miss. No new listening port on devices
 			// with the feature off.
 		}
-		overrides := map[string][]string{}
-		for chain, c := range onchfsConfig.Chains {
-			overrides[chain] = c.RPC
+		var onchfsResolver *onchfs.Resolver
+		if !onchfsConfig.Disabled {
+			overrides := map[string][]string{}
+			for chain, c := range onchfsConfig.Chains {
+				overrides[chain] = c.RPC
+			}
+			timeout := onchfs.DefaultRequestTimeout
+			if onchfsConfig.RequestTimeoutSeconds > 0 {
+				timeout = time.Duration(onchfsConfig.RequestTimeoutSeconds) * time.Second
+			}
+			onchfsResolver = onchfs.NewResolver(onchfs.MergeEndpoints(overrides, logger), onchfs.NewHTTPClient(timeout), logger)
+			logger.Info("onchfs reader ready", zap.Strings("chains", onchfsResolver.Chains()))
 		}
-		timeout := onchfs.DefaultRequestTimeout
-		if onchfsConfig.RequestTimeoutSeconds > 0 {
-			timeout = time.Duration(onchfsConfig.RequestTimeoutSeconds) * time.Second
+		var web3Resolver *web3.Resolver
+		if !web3Config.Disabled {
+			overrides := map[uint64][]string{}
+			for chain, c := range web3Config.Chains {
+				id, ok := web3.ChainIDFromString(chain)
+				if !ok {
+					logger.Error("web3 config names a chain that is not an EIP-155 id; ignored", zap.String("chain", chain))
+					continue
+				}
+				overrides[id] = c.RPC
+			}
+			timeout := web3.DefaultRequestTimeout
+			if web3Config.RequestTimeoutSeconds > 0 {
+				timeout = time.Duration(web3Config.RequestTimeoutSeconds) * time.Second
+			}
+			web3Resolver = web3.NewResolver(web3.MergeEndpoints(overrides, logger), web3.NewHTTPClient(timeout), logger)
+			logger.Info("web3 reader ready", zap.Uint64s("chains", web3Resolver.Chains()))
 		}
-		resolver := onchfs.NewResolver(onchfs.MergeEndpoints(overrides, logger), onchfs.NewHTTPClient(timeout), logger)
-		onchfsMaterializer = offlinecache.NewOnchfsMaterializer(offlinecache.OnchfsMaterializerConfig{
-			Store: offlineCacheStore, Resolver: resolver, Logger: logger, Base: context,
+		cfg := offlinecache.DeviceLocalMaterializerConfig{
+			Store: offlineCacheStore, Logger: logger, Base: context,
 			Standalone: offlineCache == nil,
-			// With a Service running, reclaiming space for an onchfs work
-			// goes through its ClearItem, whose GC is serialized with
+			// With a Service running, reclaiming space for a device-local
+			// work goes through its ClearItem, whose GC is serialized with
 			// captures; standalone, the materializer collects itself.
 			Evict: evictThroughService(offlineCache),
 			// The Service's clear epoch keeps a read in flight from
 			// restoring a work the app just cleared.
 			Fence: fenceThroughService(offlineCache),
 			OnReady: func() {
-				if f := onchfsReady.Load(); f != nil {
+				if f := deviceLocalReady.Load(); f != nil {
 					(*f)()
 				}
 			},
-		})
-		logger.Info("onchfs reader ready", zap.Strings("chains", resolver.Chains()), zap.Bool("offline_cache_feature", offlineCache != nil))
+		}
+		// A nil interface, not a typed nil: the materializer tests its
+		// resolvers for nil to leave a disabled scheme's works unplayable.
+		if onchfsResolver != nil {
+			cfg.Onchfs = onchfsResolver
+		}
+		if web3Resolver != nil {
+			cfg.Web3 = web3Resolver
+		}
+		deviceLocalMaterializer = offlinecache.NewDeviceLocalMaterializer(cfg)
+		logger.Info("device-local materializer ready",
+			zap.Bool("onchfs", onchfsResolver != nil), zap.Bool("web3", web3Resolver != nil),
+			zap.Bool("offline_cache_feature", offlineCache != nil))
 	}
 
 	// Kiosk User-Agent rewrite (#296). Built independently of the offline
@@ -1621,11 +1669,11 @@ func initializeApp(
 	if recordPick, ok := playlist_refresher.AcceptedPickRecorder(playlistRefresher); ok {
 		commandrouter.SetAcceptedPickRecorder(rawCmdHandler, recordPick, logger)
 	}
-	if onchfsMaterializer != nil {
-		commandrouter.SetOnchfsMaterializer(rawCmdHandler, onchfsMaterializer, logger)
-		playlist_refresher.SetOnchfsMaterializer(playlistRefresher, onchfsMaterializer, logger)
+	if deviceLocalMaterializer != nil {
+		commandrouter.SetDeviceLocalMaterializer(rawCmdHandler, deviceLocalMaterializer, logger)
+		playlist_refresher.SetDeviceLocalMaterializer(playlistRefresher, deviceLocalMaterializer, logger)
 		forceRefresh := playlistRefresher.ForceRefresh
-		onchfsReady.Store(&forceRefresh)
+		deviceLocalReady.Store(&forceRefresh)
 	}
 	// The owner's content policy falls with the claim on a factory reset, for
 	// the same rollback reason the device name does (see factoryReset).

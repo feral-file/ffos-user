@@ -69,9 +69,9 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	if !ok {
 		return errorResponse("invalid_request", "source is required", false), nil
 	}
-	// An app may hold an onchfs work by its raw onchfs:// URI; the device
-	// keys it by its device-local source (dp1/onchfs.go).
-	source = dp1.OnchfsSource(source)
+	// An app may hold a device-local work (onchfs, web3) by its raw URI; the
+	// device keys it by its device-local source (dp1/devicelocal.go).
+	source = dp1.DeviceLocalSource(source)
 
 	// Sampled BEFORE the resolve, which is the whole point. The resolve
 	// is a network call that can block for seconds, and until it returns
@@ -109,7 +109,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	if !found {
 		return errorResponse("not_found", "source not found in playlist", false), nil
 	}
-	source = item.Source // an onchfs item's label may differ from the caller's raw URI
+	source = item.Source // a device-local item's label may differ from the caller's raw URI
 
 	// Only a playlistUrl-resolved download has a URL to index the playlist
 	// BY; an inline dp1_call has none (same as DownloadPlaylist, which
@@ -285,12 +285,13 @@ func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[str
 	if err := offlinecache.CheckSourceKeyLength(source); err != nil {
 		return errorResponse("invalid_request", err.Error(), false), nil
 	}
-	// An app may hold an onchfs work by its raw onchfs:// URI. The device
-	// keys it by its device-local source, whose chain label came from the
-	// item's provenance (dp1/onchfs.go), so each form it can be stored
-	// under is tried and the first that exists is cleared (PR #461 review
-	// F7). Any other source is its own only variant.
-	variants := dp1.OnchfsSourceVariants(source)
+	// An app may hold a device-local work by its raw URI. The device keys it
+	// by its device-local source, and for onchfs that source carries a chain
+	// label taken from the item's provenance (dp1/devicelocal.go), so each
+	// form it can be stored under is tried and the first that exists is
+	// cleared (PR #461 review F7). A web3 work has exactly one form, because
+	// its URL carries its chain. Any other source is its own only variant.
+	variants := dp1.DeviceLocalSourceVariants(source)
 	if len(variants) == 0 {
 		variants = []string{source}
 	}
@@ -911,9 +912,10 @@ func findPlaylistItemBySource(playlist *dp1.Playlist, source string) (dp1playlis
 		}
 	}
 	// An onchfs item carries the chain label its provenance gave it, which a
-	// caller holding the raw onchfs:// URI cannot know (PR #461 review F7).
+	// caller holding the raw onchfs:// URI cannot know (PR #461 review F7);
+	// a web3 item may be held by a URI that omitted its chain id.
 	for _, item := range playlist.Items {
-		if dp1.SameOnchfsWork(item.Source, source) {
+		if dp1.SameDeviceLocalWork(item.Source, source) {
 			return item, true
 		}
 	}

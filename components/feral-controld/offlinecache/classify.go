@@ -68,12 +68,34 @@ const (
 
 	// ClassOnchfs is a device-local onchfs source
 	// (https://<root>.onchfs.invalid/…, ffos-user#427). Its host never
-	// resolves: the work is read from chain by OnchfsMaterializer when it
+	// resolves: the work is read from chain by DeviceLocalMaterializer when it
 	// is display, not captured. Classified without a round trip, ahead of the
 	// guard (which would refuse the unresolvable host), and skipped at
 	// queue time exactly like ClassInline.
 	ClassOnchfs MediaClass = "onchfs"
+
+	// ClassWeb3 is a device-local web3 source
+	// (https://<contract>.<chain>.web3.invalid/…, feral-file#3599). It
+	// behaves exactly as ClassOnchfs does — unresolvable host, written by
+	// Web3Materializer rather than captured, classified with no round trip
+	// ahead of the guard — and differs only in which materializer produces
+	// it. The two are told apart by IsDeviceHeldClass, never by a list a
+	// third scheme could be left out of.
+	ClassWeb3 MediaClass = "web3"
 )
+
+// IsDeviceHeldClass reports whether a class is one the device produces itself
+// rather than fetching from a host, so it is never queued for capture: an
+// inline data: URI or either device-local scheme. Every queue-time skip asks
+// this instead of listing the classes, so a scheme added later cannot be
+// forgotten at one of the sites that has to skip it (feral-file#3599).
+func IsDeviceHeldClass(class MediaClass) bool {
+	switch class {
+	case ClassInline, ClassOnchfs, ClassWeb3:
+		return true
+	}
+	return false
+}
 
 //go:generate mockgen -source=classify.go -destination=../mocks/offlinecache_classify.go -package=mocks -mock_names=Classifier=MockOfflineCacheClassifier
 type Classifier interface {
@@ -249,8 +271,11 @@ func (c *classifier) Classify(ctx context.Context, url string) (MediaClass, erro
 		}
 		return ClassInline, nil
 	}
-	if contentpath.IsOnchfsSourceURL(url) {
+	switch contentpath.DeviceLocalSourceScheme(url) {
+	case contentpath.SchemeOnchfs:
 		return ClassOnchfs, nil
+	case contentpath.SchemeWeb3:
+		return ClassWeb3, nil
 	}
 
 	// Before ANY network round trip, and before the streaming-suffix

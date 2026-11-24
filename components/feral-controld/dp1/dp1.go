@@ -169,7 +169,7 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*p = Playlist(decoded)
-	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
+	p.Items = mapDeviceLocalSources(p.Items) // see devicelocal.go
 	return nil
 }
 
@@ -417,7 +417,7 @@ func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	if err != nil {
 		return nil, err
 	}
-	resolved.Items = mapOnchfsSources(resolved.Items)
+	resolved.Items = mapDeviceLocalSources(resolved.Items)
 	return resolved, nil
 }
 

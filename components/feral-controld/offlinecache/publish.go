@@ -4,7 +4,7 @@ import "sync"
 
 // publishGuardStore makes "write a record's blobs, then save the record"
 // atomic with respect to GC, for producers that run outside the Service's
-// worker (OnchfsMaterializer, PR #461 review F3).
+// worker (DeviceLocalMaterializer, PR #461 review F3).
 //
 // GC is mark-and-sweep: it lists the blobs saved records reference, then
 // deletes every other blob. The Service runs its captures and its GC on one
@@ -38,7 +38,7 @@ func (s *publishGuardStore) Publish(fn func() error) error {
 	return fn()
 }
 
-// publisher is the optional Store capability OnchfsMaterializer uses.
+// publisher is the optional Store capability DeviceLocalMaterializer uses.
 type publisher interface {
 	Publish(fn func() error) error
 }

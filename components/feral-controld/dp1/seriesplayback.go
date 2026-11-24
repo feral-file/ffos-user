@@ -320,7 +320,7 @@ func (p CastPlan) Narrow(device *SeriesPlaybackMode) []dp1playlist.PlaylistItem 
 			break
 		}
 	}
-	return mapOnchfsSources(items) // catalog editions are an exit too (onchfs.go)
+	return mapDeviceLocalSources(items) // catalog editions are an exit too (devicelocal.go)
 }
 
 // RandomGroupPick is one SeriesPlaybackRandom group's resolved edition, as
@@ -618,7 +618,7 @@ func (d *dp1) resolveSeriesCastPlan(ctx context.Context, playlist Playlist, rawP
 			// final mapping, so a 5-minute refresh sent raw onchfs:// to the
 			// player), random-pick matching by source, and the cached
 			// series-segments sidecar.
-			inherited := mapOnchfsSources(inheritInstanceFields(item, editions))
+			inherited := mapDeviceLocalSources(inheritInstanceFields(item, editions))
 			group := &ResolvedSeriesGroup{Representative: item, Editions: inherited, Resolved: true, ArtworkModel: artworkModel}
 			if key, ok := seriesGroupKey(item); ok {
 				group.Key = key

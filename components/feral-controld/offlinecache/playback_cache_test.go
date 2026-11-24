@@ -868,7 +868,7 @@ func TestAutomaticCapture_DoesNotSnapshotMutableRedirect(t *testing.T) {
 
 // PR #461 review F15: an onchfs work on screen is protected and current for
 // the warmer (so speculative reclaim keeps it), while the warmer never
-// classifies or captures it (OnchfsMaterializer writes it).
+// classifies or captures it (DeviceLocalMaterializer writes it).
 func TestPlaybackCache_OnchfsWorkIsProtectedButNeverCaptured(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")

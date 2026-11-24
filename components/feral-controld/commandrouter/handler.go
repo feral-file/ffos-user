@@ -115,7 +115,7 @@ type handler struct {
 	// onchfs reads onchfs works from chain into the offline cache's store
 	// before a display request reaches the player (ffos-user#427). nil (tests, the
 	// reader disabled by config) leaves such items as they are: unplayable.
-	onchfs OnchfsMaterializer
+	onchfs DeviceLocalMaterializer
 	// seriesPlayback is the device-level series-playback override store
 	// (feral-file/ffos-user#425). nil (tests, a build wired before the seam)
 	// makes getSeriesPlayback/setSeriesPlayback answer unavailable and makes
@@ -176,32 +176,32 @@ func SetPolicyRefresher(h Handler, refresher PolicyRefresher, logger *zap.Logger
 
 func (h *handler) setPolicyRefresher(refresher PolicyRefresher) { h.policyRefresher = refresher }
 
-// OnchfsMaterializer is the consumer-owned view of
-// offlinecache.OnchfsMaterializer: make a playlist's onchfs works replayable,
+// DeviceLocalMaterializer is the consumer-owned view of
+// offlinecache.DeviceLocalMaterializer: make a playlist's onchfs works replayable,
 // waiting at most wait for the first one.
-type OnchfsMaterializer interface {
+type DeviceLocalMaterializer interface {
 	Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int
 }
 
-// onchfsCastWait bounds how long a display request waits for its first onchfs work to
+// deviceLocalOpenWait bounds how long a display request waits for its first onchfs work to
 // be read from chain. Measured on public nodes, a whole work reads in 1.5-
 // 3.5 s (Casey Reas, 1 MB, five files: 3.4 s); the wait leaves room for one
 // node failing over. Past it the display request proceeds and the work lands in the
 // background, widening the replay scope when it does.
-const onchfsCastWait = 15 * time.Second
+const deviceLocalOpenWait = 15 * time.Second
 
-// SetOnchfsMaterializer wires the onchfs reader into the display request path. Same
+// SetDeviceLocalMaterializer wires the onchfs reader into the display request path. Same
 // post-construction seam as SetPolicyRefresher.
-func SetOnchfsMaterializer(h Handler, m OnchfsMaterializer, logger *zap.Logger) {
-	setter, ok := h.(interface{ setOnchfsMaterializer(OnchfsMaterializer) })
+func SetDeviceLocalMaterializer(h Handler, m DeviceLocalMaterializer, logger *zap.Logger) {
+	setter, ok := h.(interface{ setDeviceLocalMaterializer(DeviceLocalMaterializer) })
 	if !ok {
 		logger.Warn("Command handler does not support onchfs wiring")
 		return
 	}
-	setter.setOnchfsMaterializer(m)
+	setter.setDeviceLocalMaterializer(m)
 }
 
-func (h *handler) setOnchfsMaterializer(m OnchfsMaterializer) { h.onchfs = m }
+func (h *handler) setDeviceLocalMaterializer(m DeviceLocalMaterializer) { h.onchfs = m }
 
 func (h *handler) setContentPolicy(policy *contentpolicy.Store) {
 	h.contentPolicy = policy
@@ -1209,13 +1209,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// onchfs works (ffos-user#427) are read from chain into the
 			// offline cache's store here, so replay can serve the opening one
 			// from its first frame (the display request waits only for that one; see
-			// onchfsOpening). After the policy filter (nothing it removed is
+			// deviceLocalOpening). After the policy filter (nothing it removed is
 			// read) and before the preflight; outside both locks, like the
 			// preflight, because it is network-bound. Every item already
 			// carries its device-local source (dp1/onchfs.go), which the
 			// scope sync below hashes the same way.
 			if h.onchfs != nil {
-				items, wait := onchfsOpening(playlist.Items, command.Arguments["startItem"])
+				items, wait := deviceLocalOpening(playlist.Items, command.Arguments["startItem"])
 				h.onchfs.Ensure(ctx, items, wait)
 			}
 			command.Arguments["contentContext"] = string(contentContext)
