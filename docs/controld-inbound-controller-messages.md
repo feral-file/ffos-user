@@ -72,7 +72,8 @@ for relayer topic assignment:
   when the policy admits all of its items (see "Content policy effect on
   playlists" below). An optional `request.startItem`
   (`{ "id", "source" }`, either member optional) names the work the display request
-  opens on; controld forwards it to the player untouched and the player
+  opens on; controld forwards it to the player, re-spelling only an onchfs
+  `source` as the device-local source the item carries, and the player
   resolves it against the list it admits, starting at the beginning when the
   work is absent (contract in `api-design.md`).
 - `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`,
