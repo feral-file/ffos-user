@@ -330,3 +330,33 @@ func TestWeb3EntryIsStoredInTheBrowsersSpelling(t *testing.T) {
 		assert.Equal(t, w.Origin()+c.path, rec.Resources[0].URL, c.uri)
 	}
 }
+
+// A manual-mode URL with a query and no path separator is its own call
+// (ERC-6860's mPath is empty, so the calldata is `?seed=1` and not
+// `/?seed=1`). Two things have to hold at once: the call the resolver is
+// asked carries that distinction, and the entry URL replay stores does not —
+// a browser cannot request a URL without a path and sends `/?seed=1`, so
+// that is the URL the kiosk's own request will carry (round 5 review, F18).
+func TestWeb3PathlessSourceCallsAndStoresTheRightURLs(t *testing.T) {
+	const pathless = "web3://0x4f32740cf412d647a622ba27c36fa4b76f71601f:1?seed=1"
+	store, _ := newTestStore(t)
+	source := web3Source(t, pathless)
+	w, _ := contentpath.ParseWeb3(pathless)
+	require.Equal(t, w.Origin()+"?seed=1", source, "the source keeps the absent path")
+
+	resolver := &fakeWeb3Resolver{body: digitalSoulBody}
+	m := newWeb3Materializer(t, store, resolver)
+	require.Equal(t, 1, m.Ensure(context.Background(), []dp1playlist.PlaylistItem{{ID: "a", Source: source}}, 5*time.Second))
+
+	req, _ := resolver.lastReq.Load().(web3.Request)
+	assert.False(t, req.HasPath, "the resolver must see the absent path separator")
+	assert.Equal(t, "", req.Path)
+	assert.Equal(t, "seed=1", req.Query)
+	assert.True(t, req.HasQuery)
+
+	rec, err := store.LoadItem(offlinecache.SourceKey(source))
+	require.NoError(t, err)
+	require.Len(t, rec.Resources, 1)
+	assert.Equal(t, w.Origin()+"/?seed=1", rec.Resources[0].URL,
+		"Chromium requests a path-less URL with its slash")
+}

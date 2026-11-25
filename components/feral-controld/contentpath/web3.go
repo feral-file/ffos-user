@@ -41,7 +41,12 @@ import (
 //   - The chain id is always written, so a URI that omitted it (ERC-4804's
 //     default of 1) and one that wrote `:1` are the same work and the same
 //     cache key.
-//   - Path, query and fragment are carried byte for byte.
+//   - Path, query and fragment are carried byte for byte, and so is whether
+//     the path separator was there at all: a URL with a query and no path
+//     (`web3://0x…:1?seed=1`) becomes `https://<host>?seed=1`, with no "/",
+//     because under ERC-6860's manual mode that URL's calldata is `?seed=1`
+//     where `…:1/?seed=1`'s is `/?seed=1`. Two calls, two works, two cache
+//     keys (Web3.HasPath).
 //
 // One origin per contract-and-chain, not per work: two editions of one
 // contract (Art Blocks' getTokenHtml/<core>/<tokenId>) share an origin and so
@@ -49,10 +54,14 @@ import (
 // host invertible; onchfs can afford an origin per work because its whole
 // identity is one 32-byte root (owner's call, feral-file#3599).
 //
-// ParseWeb3 and ParseWeb3SourceURL are each other's inverse, for every path
-// and not only for paths that arrived escaped: ParseWeb3 canonicalises the
-// path to the spelling a browser will ask for (canonicalWeb3Path). Nothing
-// else may build or parse either form.
+// ParseWeb3 and ParseWeb3SourceURL are each other's inverse for every URI
+// ParseWeb3 accepts, and that is checked rather than reasoned about:
+// ParseWeb3 canonicalises the path to the spelling a browser will ask for
+// (canonicalWeb3Path), then refuses any URI whose source URL does not read
+// back as itself (roundTrips). The query and the fragment are written
+// verbatim, so the bytes net/url will not carry there are refused rather
+// than rewritten into a source nothing recognises. Nothing else may build or
+// parse either form.
 
 // Web3HostSuffix ends every device-local web3 source host.
 const Web3HostSuffix = ".web3.invalid"
@@ -83,6 +92,20 @@ type Web3 struct {
 	// method name, then its arguments, as ERC-4804 spells them ("" is a
 	// call with empty calldata).
 	Path string
+	// HasPath says the URL carried the path separator, so ERC-6860's mPath
+	// begins with "/" rather than being empty. It is what tells
+	// `web3://0x…:1?seed=1` (mPath empty, mPathQuery "?seed=1") from
+	// `web3://0x…:1/?seed=1` (mPath "/", mPathQuery "/?seed=1"), which under
+	// manual mode are two different calldatas and so two different works.
+	//
+	// It is canonicalised, not recorded raw: when there is no query the two
+	// spellings produce the same calldata ("/" either way, by ERC-6860's
+	// empty-mPathQuery rule), so both are stored as HasPath — one work, one
+	// cache key, exactly as a URI that omitted the default chain id and one
+	// that wrote `:1` are one work. HasPath is therefore false only for the
+	// bare-authority-with-query form, the one shape where the separator
+	// changes what is sent.
+	HasPath bool
 	// Query and Fragment are raw, without "?" or "#". HasQuery and
 	// HasFragment tell an empty one from an absent one, so the round trip is
 	// byte for byte. The query carries ERC-4804's `returns=` attribute.
@@ -91,6 +114,15 @@ type Web3 struct {
 	Fragment    string
 	HasFragment bool
 }
+
+// web3HasPath canonicalises mPath's presence from the separator the URL
+// actually carried, and is the one rule both ParseWeb3 and
+// ParseWeb3SourceURL use: a device-local source has to spell the distinction
+// the same way the URI did, or the two stop being inverses.
+//
+// See Web3.HasPath for why an absent separator with no query is stored as
+// present.
+func web3HasPath(separator, hasQuery bool) bool { return separator || !hasQuery }
 
 // ParseWeb3 parses a `web3://` (or `w3://`) URL. ok is false for anything the
 // device cannot turn into one eth_call: a contract that is not a literal
@@ -106,7 +138,7 @@ func ParseWeb3(raw string) (Web3, bool) {
 	var w Web3
 	rest, w.Fragment, w.HasFragment = strings.Cut(rest, "#")
 	rest, w.Query, w.HasQuery = strings.Cut(rest, "?")
-	authority, after, _ := strings.Cut(rest, "/")
+	authority, after, hasSeparator := strings.Cut(rest, "/")
 	if strings.Contains(authority, "@") {
 		return Web3{}, false
 	}
@@ -131,7 +163,41 @@ func ParseWeb3(raw string) (Web3, bool) {
 		return Web3{}, false
 	}
 	w.Path = canonicalWeb3Path(after)
+	w.HasPath = web3HasPath(hasSeparator, w.HasQuery)
+	if !roundTrips(w) {
+		return Web3{}, false
+	}
 	return w, true
+}
+
+// roundTrips checks the one property the rest of the device depends on, on
+// the parse that produces it: that the source URL built from w reads back as
+// w. It is the invariant, checked, rather than a property re-derived
+// component by component — canonicalWeb3Path makes it true of the path, and
+// the query and fragment are written verbatim, where net/url is stricter
+// than the path escaping suggests. A C0 or DEL byte in the query makes
+// url.Parse refuse the source outright (it scans every byte before the
+// fragment), and an invalid percent-escape in the fragment does the same
+// through setFragment's unescape.
+//
+// Refusing such a URI is what keeps it failing closed. The alternative — and
+// what happened before this check — is worse than not playing: ParseWeb3
+// accepted the URI, so dp1 rewrote the item to a `.invalid` https source,
+// and then nothing recognised that source as device-local. The work was
+// never resolved, the app's download command answered a classification
+// failure, and media health dialed and judged a host that cannot resolve,
+// which is both "a device-local source is never dialed" and "a device-held
+// source is never probed or judged" broken on one work. Unmapped, it stays a
+// `web3://` source the kiosk simply cannot load (round 5 review, F1).
+//
+// Canonicalising the query and the fragment as well — a derived escape set
+// each, as for the path — is what would let these works play. It is two more
+// tables to keep in step with net/url for two components whose rules differ,
+// and no measured work needs one of those bytes, so it is left for the first
+// that does.
+func roundTrips(w Web3) bool {
+	back, ok := ParseWeb3SourceURL(w.SourceURL())
+	return ok && back == w
 }
 
 // canonicalWeb3Path spells a web3 path so that it survives being written into
@@ -152,12 +218,24 @@ func ParseWeb3(raw string) (Web3, bool) {
 // A `string` argument containing a space is the ordinary case under
 // ERC-4804's auto-mode typing, so this is not an edge shape.
 //
-// The call is unaffected: web3.pathSegments unescapes every segment before it
-// builds the calldata, and escaping is only a different spelling of the same
-// bytes. Existing triplets are preserved rather than normalised, so a URI
-// that encoded an argument on purpose keeps its exact source string and its
-// cache key. It is idempotent: escaping an already-escaped path changes
-// nothing, so one work has one cache key however it was spelled.
+// Existing triplets are preserved rather than normalised, so a URI that
+// encoded an argument on purpose keeps its exact source string and its cache
+// key. It is idempotent: escaping an already-escaped path changes nothing, so
+// one work has one cache key however it was spelled.
+//
+// **The auto-mode call is unaffected; the manual-mode call is not, and that
+// is deliberate.** web3.pathSegments unescapes every segment before it builds
+// auto mode's calldata, so there escaping is only a different spelling of the
+// same bytes. Manual mode has no segments to unescape: ERC-6860 sends
+// mPathQuery as the calldata and the contract parses it itself, so a
+// manual-mode work is called with the canonicalised spelling
+// (`/my%20work`, not `/my work`). A conforming URI cannot carry one of these
+// bytes raw — the ones escaped here are the ones a URL path may not hold —
+// and neither measured work is manual mode, so the device keeps one spelling
+// for the source, the cache key and the call rather than carrying a second
+// path through web3.Request for a shape no named work has. The cost is
+// recorded on the branch's `Out of scope` instead of being left implied
+// (round 5 review, F3).
 //
 // Only web3 is canonicalised here. Onchfs.SourceURL writes its path verbatim
 // the same way and is pre-existing on the base branch; see the branch's
@@ -219,15 +297,16 @@ func isHexDigit(c byte) bool {
 }
 
 // URI is the canonical `web3://` form: lower-case contract, the chain id
-// always written, then path, query and fragment as parsed.
+// always written, then path, query and fragment as parsed. The path separator
+// is written only when the URL carried one (Web3.HasPath), so the bare
+// authority form of a URL with a query keeps the mPath ERC-6860 gives it.
 func (w Web3) URI() string {
 	var b strings.Builder
 	b.WriteString("web3://0x")
 	b.WriteString(w.Contract)
 	b.WriteByte(':')
 	b.WriteString(strconv.FormatUint(w.ChainID, 10))
-	b.WriteByte('/')
-	b.WriteString(w.Path)
+	w.writePath(&b)
 	w.writeTail(&b)
 	return b.String()
 }
@@ -238,10 +317,24 @@ func (w Web3) SourceURL() string {
 	var b strings.Builder
 	b.WriteString("https://")
 	b.WriteString(w.Host())
-	b.WriteByte('/')
-	b.WriteString(w.Path)
+	w.writePath(&b)
 	w.writeTail(&b)
 	return b.String()
+}
+
+// writePath writes mPath: "/" then the path when the URL carried a
+// separator, nothing at all when it did not. An https URL with no path is
+// what makes the distinction survive into the source string — and so into
+// the sha256 cache key — because url.URL.EscapedPath tells "" from "/" and
+// nothing else in the URL can carry it (Web3.HasPath). Chromium still
+// *requests* such a URL with a "/", which is why the stored entry URL is
+// respelled rather than taken from the source (offlinecache/web3.go).
+func (w Web3) writePath(b *strings.Builder) {
+	if !w.HasPath {
+		return
+	}
+	b.WriteByte('/')
+	b.WriteString(w.Path)
 }
 
 // Origin is the work's origin on the device, "https://<host>".
@@ -281,12 +374,18 @@ func ParseWeb3SourceURL(raw string) (Web3, bool) {
 	if !ok {
 		return Web3{}, false
 	}
-	p := strings.TrimPrefix(u.EscapedPath(), "/")
+	escaped := u.EscapedPath()
+	p := strings.TrimPrefix(escaped, "/")
 	if !cleanWeb3Path(p) {
 		return Web3{}, false
 	}
 	w.Path = p
 	w.Query, w.HasQuery = u.RawQuery, u.ForceQuery || u.RawQuery != ""
+	// "" is the bare-authority form SourceURL writes for an absent mPath,
+	// "/" is a present but empty one. The same canonicalisation as ParseWeb3
+	// applies, so a source with neither a path nor a query — a shape
+	// SourceURL never writes — reads back as the "/" it would be written as.
+	w.HasPath = web3HasPath(escaped != "", w.HasQuery)
 	// The fragment is taken from the raw string, not u.EscapedFragment, so it
 	// round-trips exactly as SourceURL wrote it.
 	_, w.Fragment, w.HasFragment = strings.Cut(raw, "#")
@@ -294,7 +393,9 @@ func ParseWeb3SourceURL(raw string) (Web3, bool) {
 }
 
 // ParseWeb3Host parses a device-local web3 host into its contract and chain.
-// Path, query and fragment of the result are empty.
+// Path, query and fragment of the result are empty; HasPath is set, because
+// with no query that is the canonical spelling (Web3.HasPath), so the
+// result's SourceURL is the origin root rather than a bare authority.
 func ParseWeb3Host(host string) (Web3, bool) {
 	host = strings.ToLower(host)
 	labels, ok := strings.CutSuffix(host, Web3HostSuffix)
@@ -315,7 +416,7 @@ func ParseWeb3Host(host string) (Web3, bool) {
 	if err != nil || id == 0 || chainLabel != strconv.FormatUint(id, 10) {
 		return Web3{}, false
 	}
-	return Web3{Contract: hex.EncodeToString(contract), ChainID: id}, true
+	return Web3{Contract: hex.EncodeToString(contract), ChainID: id, HasPath: true}, true
 }
 
 // IsWeb3SourceURL reports whether raw is a device-local web3 source URL.

@@ -504,11 +504,16 @@ func (m *DeviceLocalMaterializer) resources(ctx context.Context, source string, 
 		if m.web3 == nil {
 			return nil, nil, fmt.Errorf("%w: web3", errNoResolver)
 		}
+		// HasPath and HasQuery travel with the parts: manual mode sends
+		// mPathQuery verbatim, so whether the URL carried "/" and "?" at all
+		// is part of the call, not of its spelling (web3.Request).
 		work, err := m.web3.Resolve(ctx, web3.Request{
 			Contract: w.ContractAddress(),
 			ChainID:  w.ChainID,
 			Path:     w.Path,
+			HasPath:  w.HasPath,
 			Query:    w.Query,
+			HasQuery: w.HasQuery,
 		})
 		if err != nil {
 			return nil, nil, err

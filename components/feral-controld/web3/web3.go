@@ -107,8 +107,20 @@ type Request struct {
 	// Path is the escaped URL path without a leading slash: the method, then
 	// its arguments. "" is a call with empty calldata.
 	Path string
+	// HasPath and HasQuery say whether the URL carried the "/" and the "?"
+	// at all. Manual mode sends ERC-6860's mPathQuery verbatim, so an absent
+	// separator and an empty one are two different calldatas, and only the
+	// caller that parsed the URL knows which it saw (contentpath.Web3).
+	//
+	// Each flag only ever decides an *empty* Path or Query: a non-empty one
+	// cannot have arrived without its separator, so NewPlan reads it as
+	// carrying one. A Request written by hand — or by a test — is therefore
+	// right without setting either flag, and there is no state where the
+	// two can disagree.
+	HasPath bool
 	// Query is the raw query, without "?". ERC-4804's `returns=` lives here.
-	Query string
+	Query    string
+	HasQuery bool
 }
 
 // Work is one resolved call.
@@ -201,19 +213,54 @@ func NewPlan(r Request, mode string) (Plan, error) {
 		// `returns=` attribute (it is the contract's own query, carried
 		// unchanged), the answer is decoded as ABI bytes, and the type is
 		// the extension of the complete resource path.
-		raw := "/" + r.Path
-		if r.Query != "" {
-			raw += "?" + r.Query
-		}
 		return Plan{
 			Mode:        mode,
-			Calldata:    []byte(raw),
+			Calldata:    []byte(manualPathQuery(r)),
 			ContentType: contentTypeForPath(r.Path),
 		}, nil
 	case ModeAuto:
 		return newAutoPlan(r)
 	}
 	return Plan{}, fmt.Errorf("%w: resolve mode %q", ErrUnsupported, mode)
+}
+
+// manualPathQuery is ERC-6860's mPathQuery, which manual mode sends as
+// calldata: `mPathQuery = mPath [ "?" mQuery ]`, where mPath "begins with
+// '/' or is empty", and "if mPathQuery is empty, the sent calldata will be
+// `/`".
+//
+// The substitution is of the *whole* path-and-query, not of the path. A "/"
+// prepended unconditionally — which is what this did until round 5's F18 —
+// sends `/?seed=1` for `web3://0x…:1?seed=1`, whose mPath is empty and whose
+// calldata is `?seed=1`. The contract parses that string itself, so the
+// difference is a different resource: a manual-mode work could be handed
+// another of its contract's resources and display it, with the node
+// confirming it, because the bytes really are what that call returned.
+//
+// Both separators are read from presence, not from emptiness, so every shape
+// the ABNF allows is distinguished: an absent mPath from an empty one, and
+// an absent mQuery from an empty one (`…:1/?` is mPathQuery "/?"). A
+// non-empty Path or Query implies its own separator, so a Request built
+// without the flags is still spelled correctly.
+//
+// Path reaches the contract in the spelling contentpath canonicalised it to,
+// not in the URI's own: there are no segments to unescape here as there are
+// in auto mode, and the device deliberately keeps one spelling for the
+// source, the cache key and the call. Query is carried byte for byte, since
+// nothing canonicalises it. See canonicalWeb3Path's own comment and the
+// branch's `Out of scope` for what that costs (round 5 review, F3).
+func manualPathQuery(r Request) string {
+	raw := ""
+	if r.HasPath || r.Path != "" {
+		raw = "/" + r.Path
+	}
+	if r.HasQuery || r.Query != "" {
+		raw += "?" + r.Query
+	}
+	if raw == "" {
+		return "/"
+	}
+	return raw
 }
 
 // newAutoPlan is ERC-4804's auto mode: the first path segment is the method

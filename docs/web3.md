@@ -58,6 +58,13 @@ The work plays on one node and the log says it was not confirmed. A read that re
 would make every web3 work hostage to a second host being up, which is the failure this
 whole issue exists to end.
 
+**Confirmation has five seconds, counted from the first node's answer** (`confirmBudget`).
+It runs inside the read, and the read runs inside the 15 s the display gives the work it is
+opening, so an unreachable sibling node — blocked rather than refused, which costs a full
+15 s HTTP timeout, and there can be several — would otherwise make every web3 work on that
+chain miss its own opening. Spending the budget serves the work unconfirmed, the same outcome
+as "no second node answered"; the log's `budget_spent` tells the two apart.
+
 **So the residual risk is a single node lying while every other node for that chain is
 unreachable.** It is stated here rather than hidden. The mitigations available are Feral
 File's own node being first in the list, and the operator pointing `web3.chains` at a node
@@ -89,8 +96,37 @@ The kiosk loads http(s) only, so every web3 item leaves `dp1` with a device-loca
   would need 40 and the limit is 63).
 - **The chain id is always written.** ERC-4804 defaults it to 1, so a URI that omitted it
   and one that wrote `:1` are one work and one cache key.
-- **Path, query and fragment are carried byte for byte**, as for onchfs. A `returns=`
-  attribute rides in the query, and so does a work's own seed.
+- **The path is canonicalised; the query and the fragment are carried verbatim.** A `returns=`
+  attribute rides in the query, and so does a work's own seed, and neither is touched. The
+  path is spelled the way a browser will ask for it (`canonicalWeb3Path`, whose escape set is
+  derived by probing `net/url` so it cannot drift from the parser it has to agree with);
+  existing `%XX` triplets are preserved, so a URI that encoded an argument on purpose keeps
+  its source string and its cache key. Writing the path verbatim is what round 4 removed: it
+  produced a URL Chromium would never request, so the work never appeared and nothing
+  reported it. **The canonicalised spelling is also what an auto-mode call unescapes and what
+  a manual-mode call sends**: auto mode has segments to unescape, manual mode does not, so a
+  manual-mode work is called with `/my%20work` where the URI wrote `/my work`. The device
+  keeps one spelling for the source, the cache key and the call rather than carrying a second
+  path for a shape no named work has; see `Out of scope` for what that costs.
+- **A URI whose source URL would not read back as itself is refused**, not rewritten
+  (`roundTrips`, checked on every parse). `net/url` is stricter about the query and the
+  fragment than the path escaping suggests — a C0 or DEL byte in the query, or an invalid
+  escape in the fragment, makes the source unparseable — and an accepted-but-unmappable URI
+  is worse than one that does not play: `dp1` would rewrite the item to a `.invalid` host that
+  nothing then recognises as device-local, so the work would never be resolved and media
+  health would dial and judge an unresolvable host. Refused, it stays a `web3://` source the
+  kiosk cannot load. Canonicalising those two components as well — a derived escape set each —
+  is what would let such works play, and is left for the first measured work that needs one of
+  those bytes.
+- **So is whether the path separator was there at all.** `web3://0x…:1?seed=1` has an empty
+  ERC-6860 `mPath` and becomes `https://<host>?seed=1`, with no `/`; `web3://0x…:1/?seed=1`
+  has `mPath` `/` and keeps it. Under manual mode those are two calldatas and so two works,
+  and `url.URL.EscapedPath` is what tells the two spellings apart on the way back. With no
+  query the separator changes nothing — the calldata is `/` either way — so both spellings
+  are stored with it: one work, one cache key, as with the default chain id. Chromium
+  requests a path-less URL as `/?seed=1`, so the stored entry URL is slashed
+  (`offlinecache/web3.go`); the request loses the distinction, the source, the call and the
+  cache key keep it.
 
 **One origin per contract-and-chain, not per work.** Two editions of one contract — Art
 Blocks' `getTokenHtml/<core>/<tokenId>` — share an origin, and so share localStorage and
@@ -133,6 +169,7 @@ so a flatten that skips the mapping gives one work two identities.
 | step | what |
 |---|---|
 | `resolveMode()` | ERC-6860's mode. `"manual"` sends the path and query as raw calldata. `"auto"`, an empty answer, or a **revert** is auto mode — neither measured work implements `resolveMode`, so the revert case is the common one. Any other name is `ErrUnsupported`. |
+| manual-mode calldata | ERC-6860's `mPathQuery` verbatim: `mPath` (`/` then the path, or nothing when the URL carried no separator) then `?` and the query when there was one. `/` is sent only when the whole `mPathQuery` is empty — not when only the path is, so `…:1?seed=1` sends `?seed=1` and `…:1/?seed=1` sends `/?seed=1`. The contract parses that string itself, so a `/` added to the first of those is a different resource, and a node confirms the wrong bytes honestly. |
 | auto-mode calldata | the first path segment is the method; the rest are arguments, typed by the standard's rules below. |
 | `eth_call` | one call, at the pinned block, to one node. |
 | decode | without `returns=`, the result is ABI-encoded bytes (a string encodes the same way); with `returns=(…)`, the decoded values are served as JSON (a `bool` as a JSON boolean, every other type as a string). An empty `returns=` or `returnTypes=` is the default decoding; `returns=()` is the raw result. |
@@ -203,8 +240,12 @@ salvaging rule as `onchfs`:
 A web3 work is one document, not a tree, so there is one blob and — deliberately — one URL
 for it:
 
-- the **exact source URL**, query included, as the entry — replay matches method and URL
-  exactly, and the kiosk navigates to that string;
+- the **source URL in Chromium's own spelling**, query included, as the entry
+  (`browserEntryURL`) — replay matches method and URL exactly, and Chromium percent-encodes
+  what it is handed before it asks for it (`?seed=it's` goes out as `?seed=it%27s`) and sends
+  a `/` for a path-less URL, so the entry is respelled from the source rather than being the
+  source string itself. The respelling is the WHATWG path and special-query sets, and existing
+  `%XX` escapes are kept as written;
 - the **origin root** (`https://<host>/`) as well, but *only* when the entry is itself the
   origin root (a URI with no method path), because a work with a method path shares its origin
   with every sibling work on the same contract and must not claim a URL one of them could

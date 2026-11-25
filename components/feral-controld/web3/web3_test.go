@@ -294,3 +294,70 @@ func TestAQueryThatDoesNotParseStillPlays(t *testing.T) {
 		t.Fatalf("ContentType = %q, want text/html", p.ContentType)
 	}
 }
+
+// ERC-6860: `mPathQuery = mPath [ "?" mQuery ]`, mPath "begins with '/' or is
+// empty", and "if mPathQuery is empty, the sent calldata will be `/`". The
+// substitution is of the whole path-and-query, so a URL with a query and no
+// path separator sends `?seed=1`, not `/?seed=1` — which for a manual-mode
+// contract is a different resource, returned and confirmed honestly by every
+// node (round 5 review, F18).
+func TestManualModeCalldataIsTheWholePathAndQuery(t *testing.T) {
+	const contract = "0x953d288708bb771f969fcfd9ba0819ef506ac718"
+	cases := []struct {
+		name string
+		req  web3.Request
+		want string
+	}{
+		{"no separator, with a query", web3.Request{Query: "seed=1", HasQuery: true}, "?seed=1"},
+		{"empty path, with a query", web3.Request{HasPath: true, Query: "seed=1", HasQuery: true}, "/?seed=1"},
+		{"no separator, empty query", web3.Request{HasQuery: true}, "?"},
+		{"empty path, empty query", web3.Request{HasPath: true, HasQuery: true}, "/?"},
+		{"nothing at all", web3.Request{}, "/"},
+		{"empty path, no query", web3.Request{HasPath: true}, "/"},
+		{"a path implies its separator", web3.Request{Path: "a/b"}, "/a/b"},
+		{"a query implies its separator", web3.Request{Path: "a/b", Query: "x=1"}, "/a/b?x=1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := tc.req
+			req.Contract, req.ChainID = contract, 1
+			p, err := web3.NewPlan(req, web3.ModeManual)
+			if err != nil {
+				t.Fatalf("NewPlan: %v", err)
+			}
+			if string(p.Calldata) != tc.want {
+				t.Fatalf("manual calldata = %q, want %q", p.Calldata, tc.want)
+			}
+		})
+	}
+}
+
+// Manual mode's calldata carries the path in the spelling contentpath
+// canonicalised it to, because there are no segments to unescape as there are
+// in auto mode. This is the recorded behaviour, not an accident, and it is
+// pinned so the next change to either side has to decide it again rather than
+// discover it (round 5 review, F3).
+//
+// The sweep also pins the half that is byte for byte: a query reaches the
+// contract exactly as the URI spelled it.
+func TestManualModeSendsTheCanonicalisedPathAndTheRawQuery(t *testing.T) {
+	const contract = "0x953d288708bb771f969fcfd9ba0819ef506ac718"
+	cases := []struct{ name, path, query, want string }{
+		{"a space is sent escaped", "greet/hello%20world", "", "/greet/hello%20world"},
+		{"non-ASCII is sent escaped", "greet/caf%C3%A9", "", "/greet/caf%C3%A9"},
+		{"an existing triplet is unchanged", "a%21b", "", "/a%21b"},
+		{"the query is byte for byte", "index.html", "seed=it's&n=2", "/index.html?seed=it's&n=2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := web3.Request{Contract: contract, ChainID: 1, Path: tc.path, Query: tc.query}
+			p, err := web3.NewPlan(req, web3.ModeManual)
+			if err != nil {
+				t.Fatalf("NewPlan: %v", err)
+			}
+			if string(p.Calldata) != tc.want {
+				t.Fatalf("manual calldata = %q, want %q", p.Calldata, tc.want)
+			}
+		})
+	}
+}

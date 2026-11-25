@@ -50,6 +50,20 @@ const pinDepth = 3
 // of its chain's list.
 const endpointCooldown = time.Minute
 
+// confirmBudget is all the time the second opinion gets, counted from the
+// moment the first node has answered.
+//
+// It is sized against the display, not against the network: the opening work
+// has 15 s before the kiosk gives up waiting (commandrouter's
+// deviceLocalOpenWait), and the read itself has to fit inside that too. A
+// node that is reachable answers confirm's three round trips (eth_chainId,
+// resolveMode, eth_call) well inside five seconds; one that is blocked
+// answers in DefaultRequestTimeout, 15 s, and there can be several of them.
+// So the budget is what separates "the second opinion was not available" —
+// an outcome the scheme already serves on — from "the work missed its own
+// opening" (round 5 review, F2).
+const confirmBudget = 5 * time.Second
+
 // errWrongChain marks a node that answers for a chain other than the one it
 // was configured for.
 var errWrongChain = errors.New("web3: endpoint is on another chain")
@@ -183,12 +197,31 @@ func (c *chainReader) read(ctx context.Context, req Request) (*Work, error) {
 // "Differently" includes a revert. A node that reverts the call is not a node
 // that could not answer: it is saying there is no work at that address, at
 // the same block the first node returned bytes for.
+//
+// Confirmation runs on its own budget (confirmBudget), because it runs
+// *inside* the read and the read runs inside the 15 s the display gives the
+// work it is opening (Ensure -> start -> materialize -> resources -> Resolve
+// -> read -> confirm). Without a budget, a chain whose other nodes are
+// blocked rather than refused costs one HTTP timeout each
+// (DefaultRequestTimeout, 15 s) before confirm gives up, so a device that
+// can reach one of three nodes misses the open on the first web3 work of
+// every chain — and misses it again for the next work, because confirm
+// neither reads nor writes read()'s cooldown map. Spending the budget serves
+// the work unconfirmed, which is already what "no second node answered"
+// does; it just arrives in time to be displayed (round 5 review, F2).
 func (c *chainReader) confirm(ctx context.Context, rest []string, work *Work) error {
 	block, ok := new(big.Int).SetString(work.Block, 10)
 	if !ok {
 		return fmt.Errorf("web3: block %q is not a number", work.Block)
 	}
+	ctx, cancel := context.WithTimeout(ctx, confirmBudget)
+	defer cancel()
 	for _, ep := range rest {
+		// The budget is spent: stop asking rather than letting each
+		// remaining endpoint fail on the expired deadline in turn.
+		if ctx.Err() != nil {
+			break
+		}
 		caller := &RPCCaller{Endpoint: ep, Client: c.client}
 		if err := c.checkChain(ctx, caller, ep); err != nil {
 			continue
@@ -272,9 +305,14 @@ func (c *chainReader) confirm(ctx context.Context, rest []string, work *Work) er
 			ErrDisagree, work.ReadFrom, ep, work.Block,
 			shortDigest(work.Body), shortDigest(body))
 	}
+	// budget_spent tells the two reasons apart in the field: every other
+	// node refused or could not answer, against the budget running out
+	// before they could be asked. Both serve the same bytes, but only the
+	// second means the device is being slowed by hosts it cannot reach.
 	c.logger.Info("web3: no second node confirmed the call; serving one node's answer",
 		zap.Uint64("chain", c.chain), zap.String("contract", work.Contract),
-		zap.String("endpoint", work.ReadFrom), zap.String("block", work.Block))
+		zap.String("endpoint", work.ReadFrom), zap.String("block", work.Block),
+		zap.Bool("budget_spent", ctx.Err() != nil))
 	return nil
 }
 

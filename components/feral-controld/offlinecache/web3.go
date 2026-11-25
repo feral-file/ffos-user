@@ -107,8 +107,18 @@ func web3Resources(w contentpath.Web3, source string, work *web3.Work, freshUnti
 // Chromium's. The contract call is built from the playlist's own spelling
 // and is untouched (round 5 review, F8). Existing `%XX` escapes stay as
 // written, as a browser leaves them.
+//
+// A source with no path at all (`https://<host>?seed=1`, how a URL whose
+// mPath is empty is stored — contentpath.Web3.HasPath) is slashed first: a
+// browser has no way to request a URL without a path and sends `/?seed=1`,
+// so that is the URL replay has to hold. The *source* keeps the distinction,
+// which is what makes the call and the cache key right; only the request
+// loses it, and it loses it in the browser, not here.
 func browserEntryURL(w contentpath.Web3, source string) string {
 	entry := entryURL(source)
+	if origin := w.Origin(); entry == origin || strings.HasPrefix(entry, origin+"?") {
+		entry = slashedEntry(entry)
+	}
 	rest, ok := strings.CutPrefix(entry, w.Origin()+"/")
 	if !ok {
 		return entry
