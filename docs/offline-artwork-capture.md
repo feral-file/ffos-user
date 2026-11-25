@@ -1269,6 +1269,19 @@ There is deliberately **no** top-level manifest, no separate
   queued either way, and only the separate by-URL fallback record would
   be missing if indexing fails — a failure there is logged, not
   propagated to the caller.
+- `downloadPlaylistItem` with `displayed` (feral-file/feral-file#3633) is
+  for a controller that names an on-screen item by position because it never
+  held the document. `commandrouter/offlinecache_displayed.go` handles it and
+  writes no record of its own:
+  - **URL cast:** the request is re-issued as `{playlistUrl, source}` through
+    the path above, so the record, the series sidecar and the URL index come
+    from a fresh resolve.
+  - **Inline or dynamic cast:** the item is queued and no playlist record is
+    written. A record built from the player's already-narrowed list would
+    replace a fuller one with the same id, which a whole-playlist download
+    wrote, and that would orphan the members it drops.
+  - The inline case needs no record: offline replay is armed from
+    `replay-scope.json` (source keys), and the per-work clear is by source.
 - Only fields replay routing and status reporting actually consume are
   kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
@@ -1724,6 +1737,27 @@ would. Since native media elements render on the kiosk's TOP-LEVEL page
 (not inside a cross-origin iframe the way software artworks are — see
 §6.1), the existing top-level `Fetch` interception already covers them;
 no new per-target machinery was needed for this.
+
+**A bare IPFS CID that arrives slashed is looked up bare too.** The
+kiosk's `uarewrite` heals every bare CID that carries a query, on any
+host, into its directory form (`…/ipfs/<cid>?q` → `…/ipfs/<cid>/?q`,
+`contentpath.SlashBeforeQuery`), and replay sees the healed URL. Capture
+navigates to the bare `item.Source`, so a file CID (an extensionless
+still or video) is stored only under `…/ipfs/<cid>`. Both player params
+above give every request for such a source a query, so the probe and the
+iframe navigation both missed and failed closed: the work never displayed
+offline (ffos-user#484, FF1-8EVTK3RE). When every lookup above misses,
+`processRequestPaused` runs the same lookups once more on the unslashed
+spelling (`contentpath.UnslashBeforeQuery`, which removes that one slash
+and nothing else), but only when the player's own params were the whole
+query (`unslashForPlayerParams`). A directory CID with no query of its
+own is unaffected: its slashed key, the gateway's redirect target at
+capture, matches first. A source that carries its own query (fxhash
+`…/ipfs/<dircid>?fxhash=…`) is deliberately not retried: capture does not
+heal, so its bare key is the gateway's 301 that drops the query, and
+following it would serve the null-hash page, a different iteration, with
+no error. That shape keeps failing closed until capture heals the way the
+kiosk does.
 
 - **Redirect resource** → `Fetch.fulfillRequest` with the recorded status,
   `Location` header, and the resource's captured `Headers` (below), no

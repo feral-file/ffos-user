@@ -686,7 +686,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// artist-level controls for this work; machine settings remain owned by
 		// the player and are intentionally not snapshotted here.
 		dp1Call := map[string]interface{}{
-			"dpVersion": "1.0",
+			"dpVersion": dp1.EmittedDPVersion,
 			"title":     title,
 			"items":     []interface{}{item},
 		}
@@ -1026,6 +1026,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
+				dp1.AuditDocumentAsync(h.logger, "dp1_call", playlistBytes)
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
@@ -2211,9 +2212,13 @@ func truncateLabel(s string) string {
 //
 // The documented contract is that this query exposes only a bounded label
 // snapshot: record id, timestamp, active flag, item id, title, artist,
-// thumbnail. Item sources and the full retained DP-1 item stay device-local —
-// they can be signed URLs carrying credentials in their query strings, and this
-// reply is reachable from the unauthenticated LAN hub. Forwarding the player's
+// thumbnail. Item sources and the full retained DP-1 item stay out of it — they
+// can be signed URLs carrying credentials in their query strings, and this
+// reply is reachable from the unauthenticated LAN hub. (This keeps THIS reply
+// narrow; it is not what keeps sources from a controller-tier caller: a
+// direct checkStatus reply carries every on-screen source. The surfaces are
+// listed once, in the Security Notes of
+// docs/controld-inbound-controller-messages.md.) Forwarding the player's
 // object verbatim made that contract true only for as long as the player
 // happened to honor it; a daemon that OWNS the shape cannot be widened by a
 // change on the other side of CDP.
