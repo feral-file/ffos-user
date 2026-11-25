@@ -144,6 +144,13 @@ type Playlist struct {
 	// Hydration (ProcessDynamicPlaylist*) takes Playlist by value and copies
 	// the struct, so a verdict attached at decode time survives it.
 	Verification *sigverify.Verdict `json:"-"`
+	// Extra holds top-level members the typed Playlist has no field for (a
+	// later DP-1 minor's additions, extensions this build does not model), so
+	// re-emitting the document does not strip them (DP-1 §12). Top level only:
+	// unknown members inside items or nested objects are still dropped, since
+	// items are rewritten (hydrated, narrowed, series-expanded) after decode and
+	// have no stable identity to splice them back onto.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // playlistJSON is Playlist without its methods, so UnmarshalJSON can lean on
@@ -153,7 +160,8 @@ type playlistJSON Playlist
 // UnmarshalJSON decodes the document as the plain struct and maps its items'
 // onchfs sources to the device-local form (see onchfs.go).
 //
-// There is deliberately no MarshalJSON. One existed to carry a
+// MarshalJSON re-emits unknown top-level members next to the typed ones (see
+// Extra). Historically there was no MarshalJSON. One existed to carry a
 // `dynamicQuery.pagination` block that dp1-go's typed DynamicQuery drops,
 // for the device-side Raster wallet walk. That walk was removed
 // (feral-file/feral-file#3576, section 7 of the 2026-11-23 plan): Raster now
@@ -182,7 +190,13 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 	*p = Playlist(decoded.playlistJSON)
 	p.Satellites = decodeSatellitesExact(data)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
+	p.Extra = unknownPlaylistMembers(data)
 	return nil
+}
+
+// MarshalJSON is the typed encoding plus Extra.
+func (p Playlist) MarshalJSON() ([]byte, error) {
+	return marshalWithExtra(playlistJSON(p), p.Extra)
 }
 
 // HasDynamicContent returns true when the playlist requests dynamic item resolution (spec or legacy).
@@ -682,6 +696,8 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
+	AuditDocument(d.logger, "playlistUrl", bytes)
+
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)
 	if err != nil {
@@ -721,7 +737,6 @@ func buildPlaylistItem(duration float64, token ffindexer.Token) dp1playlist.Play
 		Title:    title,
 		Source:   previewURL,
 		Duration: &dur,
-		License:  "open",
 		Provenance: &dp1playlist.ProvenanceBlock{
 			Type: dp1playlist.ProvenanceOnChain,
 			Contract: &dp1playlist.ProvenanceContract{

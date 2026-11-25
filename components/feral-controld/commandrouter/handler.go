@@ -686,7 +686,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// artist-level controls for this work; machine settings remain owned by
 		// the player and are intentionally not snapshotted here.
 		dp1Call := map[string]interface{}{
-			"dpVersion": "1.0",
+			"dpVersion": dp1.EmittedDPVersion,
 			"title":     title,
 			"items":     []interface{}{item},
 		}
@@ -1026,6 +1026,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
+				dp1.AuditDocument(h.logger, "dp1_call", playlistBytes)
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
