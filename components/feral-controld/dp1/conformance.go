@@ -116,7 +116,7 @@ func unknownPlaylistMembers(data []byte) map[string]json.RawMessage {
 		lower := strings.ToLower(k)
 		// satellites is decoded by its exact key only (see UnmarshalJSON), so a
 		// case variant is not consumed by any field and is carried as an extra.
-		if knownPlaylistKeys[lower] && !(lower == "satellites" && k != "satellites") {
+		if knownPlaylistKeys[lower] && (lower != "satellites" || k == "satellites") {
 			continue
 		}
 		if extra == nil {
