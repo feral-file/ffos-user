@@ -30,9 +30,10 @@ void validate_overlay(const Json& p) {
   if(owner!="setup")return; // Pairing/recovery schemas are migrated separately.
   static const std::set<std::string> states{"softap_qr","joining","join_failed","updating","claim_qr","ready","hidden","scanning","finalizing","factory_reset","connecting","setup_error"};
   require(states.contains(state),"unsupported","Unsupported setup overlay state");
-  fields(f,{"reason","ssid","password","portal_url","client_attached","url","device_name","version","progress"});
+  fields(f,{"reason","ssid","password","portal_url","client_attached","passive","url","device_name","version","progress"});
   // Wi-Fi escaping can double byte length; cap credentials well below QR
   // byte-mode capacity instead of accepting a panel with an unencodable code.
+  if(f.contains("passive"))require((state=="softap_qr" || state=="scanning") && f["passive"].is_boolean(),"invalid_params","Invalid passive setup flag");
   if(f.contains("password"))require(f["password"].get_ref<const std::string&>().size()<=128,"invalid_params","SoftAP password exceeds 128 bytes");
   if(f.contains("client_attached"))require(f["client_attached"].is_boolean(),"invalid_params","client_attached must be boolean");
   if(f.contains("progress"))require(f["progress"].is_number()&&std::isfinite(f["progress"].get<double>()),"invalid_params","progress must be finite");

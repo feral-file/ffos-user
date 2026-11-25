@@ -357,11 +357,12 @@ extern "C" int ff_host(int argc, char** argv) {
       // The host never manufactures a texture or a scanout acknowledgement.
       if(auto desired=playback.desired();desired && desired->stage!="failed"){
         auto it=clients.find(desired->id);
-        if(it!=clients.end() && it->second->direct() && it->second->has_ready_frame() &&
-           playback.overlay().is_null() && !playback.service_failure()){
+        if(it!=clients.end() && it->second->direct() && it->second->has_ready_frame() && !playback.service_failure()){
           playback.frame_ready(desired->id);
-          playback.presented(desired->id);
-          playback.composed(desired->id,desired->display_revision);
+          if (playback.overlay().is_null()) {
+            playback.presented(desired->id);
+            playback.composed(desired->id,desired->display_revision);
+          }
         }
       }
       ff::Surface* surface = nullptr;

@@ -139,7 +139,11 @@ struct Pool {
         if (resource.value("method", "GET") == "GET" &&
             (resource.value("url", "") == source || resource.value("url", "") == record.value("entry", source)))
           entry = &resource;
-        if (resource.value("browserPolicyVersion", 0) != 2) browser_ready = false;
+        // Unsupported methods are recorded as coverage misses without response headers.
+        // They are never replayed. Only a replayable response can invalidate the bundle.
+        const auto method = resource.value("method", "GET");
+        if ((method == "GET" || method == "HEAD" || method == "OPTIONS") &&
+            resource.value("browserPolicyVersion", 0) != 2) browser_ready = false;
         if (record.value("automatic", false)) {
           auto expiry = g_date_time_new_from_iso8601(resource.value("freshUntil", "").c_str(), nullptr);
           bool fresh = expiry && g_date_time_to_unix(expiry) > std::time(nullptr);

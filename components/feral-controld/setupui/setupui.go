@@ -5,6 +5,7 @@ package setupui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +142,12 @@ func (s *Service) trySend(ctx context.Context, req map[string]any) error {
 		}
 	}
 	err := s.sender.SetOverlay(ctx, "setup", state, fields)
+	var refusal *playerlink.RemoteError
+	if fields["passive"] == true && errors.As(err, &refusal) && refusal.Code == "invalid_params" {
+		// Older hosts retain the full setup UI until their package is updated.
+		delete(fields, "passive")
+		err = s.sender.SetOverlay(ctx, "setup", state, fields)
+	}
 	if err != nil {
 		s.logger.Info("Setup narration delivery failed", zap.String("state", state), zap.Error(err))
 	}
@@ -152,10 +159,13 @@ func stringField(req map[string]any, key string) string {
 	return value
 }
 
-func (s *Service) ShowSoftAPQR(ssid string, psk string, portalURL string) {
+func (s *Service) ShowSoftAPQR(ssid, psk, portalURL string, passive bool) {
 	req := map[string]any{
 		"state": stateSoftAPQR,
 		"ssid":  ssid,
+	}
+	if passive {
+		req["passive"] = true
 	}
 	if strings.TrimSpace(psk) != "" {
 		req["password"] = psk
@@ -196,8 +206,12 @@ func (s *Service) ShowSoftAPQRRetry(ssid string, psk string, portalURL string, r
 	s.push(req)
 }
 
-func (s *Service) ShowScanning() {
-	s.push(map[string]any{"state": stateScanning})
+func (s *Service) ShowScanning(passive bool) {
+	req := map[string]any{"state": stateScanning}
+	if passive {
+		req["passive"] = true
+	}
+	s.push(req)
 }
 
 func (s *Service) ShowJoining() {

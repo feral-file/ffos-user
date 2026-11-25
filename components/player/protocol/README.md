@@ -354,7 +354,7 @@ this failure. It must never be reported as the incoming work's failure.
 `factory_reset`, `connecting`, and `setup_error`. Unknown states fail with
 `unsupported`; the existing overlay remains. Ready/hidden clear only setup's
 own overlay. Fields are `reason`, `ssid`, `password`, `portal_url`,
-`client_attached` (boolean), `url`, `device_name`, and `progress` (finite number,
+`client_attached` (boolean), `passive` (automatic Wi-Fi invitation that yields when offline artwork has a frame), `url`, `device_name`, and `progress` (finite number,
 clamped to 0–100 for display). Text fields are at most 2,048 UTF-8 bytes without
 NUL; SSID is required for SoftAP, and SSID/password are limited to 128 bytes. Claim requires an
 HTTP(S) URL. Credential fields must not be logged.

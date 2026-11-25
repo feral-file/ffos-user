@@ -75,7 +75,7 @@ methods={
     'overlay.set':obj({'owner':enum('setup','pairing','recovery'),'state':identifier,'fields':{'type':'object','additionalProperties':True}},('owner','state')),
     'input.dispatch':{'oneOf':inputs},
 }
-setup_fields=obj({**{k:text(2048) for k in ('reason','ssid','password','portal_url','url','device_name','version')},'client_attached':boolean,'progress':{'type':'number'}})
+setup_fields=obj({**{k:text(2048) for k in ('reason','ssid','password','portal_url','url','device_name','version')},'client_attached':boolean,'passive':boolean,'progress':{'type':'number'}})
 setup_fields['properties']['password']=text(128)
 methods['overlay.set']['allOf']=[{'if':{'properties':{'owner':{'const':'setup'}}},'then':{'properties':{
  'state':enum('softap_qr','joining','join_failed','updating','claim_qr','ready','hidden','scanning','finalizing','factory_reset','connecting','setup_error'),'fields':setup_fields}}}]

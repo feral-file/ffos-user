@@ -258,11 +258,8 @@ void Presentation::draw_loading(uint64_t ticks) {
   }
 }
 void Presentation::upload_ui(UIRaster raster, const std::string& key) {
-  ui_key_=key; ui_raster_=std::move(raster);ui_width_=ui_raster_.width;ui_height_=ui_raster_.height;
-  if(!ui_width_||!ui_height_)return;
-  upload_raster(ui_, ui_raster_);
-  // Retain geometry only; the texture owns the cached label/panel pixels.
-  ui_raster_.rgba.clear();ui_raster_.rgba.shrink_to_fit();
+  ui_key_=key; ui_width_=raster.width; ui_height_=raster.height;
+  if(ui_width_ && ui_height_)upload_raster(ui_,raster);
 }
 void Presentation::ui(const std::string& text,const std::string&,bool full) {
   auto key=std::string(full?"message:":"notice:")+text+std::to_string(width_)+":"+std::to_string(height_);
@@ -271,7 +268,7 @@ void Presentation::ui(const std::string& text,const std::string&,bool full) {
 }
 void Presentation::swap(const Surface* artwork) {
   const auto start = std::chrono::steady_clock::now();
-  const bool changed = artwork && (artwork->texture != last_frame_texture_ || artwork->frames != last_frame_number_ || label_occurrence_ != last_frame_occurrence_);
+  const bool changed = artwork && (artwork->texture != last_frame_texture_ || artwork->frames != last_frame_number_ || drawing_occurrence_ != last_frame_occurrence_);
   if (changed) ++frame_serial_;
   feedback_->before_swap(artwork ? frame_serial_ : 0, swaps_ + 1);
   // Surface/context loss must terminate the host so systemd/watchdog can
@@ -285,7 +282,7 @@ void Presentation::swap(const Surface* artwork) {
   if (changed) {
     if (last_frame_ != std::chrono::steady_clock::time_point{})
       frame_timing_.add(std::chrono::duration<double,std::milli>(end-last_frame_).count());
-    last_frame_ = end; last_frame_texture_ = artwork->texture; last_frame_number_ = artwork->frames; last_frame_occurrence_ = label_occurrence_;
+    last_frame_ = end; last_frame_texture_ = artwork->texture; last_frame_number_ = artwork->frames; last_frame_occurrence_ = drawing_occurrence_;
   }
 }
 bool Presentation::can_present_direct(const Occurrence& occurrence,const Playback& playback) const {
@@ -297,15 +294,13 @@ bool Presentation::can_present_direct(const Occurrence& occurrence,const Playbac
      display_color(occurrence.display.value("background","#000000"))!="#000000")return false;
   auto now=SDL_GetTicks64();
   if(pointer_active_ && now-pointer_active_<5000)return false;
-  if(playback.display_rejected() || !playback.runtime_notice().is_null() || !playback.presentation_failure().is_null() ||
+  if(playback.display_rejected() || !playback.presentation_failure().is_null() ||
      !playback.storage_error().empty() || playback.thermal_hold())return false;
   auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
   auto update=playback.state().value("updateOutcome",Json(nullptr));
   if((schedule.is_object() && schedule.value("outcome","")=="failed") ||
      (update.is_object() && update.value("contentBlocked",false)))return false;
-  auto mode=playback.state()["settings"].value("tombstone","timed");
-  return !has_tombstone(occurrence) || mode=="off" ||
-         (mode=="timed" && label_occurrence_==occurrence.id && label_mode_==mode && now-label_started_>=30300);
+  return !card_visible_;
 }
 std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const Occurrence* occurrence,
                         const Playback& playback, const Surface* backdrop,
@@ -314,13 +309,28 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
   const auto ticks = SDL_GetTicks64();
   const bool pointer_visible = pointer_active_ && ticks-pointer_active_<5000;
   const auto mode = playback.state()["settings"].value("tombstone","timed");
-  const bool has_title=occurrence&&has_tombstone(*occurrence);
-  if(occurrence&&blend.opacity>0&&playback.overlay().is_null()&&backdrop_opacity==0&&
-     (label_occurrence_!=occurrence->id||label_mode_!=mode||label_has_title_!=has_title)){
-    label_occurrence_=occurrence->id;label_mode_=mode;label_has_title_=has_title;label_started_=ticks;
+  drawing_occurrence_=occurrence ? occurrence->id : "";
+  const auto& selected=playback.desired();
+  const auto* card_work=selected ? &*selected : nullptr;
+  if (!selected) {
+    card_cast_.clear();
+    card_clock_.select("",ticks);
+  } else if (card_cast_!=selected->cast_id) {
+    card_cast_=selected->cast_id;
+    const auto& playlist=selected->playlist;
+    std::string identity=playlist.contains("id") && playlist["id"].is_string() ? playlist["id"].get<std::string>() : "";
+    if (identity.empty()) {
+      Json works=Json::array();
+      for (const auto& item:playlist.at("items"))
+        works.push_back({item.value("id",Json(nullptr)),item.at("source")});
+      identity=Json::array({selected->playlist_title,works}).dump();
+    }
+    card_clock_.select(identity,ticks);
   }
-  const auto label_age=ticks-label_started_;
-  const bool label_visible = has_title && blend.opacity>0 && (mode=="on" || (mode=="timed" && label_age<30300));
+  const bool work_ready=selected && occurrence && occurrence->id==selected->id && (artwork || external) && blend.opacity>0;
+  if (selected && occurrence && occurrence->cast_id==selected->cast_id && card_clock_.hourly(ticks))
+    card_work=occurrence;
+  const bool show_notice=!artwork && !external && !playback.runtime_notice().is_null();
   auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
   auto update=playback.state().value("updateOutcome",Json(nullptr));
   bool overlay_panel=(schedule.is_object() && schedule.value("outcome","")=="failed") ||
@@ -328,8 +338,10 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
                      (playback.desired() && playback.desired()->stage=="failed") ||
                      !playback.recovery_error().empty() ||!playback.overlay().is_null() || playback.service_failure() || playback.thermal_hold() ||
                      !playback.presentation_failure().is_null() || !playback.storage_error().empty() ||
-                     !playback.runtime_notice().is_null();
-  if(external && blend.opacity==1 && !pointer_visible && !label_visible && !overlay_panel && !playback.display_rejected()){
+                     show_notice;
+  const bool can_show=mode!="off" && !overlay_panel && !playback.display_rejected() && !playback.state()["sleeping"].get<bool>();
+  card_visible_=card_clock_.visible(ticks,card_work && has_tombstone(*card_work),work_ready,can_show);
+  if(external && blend.opacity==1 && !pointer_visible && !card_visible_ && !overlay_panel && !playback.display_rejected()){
     browser_overlay_.reset();draw_key_.reset();return std::nullopt;
   }
   if(!external && browser_overlay_){browser_overlay_.reset();draw_key_.reset();}
@@ -341,10 +353,10 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
     loading_started_=ticks;
   }
   const bool show_loading=loading && ticks-loading_started_>=2000;
-  const int label_phase=show_loading?1+int((ticks-loading_started_-2000)%3000/16):label_visible&&mode=="timed"?int(std::min<uint64_t>(label_age,30300)/16):0;
+  const int label_phase=show_loading?1+int((ticks-loading_started_-2000)%3000/16):0;
   const bool pointer_pressed = pointer_visible && ticks < pointer_press_until_;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
-    occurrence?occurrence->id:"", width_,height_,pointer_visible,label_visible,pointer_pressed,
+    occurrence?occurrence->id:"", width_,height_,pointer_visible,card_visible_,pointer_pressed,
     pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0,label_phase,backdrop?backdrop->texture:0,backdrop?backdrop->frames:0,backdrop_opacity,
     blend.outgoing?blend.outgoing->texture:0,blend.outgoing?blend.outgoing->frames:0,blend.outgoing_opacity,blend.opacity};
   // Resubmitting an unchanged texture still consumes GPU/compositor work and
@@ -400,25 +412,14 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
     ui("Scheduled playlist could not start\n"+outcome["error"].value("message","Unknown scheduling failure"),"",false);
   else if (auto outcome=playback.state().value("updateOutcome",Json(nullptr));outcome.is_object()&&outcome.value("contentBlocked",false)&&(!playback.desired()||outcome.value("outcome","")=="failed"))
     ui("Updated playlist is blocked\nChange content preferences or choose another playlist","",!artwork);
-  else if (show_loading) draw_loading(ticks);
-  else if((!artwork || playback.online()) && !playback.runtime_notice().is_null()) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
-  else if (occurrence && label_visible) {
-    auto key="label:"+occurrence->id+occurrence->item.dump()+occurrence->playlist_title+occurrence->curator+mode+std::to_string(width_)+":"+std::to_string(height_);
-    if(key!=ui_key_)upload_ui(render_tombstone(*occurrence,width_,height_,mode=="timed"),key);
-    if(ui_width_&&ui_height_){
-      const float opacity=mode=="timed"&&label_age>30000?1-artwork_ease((label_age-30000)/300.):1;
-      quad(ui_,{0,height_-ui_height_,ui_width_,ui_height_},opacity);
-      if(ui_raster_.timer_width&&opacity==1){
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(ui_raster_.timer_x,ui_height_-ui_raster_.timer_y-ui_raster_.timer_height,ui_raster_.timer_width,ui_raster_.timer_height);
-        glClearColor(227/255.f,227/255.f,227/255.f,1);glClear(GL_COLOR_BUFFER_BIT);
-        auto remaining=int(ui_raster_.timer_width*std::max(0.0,1.0-label_age/30000.0));
-        glScissor(ui_raster_.timer_x,ui_height_-ui_raster_.timer_y-ui_raster_.timer_height,remaining,ui_raster_.timer_height);
-        glClearColor(160/255.f,160/255.f,160/255.f,1);glClear(GL_COLOR_BUFFER_BIT);glDisable(GL_SCISSOR_TEST);
-      }
-    }
+  else if (show_loading && !card_visible_) draw_loading(ticks);
+  else if(show_notice) ui("Offline artwork is incomplete\n"+playback.runtime_notice().value("message","Unavailable live dependencies"),"",!artwork);
+  else if (card_visible_) {
+    auto key="card:"+card_work->id+card_work->item.dump()+card_work->playlist_title+std::to_string(width_)+":"+std::to_string(height_);
+    if(key!=ui_key_)upload_ui(render_title_card(*card_work,width_,height_),key);
+    quad(ui_,{0,0,width_,height_});
   }
-  if (pointer_visible && overlay.is_null()) draw_pointer(pointer_pressed);
+  if (pointer_visible && overlay.is_null() && !card_visible_) draw_pointer(pointer_pressed);
   return FrameSubmission{external, blend.opacity > 0 ? artwork : nullptr};
 }
 void Presentation::submit(const FrameSubmission& frame) {

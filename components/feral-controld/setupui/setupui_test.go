@@ -86,7 +86,7 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 	}{
 		{
 			name:      "softap qr with password",
-			call:      func(s *Service) { s.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1") },
+			call:      func(s *Service) { s.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1", false) },
 			wantState: stateSoftAPQR,
 			wantFields: map[string]any{
 				"ssid": "FF1-abc", "password": "secret123", "portal_url": "http://10.42.0.1",
@@ -94,7 +94,7 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 		},
 		{
 			name:       "softap qr omits blank optional fields",
-			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "") },
+			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "", false) },
 			wantState:  stateSoftAPQR,
 			wantFields: map[string]any{"ssid": "FF1-abc"},
 			absent:     []string{"password", "portal_url", "client_attached"},
@@ -122,7 +122,7 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 		},
 		{
 			name:      "scanning",
-			call:      func(s *Service) { s.ShowScanning() },
+			call:      func(s *Service) { s.ShowScanning(false) },
 			wantState: stateScanning,
 			absent:    []string{"reason", "ssid", "url", "progress"},
 		},
@@ -638,7 +638,7 @@ func TestShowConnectingIfShowing(t *testing.T) {
 		sender := newFakePlayer()
 		svc := New(sender, nil)
 
-		svc.ShowSoftAPQR("FF1-TEST", "12345678", "http://10.42.0.1")
+		svc.ShowSoftAPQR("FF1-TEST", "12345678", "http://10.42.0.1", false)
 		sender.waitForCalls(t, 1)
 		svc.ShowConnectingIfShowing("Connected by cable, but no internet.", StateFinalizing)
 

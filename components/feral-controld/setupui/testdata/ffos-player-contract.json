@@ -89,6 +89,7 @@
             "password",
             "portal_url",
             "client_attached",
+            "passive",
             "reason"
           ]
         },

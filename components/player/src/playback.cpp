@@ -625,7 +625,8 @@ Json Playback::overlay() const {
   // A reconnect advisory can yield before presentation. Waiting for presented()
   // here would deadlock because the overlay itself blocks presentation.
   if (overlay_.is_object() && overlay_.value("owner", "") == "setup" &&
-      overlay_.value("state", "") == "connecting" && connectivity_known_ && !online_ &&
+      (overlay_.value("state", "") == "connecting" ||
+       (overlay_.contains("fields") && overlay_["fields"].value("passive",false))) && connectivity_known_ && !online_ &&
       (presented_ || (selected_ && selected_->frame_available && selected_->stage != "failed")))
     return nullptr;
   return overlay_;

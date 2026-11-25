@@ -86,6 +86,11 @@ int main() {
   std::ofstream(record_file)<<Json{{"automaticCacheVersion",1},{"record",record}};
   check(!read(url,empty,false,true).metadata.contains("replayMode"));
   record["automatic"]=false;
+  std::ofstream(root/"blobs"/digest(bytes))<<bytes;
+  record["resources"].push_back({{"url",url+"/analytics"},{"method","POST"},{"status",204}});
+  std::ofstream(record_file)<<record;
+  check(read(url,empty,false,true).error.empty());
+  check(!read(url+"/analytics",empty,false,false,"POST").error.empty());
   record["resources"][1].erase("browserPolicyVersion");
   std::ofstream(record_file)<<record;
   check(!read(url,empty,false,true).error.empty());

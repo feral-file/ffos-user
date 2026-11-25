@@ -44,8 +44,8 @@ func (s *spyNarrationUI) ShowSetupError(reason string) {
 	s.setupErrorReasons = append(s.setupErrorReasons, reason)
 }
 
-func (s *spyNarrationUI) ShowScanning() { s.calls = append(s.calls, "scanning") }
-func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string) {
+func (s *spyNarrationUI) ShowScanning(passive bool) { s.calls = append(s.calls, "scanning") }
+func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string, passive bool) {
 	s.calls = append(s.calls, "softap")
 	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
 }

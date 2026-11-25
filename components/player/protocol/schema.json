@@ -844,6 +844,9 @@
                           "client_attached": {
                             "type": "boolean"
                           },
+                          "passive": {
+                            "type": "boolean"
+                          },
                           "progress": {
                             "type": "number"
                           }

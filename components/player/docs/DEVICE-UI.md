@@ -11,7 +11,7 @@ still serves the legacy player until the remaining consumer migration is ready.
 
 `src/device_ui.cpp` renders device text and QR codes with Pango/Cairo. Only UI
 changes create/upload a raster; artwork stays on the accelerated GPU path.
-Countdown and fade use the cached UI texture. The PP Mori regular, bold and
+The PP Mori regular, bold and
 bold-italic faces come from the existing ff-player product assets. WOFF was
 discoverable by Fontconfig but Pango 1.58 substituted DejaVu while shaping it.
 The checked-in SFNT copies preserve glyphs, metrics and layout tables; reproduce
@@ -22,11 +22,7 @@ Font licensing remains the existing product's distribution responsibility.
 
 The native panel follows SetupOverlay's short-edge font sizes, line heights,
 82% scrim, rounded QR panel and two-module quiet margin. Claim copy follows the
-newer installed homelab player. The tombstone uses short-edge sizing, a white
-content-hugging plaque, italic bold artwork title, artist and optional gray
-curator credit. The exhibition name and authored curator notes are deferred. Timed mode resets for a new occurrence, mode change or first
-title, depletes for 30 seconds and fades for 300 ms. Always-on mode omits the
-timer.
+newer installed homelab player. The exhibition title card covers the display in black at playlist start and hourly. It names the artist and work at lower left, and the exhibition at upper right. The card lasts ten readable seconds. The opening can wait up to fifteen additional seconds for the work. Item changes and recasting the same playlist preserve the hourly clock. Both enabled tombstone settings use this cadence. Off suppresses the card. The QR destination is unset in the current exhibition contract.
 
 The bundled setup artwork is the original p5 sketch and seed. Its two inline
 scripts were extracted unchanged to permit strict CSP. Provenance and hashes

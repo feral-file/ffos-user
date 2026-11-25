@@ -35,20 +35,23 @@ int main(int argc,char** argv){
       FcPatternDestroy(match);FcPatternDestroy(pattern);
     }
     ff::Occurrence item;item.item={{"title","Transparent Grit"},{"metadata",{{"artists",ff::Json::array({"Dmitri Cherniak"})}}}};item.playlist_title="Living Code";item.curator="Feral File";
-    auto landscape=ff::render_tombstone(item,1920,1080,true),portrait=ff::render_tombstone(item,1080,1920,true);
-    check(landscape.width==portrait.width&&landscape.height==portrait.height,"Rotation inflated label dimensions");
-    check(landscape.width<960&&landscape.timer_width>0&&landscape.timer_height==2,"Tombstone width/timer geometry");
-    auto always=ff::render_tombstone(item,1920,1080,false);check(always.timer_width==0&&always.height<landscape.height,"Always-on label must omit countdown/gap");
-    check(always.width==267 && always.height==146,"Shipping 1080p plaque geometry must match for this fixture");
+    item.playlist={{"items",ff::Json::array({1,2})}};
+    const auto landscape=ff::render_title_card(item,1920,1080);
+    check(landscape.width==1920 && landscape.height==1080 && landscape.rgba[0]==0 && landscape.rgba[3]==255,"Opaque full-screen title card");
     item.playlist_title="Another exhibition";
-    check(ff::render_tombstone(item,1920,1080,true).rgba==landscape.rgba,"A shipping tombstone has no separate exhibition line");
-    item.item["resolvedManifest"]={{"metadata",{{"title",""},{"artists",ff::Json::array()}}}};
-    item.item["inlineManifest"]={{"metadata",{{"title","Transparent Grit"}}}};
-    check(ff::has_tombstone(item)&&ff::render_tombstone(item,1920,1080,true).rgba==landscape.rgba,
-          "Empty fetched metadata must fall through to a usable inline label and legacy artist");
-    item.item.erase("resolvedManifest");
-    item.item.erase("inlineManifest");
-    save(always,std::string(argv[2])+"/tombstone-on.png");
+    check(ff::render_title_card(item,1920,1080).rgba!=landscape.rgba,"The exhibition name belongs on the card");
+    ff::TitleCardClock clock;
+    clock.select("playlist",100);
+    check(!clock.visible(100,false,false),"Wait for metadata");
+    check(clock.visible(300,true,true) && !clock.visible(10300,true,true),"Ten seconds from first readable title");
+    clock.select("playlist",10400);
+    check(!clock.visible(10400,true,true),"Recast and item changes preserve the hour");
+    check(clock.visible(3600100,true,true) && !clock.visible(3610100,true,true),"Hourly card lasts ten seconds");
+    clock.select("next",4000000);
+    check(clock.visible(4000000,true,false) && clock.visible(4010000,true,false) && !clock.visible(4025000,true,false),"Bound the opening wait for artwork");
+    clock.select("covered",5000000);
+    check(!clock.visible(5000000,true,true,false) && clock.visible(5040000,true,true),"Setup cannot consume an unseen title");
+    check(!clock.visible(5043000,true,true,false) && clock.visible(5053000,true,true) && !clock.visible(5060000,true,true),"An interruption pauses the readable interval");
     const auto moving=ff::render_pointer(40,false),pressed=ff::render_pointer(40,true);
     check(moving.hotspot==pressed.hotspot && moving.image.rgba!=pressed.image.rgba,"Pointer feedback must preserve its hotspot");
     save(moving.image,std::string(argv[2])+"/pointer-moving.png");
@@ -57,7 +60,7 @@ int main(int argc,char** argv){
     save(ff::render_panel(pairing,1920,1080),std::string(argv[2])+"/pairing.png");
     auto notice=ff::render_message("Playback state could not be saved",1920,1080,false);
     check(notice.width<960&&notice.height<200&&notice.rgba[3]==255,"Nonfatal errors must remain compact notices over the retained artwork");
-    item.item["title"]="";check(ff::render_tombstone(item,1920,1080,true).rgba.empty(),"Missing title must omit label");
+    item.item["title"]="";check(ff::render_title_card(item,1920,1080).rgba.empty(),"Missing title must omit label");
     save(landscape,std::string(argv[2])+"/tombstone.png");
     const ff::Json claim={{"owner","setup"},{"state","claim_qr"},{"fields",{{"url","https://example.org/claim?token=SYNTHETIC-TEST"},{"device_name","My Art Computer"}}}};
     const ff::Json wifi={{"owner","setup"},{"state","softap_qr"},{"fields",{{"ssid","FF1-test:;"},{"password","fake;password"},{"portal_url","http://10.42.0.1/"}}}};
@@ -71,6 +74,6 @@ int main(int argc,char** argv){
       save(result,std::string(argv[2])+"/claim-"+std::to_string(w)+"x"+std::to_string(h)+".png");
       save(ff::render_panel(wifi,w,h),std::string(argv[2])+"/wifi-"+std::to_string(w)+"x"+std::to_string(h)+".png");
     }
-    std::cout<<"Device font, label orientation, countdown geometry and panel raster checks passed\n";return 0;
+    std::cout<<"Device font, title card timing and panel raster checks passed\n";return 0;
   }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

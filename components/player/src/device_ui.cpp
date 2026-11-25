@@ -270,8 +270,8 @@ UIRaster render_panel(const Json& overlay,int width,int height) {
 bool has_tombstone(const Occurrence& o) {
   return tombstone_label(o).title != nullptr;
 }
-UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed) {
-  const double scale=std::min(width,height)/720.0,padding=10*scale,size=16*scale;
+UIRaster render_title_card(const Occurrence& o,int width,int height) {
+  const double edge=std::min(width,height), padding=edge*.045;
   const auto label = tombstone_label(o);
   if (!label.title) return {};
   std::string artists;
@@ -283,20 +283,50 @@ UIRaster render_tombstone(const Occurrence& o,int width,int height,bool timed) {
       }
     }
   }
-  Canvas measure(1,1);const int max_width=std::max(1,int(640*scale-padding*2));
-  std::vector<std::string> blocks{(artists.empty()?"":escape(artists)+"\n")+"<b><i>"+escape(*label.title)+"</i></b>"};
-  if(!o.curator.empty())blocks.push_back("<span foreground='#A0A0A0'>Curated by: "+escape(o.curator)+"</span>");
-  std::vector<std::unique_ptr<Text>> layouts;int text_width=0;double total=0;
-  for(const auto& block:blocks){auto t=std::make_unique<Text>(measure.cr,block,size,1.4,max_width,false);text_width=std::max(text_width,t->width);total+=t->css_height;layouts.push_back(std::move(t));}
-  const double timer=timed?std::max(1.0,scale):0;
-  total+=padding*2+padding*(blocks.size()-1)+(timed?timer+padding:0);
-  // Bound hostile/very long metadata. Normal labels use content-hugging width.
-  Canvas canvas(std::max(1,int(std::ceil(text_width+padding*2))),std::max(1,std::min(height,int(std::ceil(total)))));
-  cairo_set_source_rgb(canvas.cr,1,1,1);cairo_paint(canvas.cr);cairo_set_source_rgb(canvas.cr,0,0,0);
-  double y=padding+(timed?timer+padding:0);
-  for(auto& layout:layouts){layout->paint(canvas.cr,padding,y);y+=layout->css_height+padding;}
-  auto result=canvas.pixels();
-  if(timed){result.timer_x=std::round(padding);result.timer_y=std::round(padding);result.timer_width=std::max(1,result.width-2*result.timer_x);result.timer_height=std::max(1,int(std::round(timer)));}
-  return result;
+  Canvas canvas(width,height);
+  cairo_set_source_rgb(canvas.cr,0,0,0);
+  cairo_paint(canvas.cr);
+  cairo_set_source_rgb(canvas.cr,1,1,1);
+  const int available=std::max(1,int(width-2*padding));
+  Text work(canvas.cr,(artists.empty() ? "" : escape(artists)+"\n")+"<i>"+escape(*label.title)+"</i>",
+            edge*.038,1.2,available,false);
+  work.paint(canvas.cr,padding,std::max(padding,height-padding-work.css_height));
+  if (!o.playlist_title.empty() && ((o.playlist.contains("items") && o.playlist["items"].size()>1) || !o.curator.empty() || text_field(o.playlist,"note"))) {
+    Text exhibition(canvas.cr,escape(o.playlist_title),edge*.030,1.2,available,false);
+    pango_layout_set_alignment(exhibition.layout,PANGO_ALIGN_RIGHT);
+    exhibition.paint(canvas.cr,padding,padding);
+  }
+  return canvas.pixels();
+}
+
+void TitleCardClock::select(const std::string& playlist,uint64_t now) {
+  if (playlist_==playlist) return;
+  playlist_=playlist;
+  start_=now;
+  hour_=0;
+  readable_.reset();
+  covered_.reset();
+  finished_=false;
+}
+
+bool TitleCardClock::visible(uint64_t now,bool titled,bool work_ready,bool can_show) {
+  const auto hour=(now-start_)/3600000;
+  if (hour!=hour_) {
+    hour_=hour;
+    readable_.reset();
+    covered_.reset();
+    finished_=false;
+  }
+  if (!titled || !can_show) {
+    if (!covered_) covered_=now;
+    return false;
+  }
+  if (covered_ && readable_) *readable_+=now-*covered_;
+  covered_.reset();
+  if (finished_) return false;
+  if (!readable_) readable_=now;
+  const auto elapsed=now-*readable_;
+  if (elapsed>=10000 && (hour_!=0 || work_ready || elapsed>=25000)) finished_=true;
+  return !finished_;
 }
 }

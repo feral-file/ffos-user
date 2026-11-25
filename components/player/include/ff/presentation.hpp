@@ -71,12 +71,10 @@ class Presentation {
   bool diagnostic_cpu_;
   GLuint program_ = 0, ui_ = 0, pointer_texture_ = 0;
   std::string ui_key_;
-  std::string label_occurrence_;
-  std::string label_mode_;
-  bool label_has_title_ = false;
-  uint64_t label_started_ = 0;
+  std::string drawing_occurrence_, card_cast_;
+  TitleCardClock card_clock_;
+  bool card_visible_ = false;
   int ui_width_ = 0, ui_height_ = 0;
-  UIRaster ui_raster_;
   double pointer_x_ = 0, pointer_y_ = 0;
   bool pointer_texture_pressed_ = false;
   uint64_t pointer_press_until_ = 0;

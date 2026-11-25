@@ -82,6 +82,12 @@ int main(int argc, char** argv) {
       check(!p.overlay().is_null(), "Reconnect advisory stays until a frame is ready");
       p.frame_ready(a);
       check(p.overlay().is_null(), "Offline artwork can reach first presentation");
+      auto wifi=ff::Json{{"owner","setup"},{"state","softap_qr"},{"fields",{{"ssid","FF1-test"},{"passive",true}}}};
+      p.command("overlay.set",wifi);
+      check(p.overlay().is_null(),"Automatic Wi-Fi QR yields to a ready offline frame");
+      wifi["fields"].erase("passive");
+      p.command("overlay.set",wifi);
+      check(!p.overlay().is_null(),"Requested Wi-Fi setup retains its QR");
       p.command("overlay.set", {{"owner","setup"},{"state","joining"}});
       check(!p.overlay().is_null(), "Interactive setup keeps ownership");
       p.command("overlay.set", {{"owner","setup"},{"state","connecting"}});
