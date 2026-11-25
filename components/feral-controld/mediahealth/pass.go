@@ -198,9 +198,10 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 			continue
 		}
 		if IsDeviceHeld(source) {
-			// An onchfs work (data: URIs were settled above): read from
-			// chain and verified by the device; no origin to
-			// dial, nothing to record. Inconclusive is fail-open.
+			// A device-local work — an onchfs tree or a web3 call (data:
+			// URIs were settled above): resolved from chain by the device,
+			// with no origin to dial and nothing to record. Inconclusive
+			// is fail-open.
 			results[i] = ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, Err: errDeviceHeld}
 			settled[i] = true
 			continue

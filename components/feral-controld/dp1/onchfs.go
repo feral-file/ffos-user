@@ -2,7 +2,6 @@ package dp1
 
 import (
 	"net/url"
-	"slices"
 	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -136,22 +135,3 @@ func parseOnchfsOrDeviceSource(s string) (contentpath.Onchfs, bool) {
 
 // onchfsTezosMainnet is the Tezos chain contentpath knows onchfs on.
 const onchfsTezosMainnet = "tezos:NetXdQprcVkpaWU"
-
-// mapOnchfsSources returns items with every onchfs source rewritten (see
-// above). The slice is copied before the first change, never written in
-// place: a caller's slice (a cached playlist, a dp1-go result) must not
-// change under it.
-func mapOnchfsSources(items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
-	out := items
-	for i := range items {
-		mapped := onchfsItemSource(items[i])
-		if mapped == items[i].Source {
-			continue
-		}
-		if &out[0] == &items[0] {
-			out = slices.Clone(items)
-		}
-		out[i].Source = mapped
-	}
-	return out
-}

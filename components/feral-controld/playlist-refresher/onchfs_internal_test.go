@@ -36,7 +36,7 @@ func TestSyncReplayScopeStartsOnchfsReadsWithoutWaiting(t *testing.T) {
 	kr.EXPECT().MarkPlaybackChanged().Times(1)
 	m := &recordingOnchfs{}
 	r := &refresher{context: context.Background(), kioskReplay: kr, logger: zaptest.NewLogger(t)}
-	SetOnchfsMaterializer(r, m, zaptest.NewLogger(t))
+	SetDeviceLocalMaterializer(r, m, zaptest.NewLogger(t))
 
 	r.syncReplayScopeLocked(&dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{Source: source}}}})
 

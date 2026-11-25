@@ -31,20 +31,22 @@ const dataURIScheme = "data:"
 const dataURIMetadataBytes = 1024
 
 // IsDeviceHeld reports whether a source's bytes are held by the device
-// itself rather than fetched from a host: a data: URI, or an onchfs work the
-// device read from chain and serves from the offline cache's store
-// (contentpath.IsOnchfsSourceURL, ffos-user#427). Neither has an origin to
-// probe, and a failure to show one says nothing about the network, so the
-// passes that judge origins (the kiosk observer, inferred failures, the L1
-// render probe) skip both. data: URIs keep their own payload check
-// (probeDataURI); an onchfs tree is verified byte for byte when it is read.
+// itself rather than fetched from a host: a data: URI, or a device-local
+// source the device resolves from chain and serves from the offline cache's
+// store — an onchfs tree (ffos-user#427) or a web3 contract call
+// (feral-file#3599), both via contentpath.IsDeviceLocalSource. None has an
+// origin to probe, and a failure to show one says nothing about the network,
+// so the passes that judge origins (the kiosk observer, inferred failures,
+// the L1 render probe) skip them all. data: URIs keep their own payload
+// check (probeDataURI); an onchfs tree is verified byte for byte when it is
+// read, and a web3 call is pinned to a block and compared across nodes.
 func IsDeviceHeld(rawURL string) bool {
-	return IsDataURI(rawURL) || contentpath.IsOnchfsSourceURL(rawURL)
+	return IsDataURI(rawURL) || contentpath.IsDeviceLocalSource(rawURL)
 }
 
-// errDeviceHeld is the inconclusive result of probing an onchfs source:
+// errDeviceHeld is the inconclusive result of probing a device-local source:
 // there is no origin to dial. It is never recorded (probeWritesRecord).
-var errDeviceHeld = errors.New("media health: onchfs source is read from chain by the device, not probed")
+var errDeviceHeld = errors.New("media health: source is resolved from chain by the device, not probed")
 
 // IsDataURI reports whether rawURL is a data: URI (scheme case-insensitive,
 // as RFC 3986 defines it).

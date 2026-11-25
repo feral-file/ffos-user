@@ -55,7 +55,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ReadsOnchfsWorksBeforeThePreflig
 
 	var order []string
 	materializer := &fakeOnchfs{order: &order}
-	commandrouter.SetOnchfsMaterializer(ts.handler, materializer, ts.logger)
+	commandrouter.SetDeviceLocalMaterializer(ts.handler, materializer, ts.logger)
 	// Both dead keeps the test away from the player: the display request is rejected
 	// after the preflight, and only the order is under test.
 	prober := &orderedProber{order: &order, fakeMediaHealth: fakeMediaHealth{results: []mediahealth.ProbeResult{

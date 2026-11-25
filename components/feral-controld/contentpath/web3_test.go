@@ -1,0 +1,488 @@
+package contentpath_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
+)
+
+// digitalSoul is Han Saglam's Digital Soul, the work ffos-user#427's
+// follow-up (feral-file#3599) names: the return of artpiece() on Ethereum.
+const (
+	digitalSoulContract = "0x4f32740cf412d647a622ba27c36fa4b76f71601f"
+	// artBlocksGenerator takes two arguments, which is what proves the
+	// method and its arguments stay in the path.
+	artBlocksGenerator = "0x953d288708bb771f969fcfd9ba0819ef506ac718"
+	artBlocksCore      = "0x059edd72cd353df5106d2b9cc5ab83a52287ac3a"
+)
+
+func TestParseWeb3(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		contract string
+		chain    uint64
+		path     string
+		query    string
+		hasQuery bool
+	}{
+		{"method only", "web3://" + digitalSoulContract + ":1/artpiece", digitalSoulContract[2:], 1, "artpiece", "", false},
+		{"no chain id defaults to 1", "web3://" + digitalSoulContract + "/artpiece", digitalSoulContract[2:], 1, "artpiece", "", false},
+		{"w3 alias", "w3://" + digitalSoulContract + ":1/artpiece", digitalSoulContract[2:], 1, "artpiece", "", false},
+		{"scheme case is ignored", "WEB3://" + digitalSoulContract + ":1/artpiece", digitalSoulContract[2:], 1, "artpiece", "", false},
+		{"contract case is folded", "web3://0x" + strings.ToUpper(digitalSoulContract[2:]) + ":1/artpiece", digitalSoulContract[2:], 1, "artpiece", "", false},
+		{"two arguments", "web3://" + artBlocksGenerator + ":1/getTokenHtml/" + artBlocksCore + "/0", artBlocksGenerator[2:], 1, "getTokenHtml/" + artBlocksCore + "/0", "", false},
+		{"base", "web3://" + digitalSoulContract + ":8453/artpiece", digitalSoulContract[2:], 8453, "artpiece", "", false},
+		{"returns attribute", "web3://" + digitalSoulContract + ":1/tokenURI/1?returns=(string)", digitalSoulContract[2:], 1, "tokenURI/1", "returns=(string)", true},
+		{"no path", "web3://" + digitalSoulContract + ":1", digitalSoulContract[2:], 1, "", "", false},
+		{"empty query is not an absent one", "web3://" + digitalSoulContract + ":1/artpiece?", digitalSoulContract[2:], 1, "artpiece", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, ok := contentpath.ParseWeb3(tc.raw)
+			if tc.contract == "" {
+				if ok {
+					t.Fatalf("ParseWeb3(%q) = %+v, want refused", tc.raw, w)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("ParseWeb3(%q) refused", tc.raw)
+			}
+			if w.Contract != tc.contract || w.ChainID != tc.chain || w.Path != tc.path {
+				t.Fatalf("ParseWeb3(%q) = contract %q chain %d path %q, want %q %d %q",
+					tc.raw, w.Contract, w.ChainID, w.Path, tc.contract, tc.chain, tc.path)
+			}
+			if w.Query != tc.query || w.HasQuery != tc.hasQuery {
+				t.Fatalf("ParseWeb3(%q) query = %q/%v, want %q/%v", tc.raw, w.Query, w.HasQuery, tc.query, tc.hasQuery)
+			}
+		})
+	}
+}
+
+func TestParseWeb3Refuses(t *testing.T) {
+	// Each of these is a URL the device must not turn into a call. A name
+	// service needs a second trusted system; a userinfo prefix is a
+	// look-alike no standard form needs; a chain id with a leading zero
+	// would give one work two cache keys.
+	for _, raw := range []string{
+		"",
+		"web3://",
+		"onchfs://" + strings.Repeat("ab", 32),
+		"https://" + digitalSoulContract + "/artpiece",
+		"web3://example.eth/artpiece",
+		"web3://" + digitalSoulContract[:40] + "/artpiece",
+		"web3://" + digitalSoulContract + "ff/artpiece",
+		"web3://" + digitalSoulContract + ":0/artpiece",
+		"web3://" + digitalSoulContract + ":01/artpiece",
+		"web3://" + digitalSoulContract + ":abc/artpiece",
+		"web3://" + digitalSoulContract + ":1:2/artpiece",
+		"web3://someone@" + digitalSoulContract + ":1/artpiece",
+		"web3://" + digitalSoulContract + ":1/../escape",
+		"web3://" + digitalSoulContract + ":1/a/../../escape",
+		"web3://" + digitalSoulContract + `:1/back\slash`,
+	} {
+		if w, ok := contentpath.ParseWeb3(raw); ok {
+			t.Errorf("ParseWeb3(%q) = %+v, want refused", raw, w)
+		}
+	}
+}
+
+func TestWeb3SourceURLRoundTrips(t *testing.T) {
+	// SourceURL and ParseWeb3SourceURL are each other's inverse: the offline
+	// cache keys a work by sha256 of its exact source string, and replay
+	// recovers the call from that string alone, with no side table.
+	for _, raw := range []string{
+		"web3://" + digitalSoulContract + ":1/artpiece",
+		"web3://" + digitalSoulContract + "/artpiece",
+		"web3://" + artBlocksGenerator + ":1/getTokenHtml/" + artBlocksCore + "/0",
+		"web3://" + digitalSoulContract + ":8453/artpiece?seed=0x06ec&n=2",
+		"web3://" + digitalSoulContract + ":1/tokenURI/1?returns=(string)",
+		"web3://" + digitalSoulContract + ":1/artpiece#frag",
+		"web3://" + digitalSoulContract + ":1/artpiece?",
+		"web3://" + digitalSoulContract + ":1",
+	} {
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Fatalf("ParseWeb3(%q) refused", raw)
+		}
+		source := w.SourceURL()
+		if !strings.HasSuffix(strings.SplitN(strings.TrimPrefix(source, "https://"), "/", 2)[0], contentpath.Web3HostSuffix) {
+			t.Fatalf("SourceURL(%q) = %q, host is not under %q", raw, source, contentpath.Web3HostSuffix)
+		}
+		back, ok := contentpath.ParseWeb3SourceURL(source)
+		if !ok {
+			t.Fatalf("ParseWeb3SourceURL(%q) refused (from %q)", source, raw)
+		}
+		if back != w {
+			t.Fatalf("round trip of %q: %+v != %+v", raw, back, w)
+		}
+		if back.SourceURL() != source {
+			t.Fatalf("round trip of %q is not idempotent: %q != %q", raw, back.SourceURL(), source)
+		}
+	}
+}
+
+func TestWeb3ChainDefaultIsOneCacheKey(t *testing.T) {
+	// ERC-4804 defaults the chain to 1, so a URI that omitted it and one
+	// that wrote it name one work. If these differed the device would read
+	// the same work twice and store it twice.
+	bare, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + "/artpiece")
+	if !ok {
+		t.Fatal("bare form refused")
+	}
+	explicit, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/artpiece")
+	if !ok {
+		t.Fatal("explicit form refused")
+	}
+	if bare.SourceURL() != explicit.SourceURL() {
+		t.Fatalf("one work, two sources: %q and %q", bare.SourceURL(), explicit.SourceURL())
+	}
+	if bare.URI() != explicit.URI() {
+		t.Fatalf("one work, two URIs: %q and %q", bare.URI(), explicit.URI())
+	}
+}
+
+func TestWeb3HostIsOneLabelPerContract(t *testing.T) {
+	w, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/artpiece")
+	if !ok {
+		t.Fatal("refused")
+	}
+	host := w.Host()
+	labels := strings.Split(strings.TrimSuffix(host, contentpath.Web3HostSuffix), ".")
+	if len(labels) != 2 {
+		t.Fatalf("host %q has %d labels before the suffix, want contract and chain", host, len(labels))
+	}
+	// 63 is the DNS label limit; base32 of 20 bytes is 32 characters, where
+	// hex would need 40.
+	if len(labels[0]) != 32 {
+		t.Fatalf("contract label %q is %d characters, want 32", labels[0], len(labels[0]))
+	}
+	if labels[1] != "1" {
+		t.Fatalf("chain label = %q, want 1", labels[1])
+	}
+	if w.ContractAddress() != digitalSoulContract {
+		t.Fatalf("ContractAddress() = %q, want %q", w.ContractAddress(), digitalSoulContract)
+	}
+	if w.Origin() != "https://"+host {
+		t.Fatalf("Origin() = %q, want https://%s", w.Origin(), host)
+	}
+}
+
+func TestParseWeb3SourceURLRefusesLookAlikes(t *testing.T) {
+	w, _ := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/artpiece")
+	good := w.Host()
+	label := strings.SplitN(good, ".", 2)[0]
+	for _, raw := range []string{
+		"https://" + good + ".example/artpiece",
+		"http://" + good + "/artpiece",
+		"https://user@" + good + "/artpiece",
+		"https://" + good + ":8443/artpiece",
+		"https://" + label + contentpath.Web3HostSuffix + "/artpiece", // no chain label
+		"https://" + label + ".0" + contentpath.Web3HostSuffix + "/artpiece",
+		"https://" + label + ".01" + contentpath.Web3HostSuffix + "/artpiece",
+		"https://" + label + ".eth" + contentpath.Web3HostSuffix + "/artpiece",
+		"https://" + label[:31] + ".1" + contentpath.Web3HostSuffix + "/artpiece",
+		"https://" + strings.Repeat("a", 32) + ".1" + contentpath.Web3HostSuffix + "/../escape",
+		"https://example.com/artpiece",
+	} {
+		if got, ok := contentpath.ParseWeb3SourceURL(raw); ok {
+			t.Errorf("ParseWeb3SourceURL(%q) = %+v, want refused", raw, got)
+		}
+		if contentpath.IsWeb3SourceURL(raw) {
+			t.Errorf("IsWeb3SourceURL(%q) = true, want false", raw)
+		}
+	}
+}
+
+func TestDeviceLocalSourceScheme(t *testing.T) {
+	// The shared seam every scheme-agnostic caller uses (offlinecache,
+	// mediahealth, commandrouter). A third scheme is a case here, not a
+	// sweep of those call sites.
+	onchfsRoot := strings.Repeat("ab", 32)
+	onchfs, ok := contentpath.ParseOnchfs("onchfs://" + onchfsRoot + "/?fxhash=0x06ec")
+	if !ok {
+		t.Fatal("onchfs URI refused")
+	}
+	web3, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/artpiece")
+	if !ok {
+		t.Fatal("web3 URI refused")
+	}
+	cases := map[string]contentpath.DeviceLocalScheme{
+		onchfs.SourceURL():                     contentpath.SchemeOnchfs,
+		web3.SourceURL():                       contentpath.SchemeWeb3,
+		"https://example.com/work.html":        contentpath.SchemeNone,
+		"data:text/html,<p>hi":                 contentpath.SchemeNone,
+		"onchfs://" + onchfsRoot:               contentpath.SchemeNone, // raw, not device-local
+		"web3://" + digitalSoulContract + "/a": contentpath.SchemeNone, // raw, not device-local
+		"":                                     contentpath.SchemeNone,
+	}
+	for source, want := range cases {
+		if got := contentpath.DeviceLocalSourceScheme(source); got != want {
+			t.Errorf("DeviceLocalSourceScheme(%q) = %q, want %q", source, got, want)
+		}
+		if got := contentpath.IsDeviceLocalSource(source); got != (want != contentpath.SchemeNone) {
+			t.Errorf("IsDeviceLocalSource(%q) = %v, want %v", source, got, want != contentpath.SchemeNone)
+		}
+	}
+}
+
+// A percent-encoded argument is data, not a filesystem path: it may decode to
+// "//", "a/../b" or a backslash and still be a valid contract argument
+// (round 6 review, F12). A literal dot segment or backslash is still refused.
+func TestWeb3PathAcceptsEncodedArgumentData(t *testing.T) {
+	for _, p := range []string{
+		"render/string!https%3A%2F%2Fexample.com",
+		"render/string!a%2F..%2Fb",
+		"render/string!a%5Cb",
+		"render/string!..",
+	} {
+		raw := "web3://" + digitalSoulContract + ":1/" + p
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Errorf("ParseWeb3(%q) refused, want accepted", raw)
+			continue
+		}
+		back, ok := contentpath.ParseWeb3SourceURL(w.SourceURL())
+		if !ok || back.Path != p {
+			t.Errorf("ParseWeb3SourceURL(%q) = %+v %v, want path %q", w.SourceURL(), back, ok, p)
+		}
+	}
+	for _, p := range []string{"a/%2e%2e/b", "a//b", "a/./b"} {
+		if _, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/" + p); ok {
+			t.Errorf("path %q accepted, want refused", p)
+		}
+	}
+}
+
+// "0X" is accepted by validation, so it must be stripped like "0x"
+// (round 6 review, F14).
+func TestParseWeb3StripsAnUpperCasePrefix(t *testing.T) {
+	w, ok := contentpath.ParseWeb3("web3://0X" + digitalSoulContract[2:] + ":1/artpiece")
+	if !ok || w.Contract != digitalSoulContract[2:] {
+		t.Fatalf("ParseWeb3 = %+v %v, want contract %q", w, ok, digitalSoulContract[2:])
+	}
+	if _, ok := contentpath.ParseWeb3SourceURL(w.SourceURL()); !ok {
+		t.Fatalf("SourceURL %q is not a web3 source", w.SourceURL())
+	}
+}
+
+// A web3 path is canonicalised to the spelling a browser will ask for, so
+// ParseWeb3 and ParseWeb3SourceURL are an inverse pair for EVERY path and not
+// only for paths that arrived escaped. Before this, a raw space — the ordinary
+// case for a `string` argument under ERC-4804's auto-mode typing — was stored
+// under one spelling and requested by Chromium under another, so replay's
+// exact method+URL match missed and the work never appeared (round 4, F2).
+func TestWeb3PathsSurviveTheRoundTripWhateverTheirSpelling(t *testing.T) {
+	// Derived, not sampled: every character the WHATWG path percent-encode
+	// set escapes and that a DP-1 JSON string can carry literally, plus the
+	// already-escaped spelling of one of them.
+	for _, arg := range []string{
+		"hello world", `a"b`, "a<b", "a>b", "a`b", "a{b", "a}b", "a#b", "a?b",
+		"a%25b", "a|b", "a^b", "a\x7fb", "plain", "hello%20world", "café",
+	} {
+		raw := "web3://" + digitalSoulContract + ":1/greet/" + arg
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Errorf("ParseWeb3(%q) refused a path a browser could ask for", raw)
+			continue
+		}
+		source := w.SourceURL()
+		back, ok := contentpath.ParseWeb3SourceURL(source)
+		if !ok {
+			t.Errorf("%q: ParseWeb3SourceURL refused %q", arg, source)
+			continue
+		}
+		if back != w {
+			t.Errorf("%q: the inverse does not hold:\n stored %+v\n   back %+v", arg, w, back)
+		}
+		if back.SourceURL() != source {
+			t.Errorf("%q: the source does not round trip:\n %q\n %q", arg, source, back.SourceURL())
+		}
+		// Canonicalising must be idempotent, or one work gets two cache keys
+		// depending on how its URI was spelled.
+		again, ok := contentpath.ParseWeb3(w.URI())
+		if !ok || again.SourceURL() != source {
+			t.Errorf("%q: re-parsing the canonical URI gives %q, want %q", arg, again.SourceURL(), source)
+		}
+	}
+}
+
+// Malformed percent-encoding is refused rather than guessed at: a lone "%" is
+// not a path a browser would ask for, and inventing a spelling for it would
+// give the work a source no request can match.
+func TestWeb3RefusesMalformedPercentEncoding(t *testing.T) {
+	for _, arg := range []string{"a%b", "a%", "a%2", "a%zzb"} {
+		raw := "web3://" + digitalSoulContract + ":1/greet/" + arg
+		if w, ok := contentpath.ParseWeb3(raw); ok {
+			t.Errorf("ParseWeb3(%q) = %+v, want refused", raw, w)
+		}
+	}
+}
+
+// Two spellings of one argument are one work and one cache key.
+func TestWeb3EscapedAndRawSpellingsAreOneWork(t *testing.T) {
+	rawSpace, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/greet/hello world")
+	if !ok {
+		t.Fatal("raw-space form refused")
+	}
+	escaped, ok := contentpath.ParseWeb3("web3://" + digitalSoulContract + ":1/greet/hello%20world")
+	if !ok {
+		t.Fatal("escaped form refused")
+	}
+	if rawSpace.SourceURL() != escaped.SourceURL() {
+		t.Fatalf("one work, two sources:\n %q\n %q", rawSpace.SourceURL(), escaped.SourceURL())
+	}
+}
+
+// ERC-6860 spells the calldata of a manual-mode work as mPathQuery, where
+// mPath "begins with '/' or is empty". So a URL with a query and no path
+// separator is a different call from one with an empty path — and the source
+// URL is the only place that distinction can live, because the offline cache
+// keys a work by sha256 of that string and recovers the call from it alone.
+//
+// Where the separator changes nothing (no query: the calldata is "/" either
+// way) the two spellings are deliberately one work and one cache key, as a
+// URI that omitted the default chain id and one that wrote `:1` are.
+func TestWeb3PathPresenceIsPartOfTheWork(t *testing.T) {
+	const base = "web3://" + digitalSoulContract + ":1"
+	cases := []struct {
+		name    string
+		raw     string
+		hasPath bool
+		source  string
+	}{
+		{"no separator, with a query", base + "?seed=1", false, "?seed=1"},
+		{"empty path, with a query", base + "/?seed=1", true, "/?seed=1"},
+		{"no separator, empty query", base + "?", false, "?"},
+		{"empty path, empty query", base + "/?", true, "/?"},
+		{"no separator, no query", base, true, "/"},
+		{"empty path, no query", base + "/", true, "/"},
+		{"no separator, fragment only", base + "#frag", true, "/#frag"},
+		{"a method path", base + "/artpiece?seed=1", true, "/artpiece?seed=1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, ok := contentpath.ParseWeb3(tc.raw)
+			if !ok {
+				t.Fatalf("ParseWeb3(%q) refused", tc.raw)
+			}
+			if w.HasPath != tc.hasPath {
+				t.Fatalf("ParseWeb3(%q).HasPath = %v, want %v", tc.raw, w.HasPath, tc.hasPath)
+			}
+			if want := w.Origin() + tc.source; w.SourceURL() != want {
+				t.Fatalf("SourceURL(%q) = %q, want %q", tc.raw, w.SourceURL(), want)
+			}
+			// The round trip has to carry it too, or the materializer reads
+			// the source back as the other call.
+			back, ok := contentpath.ParseWeb3SourceURL(w.SourceURL())
+			if !ok {
+				t.Fatalf("ParseWeb3SourceURL(%q) refused", w.SourceURL())
+			}
+			if back.HasPath != tc.hasPath || back.SourceURL() != w.SourceURL() {
+				t.Fatalf("round trip of %q: HasPath %v, source %q", tc.raw, back.HasPath, back.SourceURL())
+			}
+		})
+	}
+}
+
+// The two shapes whose calldata differs must not share a cache key, and the
+// four whose calldata is "/" must share one.
+func TestWeb3PathPresenceKeysTwoWorksAndOne(t *testing.T) {
+	const base = "web3://" + digitalSoulContract + ":1"
+	sourceOf := func(raw string) string {
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Fatalf("ParseWeb3(%q) refused", raw)
+		}
+		return w.SourceURL()
+	}
+	if a, b := sourceOf(base+"?seed=1"), sourceOf(base+"/?seed=1"); a == b {
+		t.Fatalf("two calls, one source: %q", a)
+	}
+	for _, raw := range []string{base + "/", base + "#f"} {
+		if a, b := sourceOf(base), sourceOf(raw); strings.TrimSuffix(a, "#f") != strings.TrimSuffix(b, "#f") {
+			t.Fatalf("one call, two sources:\n %q (%s)\n %q (%s)", a, base, b, raw)
+		}
+	}
+}
+
+// The canonical URI keeps the distinction as well, so a device-local source
+// that is mapped back to a URI for a log or a cast names the same call.
+func TestWeb3URIKeepsPathPresence(t *testing.T) {
+	for _, raw := range []string{
+		"web3://" + digitalSoulContract + ":1?seed=1",
+		"web3://" + digitalSoulContract + ":1/?seed=1",
+		"web3://" + digitalSoulContract + ":1/artpiece",
+	} {
+		w, ok := contentpath.ParseWeb3(raw)
+		if !ok {
+			t.Fatalf("ParseWeb3(%q) refused", raw)
+		}
+		if w.URI() != raw {
+			t.Fatalf("URI(%q) = %q", raw, w.URI())
+		}
+	}
+}
+
+// The inverse property is swept over every byte in each of the three
+// components, not asserted for the shapes that happened to be reported: a
+// URI ParseWeb3 accepts must have a source URL that reads back as itself and
+// is recognised as device-local. canonicalWeb3Path makes that true of the
+// path; the query and the fragment are written verbatim, where net/url is
+// stricter than the path escaping suggests, so ParseWeb3 refuses what it
+// cannot carry.
+//
+// Refusal is what makes it fail closed. Accepted-and-unmappable is the
+// failure this pins against: dp1 would rewrite the item to a `.invalid`
+// source that nothing recognises as device-local, so the work is never
+// resolved and media health dials and judges a host that cannot resolve
+// (round 5 review, F1).
+func TestEveryByteEitherRoundTripsOrIsRefused(t *testing.T) {
+	const base = "web3://" + digitalSoulContract + ":1/artpiece"
+	components := map[string]func(string) string{
+		"path":     func(b string) string { return base + "/greet/x" + b + "y" },
+		"query":    func(b string) string { return base + "?seed=x" + b + "y" },
+		"fragment": func(b string) string { return base + "#x" + b + "y" },
+	}
+	for name, build := range components {
+		t.Run(name, func(t *testing.T) {
+			accepted := 0
+			for c := 0; c < 256; c++ {
+				raw := build(string(rune(c)))
+				w, ok := contentpath.ParseWeb3(raw)
+				if !ok {
+					continue
+				}
+				accepted++
+				source := w.SourceURL()
+				back, ok := contentpath.ParseWeb3SourceURL(source)
+				if !ok || back != w {
+					t.Fatalf("byte %#02x accepted but its source %q does not read back (ok=%v)", c, source, ok)
+				}
+				if !contentpath.IsWeb3SourceURL(source) {
+					t.Fatalf("byte %#02x accepted but %q is not a device-local source", c, source)
+				}
+			}
+			if accepted == 0 {
+				t.Fatalf("no byte was accepted in the %s — the sweep proves nothing", name)
+			}
+		})
+	}
+}
+
+// The three shapes round 5's F1 reproduced, pinned by name: each is refused,
+// so nothing downstream ever sees a source it cannot parse.
+func TestWeb3RefusesWhatItsSourceURLCannotCarry(t *testing.T) {
+	const base = "web3://" + digitalSoulContract + ":1/artpiece"
+	for _, raw := range []string{
+		base + "?seed=a\x01b", // a C0 byte in the query: url.Parse refuses the source
+		base + "?seed=a\x7fb", // DEL, the same
+		base + "#100%",        // an invalid escape in the fragment
+	} {
+		if w, ok := contentpath.ParseWeb3(raw); ok {
+			t.Errorf("ParseWeb3(%q) = %+v, want refused (source %q)", raw, w, w.SourceURL())
+		}
+	}
+}

@@ -21,20 +21,35 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 	"github.com/feral-file/ffos-user/components/feral-controld/onchfs"
+	"github.com/feral-file/ffos-user/components/feral-controld/web3"
 )
 
-// The onchfs materializer is the offline cache's second producer of item
-// records (ffos-user#427). The first, capture, loads a work in a headless
-// browser from its host; an onchfs work has no host since fxhash closed, so
-// this one reads the work's tree from chain (onchfs.Resolver, every inode
-// verified against its address) and writes it into the same store, under
-// the work's device-local source (contentpath.Onchfs.SourceURL). Replay then
-// serves it to the kiosk exactly as it serves a captured work: one path
-// serves local artwork, whichever producer filled it.
+// The device-local materializer is the offline cache's second producer of
+// item records (ffos-user#427, feral-file#3599). The first, capture, loads a
+// work in a headless browser from its host. A device-local work has no host
+// to load: an onchfs work's gateway went with fxhash, and a web3 work never
+// had one because it is the return value of a contract call. So this producer
+// resolves the work itself — an onchfs tree from chain with every inode
+// verified against its address (onchfs.Resolver), or one eth_call pinned to a
+// block (web3.Resolver) — and writes it into the same store under the work's
+// device-local source. Replay then serves it to the kiosk exactly as it
+// serves a captured work: one path serves local artwork, whichever producer
+// filled it.
+//
+// One materializer serves every device-local scheme rather than one per
+// scheme. Everything between Ensure and the store is scheme-independent —
+// admission, the inflight map, freshness, the publish guard, the clear fence,
+// eviction, the standalone retention budget — and only `materialize`'s first
+// step differs. Two materializers would have duplicated that machinery and,
+// worse, given the schemes two retention pools on one disk, so a web3 work
+// would never make room for an onchfs work on screen. `resources` is the
+// seam a scheme plugs into; adding one is a case there and a resolver field,
+// not another pass over the eleven call sites
+// contentpath.IsDeviceLocalSource now answers for.
 //
 // The record is complete by construction (every file of the tree, verified)
 // and written as an Automatic record with every resource fresh for
-// onchfsFreshFor: Automatic keeps it out of the app's Downloads list (it is
+// deviceLocalFreshFor: Automatic keeps it out of the app's Downloads list (it is
 // not something the user downloaded) and lets the cache's own policies evict
 // it like any automatic warm; it is rebuilt on the next display request that needs it.
 //
@@ -50,63 +65,63 @@ import (
 // misses: replay matches exactly and the tree has no such URL. Known
 // limitation, not seen in the recorded works.
 
-// onchfsFreshFor is how long a materialized record stays replayable. The
+// deviceLocalFreshFor is how long a materialized record stays replayable. The
 // bytes cannot change under their address; expiry only bounds how long an
 // unplayed work occupies the disk before the cache may drop it.
-const onchfsFreshFor = 30 * 24 * time.Hour
+const deviceLocalFreshFor = 30 * 24 * time.Hour
 
-// onchfsRefreshWithin re-materializes a record this close to expiry, so a
+// deviceLocalRefreshWithin re-materializes a record this close to expiry, so a
 // work in rotation never lapses mid-playlist.
-const onchfsRefreshWithin = 3 * 24 * time.Hour
+const deviceLocalRefreshWithin = 3 * 24 * time.Hour
 
-// DefaultOnchfsStoreBytes bounds the onchfs records a device keeps when the
+// DefaultDeviceLocalStoreBytes bounds the onchfs records a device keeps when the
 // offline cache feature is off (the materializer is then the store's only
 // writer and nothing else evicts). With the feature on, the cache's own disk
 // policy bounds them along with everything else.
-const DefaultOnchfsStoreBytes = 512 << 20
+const DefaultDeviceLocalStoreBytes = 512 << 20
 
-// onchfsJobTimeout bounds one work's read and write. The largest recorded
+// deviceLocalJobTimeout bounds one work's read and write. The largest recorded
 // works read in under 5 s; this leaves room for a slow node and failover.
-const onchfsJobTimeout = 2 * time.Minute
+const deviceLocalJobTimeout = 2 * time.Minute
 
-// onchfsConcurrentJobs bounds works read at once, foreground and background
-// together; onchfsBackgroundJobs of them may be background reads. The slot
+// deviceLocalConcurrentJobs bounds works read at once, foreground and background
+// together; deviceLocalBackgroundJobs of them may be background reads. The slot
 // background work can never take is what keeps a display request's first work from
 // waiting behind slow background reads (PR #461 review F13) without letting
 // display requests add unbounded reads on top (F14). Each read fans out to its own
 // chain reads (onchfs.DefaultLimits.ConcurrentReads) and keeps at most
 // onchfs.MaxTreeBytes.
 const (
-	onchfsConcurrentJobs = 3
-	onchfsBackgroundJobs = 2
+	deviceLocalConcurrentJobs = 3
+	deviceLocalBackgroundJobs = 2
 )
 
-// onchfsAdmission hands out read slots: a foreground job takes any free
+// deviceLocalAdmission hands out read slots: a foreground job takes any free
 // slot and goes before every waiting background job; a background job takes
-// one only while fewer than onchfsBackgroundJobs are busy and no foreground
+// one only while fewer than deviceLocalBackgroundJobs are busy and no foreground
 // job waits. A job promoted while it waits is re-evaluated at once.
-type onchfsAdmission struct {
+type deviceLocalAdmission struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
 	running   int
 	waitingFG int
 }
 
-func newOnchfsAdmission(base context.Context) *onchfsAdmission {
-	a := &onchfsAdmission{}
+func newDeviceLocalAdmission(base context.Context) *deviceLocalAdmission {
+	a := &deviceLocalAdmission{}
 	a.cond = sync.NewCond(&a.mu)
 	context.AfterFunc(base, a.wake)
 	return a
 }
 
-func (a *onchfsAdmission) wake() {
+func (a *deviceLocalAdmission) wake() {
 	a.mu.Lock()
 	a.cond.Broadcast()
 	a.mu.Unlock()
 }
 
 // acquire waits for a slot for j, or until ctx ends (false).
-func (a *onchfsAdmission) acquire(ctx context.Context, j *onchfsJob) bool {
+func (a *deviceLocalAdmission) acquire(ctx context.Context, j *deviceLocalJob) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	counted := false
@@ -121,8 +136,8 @@ func (a *onchfsAdmission) acquire(ctx context.Context, j *onchfsJob) bool {
 			a.waitingFG++
 			counted = true
 		}
-		if (fg && a.running < onchfsConcurrentJobs) ||
-			(!fg && a.running < onchfsBackgroundJobs && a.waitingFG == 0) {
+		if (fg && a.running < deviceLocalConcurrentJobs) ||
+			(!fg && a.running < deviceLocalBackgroundJobs && a.waitingFG == 0) {
 			a.running++
 			return true
 		}
@@ -131,25 +146,35 @@ func (a *onchfsAdmission) acquire(ctx context.Context, j *onchfsJob) bool {
 	return false
 }
 
-func (a *onchfsAdmission) release() {
+func (a *deviceLocalAdmission) release() {
 	a.mu.Lock()
 	a.running--
 	a.cond.Broadcast()
 	a.mu.Unlock()
 }
 
-// OnchfsResolver reads a verified onchfs tree (onchfs.Resolver).
-type OnchfsResolver interface {
+// OnchfsTreeResolver reads a verified onchfs tree (onchfs.Resolver).
+type OnchfsTreeResolver interface {
 	Resolve(ctx context.Context, root, chain string) (*onchfs.Tree, error)
 }
 
-// OnchfsMaterializer writes onchfs works into the store. Safe for concurrent
-// use.
-type OnchfsMaterializer struct {
-	store    Store
-	resolver OnchfsResolver
-	logger   *zap.Logger
-	now      func() time.Time
+// Web3CallResolver reads a work that is a contract call's return value
+// (web3.Resolver).
+type Web3CallResolver interface {
+	Resolve(ctx context.Context, req web3.Request) (*web3.Work, error)
+}
+
+// DeviceLocalMaterializer writes device-local works into the store. Safe for
+// concurrent use.
+type DeviceLocalMaterializer struct {
+	store Store
+	// onchfs and web3 are the per-scheme resolvers. Either may be nil: a
+	// scheme with no resolver leaves its works unplayable, exactly as the
+	// whole feature being off does, and never fails another scheme's read.
+	onchfs OnchfsTreeResolver
+	web3   Web3CallResolver
+	logger *zap.Logger
+	now    func() time.Time
 	// base is the daemon's lifetime: a job outlives the display request that started
 	// it and ends with the daemon.
 	base context.Context
@@ -171,10 +196,10 @@ type OnchfsMaterializer struct {
 	// after it started (materialize).
 	fence ClearFence
 
-	admission *onchfsAdmission
+	admission *deviceLocalAdmission
 
 	mu       sync.Mutex
-	inflight map[string]*onchfsJob // by SourceKey; guarded by mu
+	inflight map[string]*deviceLocalJob // by SourceKey; guarded by mu
 	// protected are the SourceKeys of the playlist last passed to Ensure:
 	// reclaiming space never evicts a work the wall is about to show.
 	protected map[string]bool // guarded by mu
@@ -185,11 +210,11 @@ type OnchfsMaterializer struct {
 	writeMu sync.Mutex
 }
 
-type onchfsJob struct {
+type deviceLocalJob struct {
 	done chan struct{}
 	err  error
 	// foreground marks the work a display request is waiting to show; admission puts
-	// it ahead of background work (onchfsAdmission).
+	// it ahead of background work (deviceLocalAdmission).
 	foreground atomic.Bool
 	// barrier is the clear epoch when the job was created (fence only).
 	barrier uint64
@@ -203,20 +228,27 @@ type ClearFence interface {
 	ClearedSinceBarrier(playlistID string, barrier uint64, sources ...string) bool
 }
 
-// errOnchfsCleared reports a job whose work was cleared while it was read.
-var errOnchfsCleared = errors.New("onchfs: the work was cleared while it was being read")
+// errDeviceLocalCleared reports a job whose work was cleared while it was read.
+var errDeviceLocalCleared = errors.New("device-local: the work was cleared while it was being read")
 
-// OnchfsMaterializerConfig configures NewOnchfsMaterializer.
-type OnchfsMaterializerConfig struct {
-	Store    Store
-	Resolver OnchfsResolver
-	Logger   *zap.Logger
+// errNoResolver reports a device-local scheme this build has no resolver for
+// (its config disabled it, or nothing wired one).
+var errNoResolver = errors.New("device-local: no resolver for this scheme")
+
+// DeviceLocalMaterializerConfig configures NewDeviceLocalMaterializer.
+type DeviceLocalMaterializerConfig struct {
+	Store Store
+	// Onchfs reads onchfs trees; Web3 reads contract calls. A nil resolver
+	// leaves that scheme's works unplayable.
+	Onchfs OnchfsTreeResolver
+	Web3   Web3CallResolver
+	Logger *zap.Logger
 	// Base bounds every job; cancel it to stop the materializer.
 	Base context.Context
-	// Standalone: no Service runs (see OnchfsMaterializer.standalone).
+	// Standalone: no Service runs (see DeviceLocalMaterializer.standalone).
 	Standalone bool
 	// MaxBytes bounds this producer's records when Standalone
-	// (DefaultOnchfsStoreBytes when 0).
+	// (DefaultDeviceLocalStoreBytes when 0).
 	MaxBytes int64
 	// OnReady, when set, is called after a job that finished in the
 	// background (past the caller's wait) saved a record, so the caller
@@ -233,12 +265,12 @@ type OnchfsMaterializerConfig struct {
 	Now func() time.Time
 }
 
-// NewOnchfsMaterializer returns a materializer over cfg.Store.
-func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
-	m := &OnchfsMaterializer{
-		store: cfg.Store, resolver: cfg.Resolver, logger: cfg.Logger, base: cfg.Base,
+// NewDeviceLocalMaterializer returns a materializer over cfg.Store.
+func NewDeviceLocalMaterializer(cfg DeviceLocalMaterializerConfig) *DeviceLocalMaterializer {
+	m := &DeviceLocalMaterializer{
+		store: cfg.Store, onchfs: cfg.Onchfs, web3: cfg.Web3, logger: cfg.Logger, base: cfg.Base,
 		standalone: cfg.Standalone, maxBytes: cfg.MaxBytes, onReady: cfg.OnReady, now: cfg.Now,
-		inflight: map[string]*onchfsJob{},
+		inflight: map[string]*deviceLocalJob{},
 		evict:    cfg.Evict, fence: cfg.Fence,
 	}
 	if m.evict == nil {
@@ -248,12 +280,12 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 		m.now = time.Now
 	}
 	if m.maxBytes <= 0 {
-		m.maxBytes = DefaultOnchfsStoreBytes
+		m.maxBytes = DefaultDeviceLocalStoreBytes
 	}
 	if m.base == nil {
 		m.base = context.Background()
 	}
-	m.admission = newOnchfsAdmission(m.base)
+	m.admission = newDeviceLocalAdmission(m.base)
 	return m
 }
 
@@ -268,13 +300,13 @@ func NewOnchfsMaterializer(cfg OnchfsMaterializerConfig) *OnchfsMaterializer {
 // Errors are logged, not returned: an item that cannot be read stays
 // unplayable, which the player handles like any failed source, and must not
 // fail the rest of the display request.
-func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int {
+func (m *DeviceLocalMaterializer) Ensure(ctx context.Context, items []dp1playlist.PlaylistItem, wait time.Duration) int {
 	ready := 0
-	var first *onchfsJob
+	var first *deviceLocalJob
 	seen := map[string]bool{}
 	protected := map[string]bool{}
 	for _, item := range items {
-		if contentpath.IsOnchfsSourceURL(item.Source) {
+		if contentpath.IsDeviceLocalSource(item.Source) {
 			protected[SourceKey(item.Source)] = true
 		}
 	}
@@ -282,12 +314,12 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 	m.protected = protected
 	m.mu.Unlock()
 	for _, item := range items {
-		if !contentpath.IsOnchfsSourceURL(item.Source) || seen[item.Source] {
+		if !contentpath.IsDeviceLocalSource(item.Source) || seen[item.Source] {
 			continue
 		}
 		isFirst := len(seen) == 0
 		seen[item.Source] = true
-		if m.fresh(item.Source, onchfsRefreshWithin) {
+		if m.fresh(item.Source, deviceLocalRefreshWithin) {
 			ready++
 			continue
 		}
@@ -321,7 +353,7 @@ func (m *OnchfsMaterializer) Ensure(ctx context.Context, items []dp1playlist.Pla
 // went missing (swept by a store without the publish guard, or removed by
 // hand) would otherwise stay "fresh" and unplayable until it expired; this
 // way the next display request rebuilds it.
-func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
+func (m *DeviceLocalMaterializer) fresh(source string, margin time.Duration) bool {
 	rec, err := m.store.LoadItem(SourceKey(source))
 	if err != nil || rec == nil || !rec.Coverage.Complete || !rec.freshForPlayback(m.now().Add(margin)) {
 		return false
@@ -341,9 +373,9 @@ func (m *OnchfsMaterializer) fresh(source string, margin time.Duration) bool {
 //
 // A foreground job (the work a display request is waiting for) goes ahead of background
 // work for a read slot, and a background job already queued for the work is
-// promoted when a display request asks for it; see onchfsAdmission for the bound both
+// promoted when a display request asks for it; see deviceLocalAdmission for the bound both
 // share.
-func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground bool) *onchfsJob {
+func (m *DeviceLocalMaterializer) start(item dp1playlist.PlaylistItem, foreground bool) *deviceLocalJob {
 	key := SourceKey(item.Source)
 	m.mu.Lock()
 	if job, ok := m.inflight[key]; ok {
@@ -353,7 +385,7 @@ func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground boo
 		}
 		return job
 	}
-	job := &onchfsJob{done: make(chan struct{})}
+	job := &deviceLocalJob{done: make(chan struct{})}
 	job.foreground.Store(foreground)
 	if m.fence != nil {
 		job.barrier = m.fence.ClearBarrier()
@@ -373,16 +405,16 @@ func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground boo
 			return
 		}
 		defer m.admission.release()
-		ctx, cancel := context.WithTimeout(m.base, onchfsJobTimeout)
+		ctx, cancel := context.WithTimeout(m.base, deviceLocalJobTimeout)
 		defer cancel()
 		started := m.now()
 		job.err = m.materialize(ctx, item, job.barrier)
 		label := truncateSourceForLog(item.Source)
 		if job.err != nil {
-			m.logger.Warn("onchfs: work not materialized", zap.String("source", label), zap.Error(job.err))
+			m.logger.Warn("device-local: work not materialized", zap.String("source", label), zap.Error(job.err))
 			return
 		}
-		m.logger.Info("onchfs: work materialized", zap.String("source", label), zap.Duration("took", m.now().Sub(started)))
+		m.logger.Info("device-local: work materialized", zap.String("source", label), zap.Duration("took", m.now().Sub(started)))
 		if m.onReady != nil {
 			m.onReady()
 		}
@@ -390,18 +422,10 @@ func (m *OnchfsMaterializer) start(item dp1playlist.PlaylistItem, foreground boo
 	return job
 }
 
-// materialize reads item's tree and writes it as a record.
-func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.PlaylistItem, barrier uint64) error {
-	o, ok := contentpath.ParseOnchfsSourceURL(item.Source)
-	if !ok {
-		return fmt.Errorf("onchfs: not a device-local onchfs source")
-	}
-	tree, err := m.resolver.Resolve(ctx, o.Root, o.Chain)
-	if err != nil {
-		return err
-	}
+// materialize resolves item and writes it as a record.
+func (m *DeviceLocalMaterializer) materialize(ctx context.Context, item dp1playlist.PlaylistItem, barrier uint64) error {
 	now := m.now()
-	resources, blobs, err := onchfsResources(o, item.Source, tree, now.Add(onchfsFreshFor))
+	resources, blobs, err := m.resources(ctx, item.Source, now.Add(deviceLocalFreshFor))
 	if err != nil {
 		return err
 	}
@@ -418,7 +442,7 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 	defer m.writeMu.Unlock()
 	key := SourceKey(item.Source)
 	if m.cleared(item.Source, barrier) {
-		return errOnchfsCleared
+		return errDeviceLocalCleared
 	}
 	err = m.write(rec, blobs, barrier)
 	// The cache shares one disk budget. When it is full, older onchfs works
@@ -426,16 +450,16 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 	// playlist shows (PR #461 review F6). Capture reclaims for itself
 	// inside the Service; this producer has to do the same or a full cache
 	// would leave every new onchfs work unplayable.
-	for evicted := 0; isDiskPressure(err) && evicted < onchfsMaxEvictions; evicted++ {
+	for evicted := 0; isDiskPressure(err) && evicted < deviceLocalMaxEvictions; evicted++ {
 		victim, ok := m.oldestEvictable(key)
 		if !ok {
 			break
 		}
 		if evictErr := m.evict(victim); evictErr != nil {
-			m.logger.Warn("onchfs: evicting a record to make room failed", zap.Error(evictErr))
+			m.logger.Warn("device-local: evicting a record to make room failed", zap.Error(evictErr))
 			break
 		}
-		m.logger.Info("onchfs: evicted an older work to make room", zap.String("source", truncateSourceForLog(victim)))
+		m.logger.Info("device-local: evicted an older work to make room", zap.String("source", truncateSourceForLog(victim)))
 		err = m.write(rec, blobs, barrier)
 	}
 	if err != nil {
@@ -443,7 +467,7 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 			// Blobs a failed publication wrote are referenced by nothing;
 			// collect them now. With a Service running its GC does.
 			if _, _, gcErr := m.store.GC(); gcErr != nil {
-				m.logger.Warn("onchfs: collecting blobs after a failed write failed", zap.Error(gcErr))
+				m.logger.Warn("device-local: collecting blobs after a failed write failed", zap.Error(gcErr))
 			}
 		}
 		return err
@@ -454,13 +478,58 @@ func (m *OnchfsMaterializer) materialize(ctx context.Context, item dp1playlist.P
 	return nil
 }
 
+// resources resolves source by its scheme and returns what replay will serve
+// it from. This is the one place a device-local scheme differs; everything
+// else about a job is scheme-independent (see the file comment).
+func (m *DeviceLocalMaterializer) resources(ctx context.Context, source string, freshUntil time.Time) ([]Resource, map[string][]byte, error) {
+	switch contentpath.DeviceLocalSourceScheme(source) {
+	case contentpath.SchemeOnchfs:
+		o, ok := contentpath.ParseOnchfsSourceURL(source)
+		if !ok {
+			return nil, nil, fmt.Errorf("onchfs: not a device-local onchfs source")
+		}
+		if m.onchfs == nil {
+			return nil, nil, fmt.Errorf("%w: onchfs", errNoResolver)
+		}
+		tree, err := m.onchfs.Resolve(ctx, o.Root, o.Chain)
+		if err != nil {
+			return nil, nil, err
+		}
+		return onchfsResources(o, source, tree, freshUntil)
+	case contentpath.SchemeWeb3:
+		w, ok := contentpath.ParseWeb3SourceURL(source)
+		if !ok {
+			return nil, nil, fmt.Errorf("web3: not a device-local web3 source")
+		}
+		if m.web3 == nil {
+			return nil, nil, fmt.Errorf("%w: web3", errNoResolver)
+		}
+		// HasPath and HasQuery travel with the parts: manual mode sends
+		// mPathQuery verbatim, so whether the URL carried "/" and "?" at all
+		// is part of the call, not of its spelling (web3.Request).
+		work, err := m.web3.Resolve(ctx, web3.Request{
+			Contract: w.ContractAddress(),
+			ChainID:  w.ChainID,
+			Path:     w.Path,
+			HasPath:  w.HasPath,
+			Query:    w.Query,
+			HasQuery: w.HasQuery,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return web3Resources(w, source, work, freshUntil)
+	}
+	return nil, nil, fmt.Errorf("device-local: %s is not a device-local source", truncateSourceForLog(source))
+}
+
 // cleared reports a clear of source that started after barrier.
-func (m *OnchfsMaterializer) cleared(source string, barrier uint64) bool {
+func (m *DeviceLocalMaterializer) cleared(source string, barrier uint64) bool {
 	return m.fence != nil && m.fence.ClearedSinceBarrier("", barrier, source)
 }
 
-// onchfsMaxEvictions bounds one write's reclaim loop.
-const onchfsMaxEvictions = 64
+// deviceLocalMaxEvictions bounds one write's reclaim loop.
+const deviceLocalMaxEvictions = 64
 
 // isDiskPressure reports a write the cache's disk budget refused.
 func isDiskPressure(err error) bool {
@@ -469,7 +538,7 @@ func isDiskPressure(err error) bool {
 
 // evictStandalone removes a record and collects its blobs, for a device
 // with no Service (the materializer is then the store's only writer).
-func (m *OnchfsMaterializer) evictStandalone(source string) error {
+func (m *DeviceLocalMaterializer) evictStandalone(source string) error {
 	if _, err := m.store.DeleteItem(SourceKey(source)); err != nil {
 		return err
 	}
@@ -479,11 +548,11 @@ func (m *OnchfsMaterializer) evictStandalone(source string) error {
 
 // oldestEvictable is the least recently played onchfs record other than
 // keep and the current playlist's works.
-func (m *OnchfsMaterializer) oldestEvictable(keep string) (string, bool) {
+func (m *DeviceLocalMaterializer) oldestEvictable(keep string) (string, bool) {
 	m.mu.Lock()
 	protected := m.protected
 	m.mu.Unlock()
-	for _, r := range m.onchfsRecords() {
+	for _, r := range m.deviceLocalRecords() {
 		if r.key != keep && !protected[r.key] {
 			return r.source, true
 		}
@@ -491,27 +560,33 @@ func (m *OnchfsMaterializer) oldestEvictable(keep string) (string, bool) {
 	return "", false
 }
 
-// onchfsRecord is one onchfs record as the eviction policies see it.
-type onchfsRecord struct {
+// deviceLocalRecord is one onchfs record as the eviction policies see it.
+type deviceLocalRecord struct {
 	key, source string
 	at          time.Time
 	bytes       int64
 }
 
-// onchfsRecords lists this producer's records, least recently played first.
-func (m *OnchfsMaterializer) onchfsRecords() []onchfsRecord {
+// deviceLocalRecords lists this producer's records, least recently played first.
+func (m *DeviceLocalMaterializer) deviceLocalRecords() []deviceLocalRecord {
 	keys, err := m.store.ListItemKeys()
 	if err != nil {
-		m.logger.Warn("onchfs: listing records failed", zap.Error(err))
+		m.logger.Warn("device-local: listing records failed", zap.Error(err))
 		return nil
 	}
-	var out []onchfsRecord
+	var out []deviceLocalRecord
 	for _, key := range keys {
+		// Every device-local record, not only onchfs: the schemes share one
+		// disk, so they share one retention pool and one LRU order. A
+		// web3 work that has not played in a month is the right thing to
+		// drop to make room for an onchfs work on screen, and listing only
+		// one scheme's records would let the other grow unbounded
+		// (feral-file#3599).
 		rec, err := m.store.LoadItem(key)
-		if err != nil || rec == nil || !contentpath.IsOnchfsSourceURL(rec.Item.Source) {
+		if err != nil || rec == nil || !contentpath.IsDeviceLocalSource(rec.Item.Source) {
 			continue
 		}
-		r := onchfsRecord{key: key, source: rec.Item.Source, at: rec.LastPlayedAt}
+		r := deviceLocalRecord{key: key, source: rec.Item.Source, at: rec.LastPlayedAt}
 		if r.at.IsZero() {
 			r.at = rec.CapturedAt
 		}
@@ -543,28 +618,28 @@ func (m *OnchfsMaterializer) onchfsRecords() []onchfsRecord {
 // check after SaveItem covers every order: a clear that started before the
 // check is seen and the record just saved is deleted again; one that starts
 // after it deletes the saved record itself.
-func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte, barrier uint64) error {
+func (m *DeviceLocalMaterializer) write(rec *ItemRecord, blobs map[string][]byte, barrier uint64) error {
 	publish := func() error {
 		for _, body := range blobs {
 			if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
-				return fmt.Errorf("onchfs: writing a blob: %w", err)
+				return fmt.Errorf("device-local: writing a blob: %w", err)
 			}
 		}
 		if err := m.store.SaveItem(rec); err != nil {
-			return fmt.Errorf("onchfs: saving the record: %w", err)
+			return fmt.Errorf("device-local: saving the record: %w", err)
 		}
 		if m.cleared(rec.Item.Source, barrier) {
 			if _, err := m.store.DeleteItem(SourceKey(rec.Item.Source)); err != nil {
-				return fmt.Errorf("onchfs: undoing a publication a clear raced: %w", err)
+				return fmt.Errorf("device-local: undoing a publication a clear raced: %w", err)
 			}
-			return errOnchfsCleared
+			return errDeviceLocalCleared
 		}
 		for sha, body := range blobs {
 			if _, err := m.store.BlobSize(sha); err == nil {
 				continue
 			}
 			if _, err := m.store.WriteBlob(bytes.NewReader(body), 0); err != nil {
-				return fmt.Errorf("onchfs: rewriting a missing blob: %w", err)
+				return fmt.Errorf("device-local: rewriting a missing blob: %w", err)
 			}
 		}
 		return nil
@@ -577,10 +652,10 @@ func (m *OnchfsMaterializer) write(rec *ItemRecord, blobs map[string][]byte, bar
 
 // prune keeps this producer's records under maxBytes, oldest played first,
 // never the one just written, then collects unreferenced blobs. Only when
-// standalone (see OnchfsMaterializer.standalone); called under writeMu.
+// standalone (see DeviceLocalMaterializer.standalone); called under writeMu.
 // Failures are logged: the cost of a failed prune is disk, never playback.
-func (m *OnchfsMaterializer) prune(keep string) {
-	records := m.onchfsRecords()
+func (m *DeviceLocalMaterializer) prune(keep string) {
+	records := m.deviceLocalRecords()
 	var total int64
 	for _, r := range records {
 		total += r.bytes
@@ -603,13 +678,13 @@ func (m *OnchfsMaterializer) prune(keep string) {
 			continue
 		}
 		if _, err := m.store.DeleteItem(r.key); err != nil {
-			m.logger.Warn("onchfs: pruning a record failed", zap.Error(err))
+			m.logger.Warn("device-local: pruning a record failed", zap.Error(err))
 			continue
 		}
 		total -= r.bytes
 	}
 	if _, _, err := m.store.GC(); err != nil {
-		m.logger.Warn("onchfs: collecting blobs failed", zap.Error(err))
+		m.logger.Warn("device-local: collecting blobs failed", zap.Error(err))
 	}
 }
 

@@ -396,15 +396,15 @@ func (s *Service) ObservePlayback(items []dp1playlist.PlaylistItem, index int, r
 // rules and into the store, and reports whether it counted toward a
 // verdict. Caller holds s.mu.
 func (s *Service) applyEntry(o Outcome, online bool) bool {
-	if contentpath.IsOnchfsSourceURL(o.Source) {
-		// An onchfs work plays only once the device has read it from chain
-		// (offlinecache's materializer); until then the player fails it
-		// for want of bytes, not because the work is broken, and an RPC
-		// outage or a slow first read must never conclude a verdict or
-		// hint a skip. Nothing heals one either: L0 never probes a
-		// device-held source and an iframe's ready is not evidence. So no
-		// entry for it is recorded. It still ends any other source's play
-		// run, as every entry for another source does.
+	if contentpath.IsDeviceLocalSource(o.Source) {
+		// A device-local work (onchfs, web3) plays only once the device has
+		// resolved it from chain (offlinecache's materializers); until then
+		// the player fails it for want of bytes, not because the work is
+		// broken, and an RPC outage or a slow first read must never
+		// conclude a verdict or hint a skip. Nothing heals one either: L0
+		// never probes a device-held source and an iframe's ready is not
+		// evidence. So no entry for it is recorded. It still ends any other
+		// source's play run, as every entry for another source does.
 		s.endRun()
 		return false
 	}

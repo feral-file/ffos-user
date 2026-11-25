@@ -426,6 +426,11 @@ type Config struct {
 	// a hand-edited optional block must never fail config.Load.
 	Onchfs json.RawMessage `json:"onchfs,omitempty"`
 
+	// Web3 tunes how the device reads ERC-4804 `web3://` works (the nodes
+	// per chain, the request timeout, a kill switch). Raw bytes decoded by
+	// Web3Tuning(), for the same reason as Onchfs above.
+	Web3 json.RawMessage `json:"web3,omitempty"`
+
 	// Provisioning carries the escape-policy tuning block
 	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
 	// permissively by ProvisioningTuning(). RawMessage on purpose: config.Load
@@ -739,6 +744,57 @@ func (c *Config) OnchfsTuning(logger *zap.Logger) OnchfsConfig {
 		return OnchfsConfig{Disabled: disabled}
 	}
 	return o
+}
+
+// Web3Config tunes the device's own ERC-4804 reader (feral-file#3599). Every
+// field is optional; the defaults (web3.DefaultEndpoints, a 15 s request
+// timeout) are what an unconfigured device runs.
+type Web3Config struct {
+	// Disabled turns the reader off: web3 works are then left as unplayable
+	// `web3://` sources, which is how every device behaved before this
+	// reader existed.
+	Disabled bool `json:"disabled,omitempty"`
+	// Chains overrides the nodes for a chain, keyed by decimal EIP-155
+	// chain id ("1", "8453") or its CAIP-2 spelling ("eip155:1"). A chain
+	// listed here replaces that chain's defaults; a chain not listed keeps
+	// them, and a chain the device ships no node for is added by listing
+	// it.
+	//
+	// Unlike onchfs, these nodes are trusted: a contract call has no
+	// content address, so a node's answer cannot be checked against one
+	// (see the web3 package). Changing this list changes what the device
+	// will show, not only where it looks. Add a node only after a whole
+	// work has been read through it from a device.
+	Chains map[string]Web3ChainConfig `json:"chains,omitempty"`
+	// RequestTimeoutSeconds bounds one RPC request; 0 is the default.
+	RequestTimeoutSeconds int `json:"requestTimeoutSeconds,omitempty"`
+}
+
+// Web3ChainConfig is one chain's node list, in order of preference.
+type Web3ChainConfig struct {
+	RPC []string `json:"rpc"`
+}
+
+// Web3Tuning decodes the web3 block, by the same rule as OnchfsTuning: absent
+// or malformed is the built-in defaults, and an explicit "disabled": true is
+// honored even when a sibling field does not decode.
+func (c *Config) Web3Tuning(logger *zap.Logger) Web3Config {
+	if len(c.Web3) == 0 {
+		return Web3Config{}
+	}
+	var w Web3Config
+	if err := json.Unmarshal(c.Web3, &w); err != nil {
+		var sw struct {
+			Disabled bool `json:"disabled"`
+		}
+		disabled := json.Unmarshal(c.Web3, &sw) == nil && sw.Disabled
+		if logger != nil {
+			logger.Error("web3 config block malformed; using built-in defaults",
+				zap.Bool("disabled", disabled), zap.Error(err), zap.String("raw", string(c.Web3)))
+		}
+		return Web3Config{Disabled: disabled}
+	}
+	return w
 }
 
 // ProvisioningTuning carries the on-device knobs for the provisioning escape

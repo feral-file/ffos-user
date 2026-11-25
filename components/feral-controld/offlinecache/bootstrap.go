@@ -406,7 +406,7 @@ type Runtime struct {
 // Core is the part of the offline cache that serves local artwork: the
 // store, the static server for oversized blobs, and replay into the kiosk.
 // It runs on every device (ffos-user#427): onchfs works are written into
-// the store by OnchfsMaterializer and served by this replay even when the
+// the store by DeviceLocalMaterializer and served by this replay even when the
 // offline cache feature (capture, downloads, automatic warming, the
 // Service) is off.
 type Core struct {

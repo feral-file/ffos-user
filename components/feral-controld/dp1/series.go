@@ -223,7 +223,7 @@ type catalogEditions struct {
 // separately by maxSeriesPerPlaylist, which 0 does not lift.
 func (d *dp1) expandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
 	expanded := d.expandSeriesEditions(ctx, playlist, maxItems)
-	expanded.Items = mapOnchfsSources(expanded.Items) // editions are an exit too (onchfs.go)
+	expanded.Items = mapDeviceLocalSources(expanded.Items) // editions are an exit too (devicelocal.go)
 	return expanded
 }
 
