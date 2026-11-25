@@ -1215,6 +1215,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// preflight, because it is network-bound. Every item already
 			// carries its device-local source (dp1/onchfs.go), which the
 			// scope sync below hashes the same way.
+			// A startItem naming an onchfs work by a spelling other than its
+			// device-local source is re-spelled as the item's own source,
+			// so the player (and onchfsOpening below) finds it; see
+			// onchfsStartItem. Against the policy-filtered list: a work the
+			// filter removed matches nothing and the display opens at its
+			// beginning, as it would have anyway. Independent of the reader
+			// being enabled, like the item rewrite it mirrors.
+			if startItem, ok := command.Arguments["startItem"]; ok {
+				command.Arguments["startItem"] = onchfsStartItem(playlist.Items, startItem)
+			}
 			if h.onchfs != nil {
 				items, wait := onchfsOpening(playlist.Items, command.Arguments["startItem"])
 				h.onchfs.Ensure(ctx, items, wait)

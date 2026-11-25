@@ -1420,7 +1420,8 @@ func (*barrierScheduler) SetHintSource(playlistschedule.HintSource) {}
 func (*capturingScheduler) SetHintSource(playlistschedule.HintSource) {}
 
 // startItem names the work a controller wants a display request to open on. controld
-// forwards it to the player untouched and never turns it into an index: the
+// forwards it to the player (untouched, but for an onchfs source's spelling:
+// see the test after this one) and never turns it into an index: the
 // list the player counts in is the one left after the player's own
 // admission, which can be shorter than the one controld forwards. Here the
 // projection has already dropped the first item, so an index computed
@@ -1463,6 +1464,55 @@ func TestDisplayPlaylistForwardsStartItemToThePlayerUntouched(t *testing.T) {
 			require.NoError(t, marshalErr)
 			require.Contains(t, sent, `"startItem":`+string(wantJSON))
 			require.NotContains(t, sent, "startIndex", "controld never resolves the start work to an index")
+		})
+	}
+}
+
+// An onchfs work reaches the player under its device-local source, so a
+// startItem naming it by its onchfs:// URI (app 1.9.28) or the dead gateway
+// (app main) is re-spelled as that source before the send, or the player's
+// exact match misses and the display opens on item 0 (feral-file/feral-file#3636).
+// No onchfs reader is wired here: the re-spelling, like the item rewrite,
+// does not depend on it.
+func TestDisplayPlaylistRespellsAnOnchfsStartItemAsTheItemSource(t *testing.T) {
+	const root = "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
+	raw := "onchfs://" + root + "/?fxhash=1"
+	deviceLocal := dp1.OnchfsSource(raw)
+	for name, named := range map[string]string{
+		"raw URI":          raw,
+		"dead gateway URL": "https://onchfs.fxhash2.xyz/" + root + "/?fxhash=1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, player, poller := newPolicyHandlerWithPoller(t)
+			poller.EXPECT().ForceRefresh().AnyTimes()
+
+			var sent string
+			player.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+				func(_ string, params map[string]interface{}) (interface{}, error) {
+					sent = params["expression"].(string)
+					return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+				}).Times(1)
+
+			startItem := map[string]interface{}{"source": named}
+			_, err := h.Process(context.Background(), commands.Command{
+				Type: commands.CMD_DISPLAY_PLAYLIST,
+				Arguments: map[string]any{
+					"startItem": startItem,
+					"dp1_call": map[string]interface{}{
+						"dpVersion": "1.1.0", "title": "x",
+						"items": []interface{}{
+							map[string]interface{}{"id": "a", "source": "https://example.test/a"},
+							map[string]interface{}{"id": "b", "source": "https://example.test/b"},
+							map[string]interface{}{"id": "c", "source": raw},
+						},
+					},
+				},
+			})
+			require.NoError(t, err)
+			wantJSON, marshalErr := json.Marshal(map[string]interface{}{"source": deviceLocal})
+			require.NoError(t, marshalErr)
+			require.Contains(t, sent, `"startItem":`+string(wantJSON))
+			require.Equal(t, named, startItem["source"], "the controller's map is not written")
 		})
 	}
 }

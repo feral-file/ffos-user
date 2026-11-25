@@ -438,13 +438,21 @@ Either member may be omitted. It names a work, not an index, because a
 controller does not know the order a `playlistUrl` or a dynamic query resolves
 to, and the list the player plays is the one left after `displayAt`
 filtering, the content-policy projection and the player's own admission.
-`feral-controld` forwards the member to the player untouched and never
-resolves it; the player finds the work in the list it admitted, by `id`
+`feral-controld` forwards the member to the player and never resolves it to
+an index; the player finds the work in the list it admitted, by `id`
 across the whole list first and by `source` only when no item carries the
 `id` (a dynamic playlist regenerates ids; two members of a series can share a
-source), and starts there. The playlist still plays whole and in its own
-order; only the entry point moves, and the document is not rewritten, so a
-signed playlist keeps its verdict.
+source), and starts there. The one change controld makes is to the spelling
+of an onchfs `source`: every onchfs item reaches the player under its
+device-local source ([`onchfs.md`](onchfs.md)), so a `source` naming the same
+work another way (the `onchfs://` URI, the dead fxhash gateway URL, a
+different chain label) is replaced by the source of the first item holding
+that work, unless some item already holds the given string exactly
+(feral-file/feral-file#3636). The match is the work's root, path, query and
+fragment, whatever chain label either side carries, so two fxhash editions of
+one project, which differ in their query, stay distinct. The playlist still
+plays whole and in its own order; only the entry point moves, and the
+document is not rewritten, so a signed playlist keeps its verdict.
 
 Absent, malformed, or naming a work that is not in the admitted list, the
 display starts at its beginning, exactly as without the member. It never causes
