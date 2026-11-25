@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -164,11 +165,22 @@ type playlistJSON Playlist
 // `&` in a source raw where the old hook's inner json.Marshal escaped it.
 // Equivalent JSON either way; nothing compares those bytes.
 func (p *Playlist) UnmarshalJSON(data []byte) error {
-	var decoded playlistJSON
+	// dp1-go v0.8.0 added a typed Playlist.Satellites. encoding/json would
+	// match any case variant ("Satellites":123) to it and fail the whole
+	// decode on a document the schema accepts as an unknown property. The
+	// shadow field below is shallower than the promoted one, so it claims
+	// every key that folds to "satellites" as raw bytes (never failing), and
+	// the real list is then read back by the exact key — the same approach as
+	// dp1-go's own decodePlaylist, which controld bypasses by decoding here.
+	var decoded struct {
+		playlistJSON
+		SatellitesRaw json.RawMessage `json:"satellites,omitempty"`
+	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	*p = Playlist(decoded)
+	*p = Playlist(decoded.playlistJSON)
+	p.Satellites = decodeSatellitesExact(data)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
 	return nil
 }
@@ -760,4 +772,22 @@ func (d *dp1) httpClientAsHTTPClient() *http.Client {
 		Transport: httpClientTransport{d.httpClient},
 		Timeout:   wrapper.HTTPClientTimeout,
 	}
+}
+
+// decodeSatellitesExact reads "satellites" by its exact JSON key, leniently: a
+// value of the wrong shape decodes as absent rather than failing the playlist.
+func decodeSatellitesExact(data []byte) []playlists.Satellite {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return nil
+	}
+	raw, ok := top["satellites"]
+	if !ok {
+		return nil
+	}
+	var satellites []playlists.Satellite
+	if err := json.Unmarshal(raw, &satellites); err != nil {
+		return nil
+	}
+	return satellites
 }
