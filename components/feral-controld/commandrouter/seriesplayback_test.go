@@ -15,7 +15,6 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
@@ -176,7 +175,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastsTheCurrentlyDisplayedSeries(t *
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -270,7 +269,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastToRandomPushesTheChosenPickToThe
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -369,7 +368,7 @@ func TestCommandHandler_DisplayPlaylist_PushesTheAcceptedRandomPickOnTheInitialC
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -455,7 +454,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastOfAPlaylistURLCastDoesNotReResol
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -539,7 +538,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastOfAScheduledPlaylistURLCastPrese
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	ctx := context.Background()
 	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
@@ -631,7 +630,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastOfAnUnscheduledPlaylistURLCastPr
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	ctx := context.Background()
 	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
@@ -719,7 +718,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastOfAnUnscheduledDynamicPlaylistCa
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	ctx := context.Background()
 	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
@@ -841,7 +840,7 @@ func TestCommandHandler_SetSeriesPlayback_ConcurrentRequestsCoalesceWithoutLosin
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -971,7 +970,7 @@ func TestCommandHandler_SetSeriesPlayback_DefaultPlaybackInvalidatesTheSeriesCac
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1072,7 +1071,7 @@ func TestCommandHandler_SetSeriesPlayback_RejectedCastIsNotRecast(t *testing.T) 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1136,7 +1135,7 @@ func TestCommandHandler_SetSeriesPlayback_FailedRecastKeepsTheDisplayedSeries(t 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1224,7 +1223,7 @@ func TestCommandHandler_SetSeriesPlayback_OverlappingSettingChangeDoesNotRecastA
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1289,7 +1288,7 @@ func TestCommandHandler_SetSeriesPlayback_PlayerRefusedCastIsNotRecast(t *testin
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1378,7 +1377,7 @@ func TestCommandHandler_SetSeriesPlayback_NoOpWhenTheDisplayedSeriesNeverResolve
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1441,7 +1440,7 @@ func TestCommandHandler_DisplayPlaylist_DoesNotPushAWithheldRandomPickEvenWhenTh
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 	policyStore, err := contentpolicy.Open(filepath.Join(t.TempDir(), "policy.json"), false)
@@ -1526,7 +1525,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastDoesNotPushWhenThePlayerRefusesT
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1625,7 +1624,7 @@ func TestCommandHandler_SetSeriesPlayback_RecastDoesNotPushAGuessedSeqWhenAnothe
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, wrapper.NewJSON(), logger)
 	commandrouter.SetSeriesPlayback(handler, newSeriesPlaybackStore(t), logger)
 
@@ -1741,7 +1740,7 @@ func TestCommandHandler_DisplayPlaylist_PushesTheAcceptedPickEvenWhenTheGroupIsD
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	logger := zaptest.NewLogger(t)
+	logger := newTestLogger(t)
 	ctx := context.Background()
 	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
