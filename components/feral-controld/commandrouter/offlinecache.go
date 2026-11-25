@@ -739,6 +739,7 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 			return nil, nil, fmt.Errorf("failed to marshal playlist: %w", err)
 		}
 
+		dp1.AuditDocumentAsync(h.logger, "dp1_call", playlistBytes)
 		var playlist *dp1.Playlist
 		if err := h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 			return nil, nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
