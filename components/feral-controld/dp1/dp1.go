@@ -38,9 +38,16 @@ func ValidationPointers(err error) []string {
 	}
 	var out []string
 	seen := map[string]bool{}
-	for _, part := range strings.Split(err.Error(), "at '") {
+	// The text before the first "at '" is the validator's preamble, not a
+	// location; every later part starts with a pointer. end == 0 is the
+	// document root (an empty location), which is a real location (a missing top-level
+	// member is reported there), so only end < 0 (no closing quote) is dropped.
+	for i, part := range strings.Split(err.Error(), "at '") {
+		if i == 0 {
+			continue
+		}
 		end := strings.IndexByte(part, '\'')
-		if end <= 0 {
+		if end < 0 {
 			continue
 		}
 		pointer := part[:end]
@@ -144,6 +151,13 @@ type Playlist struct {
 	// Hydration (ProcessDynamicPlaylist*) takes Playlist by value and copies
 	// the struct, so a verdict attached at decode time survives it.
 	Verification *sigverify.Verdict `json:"-"`
+	// Extra holds top-level members the typed Playlist has no field for (a
+	// later DP-1 minor's additions, extensions this build does not model), so
+	// re-emitting the document does not strip them (DP-1 §12). Top level only:
+	// unknown members inside items or nested objects are still dropped, since
+	// items are rewritten (hydrated, narrowed, series-expanded) after decode and
+	// have no stable identity to splice them back onto.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // playlistJSON is Playlist without its methods, so UnmarshalJSON can lean on
@@ -153,15 +167,16 @@ type playlistJSON Playlist
 // UnmarshalJSON decodes the document as the plain struct and maps its items'
 // onchfs sources to the device-local form (see onchfs.go).
 //
-// There is deliberately no MarshalJSON. One existed to carry a
+// MarshalJSON re-emits unknown top-level members next to the typed ones (see
+// Extra). Historically there was no MarshalJSON. One existed to carry a
 // `dynamicQuery.pagination` block that dp1-go's typed DynamicQuery drops,
 // for the device-side Raster wallet walk. That walk was removed
 // (feral-file/feral-file#3576, section 7 of the 2026-11-23 plan): Raster now
 // needs a key that only ff-source-resolver-service holds, so ff-app casts an
 // address playlist as a fixed DP-1 list. A `pagination` block in an incoming
 // document is now dropped on decode like any other field dp1-go does not
-// model, and nothing reads it. Encoding is now the plain struct's, so each
-// encoder's own settings apply: control's SetEscapeHTML(false) encoder writes
+// model, and nothing reads it. Encoding is the plain struct's plus Extra, and MarshalJSON
+// does not escape HTML itself, so each encoder's own settings apply: control's SetEscapeHTML(false) encoder writes
 // `&` in a source raw where the old hook's inner json.Marshal escaped it.
 // Equivalent JSON either way; nothing compares those bytes.
 func (p *Playlist) UnmarshalJSON(data []byte) error {
@@ -182,7 +197,13 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 	*p = Playlist(decoded.playlistJSON)
 	p.Satellites = decodeSatellitesExact(data)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
+	p.Extra = unknownPlaylistMembers(data)
 	return nil
+}
+
+// MarshalJSON is the typed encoding plus Extra.
+func (p Playlist) MarshalJSON() ([]byte, error) {
+	return marshalWithExtra(playlistJSON(p), p.Extra)
 }
 
 // HasDynamicContent returns true when the playlist requests dynamic item resolution (spec or legacy).
@@ -682,6 +703,8 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
+	AuditDocumentAsync(d.logger, "playlistUrl", bytes)
+
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)
 	if err != nil {
@@ -721,7 +744,6 @@ func buildPlaylistItem(duration float64, token ffindexer.Token) dp1playlist.Play
 		Title:    title,
 		Source:   previewURL,
 		Duration: &dur,
-		License:  "open",
 		Provenance: &dp1playlist.ProvenanceBlock{
 			Type: dp1playlist.ProvenanceOnChain,
 			Contract: &dp1playlist.ProvenanceContract{
