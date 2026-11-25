@@ -1,4 +1,5 @@
 #include "ff/public_browser.hpp"
+#include "ff/sketch_startup.hpp"
 
 #include <fcntl.h>
 #include <glib.h>
@@ -230,6 +231,26 @@ void PublicBrowser::fail(const std::string& error) {
   if (!decoration_ && !retry_selected) playback_.failed(id, error);
   if (pid_ > 0) kill(-pid_, SIGKILL);
 }
+void PublicBrowser::check_sketch_startup() {
+  if (!check_sketch_startup_) return;
+  check_sketch_startup_ = false;
+  send("Runtime.evaluate", {{"expression", sketch_startup_expression}, {"returnByValue", true},
+                            {"throwOnSideEffect", true}, {"silent", true}, {"timeout", 150}},
+       session_, [this, generation = document_generation_](const Json& reply) {
+         if (generation != document_generation_ || reply.contains("exceptionDetails")) return;
+         const auto state = sketch_startup_state(reply.value("result", Json::object()).value("value", Json()));
+         // Global-mode p5 can wait for translations after document load.
+         // Instance-mode artwork can legitimately keep the global instance null.
+         check_sketch_startup_ = state == SketchStartup::pending ||
+             (state == SketchStartup::awaiting_instance &&
+              std::chrono::steady_clock::now() - loaded_at_ < std::chrono::seconds(30));
+         if (state == SketchStartup::failed) {
+           std::fprintf(stderr, "Artwork %s: p5 setup incomplete with negative preload count and zero draws\n",
+                        id.c_str());
+           throw Error("sketch_startup", "Artwork could not finish sketch setup before its first frame");
+         }
+       });
+}
 void PublicBrowser::continue_live(const std::string& request, const std::string& session, const Json& network) {
   auto url = network.at("url").get<std::string>();
   auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, url);
@@ -259,6 +280,9 @@ void PublicBrowser::message(const Json& m) {
       replies_.erase(it);
       if (m.contains("error")) {
         auto text = m.at("error").value("message", "");
+        // This optional read may race navigation or a disabled scripting
+        // context. Only an affirmative bootstrap result can fail an artwork.
+        if (reply.method == "Runtime.evaluate") return;
         // A short-lived worker/popup can close while its typed setup is queued.
         // Its stale session cannot invalidate the main artwork document.
         if (reply.session != session_ &&
@@ -370,6 +394,8 @@ void PublicBrowser::message(const Json& m) {
   } else if (method == "Page.frameNavigated" && session == session_) {
     const auto& frame = p.at("frame");
     if (!frame.contains("parentId")) {
+      ++document_generation_;
+      check_sketch_startup_ = false;
       main_world_ = 0;
       missing_init_binding_ = blocked_init_script_ = false;
       main_frame_ = frame.at("id").get<std::string>();
@@ -442,6 +468,10 @@ void PublicBrowser::message(const Json& m) {
     load_frame_ = direct()?direct_frames_:frames.count;
     if(view_)ff_browser_view_redraw(view_);
     if (!decoration_) playback_.committed(id);
+    if (!bundled_) {
+      check_sketch_startup_ = true;
+      check_sketch_startup();
+    }
   } else if (method == "Network.loadingFailed" && session == session_ &&
              p.value("type", "") == "Document" && !main_document_request_.empty() &&
              p.value("requestId", "") == main_document_request_ && !p.value("canceled", false))
@@ -555,7 +585,10 @@ void PublicBrowser::poll() {
     require(probe != CefHealthProbe::Action::reply_timeout, "renderer_unresponsive",
             "Artwork renderer did not answer its layout health probe during 5 seconds of polling");
     if (probe == CefHealthProbe::Action::send)
-      send("Page.getLayoutMetrics", Json::object(), session_, [this](const Json&) { health_.answered(); });
+      send("Page.getLayoutMetrics", Json::object(), session_, [this](const Json&) {
+        health_.answered();
+        check_sketch_startup();
+      });
     // Only materialize one archived response at a time. A 32 MiB range
     // expands to almost 43 MiB on the pipe; drain it before admitting the
     // next response so parallel fetches cannot exhaust the output budget.

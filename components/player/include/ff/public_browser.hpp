@@ -71,6 +71,9 @@ class PublicBrowser {
   bool initial_response_seen_ = false, decoration_ = false;
   bool routed_document_ = false, blocked_init_script_ = false, missing_init_binding_ = false;
   int main_world_ = 0;
+  uint64_t document_generation_ = 0;
+  bool check_sketch_startup_ = false;
+  void check_sketch_startup();
   struct Pending {
     std::string data;
     size_t offset = 0;
