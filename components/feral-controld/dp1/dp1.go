@@ -223,10 +223,9 @@ type DP1 interface {
 	ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error)
 
 	// ProcessPlaylistURLForCast processes a playlist URL for an initial
-	// displayPlaylist command. Dynamic playlists hydrate only to a bounded
-	// scheduling cap; if no item-level displayAt is discovered, the returned
-	// playlist is trimmed back to the legacy minimal size before sending to the
-	// player. Any seriesRegistry item in the result is already narrowed per
+	// displayPlaylist command. Dynamic playlists hydrate up to
+	// CAST_PLAYLIST_ITEMS_LIMIT, and the whole hydrated list is returned.
+	// Any seriesRegistry item in the result is already narrowed per
 	// deviceMode, the same resolveSeriesCastPlan a static dp1_call display request uses
 	// (feral-file/ffos-user#452) — the fetched document's own raw bytes are
 	// read for each item's seriesPlayback the same way a static display request's
@@ -256,7 +255,7 @@ type DP1 interface {
 	// and return the playlist quickly
 	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
 
-	// ProcessDynamicPlaylistForCast applies the initial-display bounded hydration
+	// ProcessDynamicPlaylistForCast applies the initial-display hydration
 	// policy described on ProcessPlaylistURLForCast, including the same
 	// series narrowing and returned CastPlan. A dynamically resolved item has
 	// no original document bytes, so its own seriesPlayback always reads as
@@ -409,36 +408,25 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 	narrowed := *resolved
 	narrowed.Items = plan.Narrow(deviceMode)
 
-	// A scheduled result (some item carries displayAt) is left untrimmed and
-	// its plan uncapped: the scheduler needs every cohort's items to arm its
-	// own timers, and the 50-item cap below exists for an unscheduled SHORT
-	// initial display request, not a scheduled one of any length.
-	if hasDisplayAtItems(narrowed.Items) {
-		return &narrowed, plan, nil
-	}
-	if len(narrowed.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
-		// Already at or under the cap, so narrowed.Items needs no trim — but
-		// plan's own maxItems is still CAST_PLAYLIST_ITEMS_LIMIT (255) from
-		// the resolveSeriesCastPlan call above. A cached plan returned as-is
-		// would let a later setSeriesPlayback re-narrow (CastPlan.Narrow)
-		// reconstruct up to 255 items for a mode this initial display request never
-		// showed, making playback depend on which mode started the display request
-		// (feralfile-bot F2 on PR #454, 2026-11-10). Capping plan.maxItems
-		// here, same as the trim path below, keeps every later re-narrow
-		// bounded the same way regardless of which mode started the display request.
-		plan.maxItems = MINIMAL_PLAYLIST_ITEMS_LIMIT
-		return &narrowed, plan, nil
-	}
-	narrowed.Items = narrowed.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
-	// plan's own maxItems is still CAST_PLAYLIST_ITEMS_LIMIT (255) from the
-	// resolveSeriesCastPlan call above, but narrowed.Items was just capped
-	// further, to MINIMAL_PLAYLIST_ITEMS_LIMIT (50): a cached plan returned
-	// as-is would let a later setSeriesPlayback re-narrow (CastPlan.Narrow)
-	// reconstruct up to 255 items, silently re-growing the playlist past
-	// what this display request ever actually showed (run-reviewer F1 on PR #454,
-	// round 2, 2026-11-10). Capping plan.maxItems to match keeps a later
-	// re-narrow bounded the same way this initial display request was.
-	plan.maxItems = MINIMAL_PLAYLIST_ITEMS_LIMIT
+	// The display request carries the whole resolved list (up to
+	// CAST_PLAYLIST_ITEMS_LIMIT): for a playlist within that cap and without
+	// series items, the same list the playlist refresher resolves a moment
+	// later. (The refresher resolves uncapped and expands series without
+	// narrowing, so a longer list, or one carrying series under a non-full
+	// mode, still changes on its first refresh; those gaps are known and
+	// separate.) It used to be trimmed to the first
+	// MINIMAL_PLAYLIST_ITEMS_LIMIT items, a remnant of the first-page-only
+	// resolve this path once did to put a wall up quickly; by then the whole
+	// list had already been fetched, so the trim saved nothing, and the
+	// refresher sent the rest about a second later. What it cost: a startItem
+	// naming a work past the cut opened the display at item 0, and the player
+	// briefly held a list other than the one status was about to report
+	// (feral-file/feral-file#3636). Do not reintroduce a cut here that the
+	// refresher does not apply to the same playlist.
+	//
+	// plan keeps the cap it was resolved under, which bounds the list shown
+	// here, so a later setSeriesPlayback re-narrow cannot grow past what this
+	// display request could show (PR #454 review F1/F2).
 	return &narrowed, plan, nil
 }
 
@@ -494,15 +482,6 @@ func classifyHydrationError(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
-}
-
-func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
-	for _, item := range items {
-		if item.DisplayAt != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // processDynamicPlaylistSpec resolves items using DP-1 playlists extension dynamicQuery and
