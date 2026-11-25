@@ -144,3 +144,40 @@ func TestAuditDocumentAsyncRunsOneAtATimeAndReleasesTheSlot(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A malformed dpVersion is sender-controlled content: the warning names the
+// JSON pointer, never the value.
+func TestAuditDPVersionNeverLogsMalformedValue(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	AuditDocument(zap.New(core), "test", []byte(`{"dpVersion":"PRIVATE_CANARY","title":"t","items":[{"source":"https://example.com/a.html"}]}`))
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "PRIVATE_CANARY") {
+			t.Errorf("message leaks value: %q", e.Message)
+		}
+		for _, f := range e.Context {
+			if strings.Contains(f.String, "PRIVATE_CANARY") {
+				t.Errorf("field %q leaks value: %q", f.Key, f.String)
+			}
+		}
+	}
+	if logs.FilterMessage("DP-1 document dpVersion is not a version").FilterField(zap.String("pointer", "/dpVersion")).Len() != 1 {
+		t.Errorf("want one warning carrying pointer /dpVersion, got %v", logs.All())
+	}
+}
+
+// A digits-only dpVersion passes the pattern at any length (leading zeros), so
+// the major-mismatch warning must log the parsed major, never the raw string.
+func TestAuditDPVersionMajorMismatchLogsBoundedValue(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	doc := `{"dpVersion":"` + strings.Repeat("0", 100000) + `.0.0","title":"t","items":[{"source":"https://example.com/a.html"}]}`
+	AuditDocument(zap.New(core), "test", []byte(doc))
+	mm := logs.FilterMessage("DP-1 document major version differs from this build; playing it anyway")
+	if mm.Len() != 1 {
+		t.Fatalf("want one major-mismatch warning, got %v", logs.All())
+	}
+	for _, f := range mm.All()[0].Context {
+		if len(f.String) > 64 {
+			t.Errorf("field %q carries %d bytes of sender content", f.Key, len(f.String))
+		}
+	}
+}

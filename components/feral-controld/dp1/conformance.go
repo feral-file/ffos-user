@@ -85,18 +85,17 @@ func auditDPVersion(logger *zap.Logger, source string, raw []byte) {
 		return
 	}
 	v := *head.DPVersion
-	if len(v) > 32 {
-		v = v[:32]
-	}
 	// ParseDPVersion is lenient ("1.0" parses); the schema is not.
 	parsed, err := dp1sdk.ParseDPVersion(v)
 	if err != nil || !dpVersionPattern.MatchString(v) {
-		logger.Warn("DP-1 document dpVersion is not a version", zap.String("source", source), zap.String("dpVersion", v))
+		// Report the JSON pointer only: a malformed value is sender-controlled
+		// document content and must not reach device logs.
+		logger.Warn("DP-1 document dpVersion is not a version", zap.String("source", source), zap.String("pointer", "/dpVersion"))
 		return
 	}
 	if err := dp1sdk.WarnMajorMismatch(parsed, SupportedMajor); err != nil {
 		logger.Warn("DP-1 document major version differs from this build; playing it anyway",
-			zap.String("source", source), zap.String("dpVersion", v), zap.Uint64("supportedMajor", SupportedMajor))
+			zap.String("source", source), zap.Uint64("major", parsed.Major()), zap.Uint64("supportedMajor", SupportedMajor))
 	}
 }
 
