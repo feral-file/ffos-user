@@ -38,9 +38,16 @@ func ValidationPointers(err error) []string {
 	}
 	var out []string
 	seen := map[string]bool{}
-	for _, part := range strings.Split(err.Error(), "at '") {
+	// The text before the first "at '" is the validator's preamble, not a
+	// location; every later part starts with a pointer. end == 0 is the
+	// document root (an empty location), which is a real location (a missing top-level
+	// member is reported there), so only end < 0 (no closing quote) is dropped.
+	for i, part := range strings.Split(err.Error(), "at '") {
+		if i == 0 {
+			continue
+		}
 		end := strings.IndexByte(part, '\'')
-		if end <= 0 {
+		if end < 0 {
 			continue
 		}
 		pointer := part[:end]

@@ -181,3 +181,35 @@ func TestAuditDPVersionMajorMismatchLogsBoundedValue(t *testing.T) {
 		}
 	}
 }
+
+// A missing top-level member is reported by the validator at the document
+// root (the empty-string location); the audit must keep that location, not log an empty list.
+func TestAuditDocumentKeepsRootSchemaLocation(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	AuditDocument(zap.New(core), "test", []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://example.com/a.html"}]}`))
+	got := logs.FilterMessage("DP-1 document does not conform to the schema; playing it anyway")
+	if got.Len() != 1 {
+		t.Fatalf("want one schema warning, got %v", logs.All())
+	}
+	pointers := got.All()[0].ContextMap()["pointers"]
+	if list, _ := pointers.([]interface{}); len(list) == 0 {
+		t.Errorf("root violation lost its location: %v", pointers)
+	}
+}
+
+func TestWaitForAuditsReturnsOnlyAfterTheRunningAuditEnds(t *testing.T) {
+	auditSlot <- struct{}{} // an audit is "running"
+	done := make(chan struct{})
+	go func() { WaitForAudits(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("WaitForAudits returned while an audit held the slot")
+	case <-time.After(50 * time.Millisecond):
+	}
+	<-auditSlot
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForAudits did not return after the slot was released")
+	}
+}

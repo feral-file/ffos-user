@@ -76,6 +76,20 @@ func AuditDocumentAsync(logger *zap.Logger, source string, raw []byte) {
 	}
 }
 
+// WaitForAudits blocks until no background audit is running. It is a
+// shutdown/teardown seam: an audit writes through the logger it was handed, so
+// a caller whose logger has a bounded lifetime (a test's zaptest logger, which
+// panics or races once the test has returned) drains audits before releasing
+// it. Taking the slot is enough because AuditDocumentAsync takes it
+// synchronously, before the goroutine starts, so an audit launched before this
+// call is either holding the slot or finished. It does not stop new audits;
+// call it once the source of documents has gone quiet. Production never needs
+// it: the process logger outlives every audit.
+func WaitForAudits() {
+	auditSlot <- struct{}{}
+	<-auditSlot
+}
+
 func auditDPVersion(logger *zap.Logger, source string, raw []byte) {
 	var head struct {
 		DPVersion *string `json:"dpVersion"`
