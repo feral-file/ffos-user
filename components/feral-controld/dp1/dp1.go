@@ -168,8 +168,8 @@ type playlistJSON Playlist
 // needs a key that only ff-source-resolver-service holds, so ff-app casts an
 // address playlist as a fixed DP-1 list. A `pagination` block in an incoming
 // document is now dropped on decode like any other field dp1-go does not
-// model, and nothing reads it. Encoding is now the plain struct's, so each
-// encoder's own settings apply: control's SetEscapeHTML(false) encoder writes
+// model, and nothing reads it. Encoding is the plain struct's plus Extra, and MarshalJSON
+// does not escape HTML itself, so each encoder's own settings apply: control's SetEscapeHTML(false) encoder writes
 // `&` in a source raw where the old hook's inner json.Marshal escaped it.
 // Equivalent JSON either way; nothing compares those bytes.
 func (p *Playlist) UnmarshalJSON(data []byte) error {
@@ -696,7 +696,7 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
-	AuditDocument(d.logger, "playlistUrl", bytes)
+	AuditDocumentAsync(d.logger, "playlistUrl", bytes)
 
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)

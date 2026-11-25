@@ -1026,7 +1026,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
-				dp1.AuditDocument(h.logger, "dp1_call", playlistBytes)
+				dp1.AuditDocumentAsync(h.logger, "dp1_call", playlistBytes)
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}

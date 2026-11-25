@@ -1,6 +1,7 @@
 package dp1
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"regexp"
@@ -45,6 +46,30 @@ func AuditDocument(logger *zap.Logger, source string, raw []byte) {
 		}
 		logger.Warn("DP-1 document does not conform to the schema; playing it anyway",
 			zap.String("source", source), zap.Strings("pointers", pointers))
+	}
+}
+
+// auditSlot lets one background audit run at a time. The schema validator
+// holds dp1-go's process-wide validation lock for a whole-document pass, so
+// running it inline would put that cost and lock contention on the display
+// path; the audit is report-only, so dropping one when another is in flight
+// costs a log line, never behavior.
+var auditSlot = make(chan struct{}, 1)
+
+// AuditDocumentAsync runs AuditDocument off the caller's path, skipping it if
+// an audit is already running. raw must not be mutated afterwards (callers
+// hold the received bytes read-only).
+func AuditDocumentAsync(logger *zap.Logger, source string, raw []byte) {
+	select {
+	case auditSlot <- struct{}{}:
+		go func() {
+			defer func() { <-auditSlot }()
+			AuditDocument(logger, source, raw)
+		}()
+	default:
+		if logger != nil {
+			logger.Debug("DP-1 audit skipped: another audit is running", zap.String("source", source))
+		}
 	}
 }
 
@@ -131,7 +156,7 @@ func unknownPlaylistMembers(data []byte) map[string]json.RawMessage {
 // unknown members back in. A typed field always wins over an extra of the same
 // name (extras exclude every modeled name, so this only guards a future field).
 func marshalWithExtra(base playlistJSON, extra map[string]json.RawMessage) ([]byte, error) {
-	typed, err := json.Marshal(base)
+	typed, err := marshalNoEscape(base)
 	if err != nil || len(extra) == 0 {
 		return typed, err
 	}
@@ -144,5 +169,19 @@ func marshalWithExtra(base playlistJSON, extra map[string]json.RawMessage) ([]by
 			members[k] = v
 		}
 	}
-	return json.Marshal(members)
+	return marshalNoEscape(members)
+}
+
+// marshalNoEscape encodes without HTML escaping so the enclosing encoder's own
+// SetEscapeHTML choice applies: bytes returned from a MarshalJSON are only
+// re-escaped by the outer encoder when it escapes, and can never be
+// un-escaped by one that does not.
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }

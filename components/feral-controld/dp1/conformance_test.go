@@ -1,9 +1,11 @@
 package dp1
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -95,5 +97,22 @@ func TestBuildPlaylistItemInventsNoLicense(t *testing.T) {
 	item := buildPlaylistItem(10, ffindexer.Token{})
 	if item.License != "" {
 		t.Errorf("license %q was invented for an indexer token", item.License)
+	}
+}
+
+func TestMarshalLeavesHTMLEscapingToTheOuterEncoder(t *testing.T) {
+	var p Playlist
+	doc := `{"dpVersion":"1.1.0","title":"a&b","items":[{"source":"https://x/?a=1&b=2"}],"extra":"x&y"}`
+	if err := json.Unmarshal([]byte(doc), &p); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(p); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), `\u0026`) {
+		t.Errorf("outer SetEscapeHTML(false) was defeated: %s", buf.String())
 	}
 }
