@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assembly Check</title>
+<!--
+Assembly Check: what to look at on a fully assembled unit, after Panel Check.
+One file, no network. Works from file:// and from a web server.
+
+  index.html                 Assembly Check: cycles the nine slides, forever
+  index.html?set=brightness  white, gray, black, 60 s each: brightness, evenness, light leak
+  index.html?set=panel       black 15 s, gray 15 s, no caption: the Panel Check loop Feral File scores
+  Keys (any set): Right/Space next, Left previous; the slide then holds until the next key. A resumes the cycle.
+  index.html?slide=red       holds one slide (a DP-1 playlist item)
+  index.html?label=0         no on-screen caption
+  index.html?seconds=5       every slide lasts 5 s (default: per slide below)
+
+Slides: white red green blue ramp geometry motion video gpu gray black
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  #stage, #stage > * { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  video { object-fit: fill; background: #000; }
+  #label {
+    position: fixed; left: 50%; bottom: 6vh; transform: translateX(-50%);
+    max-width: 80vw; padding: 1.2vh 2vh; border-radius: 0.6vh;
+    background: rgba(0,0,0,.78); color: #fff; text-align: center;
+    font: 500 2.2vh/1.45 system-ui, "Noto Sans CJK SC", "PingFang SC", sans-serif;
+    transition: opacity .4s; pointer-events: none;
+  }
+  #label small { display: block; font-size: 1.8vh; opacity: .85; }
+  #stat {
+    position: fixed; left: 50%; top: 6vh; transform: translateX(-50%);
+    padding: 1vh 2vh; border-radius: 0.6vh; background: rgba(0,0,0,.78); color: #fff;
+    font: 600 2.6vh/1.3 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre; display: none;
+  }
+  #stat.bad { background: #b00020; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="stat"></div>
+<div id="label"></div>
+<script>
+'use strict';
+const q = new URLSearchParams(location.search);
+const stage = document.getElementById('stage');
+const label = document.getElementById('label');
+const stat = document.getElementById('stat');
+let stop = () => {};          // cleanup for the running slide
+let raf = 0, hide = 0;
+
+function field(color) { return () => { const d = document.createElement('div'); d.style.background = color; stage.append(d); }; }
+
+function canvas2d() {
+  const c = document.createElement('canvas');
+  const dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(innerWidth * dpr); c.height = Math.round(innerHeight * dpr);
+  stage.append(c);
+  return [c, c.getContext('2d')];
+}
+
+// Gray ramp, stepped ramp, primaries and secondaries: banding, gamma, a dead color channel.
+function ramp() {
+  const [c, g] = canvas2d(); const W = c.width, H = c.height, row = H / 8;
+  const rows = [[1,1,1],[1,0,0],[0,1,0],[0,0,1]];
+  rows.forEach((m, i) => {                      // smooth 0..255, one column per pixel
+    const img = g.createImageData(W, 1);
+    for (let x = 0; x < W; x++) { const v = Math.round(x / (W - 1) * 255);
+      img.data.set([v*m[0], v*m[1], v*m[2], 255], x * 4); }
+    for (let y = 0; y < row; y++) g.putImageData(img, 0, Math.round(i * row) + y);
+  });
+  for (let s = 0; s < 32; s++) {                // 32 gray steps: each one must be visible
+    const v = Math.round(s / 31 * 255); g.fillStyle = `rgb(${v},${v},${v})`;
+    g.fillRect(Math.round(s * W / 32), Math.round(4 * row), Math.ceil(W / 32), Math.ceil(row));
+  }
+  const near = (y, base, dir) => { for (let s = 0; s < 16; s++) {   // shadow and highlight steps
+    const v = base + dir * s * 2; g.fillStyle = `rgb(${v},${v},${v})`;
+    g.fillRect(Math.round(s * W / 16), Math.round(y), Math.ceil(W / 16), Math.ceil(row)); } };
+  near(5 * row, 0, 1); near(6 * row, 255, -1);
+  ['#fff','#ff0','#0ff','#0f0','#f0f','#f00','#00f','#000'].forEach((col, i) => {
+    g.fillStyle = col; g.fillRect(Math.round(i * W / 8), Math.round(7 * row), Math.ceil(W / 8), Math.ceil(row)); });
+}
+
+// 1-pixel border, grid, circle, pixel checkerboards: scaling, cropping, position in the bezel.
+function geometry() {
+  const [c, g] = canvas2d(); const W = c.width, H = c.height;
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  const step = Math.round(Math.min(W, H) / 16);
+  g.fillStyle = '#555';
+  for (let x = step; x < W; x += step) g.fillRect(x, 0, 1, H);
+  for (let y = step; y < H; y += step) g.fillRect(0, y, W, 1);
+  g.fillStyle = '#fff';                          // outermost pixel on all four sides
+  g.fillRect(0, 0, W, 1); g.fillRect(0, H - 1, W, 1); g.fillRect(0, 0, 1, H); g.fillRect(W - 1, 0, 1, H);
+  g.fillStyle = '#f00';                          // second ring, 8 px in
+  g.fillRect(8, 8, W - 16, 1); g.fillRect(8, H - 9, W - 16, 1); g.fillRect(8, 8, 1, H - 16); g.fillRect(W - 9, 8, 1, H - 16);
+  g.strokeStyle = '#fff'; g.lineWidth = 2;
+  g.beginPath(); g.arc(W / 2, H / 2, Math.min(W, H) * 0.42, 0, 7); g.stroke();
+  g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+  const patch = (px, py, size, kind) => {        // 1-px patterns: gray smear here means scaling
+    const img = g.createImageData(size, size);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const on = kind === 'check' ? (x + y) % 2 : kind === 'v' ? x % 2 : y % 2;
+      const v = on ? 255 : 0; img.data.set([v, v, v, 255], (y * size + x) * 4); }
+    g.putImageData(img, Math.round(px - size / 2), Math.round(py - size / 2));
+  };
+  const s = step * 2, o = step * 3;
+  patch(W / 2, H / 2, s, 'check');
+  patch(o, o, s, 'v'); patch(W - o, o, s, 'h'); patch(o, H - o, s, 'h'); patch(W - o, H - o, s, 'v');
+  g.fillStyle = '#fff'; g.font = `${Math.round(step * 0.45)}px monospace`; g.textAlign = 'center';
+  g.fillText(`${W} × ${H}`, W / 2, H / 2 + s * 0.5 + step * 0.7);
+}
+
+// Frame pacing: counts frames that arrive late. Used by the motion and gpu slides.
+function pacer(minFps) {
+  let last = 0, n = 0, late = 0, t0 = 0; const gaps = [];
+  stat.style.display = 'block'; stat.className = ''; stat.textContent = '';
+  return now => {
+    if (!t0) { t0 = last = now; return 0; }
+    const gap = now - last; last = now; n++;
+    if (gaps.length < 120) gaps.push(gap);
+    const typical = gaps.slice().sort((a, b) => a - b)[gaps.length >> 1];
+    if (n > 30 && gap > typical * 1.6) late++;
+    const fps = n / ((now - t0) / 1000);
+    if (n % 15 === 0) {
+      stat.textContent = `${fps.toFixed(1)} fps   late frames ${late}`;
+      stat.className = (n > 120 && (fps < minFps || late > n * 0.02)) ? 'bad' : '';
+    }
+    return (now - t0) / 1000;
+  };
+}
+
+// Sweeping bars: tearing, stutter, smear.
+function motion() {
+  const [c, g] = canvas2d(); const W = c.width, H = c.height; const tick = pacer(50);
+  const draw = now => {
+    const t = tick(now);
+    g.fillStyle = '#202020'; g.fillRect(0, 0, W, H);
+    const x = (t * W / 2) % W, y = (t * H / 3) % H, bw = Math.round(W / 60);
+    g.fillStyle = '#fff'; g.fillRect(x, 0, bw, H);
+    g.fillStyle = '#0f0'; g.fillRect(0, y, W, bw);
+    g.fillStyle = '#f0f'; g.fillRect(W - x - bw, 0, bw, H);
+    raf = requestAnimationFrame(draw);
+  };
+  raf = requestAnimationFrame(draw);
+}
+
+// A 60 fps H.264 clip: the video decoder. Counts frames the decoder dropped.
+function video() {
+  const v = document.createElement('video');
+  v.src = 'motion.mp4'; v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true;
+  stage.append(v);
+  stat.style.display = 'block'; stat.className = ''; stat.textContent = 'video…';
+  v.addEventListener('error', () => { stat.textContent = 'VIDEO DID NOT PLAY'; stat.className = 'bad'; });
+  const id = setInterval(() => {
+    const p = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+    if (v.readyState < 2 || !p) return;
+    if (v.currentTime === 0 && v.paused) { stat.textContent = 'VIDEO DID NOT PLAY'; stat.className = 'bad'; return; }
+    stat.textContent = `video frames ${p.totalVideoFrames}   dropped ${p.droppedVideoFrames}`;
+    stat.className = p.droppedVideoFrames > p.totalVideoFrames * 0.02 ? 'bad' : '';
+  }, 500);
+  const done = stop; stop = () => { clearInterval(id); v.pause(); v.removeAttribute('src'); v.load(); done(); };
+  v.play().catch(() => { stat.textContent = 'VIDEO DID NOT PLAY'; stat.className = 'bad'; });
+}
+
+// A fragment shader at full resolution: graphics acceleration. Software rendering shows as low fps.
+function gpu() {
+  const c = document.createElement('canvas');
+  const dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(innerWidth * dpr); c.height = Math.round(innerHeight * dpr); stage.append(c);
+  const gl = c.getContext('webgl');
+  stat.style.display = 'block'; stat.className = '';
+  if (!gl) { stat.textContent = 'NO WEBGL'; stat.className = 'bad'; return; }
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, 'attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}'));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, `precision highp float;uniform vec2 r;uniform float t;
+    void main(){vec2 u=(gl_FragCoord.xy*2.-r)/min(r.x,r.y);float a=0.;vec3 col=vec3(0.);
+      for(int i=0;i<24;i++){float f=float(i);
+        u=mat2(cos(.37),-sin(.37),sin(.37),cos(.37))*u*1.07+vec2(sin(t*.3+f),cos(t*.23+f*1.7))*.12;
+        a+=sin(u.x*3.+t+f)*cos(u.y*3.-t*.7);
+        col+=.5+.5*cos(vec3(0.,2.1,4.2)+a+f*.3);}
+      gl_FragColor=vec4(col/24.,1.);}`));
+  gl.linkProgram(p); gl.useProgram(p);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+  const a = gl.getAttribLocation(p, 'a'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+  gl.viewport(0, 0, c.width, c.height);
+  gl.uniform2f(gl.getUniformLocation(p, 'r'), c.width, c.height);
+  const ut = gl.getUniformLocation(p, 't'); const tick = pacer(30);
+  const draw = now => { gl.uniform1f(ut, tick(now)); gl.drawArrays(gl.TRIANGLES, 0, 3); raf = requestAnimationFrame(draw); };
+  raf = requestAnimationFrame(draw);
+}
+
+const SLIDES = [
+  { id: 'white',    s: 10, run: field('#fff'), en: 'White: dark dots, dust, any tint or uneven patch',            zh: '白场：暗点、灰尘、偏色或亮度不均' },
+  { id: 'red',      s: 8,  run: field('#f00'), en: 'Red: any black or off-color dot or line',                     zh: '红场：黑点、异色点或线' },
+  { id: 'green',    s: 8,  run: field('#0f0'), en: 'Green: any black or off-color dot or line',                   zh: '绿场：黑点、异色点或线' },
+  { id: 'blue',     s: 8,  run: field('#00f'), en: 'Blue: any black or off-color dot or line',                    zh: '蓝场：黑点、异色点或线' },
+  { id: 'ramp',     s: 12, run: ramp,          en: 'Ramps: smooth with no bands; every gray step visible; colors pure', zh: '渐变：过渡平滑无色带；每一级灰阶都能分辨；颜色纯正' },
+  { id: 'geometry', s: 12, run: geometry,      en: 'Geometry: white line visible on all four edges; circle round; fine patterns sharp', zh: '几何：四边白线都可见；圆形不变形；细纹清晰' },
+  { id: 'motion',   s: 12, run: motion,        en: 'Motion: bars move smoothly, no tearing or stutter',           zh: '运动：色条移动流畅，无撕裂、无卡顿' },
+  { id: 'video',    s: 12, run: video,         en: 'Video: plays smoothly; dropped stays near 0',                 zh: '视频：播放流畅；dropped 接近 0' },
+  { id: 'gpu',      s: 20, run: gpu,           en: 'Graphics: pattern moves smoothly; box at top stays black, not red', zh: '图形：画面流畅；顶部数字框保持黑色，不变红' },
+  { id: 'gray',     s: 60, run: field('rgb(128,128,128)'), en: 'Gray: uneven patches, pressure marks, dark dots, dust', zh: '灰场：亮度不均、压痕、暗点、灰尘' },
+  { id: 'black',    s: 60, run: field('#000'), en: 'Black, room dark: light leak at edges and corners, bright dots', zh: '黑场（暗室）：边角漏光、亮点' },
+];
+const SETS = {
+  assembly:   ['white','red','green','blue','ramp','geometry','motion','video','gpu'],
+  brightness: ['white','gray','black'],
+  panel:      ['black','gray'],
+};
+
+function show(slide, n, total) {
+  cancelAnimationFrame(raf); stop(); stop = () => {};
+  stage.replaceChildren(); stat.style.display = 'none';
+  slide.run();
+  if (q.get('label') === '0' || q.get('set') === 'panel') { label.style.opacity = 0; return; }
+  label.innerHTML = '';
+  const zh = document.createElement('div'); zh.textContent = (total ? `${n}/${total}  ` : '') + slide.zh;
+  const en = document.createElement('small'); en.textContent = slide.en;
+  label.append(zh, en); label.style.opacity = 1;
+  // The slide is read with nothing on it: the caption leaves after 4 s.
+  clearTimeout(hide); hide = setTimeout(() => { label.style.opacity = 0; }, 4000);
+}
+
+const one = SLIDES.find(s => s.id === q.get('slide'));
+const list = (SETS[q.get('set')] || SETS.assembly).map(id => SLIDES.find(s => s.id === id));
+const fixed = Number(q.get('seconds')) || (q.get('set') === 'panel' ? 15 : 0);
+let i = 0, timer = 0, auto = true;
+function go(k) {
+  i = ((k % list.length) + list.length) % list.length;
+  const s = list[i]; show(s, i + 1, list.length);
+  clearTimeout(timer); if (auto) timer = setTimeout(() => go(i + 1), (fixed || s.s) * 1000);
+}
+if (one) show(one); else go(0);
+addEventListener('keydown', e => {
+  if (one) return;
+  if (e.key === 'ArrowRight' || e.key === ' ') { auto = false; go(i + 1); }
+  else if (e.key === 'ArrowLeft') { auto = false; go(i - 1); }
+  else if (e.key === 'a' || e.key === 'A') { auto = true; go(i); }
+});
+addEventListener('resize', () => { if (one) show(one); else go(i); });
+</script>
+</body>
+</html>
