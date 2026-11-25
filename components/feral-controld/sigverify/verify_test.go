@@ -429,3 +429,35 @@ func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 
 	assert.Equal(t, sigverify.StatusValid, sigverify.Verify(pretty).Status)
 }
+
+// TestVerify_RoleOutsideDP1Enum: §7.1 makes role REQUIRED and one of a closed
+// set, and dp1-go never checks it, so a cryptographically good entry with an
+// unknown or empty role must not come back valid.
+func TestVerify_RoleOutsideDP1Enum(t *testing.T) {
+	for _, role := range []string{"admin", "Feed", ""} {
+		t.Run("role="+role, func(t *testing.T) {
+			doc := unsignedDoc()
+			signWith(t, doc, newKey(t), role)
+
+			v := sigverify.Verify(mustJSON(t, doc))
+
+			assert.Equal(t, sigverify.StatusInvalid, v.Status)
+			require.Len(t, v.Signers, 1)
+			assert.False(t, v.Signers[0].OK)
+			assert.Equal(t, sigverify.ReasonMalformed, v.Signers[0].Reason)
+		})
+	}
+}
+
+// TestVerify_EveryDP1RoleIsValid pins the accepted set: the five core roles
+// plus publisher (Channels extension).
+func TestVerify_EveryDP1RoleIsValid(t *testing.T) {
+	for _, role := range []string{"curator", "feed", "agent", "institution", "licensor", "publisher"} {
+		t.Run(role, func(t *testing.T) {
+			doc := unsignedDoc()
+			signWith(t, doc, newKey(t), role)
+
+			assert.Equal(t, sigverify.StatusValid, sigverify.Verify(mustJSON(t, doc)).Status)
+		})
+	}
+}

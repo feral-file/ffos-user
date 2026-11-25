@@ -43,7 +43,8 @@ const (
 	StatusValid Status = "valid"
 	// StatusInvalid: signatures[] is present and at least one entry does
 	// not verify — tampered content (payload_hash mismatch), a placeholder or
-	// wrong-key signature, an algorithm dp1-go does not implement, or a
+	// wrong-key signature, a role outside the DP-1 §7.1 set, an algorithm dp1-go
+	// does not implement, or a
 	// malformed entry. The only status meaning "a claim was made and it is
 	// false"; the mode policy treats it like unsigned, the reason string
 	// tells them apart.
@@ -109,7 +110,8 @@ const (
 // malformed with the oversized field blanked, verified by nothing, and the
 // document is invalid regardless of what dp1-go says about the other
 // entries (dp1-go does not look at role at all, so a valid signature with a
-// megabyte role would otherwise come back "valid"). A did:key is ~56 chars
+// megabyte role would otherwise come back "valid"; Verify also holds the
+// role to the DP-1 §7.1 enum for the same reason). A did:key is ~56 chars
 // and a did:pkh ~60; the DP-1 role and alg vocabularies are single words.
 const (
 	MaxAlgLen  = 32
@@ -262,6 +264,15 @@ func Verify(raw []byte) Verdict {
 	for _, r := range results {
 		e := r.Signature
 		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: r.OK()}
+		// dp1-go checks the signature bytes and never looks at role, but
+		// §7.1 makes role REQUIRED and one of a closed set. A cryptographically
+		// good entry with a role outside it is a malformed entry, not a valid
+		// one; reported with the existing "malformed signature" reason so the
+		// reply vocabulary does not grow.
+		if s.OK && !knownRole(e.Role) {
+			s.OK = false
+			r.Err = errBadRole
+		}
 		if !s.OK {
 			s.Reason = classify(r.Err)
 			if firstFailure == "" {
@@ -356,6 +367,18 @@ func classify(err error) string {
 		return ReasonMalformed
 	}
 }
+
+// errBadRole classifies as ReasonMalformed (see classify's default arm).
+var errBadRole = errors.New("signature role is not a DP-1 role")
+
+// knownRoles is the closed role set of DP-1 §7.1: the five core roles plus
+// `publisher`, which the Channels extension adds to the same enum.
+var knownRoles = map[string]bool{
+	"curator": true, "feed": true, "agent": true,
+	"institution": true, "licensor": true, "publisher": true,
+}
+
+func knownRole(role string) bool { return knownRoles[role] }
 
 func roleOrUnknown(role string) string {
 	if role == "" {
