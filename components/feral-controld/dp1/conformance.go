@@ -38,7 +38,7 @@ func AuditDocument(logger *zap.Logger, source string, raw []byte) {
 		return
 	}
 	auditDPVersion(logger, source, raw)
-	if _, err := dp1sdk.ParseAndValidatePlaylistWithPlaylistsAndContentRatingExtensions(raw); err != nil {
+	if err := dp1sdk.PlaylistWithPlaylistsAndContentRatingExtensionsSchemaValidate(raw); err != nil {
 		pointers := ValidationPointers(err)
 		if len(pointers) > maxAuditPointers {
 			pointers = pointers[:maxAuditPointers]
@@ -87,7 +87,13 @@ var knownPlaylistKeys = func() map[string]bool {
 				continue
 			}
 			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-			if name != "" && name != "-" {
+			if name == "-" {
+				// Reserved internal field (Verification, Extra): its wire
+				// name is claimed so a sender cannot smuggle content under it
+				// through the extras.
+				name = strings.ToLower(f.Name)
+			}
+			if name != "" {
 				keys[strings.ToLower(name)] = true
 			}
 		}
@@ -107,7 +113,10 @@ func unknownPlaylistMembers(data []byte) map[string]json.RawMessage {
 	}
 	var extra map[string]json.RawMessage
 	for k, v := range all {
-		if knownPlaylistKeys[strings.ToLower(k)] {
+		lower := strings.ToLower(k)
+		// satellites is decoded by its exact key only (see UnmarshalJSON), so a
+		// case variant is not consumed by any field and is carried as an extra.
+		if knownPlaylistKeys[lower] && !(lower == "satellites" && k != "satellites") {
 			continue
 		}
 		if extra == nil {

@@ -64,7 +64,7 @@ func TestAuditDocumentReportsAndNeverRejects(t *testing.T) {
 }
 
 func TestPlaylistKeepsUnknownTopLevelMembersOnReemit(t *testing.T) {
-	doc := `{"dpVersion":"1.2.0","title":"t","items":[{"source":"https://example.com/a.html"}],"futureMember":{"a":[1,2]},"Title":"folded"}`
+	doc := `{"dpVersion":"1.2.0","title":"t","items":[{"source":"https://example.com/a.html"}],"futureMember":{"a":[1,2]},"Title":"folded","verification":{"verified":true},"Satellites":[1]}`
 	var p Playlist
 	if err := json.Unmarshal([]byte(doc), &p); err != nil {
 		t.Fatal(err)
@@ -82,6 +82,9 @@ func TestPlaylistKeepsUnknownTopLevelMembersOnReemit(t *testing.T) {
 	}
 	if _, dup := m["Title"]; dup {
 		t.Errorf("case-folded known member must not be carried as an extra: %s", out)
+	}
+	if string(m["Satellites"]) != `[1]` {
+		t.Errorf("case-variant satellites must be preserved as an extra: %s", out)
 	}
 	if _, ok := m["verification"]; ok {
 		t.Errorf("verdict must not ride the payload: %s", out)
