@@ -116,6 +116,44 @@ void rounded(cairo_t* cr,double x,double y,double width,double height,double rad
   cairo_arc(cr,x+radius,y+height-radius,radius,pi/2,pi);
   cairo_arc(cr,x+radius,y+radius,radius,pi,pi*1.5);cairo_close_path(cr);
 }
+// Keep QR module boundaries sharp at fractional device scales.
+void draw_qr(cairo_t* cr, const QRcode& code, double x, double y, double size, int margin) {
+  const double cell = size / (code.width + 2 * margin);
+  cairo_save(cr);
+  cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+  cairo_set_source_rgb(cr, 0, 0, 0);
+  for (int row = 0; row < code.width; ++row)
+    for (int col = 0; col < code.width; ++col)
+      if (code.data[row * code.width + col] & 1)
+        cairo_rectangle(cr, x + (col + margin) * cell, y + (row + margin) * cell, cell, cell);
+  cairo_fill(cr);
+  cairo_restore(cr);
+}
+
+std::string title_card_link(const Json& playlist) {
+  auto links = playlist.find("links");
+  if (links == playlist.end() || !links->is_array()) return {};
+  for (const auto& link : *links) {
+    auto raw = text_field(link, "url");
+    if (!raw || raw->find('\0') != raw->npos) continue;
+    auto first = raw->find_first_not_of(" \t\r\n");
+    if (first == raw->npos) continue;
+    auto value = raw->substr(first, raw->find_last_not_of(" \t\r\n") - first + 1);
+    auto uri = g_uri_parse(value.c_str(), GUriFlags(G_URI_FLAGS_ENCODED | G_URI_FLAGS_SCHEME_NORMALIZE), nullptr);
+    if (!uri) continue;
+    const char* scheme = g_uri_get_scheme(uri);
+    const char* host = g_uri_get_host(uri);
+    std::string address;
+    if (host && *host && (!g_ascii_strcasecmp(scheme, "https") || !g_ascii_strcasecmp(scheme, "http"))) {
+      char* serialized = g_uri_to_string(uri);
+      address = serialized;
+      g_free(serialized);
+    }
+    g_uri_unref(uri);
+    if (!address.empty() && address.size() <= 512) return address;
+  }
+  return {};
+}
 UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block> after,int width,int height,const std::string& version) {
   require(width>0&&height>0&&width<=16384&&height<=16384,"graphics_error","Invalid UI dimensions");
   const double edge=std::min(width,height),qr_size=std::min(edge*.296,400.0),padding=edge*.022;
@@ -142,12 +180,8 @@ UIRaster panel(std::vector<Block> before,const std::string& qr,std::vector<Block
     require(code!=nullptr,"graphics_error","QR payload cannot be encoded");
     y+=height*.05;const double box=qr_size+padding*2;
     cairo_set_source_rgb(canvas.cr,1,1,1);rounded(canvas.cr,-box*.5,y,box,box,edge*.015);cairo_fill(canvas.cr);
-    const double cell=qr_size/(code->width+4); // qrcode.react marginSize=2.
-    cairo_set_antialias(canvas.cr,CAIRO_ANTIALIAS_NONE);cairo_set_source_rgb(canvas.cr,0,0,0);
-    for(int row=0;row<code->width;++row)for(int col=0;col<code->width;++col)if(code->data[row*code->width+col]&1){
-      cairo_rectangle(canvas.cr,-qr_size*.5+(col+2)*cell,y+padding+(row+2)*cell,cell,cell);
-    }
-    cairo_fill(canvas.cr);cairo_set_antialias(canvas.cr,CAIRO_ANTIALIAS_DEFAULT);QRcode_free(code);
+    draw_qr(canvas.cr, *code, -qr_size*.5, y+padding, qr_size, 2);
+    QRcode_free(code);
     y+=box;cairo_set_source_rgb(canvas.cr,1,1,1);
   }
   paint(after);
@@ -288,13 +322,30 @@ UIRaster render_title_card(const Occurrence& o,int width,int height) {
   cairo_paint(canvas.cr);
   cairo_set_source_rgb(canvas.cr,1,1,1);
   const int available=std::max(1,int(width-2*padding));
+  const auto link = title_card_link(o.playlist);
+  std::unique_ptr<QRcode, decltype(&QRcode_free)> code(
+      link.empty() ? nullptr : QRcode_encodeString(link.c_str(),0,QR_ECLEVEL_L,QR_MODE_8,1), QRcode_free);
+  const int qr_size = std::max(1, int(edge * .17));
+  const int caption_width = int(edge * .24);
+  const int label_width = code ? std::max(1, available - caption_width - int(padding)) : available;
   Text work(canvas.cr,(artists.empty() ? "" : escape(artists)+"\n")+"<i>"+escape(*label.title)+"</i>",
-            edge*.038,1.2,available,false);
+            edge*.038,1.2,label_width,false);
   work.paint(canvas.cr,padding,std::max(padding,height-padding-work.css_height));
   if (!o.playlist_title.empty() && ((o.playlist.contains("items") && o.playlist["items"].size()>1) || !o.curator.empty() || text_field(o.playlist,"note"))) {
     Text exhibition(canvas.cr,escape(o.playlist_title),edge*.030,1.2,available,false);
     pango_layout_set_alignment(exhibition.layout,PANGO_ALIGN_RIGHT);
     exhibition.paint(canvas.cr,padding,padding);
+  }
+  if (code) {
+    Text caption(canvas.cr, "About this work", edge*.022, 1.2, caption_width, true);
+    const double right = width-padding, bottom = height-padding;
+    const double x = right-caption_width*.5-qr_size*.5;
+    const double y = bottom-qr_size;
+    caption.paint(canvas.cr, right-caption_width, y-edge*.012-caption.css_height);
+    cairo_set_source_rgb(canvas.cr,1,1,1);
+    cairo_rectangle(canvas.cr,x,y,qr_size,qr_size);
+    cairo_fill(canvas.cr);
+    draw_qr(canvas.cr,*code,x,y,qr_size,4);
   }
   return canvas.pixels();
 }

@@ -38,6 +38,15 @@ int main(int argc,char** argv){
     item.playlist={{"items",ff::Json::array({1,2})}};
     const auto landscape=ff::render_title_card(item,1920,1080);
     check(landscape.width==1920 && landscape.height==1080 && landscape.rgba[0]==0 && landscape.rgba[3]==255,"Opaque full-screen title card");
+    item.playlist["links"] = ff::Json::array({{{"url","mailto:test@example.org"}},{{"url","https://example.org/"+std::string(513,'a')}}});
+    check(ff::render_title_card(item,1920,1080).rgba==landscape.rgba,"Invalid and long links omit the code");
+    item.playlist["links"].push_back({{"url","https://example.org/episode?x=1&y=2"}});
+    const auto linked=ff::render_title_card(item,1920,1080);
+    check(linked.rgba!=landscape.rgba,"A playlist link adds a code");
+    item.playlist["links"].push_back({{"url","https://other.example/"}});
+    check(ff::render_title_card(item,1920,1080).rgba==linked.rgba,"First usable link wins");
+    save(linked,std::string(argv[2])+"/linked-title-card.png");
+    item.playlist.erase("links");
     item.playlist_title="Another exhibition";
     check(ff::render_title_card(item,1920,1080).rgba!=landscape.rgba,"The exhibition name belongs on the card");
     ff::TitleCardClock clock;
