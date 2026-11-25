@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -114,5 +115,32 @@ func TestMarshalLeavesHTMLEscapingToTheOuterEncoder(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), `\u0026`) {
 		t.Errorf("outer SetEscapeHTML(false) was defeated: %s", buf.String())
+	}
+}
+
+func TestAuditDocumentAsyncRunsOneAtATimeAndReleasesTheSlot(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	logger := zap.New(core)
+
+	auditSlot <- struct{}{} // another audit is "running"
+	AuditDocumentAsync(logger, "busy", []byte(`{}`))
+	<-auditSlot
+	if logs.FilterMessage("DP-1 audit skipped: another audit is running").Len() != 1 {
+		t.Fatalf("busy slot must skip the audit with a debug line: %v", logs.All())
+	}
+
+	AuditDocumentAsync(logger, "free", []byte(`{}`))
+	deadline := time.Now().Add(5 * time.Second)
+	for logs.FilterMessage("DP-1 document has no readable dpVersion").Len() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("audit did not run once the slot was free")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for len(auditSlot) != 0 { // the goroutine releases the slot when it ends
+		if time.Now().After(deadline) {
+			t.Fatal("slot was not released")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

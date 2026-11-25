@@ -51,9 +51,12 @@ func AuditDocument(logger *zap.Logger, source string, raw []byte) {
 
 // auditSlot lets one background audit run at a time. The schema validator
 // holds dp1-go's process-wide validation lock for a whole-document pass, so
-// running it inline would put that cost and lock contention on the display
-// path; the audit is report-only, so dropping one when another is in flight
-// costs a log line, never behavior.
+// running it inline would put that cost on the display path of the command
+// that carries the document. Off the path, the residual cost is that a
+// concurrent command's own schema check (the synchronous content-rating
+// fragment check shares that lock) can wait for one audit pass, bounded by one
+// document (<= MaxPlaylistBodyBytes). The audit is report-only, so skipping one
+// when another is in flight costs a log line, never behavior.
 var auditSlot = make(chan struct{}, 1)
 
 // AuditDocumentAsync runs AuditDocument off the caller's path, skipping it if
