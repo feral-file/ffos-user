@@ -615,7 +615,7 @@ siblings as `unverified`. The outcome is one of three `signatureStatus` values:
 (every `signatures[]` entry verifies), `invalid` (signatures present, at
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, a `role` outside the DP-1 §7.1 set
-(`curator`, `feed`, `agent`, `institution`, `licensor`, `publisher`) reported as `malformed signature`, malformed entry), or `unsigned` (no `signatures[]`; a
+(`curator`, `feed`, `agent`, `institution`, `licensor`) reported as `malformed signature`, malformed entry), or `unsigned` (no `signatures[]`; a
 legacy v1.0 `signature` string alone also counts as unsigned and is flagged).
 Verification is informational only: the display reply, `player_status`, and device
 logs retain diagnostic verdicts, but signatures never block playback or trigger

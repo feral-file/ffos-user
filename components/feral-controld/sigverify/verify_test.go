@@ -434,7 +434,7 @@ func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 // set, and dp1-go never checks it, so a cryptographically good entry with an
 // unknown or empty role must not come back valid.
 func TestVerify_RoleOutsideDP1Enum(t *testing.T) {
-	for _, role := range []string{"admin", "Feed", ""} {
+	for _, role := range []string{"admin", "Feed", "", "publisher"} {
 		t.Run("role="+role, func(t *testing.T) {
 			doc := unsignedDoc()
 			signWith(t, doc, newKey(t), role)
@@ -450,9 +450,9 @@ func TestVerify_RoleOutsideDP1Enum(t *testing.T) {
 }
 
 // TestVerify_EveryDP1RoleIsValid pins the accepted set: the five core roles
-// plus publisher (Channels extension).
+// (publisher is a Channels role, not a playlist one).
 func TestVerify_EveryDP1RoleIsValid(t *testing.T) {
-	for _, role := range []string{"curator", "feed", "agent", "institution", "licensor", "publisher"} {
+	for _, role := range []string{"curator", "feed", "agent", "institution", "licensor"} {
 		t.Run(role, func(t *testing.T) {
 			doc := unsignedDoc()
 			signWith(t, doc, newKey(t), role)

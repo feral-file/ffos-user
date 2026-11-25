@@ -149,8 +149,8 @@ const MaxDocumentBytes = 16 << 20
 //
 // The cap stays because what remains is still attacker-chosen: N ECDSA
 // recoveries for eip191, and N alg/kid/role strings copied into the display request
-// reply and the log line. DP-1 defines six roles (curator, feed, agent,
-// institution, licensor, publisher); 16 is comfortably above any honest
+// reply and the log line. DP-1 defines five playlist roles (curator, feed, agent,
+// institution, licensor); 16 is comfortably above any honest
 // chain. Past it the document is invalid with ReasonTooManySignatures and
 // NO cryptography runs, so the cost of a hostile document is one envelope
 // decode.
@@ -371,11 +371,15 @@ func classify(err error) string {
 // errBadRole classifies as ReasonMalformed (see classify's default arm).
 var errBadRole = errors.New("signature role is not a DP-1 role")
 
-// knownRoles is the closed role set of DP-1 §7.1: the five core roles plus
-// `publisher`, which the Channels extension adds to the same enum.
+// knownRoles is the closed role set of the DP-1 playlist schema (§7.1): the
+// five core roles. `publisher` is deliberately absent: it belongs to the
+// Channels extension's own schema, and Verify only ever sees playlists.
 var knownRoles = map[string]bool{
-	"curator": true, "feed": true, "agent": true,
-	"institution": true, "licensor": true, "publisher": true,
+	dp1playlist.RoleCurator:     true,
+	dp1playlist.RoleFeed:        true,
+	dp1playlist.RoleAgent:       true,
+	dp1playlist.RoleInstitution: true,
+	dp1playlist.RoleLicensor:    true,
 }
 
 func knownRole(role string) bool { return knownRoles[role] }
