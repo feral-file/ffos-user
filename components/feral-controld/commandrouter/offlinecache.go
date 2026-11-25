@@ -661,9 +661,10 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // resolveOfflineCachePlaylist mirrors the playlistUrl/dp1_call resolution
 // Process already does for CMD_DISPLAY_PLAYLIST, but with minimal=false: a
 // download request wants the whole playlist (up to dp1.MAX_PLAYLIST_ITEMS_LIMIT
-// items), not the minimal first batch a live display uses. Kept as its own
-// helper (rather than sharing displayPlaylist's inline switch) so the
-// display-integration todo can evolve that path independently.
+// items of download work), not the CAST_PLAYLIST_ITEMS_LIMIT-bounded list a
+// live display request carries. Kept as its own helper (rather than sharing
+// displayPlaylist's inline switch) so the display-integration todo can evolve
+// that path independently.
 //
 // The ceiling in that first sentence bounds the download WORK, and it is
 // applied where that work is scheduled — Service.DownloadPlaylist's maxQueued

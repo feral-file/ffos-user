@@ -549,7 +549,10 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PaginationTwoPages(t *testi
 	assert.Equal(t, "Page2", result.Items[dp1.MAX_PLAYLIST_ITEMS_LIMIT].Title)
 }
 
-func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsMinimal(t *testing.T) {
+// An unscheduled display request carries the whole resolved list, as the
+// refresher will a moment later, never a first-50 cut: a startItem naming a
+// work past such a cut opened the display at item 0 (feral-file/feral-file#3636).
+func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsTheWholeResolvedList(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -582,7 +585,8 @@ func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsMinimal(t *testing
 
 	result, _, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
 	assert.NoError(t, err)
-	assert.Len(t, result.Items, dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT)
+	require.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+	assert.Equal(t, "item-60", result.Items[60].Title, "order is the resolver's, unchanged")
 }
 
 func TestDP1_ProcessDynamicPlaylistForCast_ScheduledStopsAtCastLimit(t *testing.T) {
