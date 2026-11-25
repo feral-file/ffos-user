@@ -17,6 +17,8 @@ struct ArtworkRoute {
 };
 ArtworkRoute artwork_route(const Json& sources, const Json& item, const std::string& url);
 
+std::string gateway_document_url(const std::string& source, const std::string& routed);
+
 class ArtworkCache {
  public:
   struct Media {

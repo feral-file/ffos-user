@@ -77,10 +77,15 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
              (!cache_mode.empty() ||
               virtual_cache_source(occurrence_.item.at("source"))) &&
              !occurrence_.item.at("source").get<std::string>().starts_with("data:")) {
+    auto entry = source;
+    if (capture && !capture->file_entry.empty()) {
+      entry = source_override_ = capture->file_entry;
+      occurrence_.item = capture->render_item(occurrence_.item);
+    }
     cache_ = std::make_shared<CacheInbox>();
     require(cache_request(cache_, bundle_root, "", id,
-                          {{"source", occurrence_.item.at("source")},
-                           {"url", occurrence_.item.at("source")},
+                          {{"source", source},
+                           {"url", entry},
                            {"method", "GET"},
                            {"headers", Json::object()}},
                           true, false, std::move(capture)),

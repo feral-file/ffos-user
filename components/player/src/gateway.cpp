@@ -2,6 +2,7 @@
 #include <glib.h>
 #include <cstdlib>
 
+extern "C" char* ff_gateway_document_url(const char*);
 extern "C" char* ff_gateway_url(const char*, const char*);
 extern "C" char* ff_observed_gateway_url(const char*, const char*, const char*);
 namespace ff {
@@ -31,5 +32,16 @@ ArtworkRoute artwork_route(const Json& sources, const Json& item, const std::str
   }
   g_uri_unref(uri);
   return result;
+}
+// A transparent request rewrite does not change document.baseURI. Carry
+// the slash added by the configured CID gateway into the document URL too,
+// so relative scripts stay under the CID and the edition query survives.
+std::string gateway_document_url(const std::string& source, const std::string& routed) {
+  if (source == routed) return source;
+  auto normalized = ff_gateway_document_url(source.c_str());
+  if (!normalized) return source;
+  std::string url(normalized);
+  std::free(normalized);
+  return url;
 }
 }

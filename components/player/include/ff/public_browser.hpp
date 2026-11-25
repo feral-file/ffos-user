@@ -69,6 +69,8 @@ class PublicBrowser {
   int writer_ = -1, reader_ = -1;
   std::string buffer_, session_, profile_, main_frame_, main_document_request_, navigation_url_, document_url_, navigation_error_;
   bool initial_response_seen_ = false, decoration_ = false;
+  bool routed_document_ = false, blocked_init_script_ = false, missing_init_binding_ = false;
+  int main_world_ = 0;
   struct Pending {
     std::string data;
     size_t offset = 0;

@@ -35,6 +35,16 @@ std::string base64(const std::string& bytes) {
 }
 namespace {
 constexpr size_t body_limit = 32 * 1024 * 1024;
+// Compare named assets by decoded filename only inside this archive's origin.
+std::string named_file_path(const std::string& url, const std::string& origin) {
+  if (!url.starts_with(origin)) return {};
+  auto path = url.substr(origin.size(), url.find_first_of("?#") - origin.size());
+  auto name = g_uri_unescape_string(path.c_str(), "/\\");
+  if (!name) return {};
+  std::string result(name);
+  g_free(name);
+  return result;
+}
 struct Job {
   std::shared_ptr<CacheInbox> inbox;
   std::string root, session, request, payload;
@@ -123,6 +133,15 @@ struct Pool {
                            manifest.at("record").value("automatic", false), "bundle", "Unsupported automatic capture");
       loaded = std::make_shared<CaptureSnapshot>();
       loaded->record = wrapped ? std::move(manifest.at("record")) : std::move(manifest);
+      const auto& data = loaded->record;
+      if (data.contains("capsule") && data.at("capsule").value("files", false)) {
+        const auto id = data.at("capsule").at("archiveSHA256").get<std::string>();
+        const auto entry = data.at("entry").get<std::string>();
+        require(id.size() == 64 && id.find_first_not_of("0123456789abcdef") == id.npos &&
+                entry.starts_with("https://" + id.substr(0, 32) + "." + id.substr(32) + ".capsule.invalid/"),
+                "bundle", "Invalid capsule file origin");
+        loaded->file_entry = entry;
+      }
       capture = loaded;
     }
     const auto& record = capture->record;
@@ -154,6 +173,7 @@ struct Pool {
       if (!entry) return;
       auto type = entry->value("contentType", "");
       if (type.empty()) type = entry->value("sniffedContentType", "");
+      if (loaded && !loaded->file_entry.empty()) loaded->file_mime = type;
       if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
         require(record.value("automatic", false), "bundle", "Downloaded browser capture needs recapture for original response headers");
         return;
@@ -200,12 +220,23 @@ struct Pool {
                           !g_ascii_strcasecmp(name.c_str(), "Cookie")))
         throw Error("bundle", "Request variant requires live origin");
     }
+    // A named file has one signed representation regardless of its query.
+    // HTTP captures keep the original query as part of the response identity.
+    std::string origin, filename;
+    if (!capture->file_entry.empty()) {
+      origin = capture->file_entry.substr(0, capture->file_entry.find('/', 8) + 1);
+      filename = named_file_path(url, origin);
+      require(!filename.empty(), "bundle", "Resource outside capsule file mount");
+    }
     const Json* found = nullptr;
     for (int hop = 0; hop < 16; ++hop) {
       found = nullptr;
       const Json* head_fallback = nullptr;
       for (const auto& resource : record.at("resources")) {
-        if (resource.at("url") != url) continue;
+        const auto& target = resource.at("url").get_ref<const std::string&>();
+        if (origin.empty()) {
+          if (target != url) continue;
+        } else if (target.find('?') != target.npos || named_file_path(target, origin) != filename) continue;
         auto captured_method = resource.value("method", "GET");
         if (method == "HEAD" && captured_method == "GET") {
           require(!head_fallback, "bundle", "Ambiguous GET for HEAD fallback");
@@ -241,6 +272,12 @@ struct Pool {
     }
     require(job.open_file || found->value("browserPolicyVersion", 0) == 2, "bundle", "Browser capture requires recapture for original response headers");
     auto headers = found->value("headerFields", Json::array());
+    // The bundled model viewer lives on its own origin. A named file has
+    // no upstream CORS policy; authorize only this viewer to read the bytes.
+    if (!origin.empty() && std::none_of(headers.begin(), headers.end(), [](const Json& header) {
+          return !g_ascii_strcasecmp(header.value("name", "").c_str(), "Access-Control-Allow-Origin");
+        }))
+      headers.push_back({{"name","Access-Control-Allow-Origin"},{"value","https://ff-player.internal"}});
     reply.metadata = {{"status", found->value("status", 200)}, {"headers", headers},
                       {"complete", record.at("coverage").value("complete", false)}};
     if (found->contains("redirectTo") || method == "HEAD" || method == "OPTIONS") return;

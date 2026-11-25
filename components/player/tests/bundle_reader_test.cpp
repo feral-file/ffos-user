@@ -94,5 +94,31 @@ int main() {
   record["resources"][1].erase("browserPolicyVersion");
   std::ofstream(record_file)<<record;
   check(!read(url,empty,false,true).error.empty());
+  const std::string archive(64, 'b');
+  const std::string mount = "https://" + archive.substr(0,32) + "." + archive.substr(32) + ".capsule.invalid/";
+  auto named = clip;
+  named["url"] = mount + "work.png";
+  named["contentType"] = "image/png";
+  auto files = Json{{"item",{{"source",url}}},{"entry",named.at("url")},
+                    {"capsule",{{"files",true},{"archiveSHA256",archive}}},
+                    {"resources",Json::array({named})},{"coverage",{{"complete",true}}}};
+  for (auto [path, mime] : {std::pair{"work.png","image/png"}, {"clip.mp4","video/mp4"},
+                             {"model.glb","model/gltf-binary"}}) {
+    files["entry"] = files["resources"][0]["url"] = mount + path;
+    files["resources"][0]["contentType"] = mime;
+    std::ofstream(record_file) << files;
+    auto mounted = read(url,empty,false,true);
+    check(mounted.capture && mounted.capture->file_entry == mount + path && mounted.capture->file_mime == mime);
+    auto variant = read(mount + path + "?v=1",empty,true,false,"GET",mounted.capture);
+    check(variant.error.empty() && fs::exists(variant.metadata.at("path").get<std::string>()));
+    check(!read(url + "?v=1",empty,true,false,"GET",mounted.capture).error.empty());
+  }
+  files["entry"] = files["resources"][0]["url"] = mount + "sketch%281%29.js";
+  std::ofstream(record_file) << files;
+  auto mounted = read(url,empty,false,true);
+  check(mounted.capture && read(mount + "sketch(1).js?v=1",empty,false,false,"GET",mounted.capture).body == bytes);
+  files["entry"] = "https://example.org/foreign";
+  std::ofstream(record_file) << files;
+  check(!read(url,empty,false,true).error.empty());
   fs::remove_all(root);
 }

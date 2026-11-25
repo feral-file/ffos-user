@@ -36,6 +36,15 @@ func ff_gateway_url(raw, gateway *C.char) *C.char {
 	return C.CString(target + path)
 }
 
+//export ff_gateway_document_url
+func ff_gateway_document_url(raw *C.char) *C.char {
+	normalized, ok := contentpath.SlashBeforeQuery(C.GoString(raw))
+	if !ok {
+		return nil
+	}
+	return C.CString(normalized)
+}
+
 //export ff_observed_gateway_url
 func ff_observed_gateway_url(source, observed, raw *C.char) *C.char {
 	original, err := url.Parse(C.GoString(source))

@@ -1022,9 +1022,11 @@ alone does not repair a fielded device's existing records.
 `displayCapsule` accepts an owner-authenticated LAN command with three fields.
 `capsule` is the base64-encoded `.dp1c` archive, `signature` is its detached
 signature JSON object, and `signer` is the expected Ed25519 `did:key`.
-The archive limit is 1.5 MiB compressed and 32 MiB expanded. The supported
-layout is a single static artwork with a complete, original-URL replay
-capture. The signer authorizes the archived response headers. Offline caching
+The archive limit is 1.5 MiB compressed and 32 MiB expanded. A capsule contains one static playlist item. Replay-mode archives carry a
+complete original-URL capture. Files-mode archives carry a named asset tree.
+The native player mounts each verified tree at a separate, archive-derived
+HTTPS origin under `capsule.invalid`, preserving the entry path and query.
+The signed playlist and its original source remain in the retained archive. The signer authorizes the archived response headers. Offline caching
 must be enabled on the device.
 
 Controld verifies the signature, archive structure, and asset digests before

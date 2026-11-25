@@ -14,11 +14,16 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"io/fs"
+	"maps"
+	"mime"
 	"net/url"
+	"path"
 	"reflect"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"github.com/display-protocol/dp1-go/playlist"
@@ -36,6 +41,7 @@ const (
 )
 
 type CapsuleRecord struct {
+	Files         bool            `json:"files,omitempty"`
 	ArchiveSHA256 string          `json:"archiveSHA256"`
 	Signature     json.RawMessage `json:"signature"`
 }
@@ -209,7 +215,61 @@ func capsuleFrameDigest(body []byte, width, height int) (string, error) {
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-func capsuleReplay(files map[string][]byte) (json.RawMessage, *ItemRecord, map[string][]byte, error) {
+// A files-mode capsule has no HTTP origin or archived response headers. Give
+// each signed archive its own unreachable origin. Relative links and the edition
+// query work normally, without impersonating the token's source or a gateway.
+func capsuleFileCapture(id, entry string, assets map[string]string) (capsuleCapture, error) {
+	var capture capsuleCapture
+	name, query, hasQuery := strings.Cut(entry, "?")
+	if _, found := assets[name]; !found || strings.Contains(entry, "#") {
+		return capture, errors.New("invalid capsule file entry")
+	}
+	host := id[:32] + "." + id[32:] + ".capsule.invalid"
+	for _, filename := range slices.Sorted(maps.Keys(assets)) {
+		if !fs.ValidPath(filename) || filename == "." || strings.ContainsAny(filename, "%?#:\\") || strings.IndexFunc(filename, unicode.IsControl) >= 0 {
+			return capture, errors.New("invalid capsule asset path")
+		}
+		u := url.URL{Scheme: "https", Host: host, Path: "/" + filename}
+		mimeType := mime.TypeByExtension(path.Ext(filename))
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		resource := Resource{Method: "GET", URL: u.String(), Status: 200, ContentType: mimeType, SHA256: assets[filename]}
+		capture.Resources = append(capture.Resources, resource)
+		if filename == name {
+			u.RawQuery = query
+			u.ForceQuery = hasQuery
+			capture.Entry = u.String()
+			if hasQuery {
+				resource.URL = capture.Entry
+				capture.Resources = append(capture.Resources, resource)
+			}
+		}
+	}
+	capture.Coverage.Complete = true
+	return capture, nil
+}
+
+func capsulePlaylistSource(raw json.RawMessage, source string) (json.RawMessage, error) {
+	// Keep DP-1 extension fields in the runtime playlist; the signed original
+	// (including its source and provenance) stays in the retained archive.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["items"], &items); err != nil {
+		return nil, err
+	}
+	if len(items) != 1 || items[0] == nil {
+		return nil, errors.New("capsule requires one playlist item object")
+	}
+	items[0]["source"], _ = json.Marshal(source)
+	fields["items"], _ = json.Marshal(items)
+	return json.Marshal(fields)
+}
+
+func capsuleReplay(id string, files map[string][]byte) (json.RawMessage, *ItemRecord, map[string][]byte, error) {
 	raw := json.RawMessage(files["playlist.json"])
 	if len(raw) > 60<<10 {
 		return nil, nil, nil, errors.New("capsule playlist exceeds the native item size limit")
@@ -231,11 +291,6 @@ func capsuleReplay(files map[string][]byte) (json.RawMessage, *ItemRecord, map[s
 	if item.DisplayAt != nil || (item.Provenance != nil && item.Provenance.Type == "seriesRegistry") {
 		return nil, nil, nil, errors.New("capsule item must be directly playable")
 	}
-	var capture capsuleCapture
-	if err := json.Unmarshal(files["meta/capture/resources.json"], &capture); err != nil ||
-		!capsuleHTTPURL(item.Source) || capture.Entry != item.Source || !capture.Coverage.Complete || len(capture.Resources) > maxCapsuleMembers {
-		return nil, nil, nil, errors.New("capsule requires a complete original-URL replay capture")
-	}
 	var reference struct {
 		Mode   string             `json:"mode"`
 		Entry  string             `json:"entry"`
@@ -243,8 +298,35 @@ func capsuleReplay(files map[string][]byte) (json.RawMessage, *ItemRecord, map[s
 		Frame  playlist.FrameHash `json:"frame"`
 	}
 	if err := json.Unmarshal(files["meta/render/reference.json"], &reference); err != nil ||
-		reference.Mode != "replay" || reference.Entry != capture.Entry || len(reference.Assets) == 0 {
+		len(reference.Assets) == 0 {
 		return nil, nil, nil, errors.New("invalid capsule replay reference")
+	}
+	var capture capsuleCapture
+	switch reference.Mode {
+	case "files":
+		if _, ok := files["meta/capture/resources.json"]; ok {
+			return nil, nil, nil, errors.New("file capsule cannot also claim an HTTP capture")
+		}
+		var err error
+		capture, err = capsuleFileCapture(id, reference.Entry, reference.Assets)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Retain a web edition's source as the cache lookup key. Non-web
+		// sources enter the existing HTTP replay path through their mount URL.
+		if !capsuleHTTPURL(item.Source) {
+			item.Source = capture.Entry
+			raw, err = capsulePlaylistSource(raw, item.Source)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	case "replay":
+		if err := json.Unmarshal(files["meta/capture/resources.json"], &capture); err != nil || !capsuleHTTPURL(item.Source) || capture.Entry != item.Source || reference.Entry != capture.Entry || !capture.Coverage.Complete || len(capture.Resources) > maxCapsuleMembers {
+			return nil, nil, nil, errors.New("capsule requires a complete original-URL replay capture")
+		}
+	default:
+		return nil, nil, nil, errors.New("unsupported capsule reference mode")
 	}
 	var engine struct {
 		ImageRef struct {
@@ -272,27 +354,20 @@ func capsuleReplay(files map[string][]byte) (json.RawMessage, *ItemRecord, map[s
 	blobs := make(map[string][]byte, len(reference.Assets))
 	for name, digest := range reference.Assets {
 		body, found := files["assets/"+name]
-		if !validSourceKey(digest) || name != digest || !found || capsuleDigest(body) != digest {
+		if !validSourceKey(digest) || (reference.Mode == "replay" && name != digest) || !found || capsuleDigest(body) != digest {
 			return nil, nil, nil, errors.New("capsule asset checksum mismatch")
 		}
 		blobs[digest] = body
 	}
 	for name := range files {
 		if asset, found := strings.CutPrefix(name, "assets/"); found {
-			if _, ok := blobs[asset]; !ok {
+			if _, ok := reference.Assets[asset]; !ok {
 				return nil, nil, nil, errors.New("capsule contains an unlisted asset")
 			}
 		}
 	}
-	if len(item.Repro.AssetsSHA256) != len(blobs) {
+	if !slices.Equal(slices.Sorted(slices.Values(item.Repro.AssetsSHA256)), slices.Sorted(maps.Values(reference.Assets))) {
 		return nil, nil, nil, errors.New("capsule playlist assets disagree with the reference")
-	}
-	playlistAssets := make(map[string]bool, len(blobs))
-	for _, digest := range item.Repro.AssetsSHA256 {
-		if _, found := blobs[digest]; !found || playlistAssets[digest] {
-			return nil, nil, nil, errors.New("capsule playlist assets disagree with the reference")
-		}
-		playlistAssets[digest] = true
 	}
 	used := make(map[string]bool)
 	requests := make(map[string]*Resource)
@@ -342,7 +417,7 @@ func capsuleReplay(files map[string][]byte) (json.RawMessage, *ItemRecord, map[s
 	if capture.CapturedAt.IsZero() {
 		capture.CapturedAt, _ = time.Parse(time.RFC3339, document.Created)
 	}
-	record := &ItemRecord{Item: item, Entry: capture.Entry, Resources: capture.Resources,
+	record := &ItemRecord{Capsule: &CapsuleRecord{ArchiveSHA256: id, Files: reference.Mode == "files"}, Item: item, Entry: capture.Entry, Resources: capture.Resources,
 		Coverage: capture.Coverage, CapturedAt: capture.CapturedAt}
 	return raw, record, blobs, nil
 }
@@ -366,11 +441,11 @@ func (s *service) ImportCapsule(ctx context.Context, archive []byte, sidecar jso
 	if err != nil {
 		return nil, fmt.Errorf("read capsule: %w", err)
 	}
-	raw, record, blobs, err := capsuleReplay(files)
+	raw, record, blobs, err := capsuleReplay(id, files)
 	if err != nil {
 		return nil, err
 	}
-	record.Capsule = &CapsuleRecord{ArchiveSHA256: id, Signature: sidecar}
+	record.Capsule.Signature = sidecar
 	blobs[id] = archive
 
 	encoded, err := json.Marshal(record)

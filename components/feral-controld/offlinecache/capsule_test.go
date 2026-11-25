@@ -119,3 +119,47 @@ func capsuleFixture(t *testing.T, source, artwork, signer string, private ed2551
 	require.NoError(t, err)
 	return archive.Bytes(), signature
 }
+
+func TestCapsuleNamedFiles(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, public...))
+	archive, _ := capsuleFixture(t, "https://example.org/token", "<p>named file</p>", signer, private)
+	files, err := readCapsuleFiles(archive)
+	require.NoError(t, err)
+	var ref map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(files["meta/render/reference.json"], &ref))
+	digest := capsuleDigest([]byte("<p>named file</p>"))
+	delete(files, "meta/capture/resources.json")
+	files["assets/nested/index.html"] = files["assets/"+digest]
+	delete(files, "assets/"+digest)
+	ref["mode"] = json.RawMessage(`"files"`)
+	ref["entry"] = json.RawMessage(`"nested/index.html?fxhash=abc"`)
+	ref["assets"], err = json.Marshal(map[string]string{"nested/index.html": digest})
+	require.NoError(t, err)
+	files["meta/render/reference.json"], err = json.Marshal(ref)
+	require.NoError(t, err)
+	id := capsuleDigest(archive)
+	raw, record, blobs, err := capsuleReplay(id, files)
+	require.NoError(t, err)
+	want := "https://" + id[:32] + "." + id[32:] + ".capsule.invalid/nested/index.html?fxhash=abc"
+	require.Equal(t, want, record.Entry)
+	require.Equal(t, "https://example.org/token", record.Item.Source)
+	require.True(t, record.Capsule.Files)
+	require.Contains(t, string(raw), record.Item.Source)
+	require.Len(t, record.Resources, 2)
+	require.Equal(t, []byte("<p>named file</p>"), blobs[digest])
+	require.Contains(t, string(files["playlist.json"]), "https://example.org/token")
+	for _, bad := range []string{"../x", "%2fescape", "a\\b", "/absolute", "bad#fragment"} {
+		_, err := capsuleFileCapture(id, bad, map[string]string{bad: digest})
+		require.Error(t, err, bad)
+	}
+}
+
+func TestCapsulePlaylistSourceRejectsMalformedItems(t *testing.T) {
+	for _, raw := range []string{`{"items":[]}`, `{"items":[null]}`, `{"ITEMS":[{}]}`, `{"items":[{},{}]}`} {
+		if _, err := capsulePlaylistSource(json.RawMessage(raw), "https://example.org"); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+}

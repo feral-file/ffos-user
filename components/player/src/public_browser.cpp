@@ -73,6 +73,13 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     std::filesystem::create_directories(profile_);
     auto source = occurrence_.item.at("source").get<std::string>();
     capture_ = std::move(capture);
+    if (!offline_ && !capture_) {
+      const auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, source);
+      routed_document_ = route.url != source;
+      navigation_url_ = gateway_document_url(source, route.url);
+    }
+    if (capture_ && !capture_->file_entry.empty())
+      navigation_url_ = capture_->file_entry;
     // Online mixed-mode misses must reach the live origin without passing
     // through a registered capture handler. Large GETs use the live path in
     // that mode; offline and explicitly isolated occurrences use the stream.
@@ -84,10 +91,11 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
       index.close();
       require(!index.fail(), "bundle", "Cannot stage capture stream index");
     }
-    auto path = source.substr(0, source.find_first_of("?#"));
+    const auto render_item = capture_ ? capture_->render_item(occurrence_.item) : occurrence_.item;
+    auto path = navigation_url_.substr(0, navigation_url_.find_first_of("?#"));
     std::transform(path.begin(), path.end(), path.begin(),
                    [](unsigned char c) { return std::tolower(c); });
-    bundled_ = decoration_ || occurrence_.item.value("mimeType", "").starts_with("model/") ||
+    bundled_ = decoration_ || render_item.value("mimeType", "").starts_with("model/") ||
                path.ends_with(".glb") || path.ends_with(".gltf");
     bundle_prefix_ = "https://ff-player.internal/" + uuid() + "/";
     auto bounds = presentation_.bounds(occurrence_.display);
@@ -298,6 +306,10 @@ void PublicBrowser::message(const Json& m) {
       session_ = child;
       send("Page.enable", {}, child);
       send("Network.enable", {}, child);
+      if (routed_document_) {
+        send("Audits.enable", {}, child);
+        send("Runtime.enable", {}, child);
+      }
       send("Page.setLifecycleEventsEnabled", {{"enabled", true}}, child);
       enable_interception(child);
       send("Target.setAutoAttach",
@@ -310,7 +322,7 @@ void PublicBrowser::message(const Json& m) {
         send("Page.navigate",
              {{"url", bundled_ ? Json(bundle_prefix_ +
                                      (decoration_ ? "setup-artwork/index.html" : "index.html"))
-                              : occurrence_.item.at("source")}},
+                              : Json(navigation_url_)}},
              child, [this](const Json& result) {
                navigation_error_ = result.value("errorText", "");
              });
@@ -335,9 +347,31 @@ void PublicBrowser::message(const Json& m) {
              {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}}, child);
       send("Runtime.runIfWaitingForDebugger", {}, child);
     }
+  } else if (routed_document_ && session == session_ && method == "Runtime.executionContextCreated") {
+    const auto& context = p.at("context");
+    const auto aux = context.value("auxData", Json::object());
+    if (aux.value("isDefault", false) && aux.value("frameId", "") == main_frame_)
+      main_world_ = context.at("id");
+  } else if (routed_document_ && session == session_ && !loaded_ && method == "Runtime.exceptionThrown") {
+    const auto& details = p.at("exceptionDetails");
+    if (main_world_ && details.value("executionContextId", 0) == main_world_ &&
+        details.value("exception", Json::object()).value("className", "") == "ReferenceError")
+      missing_init_binding_ = true;
+  } else if (routed_document_ && session == session_ && method == "Audits.issueAdded") {
+    const auto& issue = p.at("issue");
+    if (issue.value("code", "") == "ContentSecurityPolicyIssue") {
+      const auto policy = issue.at("details").value("contentSecurityPolicyIssueDetails", Json::object());
+      if (!policy.value("isReportOnly", true) &&
+          policy.value("contentSecurityPolicyViolationType", "") == "kInlineViolation" &&
+          policy.value("violatedDirective", "").starts_with("script-src") &&
+          policy.value("sourceCodeLocation", Json::object()).value("url", "") == navigation_url_)
+        blocked_init_script_ = true;
+    }
   } else if (method == "Page.frameNavigated" && session == session_) {
     const auto& frame = p.at("frame");
     if (!frame.contains("parentId")) {
+      main_world_ = 0;
+      missing_init_binding_ = blocked_init_script_ = false;
       main_frame_ = frame.at("id").get<std::string>();
       document_url_ = frame.at("url").get<std::string>() + frame.value("urlFragment", "");
     }
@@ -396,7 +430,7 @@ void PublicBrowser::message(const Json& m) {
     if (!initial_source) return;
     initial_response_seen_ = true;
     auto mime = response.value("mimeType", "");
-    Json classified = occurrence_.item;
+    Json classified = capture_ ? capture_->render_item(occurrence_.item) : occurrence_.item;
     classified["mimeType"] = mime;
     if (native_media(classified)) resolved_native_mime = mime;
   } else if (method == "Page.lifecycleEvent" && (!bundled_ || decoration_) && session == session_ &&
@@ -414,6 +448,7 @@ void PublicBrowser::message(const Json& m) {
     fail("Artwork navigation failed: " + p.value("errorText", "network error"));
   else if (method == "Target.targetCrashed" || method == "Inspector.targetCrashed")
     fail("Public Chromium renderer crashed");
+
 }
 bool PublicBrowser::bundled_request(const Json& p, const std::string& session) {
   if (!bundled_) return false;
@@ -427,8 +462,9 @@ bool PublicBrowser::bundled_request(const Json& p, const std::string& session) {
     return true;
   }
   if (path == "config.json") {
-    Json config = {{"source", occurrence_.item.at("source")},
-                   {"mime", occurrence_.item.value("mimeType", "")},
+    const auto render_item = capture_ ? capture_->render_item(occurrence_.item) : occurrence_.item;
+    Json config = {{"source", render_item.at("source")},
+                   {"mime", render_item.value("mimeType", "")},
                    {"display", occurrence_.display},
                    {"displayRevision", occurrence_.display_revision},
                    {"paused", playback_.media_paused(id)}};
@@ -538,7 +574,7 @@ void PublicBrowser::poll() {
       const auto mixed_key = reply.session + "\n" + reply.request;
       if (reply.error.empty() && reply.metadata.contains("nativeMime") &&
           reply.session == session_ && !bundled_) {
-        Json classified = occurrence_.item;
+        Json classified = capture_ ? capture_->render_item(occurrence_.item) : occurrence_.item;
         classified["mimeType"] = reply.metadata.at("nativeMime");
         require(native_media(classified), "cache_protocol", "Invalid native media handoff");
         resolved_native_mime = reply.metadata.at("nativeMime");
@@ -604,6 +640,7 @@ void PublicBrowser::poll() {
         id, {{"backend", backend_},
              {"browserPid", pid_},
              {"documentUrl", document_url_},
+             {"inlineScriptBlocked", blocked_init_script_}, {"startupReferenceError", missing_init_binding_},
              {"nestedCompositorGpuPasses", compositor_gpu_passes_},
              {"exportedFrames", frames.count},{"presentedFrames",direct_frames_},{"presentationPath",direct()?"cage":"composited"},
              {"offline", offline_},
