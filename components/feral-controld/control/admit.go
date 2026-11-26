@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -449,6 +450,12 @@ func (a *Authority) SetTransports(ts []string) {
 	a.transports.Store(&ts)
 }
 
+// DialsRelayV2 reports whether this daemon run carries relay v2.
+func (a *Authority) DialsRelayV2() bool {
+	ts := a.transports.Load()
+	return ts != nil && slices.Contains(*ts, TransportRelayV2)
+}
+
 // Status returns the public status block. A locked device has no profile it
 // can vouch for, so it omits it.
 func (a *Authority) Status() Status {
@@ -476,6 +483,16 @@ type Invitation struct {
 	ExpiresAt int64
 	Pins      Pins
 	Gen       string
+	// Sig and Enc are the device keys the pins are thumbprints of.
+	Sig, Enc PublicJWK
+}
+
+// KeyFields returns claim-QR fields 10-13 (§11): the invitation's expiry on
+// the device clock, the device keys as compressed points, and host, the
+// device's LAN IPv4 literal or "". With them the QR is the whole profile, so
+// a controller that cannot reach the LAN status can still seal an enroll.
+func (i Invitation) KeyFields(host string) []string {
+	return []string{strconv.FormatInt(i.ExpiresAt, 10), i.Sig.Compressed(), i.Enc.Compressed(), host}
 }
 
 // IssueInvitation creates a fresh invitation. The one it replaces stays
@@ -516,7 +533,8 @@ func (a *Authority) CurrentInvitation() (Invitation, bool) {
 
 func (a *Authority) invitationLocked() Invitation {
 	id := a.store.Identity()
-	return Invitation{Value: a.inv.value, ExpiresAt: a.inv.expiresAt, Pins: id.Pins(), Gen: id.gen}
+	return Invitation{Value: a.inv.value, ExpiresAt: a.inv.expiresAt, Pins: id.Pins(), Gen: id.gen,
+		Sig: id.sigPub, Enc: id.encPub}
 }
 
 // EnsureInvitation returns the live invitation, issuing a fresh one when there

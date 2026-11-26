@@ -172,7 +172,7 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		ControlOwnerEnrolled()
 		ControlReleased()
 	}); ok {
-		ex.SetControl(controlgate.ClaimQR{Auth: c.auth})
+		ex.SetControl(controlgate.ClaimQR{Auth: c.auth, LANHost: controlgate.DefaultRouteIPv4})
 		// The authority refuses first-owner enroll on v2 (§5.1); the v2 gate
 		// gets the hook anyway so the claim QR cannot outlive its invitation
 		// if that ever changes.

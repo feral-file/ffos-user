@@ -36,6 +36,15 @@ func (k PublicJWK) uncompressed() []byte {
 	return append(b, k.Y[:]...)
 }
 
+// Compressed is b64u of the 33-byte compressed SEC 1 point: the form the
+// claim QR carries the device keys in (§11), where every character costs
+// scan distance.
+func (k PublicJWK) Compressed() string {
+	b := make([]byte, 0, 1+p256CoordLen)
+	b = append(b, 2|k.Y[p256CoordLen-1]&1)
+	return b64u(append(b, k.X[:]...))
+}
+
 // ECDH returns the key as an ECDH public key.
 func (k PublicJWK) ECDH() (*ecdh.PublicKey, error) {
 	return ecdh.P256().NewPublicKey(k.uncompressed())

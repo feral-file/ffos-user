@@ -404,8 +404,8 @@ type executor struct {
 	// device carries the v2 relay and whether its socket is up right now. The
 	// claim flow's remote-route wait ends on a legacy topic OR a live v2
 	// socket, and with v2 wired an online device paints even when neither
-	// arrived: first-owner enrollment is LAN-only, so a claim never needs a
-	// remote route, and the app reaches the device by device ID afterwards.
+	// arrived: the QR carries the device keys and its LAN address, so the
+	// first owner can enroll on the LAN before the v2 socket is up.
 	// nil (an old controld.json with no relayV2, no control wiring) keeps the
 	// legacy rule exactly: no topic, no QR.
 	v2Wired     func() bool
@@ -597,8 +597,9 @@ func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 // authority (controlgate.ClaimQR implements it).
 type ControlClaim interface {
 	// ClaimQRFields returns the invitation fields to append to the claim URL
-	// (inv, thumb(devSig), thumb(devEnc), gen) and when the invitation
-	// expires; ok is false unless the device is in the legacy state.
+	// (inv, thumb(devSig), thumb(devEnc), gen and, on a device that dials
+	// relay v2, exp, devSig, devEnc, host) and when the invitation expires;
+	// ok is false unless the device is in the legacy state.
 	ClaimQRFields() (fields []string, expiresAt time.Time, ok bool)
 	// ClaimQRPins returns the same four fields with an empty invitation
 	// ("", thumb(devSig), thumb(devEnc), gen) whenever the device can vouch
@@ -1871,7 +1872,7 @@ func (e *executor) claimWithoutRemoteRoute(ctx context.Context) bool {
 	if err != nil || !online {
 		return false
 	}
-	e.logger.Info("Auto claim flow: no remote route yet, but v2 is wired and the device is online; painting (first-owner enrollment is LAN-only)")
+	e.logger.Info("Auto claim flow: no remote route yet, but v2 is wired and the device is online; painting (the first owner can enroll on the LAN)")
 	return true
 }
 
@@ -1915,10 +1916,11 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 // other builder this once had to match, was deleted with feral-setupd.)
 //
 // invitation, when present, is the feral-file#3551 control invitation
-// appended as four more fields (docs/ff1-control-v1.md §11):
+// appended as more fields (docs/ff1-control-v1.md §11):
 // |<inv>|<thumb(devSig)>|<thumb(devEnc)>|<gen>, with <inv> empty when there is
-// no invitation. Old app parsers read only indices 0, 1 and 3, so the topic
-// stays at index 1.
+// no invitation, and after a live invitation on a device that dials relay v2
+// |<exp>|<devSig>|<devEnc>|<host> (control.Invitation.KeyFields). Old app
+// parsers read only indices 0, 1 and 3, so the topic stays at index 1.
 func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string, invitation ...string) string {
 	internet := "false"
 	if online {
