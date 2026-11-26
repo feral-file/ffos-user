@@ -23,9 +23,8 @@ func DefaultRouteIPv4() string {
 // (§11): a private or link-local IPv4 address. Anything else is left out, so
 // the QR never points a phone at an address it would refuse.
 func lanIPv4Literal(ip net.IP) string {
-	v4 := ip.To4()
-	if v4 == nil || !(v4.IsPrivate() || v4.IsLinkLocalUnicast()) {
-		return ""
+	if v4 := ip.To4(); v4 != nil && (v4.IsPrivate() || v4.IsLinkLocalUnicast()) {
+		return v4.String()
 	}
-	return v4.String()
+	return ""
 }
