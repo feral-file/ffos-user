@@ -9,7 +9,7 @@ import (
 
 // invitationMinRemaining is the least life a painted invitation may have
 // left; a shorter one is replaced before it goes on screen.
-const invitationMinRemaining = 2 * time.Minute
+const invitationMinRemaining = time.Minute
 
 // ClaimQR adapts the authority to devicectl.ControlClaim.
 type ClaimQR struct{ Auth *control.Authority }

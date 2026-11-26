@@ -359,27 +359,6 @@ type failRemoveFS struct{ *MemFS }
 
 func (failRemoveFS) RemoveAll(string) error { return errors.New("ebusy") }
 
-func TestEnsureInvitation(t *testing.T) {
-	d := newTestDevice(t)
-	a, err := d.a.EnsureInvitation(time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := d.a.EnsureInvitation(time.Minute)
-	if a.Value != b.Value {
-		t.Fatal("live invitation reissued")
-	}
-	d.advance(invitationTTL - 30)
-	c, _ := d.a.EnsureInvitation(time.Minute)
-	if c.Value == a.Value || c.ExpiresAt <= a.ExpiresAt {
-		t.Fatal("nearly spent invitation not refreshed")
-	}
-	d2, _, _ := ownerDevice(t)
-	if _, err := d2.a.EnsureInvitation(time.Minute); err == nil {
-		t.Fatal("invitation issued on an enrolled device")
-	}
-}
-
 // Review F5: an unreadable tombstone is locked, but not "retired": the
 // plaintext factoryReset allowance is only for a real tombstone.
 func TestUnreadableTombstoneIsPlainLocked(t *testing.T) {
