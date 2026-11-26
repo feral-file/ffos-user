@@ -114,9 +114,8 @@ func auditDPVersion(logger *zap.Logger, source string, raw []byte) {
 }
 
 // knownPlaylistKeys is the set of top-level member names the typed Playlist
-// decodes, lower-cased: encoding/json folds case when matching, so a member
-// that folds to one of these was consumed by a field and must not also be
-// carried as an extra.
+// decodes, by exact name (stripCaseVariants keeps a case variant out of the
+// decode), plus the reserved internal names in lower case.
 var knownPlaylistKeys = func() map[string]bool {
 	keys := map[string]bool{}
 	var walk func(t reflect.Type)
@@ -135,7 +134,7 @@ var knownPlaylistKeys = func() map[string]bool {
 				name = strings.ToLower(f.Name)
 			}
 			if name != "" {
-				keys[strings.ToLower(name)] = true
+				keys[name] = true
 			}
 		}
 	}
@@ -154,10 +153,10 @@ func unknownPlaylistMembers(data []byte) map[string]json.RawMessage {
 	}
 	var extra map[string]json.RawMessage
 	for k, v := range all {
-		lower := strings.ToLower(k)
-		// satellites is decoded by its exact key only (see UnmarshalJSON), so a
-		// case variant is not consumed by any field and is carried as an extra.
-		if knownPlaylistKeys[lower] && (lower != "satellites" || k == "satellites") {
+		// A case variant of a modeled member is consumed by no field, so it is
+		// an unknown member like any other. The reserved names stay claimed
+		// under any case.
+		if knownPlaylistKeys[k] || strings.EqualFold(k, "verification") || strings.EqualFold(k, "extra") {
 			continue
 		}
 		if extra == nil {

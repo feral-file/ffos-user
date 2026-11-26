@@ -8,6 +8,7 @@ import (
 	goio "io"
 	"maps"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -191,7 +192,9 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 		playlistJSON
 		SatellitesRaw json.RawMessage `json:"satellites,omitempty"`
 	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	// Exact member names only: see stripCaseVariants.
+	exact := stripCaseVariants(data, reflect.TypeOf(playlistJSON{}))
+	if err := json.Unmarshal(exact, &decoded); err != nil {
 		return err
 	}
 	*p = Playlist(decoded.playlistJSON)

@@ -1155,16 +1155,25 @@ func TestService_IndexPlaylistForOfflineDisplay_BeforeStartReturnsNotStarted(t *
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 }
 
-// TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors mirrors
-// DownloadPlaylist's own validation for a playlist with no id.
-func TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors(t *testing.T) {
+// TestService_IndexPlaylistForOfflineDisplay_IDLessPlaylist: `id` is optional
+// in DP-1, so the record is filed under a derived key and still serves the URL.
+func TestService_IndexPlaylistForOfflineDisplay_IDLessPlaylist(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json", 0, nil)
+	url := "https://example.com/p.json"
+	doc := json.RawMessage(`{"dpVersion":"1.1.0","title":"no id","items":[{"source":"https://example.com/a"}]}`)
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(doc, url, 0, nil))
+
+	raw, _, err := ts.service.CachedPlaylistForURL(url)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(doc), string(raw))
+	// The derived key is what clears it.
+	require.NoError(t, ts.service.ClearPlaylist(offlinecache.PlaylistRecordKey("", url, nil)))
+	_, _, err = ts.service.CachedPlaylistForURL(url)
 	assert.Error(t, err)
 }
 
@@ -1184,17 +1193,6 @@ func TestService_DownloadPlaylist_InvalidJSON(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "", 0, nil)
-	assert.Error(t, err)
-}
-
-func TestService_DownloadPlaylist_MissingID(t *testing.T) {
-	ts := setupService(t, 0, nil)
-	defer ts.ctrl.Finish()
-
-	raw, err := json.Marshal(map[string]interface{}{"dpVersion": "1.0.0", "items": []interface{}{}})
-	require.NoError(t, err)
-
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	assert.Error(t, err)
 }
 

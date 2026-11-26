@@ -1939,15 +1939,13 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return 0, 0, fmt.Errorf("offline cache: parse playlist: %w", err)
 	}
-	if playlist.ID == "" {
-		return 0, 0, errors.New("offline cache: playlist has no id")
-	}
+	key := PlaylistRecordKey(playlist.ID, sourceURL, playlist.Items)
 
 	// Sample the playlist's clear-epoch before the classify loop so a
 	// ClearPlaylist landing during classification is detected before the
 	// save below and cannot resurrect the cleared playlist record — see
 	// playlistClearEpoch's doc.
-	plEpoch := s.currentPlaylistEpoch(playlist.ID)
+	plEpoch := s.currentPlaylistEpoch(key)
 
 	// Classification only decides WHICH items are eligible — it must
 	// never itself start any work. Enqueuing is deliberately deferred
@@ -2013,7 +2011,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// nothing has been enqueued yet and the per-item epoch checks in the
 	// enqueue loop below would abort every item anyway, so it is reported
 	// as a clean 0-queued/no-error outcome.
-	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, plEpoch, segments)
+	saved, err := s.savePlaylistAndURLIndex(key, playlistRaw, sourceURL, plEpoch, segments)
 	if err != nil {
 		// Nothing has been enqueued yet at this point — a save failure
 		// here starts no background work at all, matching this error
@@ -2202,9 +2200,6 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return fmt.Errorf("offline cache: parse playlist: %w", err)
 	}
-	if playlist.ID == "" {
-		return errors.New("offline cache: playlist has no id")
-	}
 	// saved==false means a ClearPlaylist won the race and the write was
 	// skipped. That is reported as ErrPlaylistSaveClearedRace rather than
 	// swallowed: a caller for whom this save is the ONLY durable write —
@@ -2213,7 +2208,8 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	// playlist body that was never written. Callers using this purely for
 	// the best-effort by-URL index treat the sentinel as the benign no-op
 	// it is for them.
-	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch, segments)
+	key := PlaylistRecordKey(playlist.ID, sourceURL, playlist.Items)
+	saved, err := s.savePlaylistAndURLIndex(key, playlistRaw, sourceURL, sampledEpoch, segments)
 	if err != nil {
 		return err
 	}

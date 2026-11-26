@@ -83,8 +83,8 @@ func TestPlaylistKeepsUnknownTopLevelMembersOnReemit(t *testing.T) {
 	if string(m["futureMember"]) != `{"a":[1,2]}` {
 		t.Errorf("futureMember lost or changed: %s", out)
 	}
-	if _, dup := m["Title"]; dup {
-		t.Errorf("case-folded known member must not be carried as an extra: %s", out)
+	if p.Title != "t" || string(m["title"]) != `"t"` || string(m["Title"]) != `"folded"` {
+		t.Errorf("case variant must not override title and must be preserved as itself: %s", out)
 	}
 	if string(m["Satellites"]) != `[1]` {
 		t.Errorf("case-variant satellites must be preserved as an extra: %s", out)

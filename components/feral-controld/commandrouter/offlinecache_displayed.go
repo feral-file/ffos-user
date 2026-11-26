@@ -129,7 +129,7 @@ func (h *handler) handleDownloadDisplayedItem(ctx context.Context, args map[stri
 
 	playlistID := ""
 	if playerStatus.Playlist != nil {
-		playlistID = playerStatus.Playlist.ID
+		playlistID = offlinecache.PlaylistRecordKey(playerStatus.Playlist.ID, "", playerStatus.Playlist.Items)
 	}
 	if h.offlineCache.ClearedSinceBarrier(playlistID, barrier, item.Source) {
 		return errorResponse("busy",

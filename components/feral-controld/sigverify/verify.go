@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/sign"
@@ -39,7 +40,8 @@ import (
 type Status string
 
 const (
-	// StatusValid: signatures[] is present and every entry verifies.
+	// StatusValid: signatures[] is present, every entry verifies, and at least
+	// one is a feed or curator signature.
 	StatusValid Status = "valid"
 	// StatusInvalid: signatures[] is present and at least one entry does
 	// not verify — tampered content (payload_hash mismatch), a placeholder or
@@ -95,6 +97,9 @@ const (
 	ReasonMalformed           = "malformed signature"
 	ReasonTooManySignatures   = "too many signatures"
 	ReasonDocumentTooLarge    = "document too large"
+	// ReasonNoFeedOrCurator marks a document whose entries all verify while
+	// none is a feed or curator signature (§7.1.1).
+	ReasonNoFeedOrCurator = "no feed or curator signature"
 	// ReasonUnverified marks an in-bounds entry that was never checked
 	// because a sibling entry tripped a bound and the document was refused
 	// before any cryptography ran.
@@ -163,8 +168,19 @@ type signatureEnvelope struct {
 	// Signature is raw so PRESENCE can be told apart from an empty string:
 	// the wire contract flags legacySignature whenever a v1.0 `signature`
 	// string is present, "" included.
-	Signature  json.RawMessage `json:"signature"`
-	Signatures json.RawMessage `json:"signatures"`
+	Signature  json.RawMessage
+	Signatures json.RawMessage
+}
+
+// readEnvelope reads the two members by their exact names. Struct decoding
+// matches case-insensitively, so a "Signatures" member the signer did not
+// call signatures would be judged as the document's signature list.
+func readEnvelope(raw []byte) (signatureEnvelope, error) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return signatureEnvelope{}, err
+	}
+	return signatureEnvelope{Signature: members["signature"], Signatures: members["signatures"]}, nil
 }
 
 // legacyPresent reports whether the top-level `signature` field carried a
@@ -195,8 +211,8 @@ func Verify(raw []byte) Verdict {
 	if len(raw) > MaxDocumentBytes {
 		return Verdict{Status: StatusInvalid, Reason: ReasonDocumentTooLarge}
 	}
-	var env signatureEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
+	env, err := readEnvelope(raw)
+	if err != nil {
 		// Not a JSON object at all. Reported as invalid rather than unsigned
 		// so a garbage document is never mistaken for an honest unsigned one.
 		return Verdict{Status: StatusInvalid, Reason: ReasonMalformed}
@@ -235,7 +251,13 @@ func Verify(raw []byte) Verdict {
 	// each one here — another whole-document canonicalization apiece, on the
 	// failure path, which is the path a hostile document chooses
 	// (display-protocol/dp1-go#16).
-	results, err := sign.VerifyMultiSignaturesJSONDetailed(raw)
+	// dp1-go reads the member case-insensitively, so it is asked only about a
+	// document that has the exact one.
+	var results []sign.SignatureResult
+	err = sign.ErrNoSignatures
+	if env.Signatures != nil {
+		results, err = sign.VerifyMultiSignaturesJSONDetailed(raw)
+	}
 	switch {
 	case errors.Is(err, sign.ErrNoSignatures):
 		reason := ReasonUnsigned
@@ -247,11 +269,12 @@ func Verify(raw []byte) Verdict {
 		// signatures is present but not an array of signature objects.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
-	if len(results) != len(entries) {
-		// Cannot happen: dp1-go decoded the same array from the same bytes
-		// this function just counted and field-bounded. Guarded so a library
-		// change surfaces as invalid, never as a silently valid verdict over
-		// entries the bounds above never saw.
+	if !slices.EqualFunc(results, entries, func(r sign.SignatureResult, e dp1playlist.Signature) bool {
+		return r.Signature == e
+	}) {
+		// Reachable only when a case variant of "signatures" sits beside it and
+		// dp1-go judged that one. Invalid, never a verdict over entries the
+		// bounds above never saw.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
 
@@ -280,6 +303,12 @@ func Verify(raw []byte) Verdict {
 			}
 		}
 		signers = append(signers, s)
+	}
+	// §7.1.1: the document needs at least one feed or curator signature. Every
+	// entry verifying is not enough when none of them has either role. Reported
+	// only, like every other verdict.
+	if firstFailure == "" && !slices.ContainsFunc(signers, isPublishingSigner) {
+		firstFailure = ReasonNoFeedOrCurator
 	}
 	if firstFailure == "" {
 		return Verdict{Status: StatusValid, Signers: signers, LegacyPresent: legacy}
@@ -366,6 +395,10 @@ func classify(err error) string {
 	default:
 		return ReasonMalformed
 	}
+}
+
+func isPublishingSigner(s Signer) bool {
+	return s.OK && (s.Role == dp1playlist.RoleFeed || s.Role == dp1playlist.RoleCurator)
 }
 
 // errBadRole classifies as ReasonMalformed (see classify's default arm).

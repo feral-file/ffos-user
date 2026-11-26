@@ -336,8 +336,8 @@ func TestCommandHandler_DownloadPlaylistItem_UnsupportedMediaClass(t *testing.T)
 	ts.mockDP1.EXPECT().FetchPlaylist(ts.ctx, playlistURL).Return(playlist, json.RawMessage(nil), nil).Times(1)
 	ts.mockDP1.EXPECT().ResolveSeriesCastPlan(ts.ctx, *playlist, json.RawMessage(nil), (*dp1.SeriesPlaybackMode)(nil), 0).DoAndReturn(passthroughCastPlan).Times(1)
 	// This playlist has no ID; the handler still samples (playlistUrl is
-	// present) before the download fails below.
-	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("").Return(uint64(0)).Times(1)
+	// present) before the download fails below, under the derived record key.
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration(offlinecache.PlaylistRecordKey("", playlistURL, nil)).Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrUnsupportedMediaClass).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{

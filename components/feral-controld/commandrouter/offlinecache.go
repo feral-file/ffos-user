@@ -103,7 +103,9 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// resurrecting exactly what that clear removed. Retryable: re-issuing
 	// after the clear has settled behaves normally, which is how the
 	// enqueue-window twin (ErrClearedDuringDownload) is already reported.
-	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, source) {
+	sourceURL, _ := stringArg(args["playlistUrl"])
+	key := offlinecache.PlaylistRecordKey(playlist.ID, sourceURL, playlist.Items)
+	if h.offlineCache.ClearedSinceBarrier(key, barrier, source) {
 		return errorResponse("busy",
 			"a clear for this playlist or item landed while it was being resolved, so nothing was queued", true), nil
 	}
@@ -137,8 +139,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// Sampled here (just after resolve, before DownloadItem) for the same
 	// reason DownloadPlaylist samples right after it has the playlist
 	// body: it is the earliest point the playlist ID is known.
-	sourceURL, _ := stringArg(args["playlistUrl"])
-	clearGen := h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
+	clearGen := h.offlineCache.CurrentPlaylistClearGeneration(key)
 
 	// ErrItemInlineNotQueued is an OUTCOME, not a failure: the item's
 	// bytes are inline in the playlist body, so it is already offline and
@@ -241,7 +242,9 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	for _, item := range playlist.Items {
 		sources = append(sources, item.Source)
 	}
-	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, sources...) {
+	downloadURL, _ := stringArg(args["playlistUrl"])
+	key := offlinecache.PlaylistRecordKey(playlist.ID, downloadURL, playlist.Items)
+	if h.offlineCache.ClearedSinceBarrier(key, barrier, sources...) {
 		return errorResponse("busy",
 			"a clear for this playlist or one of its items landed while it was being resolved, so nothing was queued", true), nil
 	}
@@ -260,7 +263,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// Service.CachedPlaylistForURL. "" (inline download) means no such
 	// fallback is possible for this playlist, same as before this field
 	// existed.
-	sourceURL, _ := stringArg(args["playlistUrl"])
+	sourceURL := downloadURL
 
 	// The item ceiling is passed as the QUEUEING bound, not applied to raw
 	// above: raw is the membership record ClearPlaylist later enumerates, and
