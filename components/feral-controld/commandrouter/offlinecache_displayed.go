@@ -124,7 +124,7 @@ func (h *handler) handleDownloadDisplayedItem(ctx context.Context, args map[stri
 		return h.handleDownloadPlaylistItem(ctx, map[string]any{
 			"playlistUrl": *playerStatus.PlaylistURL,
 			"source":      item.Source,
-		})
+		}, nil)
 	}
 
 	playlistID := ""

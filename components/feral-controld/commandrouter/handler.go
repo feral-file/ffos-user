@@ -744,7 +744,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	}
 
 	if isOfflineCacheCommand(commandType) {
-		return h.handleOfflineCacheCommand(ctx, commandType, command.Arguments)
+		return h.handleOfflineCacheCommand(ctx, command)
 	}
 
 	if commandType == commands.CMD_GET_CONTENT_POLICY || commandType == commands.CMD_SET_CONTENT_POLICY {
@@ -999,23 +999,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 
 				// The bytes the document is decoded from AND verified on.
-				// Preferred: the caller's own `dp1_call` token, kept
-				// verbatim by the ingress decoders (Command.RawArguments) —
-				// a signer covered exactly those bytes. Fallback: a
-				// re-marshal of the decoded map, only for commands built
-				// in-process (OOM recovery, tests) that never had a wire
-				// form. The fallback is lossy in a way a verifier feels:
-				// encoding/json HTML-escapes `&`/`<`/`>`, six bytes each,
-				// which can inflate the document past
-				// sigverify.MaxDocumentBytes and report an honest document
-				// as invalid — so the wire token wins. (Its float64
-				// rounding of large integers is absorbed by JCS, see
-				// commands.Command.RawArguments.)
+				raw, _ := command.RawArgument("dp1_call")
+				// Assigned, not declared: a `:=` here would shadow the
+				// outer err this switch reports through.
 				var playlistBytes []byte
-				if raw, hasRaw := command.RawArgument("dp1_call"); hasRaw {
-					playlistBytes = raw
-				} else if playlistBytes, err = h.json.Marshal(playlistMap); err != nil {
-					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
+				if playlistBytes, err = h.inlinePlaylistBytes(raw, playlistMap); err != nil {
+					return nil, err
 				}
 
 				// Validate the RAW bytes before the typed decode. A

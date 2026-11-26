@@ -2134,3 +2134,41 @@ func TestCommandHandler_DownloadPlaylistItem_OnchfsURIFindsTheLabeledItem(t *tes
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 }
+
+// A member named twice survives only in the wire bytes: validating a
+// re-marshal of the decoded map would accept on download what display refuses.
+func TestCommandHandler_Download_RefusesRepeatedMemberOnWireBytes(t *testing.T) {
+	const doc = `{"dpVersion":"1.1.0","title":"t","defaults":{"duration":-1},"defaults":{},` +
+		`"items":[{"source":"https://example.com/a"}]}`
+
+	for _, tc := range []struct {
+		name    string
+		request string
+		command commands.Type
+	}{
+		{"playlist", `{"dp1_call":` + doc + `}`, commands.CMD_DOWNLOAD_PLAYLIST},
+		{"item", `{"source":"https://example.com/a","dp1_call":` + doc + `}`, commands.CMD_DOWNLOAD_PLAYLIST_ITEM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, mockOfflineCache := setupOfflineCache(t)
+			defer ts.teardown()
+			ts.handler = commandrouter.New(
+				ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller,
+				nil, mockOfflineCache, nil, nil, wrapper.NewJSON(), ts.logger)
+
+			var command commands.Command
+			require.NoError(t, json.Unmarshal(
+				[]byte(`{"command":"`+string(tc.command)+`","request":`+tc.request+`}`), &command))
+
+			// No download or save expectation: nothing may be queued.
+			result, err := ts.handler.Process(ts.ctx, command)
+
+			require.NoError(t, err)
+			resp, ok := result.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, false, resp["ok"])
+			assert.Contains(t, fmt.Sprint(resp["error"]), "resolve_failed")
+			assert.Contains(t, fmt.Sprint(resp["error"]), "playlistInvalid")
+		})
+	}
+}
