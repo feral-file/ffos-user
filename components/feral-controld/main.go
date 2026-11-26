@@ -1122,7 +1122,7 @@ func initializeApp(
 	// notification producers get sealing handles when it is on (§9).
 	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
 	if len(v2Config) > 0 && relayV2Eligible(v2Config[0], controlWire, deviceIDFromHostname()) {
-		controlWire.v2 = newRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
+		controlWire.dialRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
 	}
 	controlWire.setTransports(relayerEndpoint != "")
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
@@ -1673,10 +1673,10 @@ func initializeApp(
 	// mediator.SetRelayV2Waker). Wired whenever this device carries v2,
 	// independent of the netlog recorder that owns SetInternetObserver.
 	if controlWire != nil && controlWire.v2 != nil {
-		waker, okWaker := controlWire.v2.(interface{ WakeV2() })
+		wake, okWaker := controlWire.v2Wakers()
 		sink, okSink := mediator.(interface{ SetRelayV2Waker(func()) })
 		if okWaker && okSink {
-			sink.SetRelayV2Waker(waker.WakeV2)
+			sink.SetRelayV2Waker(wake)
 		} else {
 			// Both are this module's own types; a miss means a rename broke
 			// the seam and v2 is back to minutes of downtime per network
@@ -1910,9 +1910,9 @@ func initializeApp(
 	// The claim flow's remote-route wait ends on a live v2 socket too, so a
 	// device that never gets a legacy topic is still claimable (see
 	// executor.v2Wired). Only wired when this device actually carries v2.
+	// "Live" is the keyed carrier: see controlWiring.v2KeyedConnected.
 	if rv, ok := executor.(relayV2RouteSink); ok && controlWire != nil && controlWire.v2 != nil {
-		v2 := controlWire.v2
-		rv.SetRelayV2Route(func() bool { return true }, v2.IsConnected)
+		rv.SetRelayV2Route(func() bool { return true }, controlWire.v2KeyedConnected)
 	}
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline

@@ -13,7 +13,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 const wiringDir = "/home/feralfile/.state/control"
@@ -150,5 +152,88 @@ func TestControlWiring_Transports(t *testing.T) {
 	w.setTransports(true)
 	if got := w.auth.Status().Transports; !slices.Equal(got, []string{"lan", "relayer", "relayV2"}) {
 		t.Fatalf("dual-stack transports: %v", got)
+	}
+}
+
+// connRelayer is a v2 carrier whose socket state and wake a test controls.
+type connRelayer struct {
+	*mocks.MockRelayer
+	connected bool
+	woken     int
+}
+
+func (c *connRelayer) IsConnected() bool { return c.connected }
+func (c *connRelayer) WakeV2()           { c.woken++ }
+
+// Spec §10: the device dials the keyed channel and the device-ID channel.
+// The device-ID channel is public and can be refused or held full, which
+// must cost nothing on the keyed one: notifications and status read either
+// carrier, the claim-QR wait reads the keyed one, a wake reaches both.
+func TestControlWiring_TwoV2Carriers(t *testing.T) {
+	tests := []struct {
+		name               string
+		keyed, device      bool
+		wantAny, wantKeyed bool
+	}{
+		{name: "both up", keyed: true, device: true, wantAny: true, wantKeyed: true},
+		{name: "device-ID channel refused", keyed: true, wantAny: true, wantKeyed: true},
+		{name: "only the device-ID channel up", device: true, wantAny: true},
+		{name: "both down"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			keyed, device := &connRelayer{connected: tc.keyed}, &connRelayer{connected: tc.device}
+			w := &controlWiring{v2: device, v2Keyed: keyed}
+			if got := w.v2AnyConnected(); got != tc.wantAny {
+				t.Errorf("v2AnyConnected = %v, want %v", got, tc.wantAny)
+			}
+			if got := w.v2KeyedConnected(); got != tc.wantKeyed {
+				t.Errorf("v2KeyedConnected = %v, want %v", got, tc.wantKeyed)
+			}
+			wake, ok := w.v2Wakers()
+			if !ok {
+				t.Fatal("carriers not wakeable")
+			}
+			wake()
+			if keyed.woken != 1 || device.woken != 1 {
+				t.Errorf("wake reached keyed %d, device %d", keyed.woken, device.woken)
+			}
+		})
+	}
+
+	// A locked authority has no identity: only the device-ID carrier exists.
+	deviceOnly := &controlWiring{v2: &connRelayer{connected: true}}
+	if deviceOnly.v2KeyedConnected() || !deviceOnly.v2AnyConnected() || len(deviceOnly.v2Carriers()) != 1 {
+		t.Fatal("device-ID carrier alone misreported")
+	}
+	// A carrier that cannot be woken is reported, not skipped.
+	if _, ok := (&controlWiring{v2: &mocks.MockRelayer{}}).v2Wakers(); ok {
+		t.Fatal("an unwakeable carrier was accepted")
+	}
+	var off *controlWiring
+	if off.v2AnyConnected() || off.v2KeyedConnected() || len(off.v2Carriers()) != 0 {
+		t.Fatal("protocol off reported a v2 carrier")
+	}
+}
+
+// The keyed channel is thumb(devSig), which is field 7 of the claim QR and
+// derivable from every pinned profile; the device-ID carrier keeps the ID.
+func TestDialRelayV2_Channels(t *testing.T) {
+	w := wiringFor(t, config.ControlConfig{}, ownedState(t))
+	var channels []string
+	old := newRelayV2
+	newRelayV2 = func(_, channel string, _ wrapper.WebSocketDialer, _ wrapper.Randomizer, _ wrapper.Clock,
+		_ wrapper.OS, _ wrapper.JSON, _ *zap.Logger) relayer.Relayer {
+		channels = append(channels, channel)
+		return &connRelayer{}
+	}
+	t.Cleanup(func() { newRelayV2 = old })
+	w.dialRelayV2("wss://relay.test", "FF1-SKYZ2E3A", nil, nil, nil, nil, nil, zap.NewNop())
+	want := []string{"FF1-SKYZ2E3A", w.auth.Status().Profile.Sig.Thumbprint()}
+	if !slices.Equal(channels, want) || w.v2 == nil || w.v2Keyed == nil {
+		t.Fatalf("channels %v, want %v", channels, want)
+	}
+	if len(want[1]) != 43 {
+		t.Fatalf("keyed channel %q is not a 43-character thumbprint", want[1])
 	}
 }
