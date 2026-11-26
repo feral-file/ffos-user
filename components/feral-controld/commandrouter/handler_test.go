@@ -36,6 +36,14 @@ import (
 // staged-reset guard closes the whole command surface, every family and every
 // transport), so each routing test has to answer it; the rejection behavior
 // itself is covered by TestCommandHandler_Process_StagedFactoryReset_*.
+// UUIDs for fixtures read back from the offline cache, which the schema judges
+// strictly.
+const (
+	testPlaylistUUID = "11111111-1111-4111-8111-111111111111"
+	testItemUUID1    = "22222222-2222-4222-8222-222222222222"
+	testItemUUID2    = "33333333-3333-4333-8333-333333333333"
+)
+
 func newRoutableExecutor(ctrl *gomock.Controller) *mocks.MockExecutor {
 	m := mocks.NewMockExecutor(ctrl)
 	m.EXPECT().ResetStaged().Return(false).AnyTimes()
@@ -743,10 +751,10 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 	defer ts.teardown()
 
 	playlistURL := "https://example.com/playlist.json"
-	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item1","source":"https://example.com/video.mp4"}]}`)
+	cachedRawBytes := []byte(`{"dpVersion":"1.1.0","title":"t","id":"` + testPlaylistUUID + `","items":[{"id":"` + testItemUUID1 + `","source":"https://example.com/video.mp4"}]}`)
 	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		ID:    "playlist-1",
-		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+		ID:    testPlaylistUUID,
+		Items: []dp1playlist.PlaylistItem{{ID: testItemUUID1, Source: "https://example.com/video.mp4"}},
 	}}
 
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
@@ -823,7 +831,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 			},
 		},
 	}
-	playlistBytes := []byte(`{"items":[{"id":"item1","title":"Test Item"}]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","items":[{"id":"item1","title":"Test Item","source":"https://example.com/video.mp4"}]}`)
 	mockPlaylist := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Items: []dp1playlist.PlaylistItem{
@@ -1033,6 +1041,60 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 	assert.NotContains(t, displayExpression, "rp-42")
 }
 
+// A work's title may be longer than a playlist title is allowed to be.
+func TestCommandHandler_Process_PlayRecentlyPlayed_LongItemTitleStillReplays(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx := context.Background()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	// Re-entering displayPlaylist with the retained item goes through the
+	// static dp1_call branch, which resolves series items by hand; this
+	// playlist has none, so echo it back as plain segments.
+	mockDP1.EXPECT().
+		ResolveSeriesCastPlan(ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(passthroughCastPlan).
+		AnyTimes()
+	handler := commandrouter.New(
+		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
+		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	var displayExpression string
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, "resolveRecentlyPlayed")
+			return map[string]interface{}{"message": map[string]interface{}{
+				"ok": true, "status": "ok", "item": map[string]interface{}{
+					"id": "retained-work", "source": "https://example.test/retained", "license": "open",
+					"title": strings.Repeat("é", 300),
+				},
+			}}, nil
+		}).Times(1)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			displayExpression = params["expression"].(string)
+			return playerOkResponse(), nil
+		}).Times(1)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_PLAY_RECENTLY_PLAYED,
+		Arguments: map[string]interface{}{"recordId": "rp-42"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "rp-42", result.(map[string]interface{})["recordId"])
+	assert.Contains(t, displayExpression, "displayPlaylist")
+	item := firstCastItem(t, displayExpression)
+	assert.Equal(t, "https://example.test/retained", item["source"])
+	// The replay document's own title is cut to the schema's 200 characters.
+	assert.Contains(t, displayExpression, `"title":"`+strings.Repeat("é", 200)+`"`)
+}
+
 // firstCastItem digs the first playlist item out of the CDP expression the
 // handler sent, which has the shape window.handleCDPRequest(<command JSON>).
 func firstCastItem(t *testing.T, expression string) map[string]interface{} {
@@ -1098,7 +1160,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 			},
 		},
 	}
-	playlistBytes := []byte(`{"items":[],"dynamicQueries":[]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","items":[],"dynamicQueries":[{"endpoint":"https://api.example.com/graphql","params":{"query":"test query"}}]}`)
 	mockPlaylist := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Items: []dp1playlist.PlaylistItem{},
@@ -1185,7 +1247,8 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 			},
 		},
 	}
-	playlistBytes := []byte(`{"items":[]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","items":[],"dynamicQuery":{"profile":"graphql-v1","endpoint":"https://api.example.com/graphql",` +
+		`"query":"query { items { source } }","responseMapping":{"itemsPath":"data.items","itemSchema":"dp1/1.0"}}}`)
 	mockPlaylist := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Items: []dp1playlist.PlaylistItem{},

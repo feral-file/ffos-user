@@ -5,6 +5,7 @@ package playlistschedule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -704,6 +705,19 @@ func (s *scheduler) restorePersisted() {
 	}
 	if source == nil || source.IsZero() {
 		return
+	}
+	// A stored inline dynamic document is a document this device would play
+	// again, written possibly by a build that did not check it.
+	if source.DynamicPlaylist != nil {
+		raw, err := json.Marshal(source.DynamicPlaylist)
+		if err == nil {
+			// Only an inline cast is persisted as a document.
+			err = dp1.CheckInlineCast(s.logger, "persisted displayAt source", raw)
+		}
+		if err != nil {
+			s.logger.Warn("Dropping the persisted displayAt source", zap.Error(err))
+			return
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

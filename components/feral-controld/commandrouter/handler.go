@@ -440,6 +440,9 @@ func (h *handler) currentGeneration() uint64 {
 	return h.sessionGeneration()
 }
 
+// maxPlaylistTitle is the schema's maxLength for a playlist title.
+const maxPlaylistTitle = 200
+
 func New(
 	executor devicectl.Executor,
 	cdp cdp.CDP,
@@ -680,6 +683,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		title, _ := item["title"].(string)
 		if title == "" {
 			title = "Recently played"
+		}
+		// The playlist title is at most 200 characters; an item's is not
+		// bounded, and this document is controld's own to write.
+		if runes := []rune(title); len(runes) > maxPlaylistTitle {
+			title = string(runes[:maxPlaylistTitle])
 		}
 		// Extracting one item invalidates the original full-playlist
 		// signature. Preserve only the applicable defaults, which carry
@@ -1026,7 +1034,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
-				dp1.AuditDocumentAsync(h.logger, "dp1_call", playlistBytes)
+				// Schema conformance, signatures aside. Replay and the series
+				// re-display re-enter here too. Inline documents carry the
+				// temporary ff-app exemption (dp1/inline_exemption.go).
+				if err = dp1.CheckInlineCast(h.logger, "dp1_call", playlistBytes); err != nil {
+					err = playlistInvalid(err)
+					return nil, err
+				}
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}

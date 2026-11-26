@@ -17,6 +17,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 )
 
+// Playlist ids of the documents fetched here.
+const (
+	playlistUUID1 = "11111111-1111-4111-8111-111111111111"
+	playlistUUID2 = "22222222-2222-4222-8222-222222222222"
+	playlistUUID3 = "33333333-3333-4333-8333-333333333333"
+)
+
 // servePlaylistFromBody wires the HTTP/IO/JSON mocks to hand back body,
 // decoded by the real encoding/json (unlike series_test.go's servePlaylist,
 // which fakes the decode by assigning Items directly) — so a document's own
@@ -57,8 +64,8 @@ func allowRawItemModeDecode(ts *testSetup) {
 // 96 editions instead of narrowing to one.
 func multiEditionsBody(playlistID string) string {
 	return `{"items":[` +
-		`{"id":"a","source":"https://example.com/a.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"a"}}},` +
-		`{"id":"b","source":"https://example.com/b.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"b"}}}` +
+		`{"id":"` + uid("a") + `","source":"https://example.com/a.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"a"}}},` +
+		`{"id":"` + uid("b") + `","source":"https://example.com/b.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"b"}}}` +
 		`],"limit":255,"offset":0,"playlistId":"` + playlistID + `","series":{"chain":"evm","seriesId":"387","artworkModel":"multi"},"total":2}`
 }
 
@@ -66,8 +73,8 @@ func multiEditionsBody(playlistID string) string {
 // (editions that genuinely differ), where full/first is a real choice.
 func multiUniqueEditionsBody(playlistID string) string {
 	return `{"items":[` +
-		`{"id":"a","source":"https://example.com/a.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"a"}}},` +
-		`{"id":"b","source":"https://example.com/b.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"b"}}}` +
+		`{"id":"` + uid("a") + `","source":"https://example.com/a.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"a"}}},` +
+		`{"id":"` + uid("b") + `","source":"https://example.com/b.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"b"}}}` +
 		`],"limit":255,"offset":0,"playlistId":"` + playlistID + `","series":{"chain":"evm","seriesId":"387","artworkModel":"multi_unique"},"total":2}`
 }
 
@@ -84,11 +91,11 @@ func TestDP1_ProcessPlaylistURLForCast_NarrowsMultiArtworkModelToRepresentative(
 	defer ts.teardown()
 
 	url := "https://feed.example/exhibition.json"
-	body := `{"dpVersion":"1.1.0","id":"playlist-1","title":"t","items":[` +
-		`{"id":"item-series","slug":"scrampled-auw","title":"Scrampled","source":"https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":"387"}}}` +
+	body := `{"dpVersion":"1.1.0","id":"` + playlistUUID1 + `","title":"t","items":[` +
+		`{"id":"` + itemSeriesID + `","slug":"scrampled-auw","title":"Scrampled","source":"https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":"387"}}}` +
 		`]}`
 	servePlaylistFromBody(ts, url, body)
-	serveEditions(ts, "playlist-1", "item-series", multiEditionsBody("playlist-1"))
+	serveEditions(ts, playlistUUID1, itemSeriesID, multiEditionsBody(playlistUUID1))
 	allowRawItemModeDecode(ts)
 
 	result, plan, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
@@ -96,7 +103,7 @@ func TestDP1_ProcessPlaylistURLForCast_NarrowsMultiArtworkModelToRepresentative(
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1,
 		"a multi series (identical editions) must narrow to its representative regardless of mode, not play every catalog edition")
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, itemSeriesID, result.Items[0].ID)
 	assert.True(t, plan.HasSeriesGroups(),
 		"the resolved plan must be returned so a later setSeriesPlayback can re-narrow it without a second catalog call")
 }
@@ -112,11 +119,11 @@ func TestDP1_ProcessPlaylistURLForCast_HonorsDocumentSeriesPlaybackFromFetchedBy
 	defer ts.teardown()
 
 	url := "https://feed.example/exhibition-2.json"
-	body := `{"dpVersion":"1.1.0","id":"playlist-2","title":"t","items":[` +
-		`{"id":"item-series","slug":"scrampled-auw","title":"Scrampled","source":"https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4","seriesPlayback":"first","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":"387"}}}` +
+	body := `{"dpVersion":"1.1.0","id":"` + playlistUUID2 + `","title":"t","items":[` +
+		`{"id":"` + itemSeriesID + `","slug":"scrampled-auw","title":"Scrampled","source":"https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4","seriesPlayback":"first","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":"387"}}}` +
 		`]}`
 	servePlaylistFromBody(ts, url, body)
-	serveEditions(ts, "playlist-2", "item-series", multiUniqueEditionsBody("playlist-2"))
+	serveEditions(ts, playlistUUID2, itemSeriesID, multiUniqueEditionsBody(playlistUUID2))
 	allowRawItemModeDecode(ts)
 
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
@@ -133,8 +140,8 @@ func manyEditionsBody(playlistID string, n int, artworkModel string) string {
 	items := make([]string, n)
 	for i := range items {
 		items[i] = fmt.Sprintf(
-			`{"id":"e%d","source":"https://example.com/%d.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"%d"}}}`,
-			i, i, i)
+			`{"id":"%s","source":"https://example.com/%d.mp4","provenance":{"type":"onChain","contract":{"chain":"evm","address":"0x28b51BA8B990c48CB22cB6EF0ad5415fdBA5210C","tokenId":"%d"}}}`,
+			uid(fmt.Sprintf("e%d", i)), i, i)
 	}
 	return fmt.Sprintf(
 		`{"items":[%s],"limit":255,"offset":0,"playlistId":"%s","series":{"chain":"evm","seriesId":"387","artworkModel":"%s"},"total":%d}`,
@@ -256,11 +263,11 @@ func TestDP1_ProcessPlaylistURLForCast_FullMultiUniquePlaysEveryEdition(t *testi
 	defer ts.teardown()
 
 	url := "https://feed.example/exhibition-3.json"
-	body := `{"dpVersion":"1.1.0","id":"playlist-3","title":"t","items":[` +
-		`{"id":"item-series","slug":"scrampled-auw","title":"Scrampled","source":"https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":"387"}}}` +
+	body := `{"dpVersion":"1.1.0","id":"` + playlistUUID3 + `","title":"t","items":[` +
+		`{"id":"` + itemSeriesID + `","slug":"scrampled-auw","title":"Scrampled","source":"https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4","provenance":{"type":"seriesRegistry","contract":{"chain":"evm","seriesId":"387"}}}` +
 		`]}`
 	servePlaylistFromBody(ts, url, body)
-	serveEditions(ts, "playlist-3", "item-series", multiUniqueEditionsBody("playlist-3"))
+	serveEditions(ts, playlistUUID3, itemSeriesID, multiUniqueEditionsBody(playlistUUID3))
 	allowRawItemModeDecode(ts)
 
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)

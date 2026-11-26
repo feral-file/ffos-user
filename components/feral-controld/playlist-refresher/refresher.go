@@ -2250,6 +2250,9 @@ func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func
 	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
 		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
 	}
+	if err := dp1.CheckPlayable(r.logger, "offline cache", raw); err != nil {
+		return nil, fmt.Errorf("offline cache: cached playlist for %s: %w", url, err)
+	}
 	var playlist *dp1.Playlist
 	if err := r.json.Unmarshal(raw, &playlist); err != nil {
 		return nil, fmt.Errorf("offline cache: parse cached playlist for %s: %w", url, err)

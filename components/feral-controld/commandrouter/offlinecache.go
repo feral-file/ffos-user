@@ -743,7 +743,9 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 			return nil, nil, fmt.Errorf("failed to marshal playlist: %w", err)
 		}
 
-		dp1.AuditDocumentAsync(h.logger, "dp1_call", playlistBytes)
+		if err := dp1.CheckInlineCast(h.logger, "dp1_call", playlistBytes); err != nil {
+			return nil, nil, err
+		}
 		var playlist *dp1.Playlist
 		if err := h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 			return nil, nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
@@ -893,6 +895,9 @@ func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	}
 	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
 		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
+	}
+	if err := dp1.CheckPlayable(h.logger, "offline cache", raw); err != nil {
+		return nil, fmt.Errorf("offline cache: cached playlist for %s: %w", url, err)
 	}
 	var playlist *dp1.Playlist
 	if err := h.json.Unmarshal(raw, &playlist); err != nil {

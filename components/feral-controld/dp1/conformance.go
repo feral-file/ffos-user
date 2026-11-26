@@ -3,6 +3,7 @@ package dp1
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
@@ -21,93 +22,123 @@ const EmittedDPVersion = "1.1.0"
 
 var dpVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
-// maxAuditPointers bounds how many violation locations one audit line carries.
-const maxAuditPointers = 10
+// maxSchemaPointers bounds how many violation locations one refusal names.
+const maxSchemaPointers = 10
 
-// AuditDocument reports how a received DP-1 document departs from the spec
-// and returns nothing the caller may act on.
+// SchemaError is the refusal of a document that does not conform to the DP-1
+// schema. It carries JSON pointers only: the validator's messages can quote
+// document values, which are untrusted and may be large.
+type SchemaError struct{ Locations []string }
+
+func (e *SchemaError) Error() string {
+	return fmt.Sprintf("%v: schema at %s", ErrPlaylistInvalid, strings.Join(e.Locations, ", "))
+}
+
+// Unwrap carries the refusal to the transports as playlistInvalid.
+func (e *SchemaError) Unwrap() error { return ErrPlaylistInvalid }
+
+// placeholderSignatures stands in for whatever the document carries while the
+// schema runs. A signature is not required of a playlist this device plays,
+// and a bad one never blocks playback: whether signatures are checked, and
+// what the verdict means, belongs to sigverify and its settings.
+var placeholderSignatures = json.RawMessage(`[{"alg":"ed25519","kid":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",` +
+	`"ts":"2025-01-01T00:00:00Z","payload_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000",` +
+	`"role":"feed","sig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]`)
+
+// placeholderItems stands in for the empty list of a legacy dynamicQueries
+// playlist, see CheckPlayable.
+var placeholderItems = json.RawMessage(`[{"source":"https://example.com/"}]`)
+
+// CheckPlayable refuses a playlist document that does not conform to the DP-1
+// schema (core with the playlists and content-rating extensions). Every path
+// that plays a document calls it, on the bytes as received or as stored,
+// before anything reshapes them.
 //
-// Report-only by design (owner constraint): the device must keep playing every
-// document it plays today, so a malformed dpVersion, a major mismatch, or a
-// schema violation (missing required members, empty items, wrong types) is
-// logged and never refuses the document. Only JSON pointers are logged: the
-// validator's messages can quote document values, which are untrusted and may
-// be large. Run on the bytes as received, before any reshaping, so the report
-// describes the sender's document and not controld's rewrite of it.
-func AuditDocument(logger *zap.Logger, source string, raw []byte) {
-	if logger == nil {
-		return
+// Two allowances, both decided by the owner:
+//   - signatures are not judged (see placeholderSignatures);
+//   - a legacy `dynamicQueries` playlist may carry an empty `items`, which the
+//     schema allows only next to the spec's `dynamicQuery`.
+//
+// A dpVersion of another major is only logged (§12). The validator holds
+// dp1-go's process-wide lock for the whole pass, so concurrent commands queue
+// behind a large document.
+func CheckPlayable(logger *zap.Logger, source string, raw []byte) error {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+		return refuse(logger, source, []string{"/"})
 	}
-	auditDPVersion(logger, source, raw)
-	if err := dp1sdk.PlaylistWithPlaylistsAndContentRatingExtensionsSchemaValidate(raw); err != nil {
+	if logger != nil {
+		logMajorMismatch(logger, source, doc)
+	}
+	delete(doc, "signature")
+	doc["signatures"] = placeholderSignatures
+	if isEmptyLegacyDynamic(doc) {
+		doc["items"] = placeholderItems
+	}
+	checked, err := marshalNoEscape(doc)
+	if err != nil {
+		return refuse(logger, source, []string{"/"})
+	}
+	if err := dp1sdk.PlaylistWithPlaylistsAndContentRatingExtensionsSchemaValidate(checked); err != nil {
 		pointers := ValidationPointers(err)
-		if len(pointers) > maxAuditPointers {
-			pointers = pointers[:maxAuditPointers]
+		if len(pointers) > maxSchemaPointers {
+			pointers = pointers[:maxSchemaPointers]
 		}
-		logger.Warn("DP-1 document does not conform to the schema; playing it anyway",
+		return refuse(logger, source, pointers)
+	}
+	return nil
+}
+
+// checkItem reports whether one item conforms, for items controld takes from a
+// catalog or an indexer rather than from a playlist document.
+func checkItem(raw []byte) error {
+	doc, err := marshalNoEscape(map[string]any{
+		"dpVersion":  EmittedDPVersion,
+		"title":      "item",
+		"items":      []json.RawMessage{raw},
+		"signatures": placeholderSignatures,
+	})
+	if err != nil {
+		return err
+	}
+	if err := dp1sdk.PlaylistWithPlaylistsAndContentRatingExtensionsSchemaValidate(doc); err != nil {
+		return &SchemaError{Locations: ValidationPointers(err)}
+	}
+	return nil
+}
+
+func isEmptyLegacyDynamic(doc map[string]json.RawMessage) bool {
+	if _, spec := doc["dynamicQuery"]; spec {
+		return false
+	}
+	var queries, items []json.RawMessage
+	if json.Unmarshal(doc["dynamicQueries"], &queries) != nil || len(queries) == 0 {
+		return false
+	}
+	return json.Unmarshal(doc["items"], &items) == nil && items != nil && len(items) == 0
+}
+
+func refuse(logger *zap.Logger, source string, pointers []string) error {
+	if logger != nil {
+		logger.Warn("DP-1 document does not conform to the schema; refusing it",
 			zap.String("source", source), zap.Strings("pointers", pointers))
 	}
+	return &SchemaError{Locations: pointers}
 }
 
-// auditSlot lets one background audit run at a time. The schema validator
-// holds dp1-go's process-wide validation lock for a whole-document pass, so
-// running it inline would put that cost on the display path of the command
-// that carries the document. Off the path, the residual cost is that a
-// concurrent command's own schema check (the synchronous content-rating
-// fragment check shares that lock) can wait for one audit pass, bounded by one
-// document (<= MaxPlaylistBodyBytes). The audit is report-only, so skipping one
-// when another is in flight costs a log line, never behavior.
-var auditSlot = make(chan struct{}, 1)
-
-// AuditDocumentAsync runs AuditDocument off the caller's path, skipping it if
-// an audit is already running. raw must not be mutated afterwards (callers
-// hold the received bytes read-only).
-func AuditDocumentAsync(logger *zap.Logger, source string, raw []byte) {
-	select {
-	case auditSlot <- struct{}{}:
-		go func() {
-			defer func() { <-auditSlot }()
-			AuditDocument(logger, source, raw)
-		}()
-	default:
-		if logger != nil {
-			logger.Debug("DP-1 audit skipped: another audit is running", zap.String("source", source))
-		}
-	}
-}
-
-// WaitForAudits blocks until no background audit is running. It is a
-// shutdown/teardown seam: an audit writes through the logger it was handed, so
-// a caller whose logger has a bounded lifetime (a test's zaptest logger, which
-// panics or races once the test has returned) drains audits before releasing
-// it. Taking the slot is enough because AuditDocumentAsync takes it
-// synchronously, before the goroutine starts, so an audit launched before this
-// call is either holding the slot or finished. It does not stop new audits;
-// call it once the source of documents has gone quiet. Production never needs
-// it: the process logger outlives every audit.
-func WaitForAudits() {
-	auditSlot <- struct{}{}
-	<-auditSlot
-}
-
-func auditDPVersion(logger *zap.Logger, source string, raw []byte) {
-	var head struct {
-		DPVersion *string `json:"dpVersion"`
-	}
-	if err := json.Unmarshal(raw, &head); err != nil || head.DPVersion == nil {
-		logger.Warn("DP-1 document has no readable dpVersion", zap.String("source", source))
+// logMajorMismatch warns when the document's major differs from this build's.
+// A malformed or missing dpVersion is the schema's to refuse.
+func logMajorMismatch(logger *zap.Logger, source string, doc map[string]json.RawMessage) {
+	var v string
+	if json.Unmarshal(doc["dpVersion"], &v) != nil || !dpVersionPattern.MatchString(v) {
 		return
 	}
-	v := *head.DPVersion
-	// ParseDPVersion is lenient ("1.0" parses); the schema is not.
 	parsed, err := dp1sdk.ParseDPVersion(v)
-	if err != nil || !dpVersionPattern.MatchString(v) {
-		// Report the JSON pointer only: a malformed value is sender-controlled
-		// document content and must not reach device logs.
-		logger.Warn("DP-1 document dpVersion is not a version", zap.String("source", source), zap.String("pointer", "/dpVersion"))
+	if err != nil {
 		return
 	}
 	if err := dp1sdk.WarnMajorMismatch(parsed, SupportedMajor); err != nil {
+		// The parsed major, never the sender-sized string.
 		logger.Warn("DP-1 document major version differs from this build; playing it anyway",
 			zap.String("source", source), zap.Uint64("major", parsed.Major()), zap.Uint64("supportedMajor", SupportedMajor))
 	}

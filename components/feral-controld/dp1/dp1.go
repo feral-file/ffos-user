@@ -625,13 +625,33 @@ func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlis
 	}
 
 	duration := defaultDurationSeconds(playlist)
-	newItems := buildPlaylistItems(duration, ffTokens)
+	newItems := d.conformingItems(playlist.ID, buildPlaylistItems(duration, ffTokens))
 
 	// Always replace the new items to keep the playlist up to date.
 	// FIXME: This line will ignore the case that playlist has both curated and dynamic items.
 	playlist.Items = newItems
 
 	return &playlist, nil
+}
+
+// conformingItems drops the items built from indexer tokens that fail the
+// schema (a token with no preview URL has no `source`). Only the item goes:
+// the rest of the playlist plays.
+func (d *dp1) conformingItems(playlistID string, items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	kept := make([]dp1playlist.PlaylistItem, 0, len(items))
+	for _, item := range items {
+		raw, err := json.Marshal(item)
+		if err == nil {
+			err = checkItem(raw)
+		}
+		if err != nil {
+			d.logger.Warn("dropping an indexer item that does not conform to the schema",
+				zap.String("playlist_id", playlistID), zap.String("item_id", item.ID), zap.Error(err))
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 func defaultDurationSeconds(playlist Playlist) float64 {
@@ -687,7 +707,9 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
-	AuditDocumentAsync(d.logger, "playlistUrl", bytes)
+	if err := CheckPlayable(d.logger, "playlistUrl", bytes); err != nil {
+		return Playlist{}, nil, err
+	}
 
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)

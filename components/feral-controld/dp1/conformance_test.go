@@ -3,11 +3,13 @@ package dp1
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -30,39 +32,81 @@ func TestEmittedDPVersionMatchesSchemaPattern(t *testing.T) {
 	}
 }
 
-func TestAuditDocumentReportsAndNeverRejects(t *testing.T) {
+func TestCheckPlayable(t *testing.T) {
+	const item = `{"source":"https://example.com/a.html"}`
+	const head = `{"dpVersion":"1.1.0","title":"t",`
 	tests := []struct {
-		name     string
-		doc      string
-		wantWarn []string
+		name    string
+		doc     string
+		pointer string // "" means playable
 	}{
-		{"conformant", string(conformantFixture(t)), nil},
-		{"short version", `{"dpVersion":"1.0","title":"t","items":[{"source":"https://example.com/a.html"}]}`, []string{"DP-1 document dpVersion is not a version"}},
-		{"major mismatch", `{"dpVersion":"2.0.0","title":"t","items":[{"source":"https://example.com/a.html"}]}`, []string{"DP-1 document major version differs from this build; playing it anyway"}},
-		{"missing version", `{"title":"t","items":[{"source":"https://example.com/a.html"}]}`, []string{"DP-1 document has no readable dpVersion"}},
-		{"empty items", `{"dpVersion":"1.1.0","title":"t","items":[]}`, []string{"DP-1 document does not conform to the schema; playing it anyway"}},
+		{"signed fixture", string(conformantFixture(t)), ""},
+		{"unsigned", head + `"items":[` + item + `]}`, ""},
+		{"malformed signatures are not judged", head + `"items":[` + item + `],"signatures":[{"role":"nobody"}],"signature":7}`, ""},
+		{"no id, unknown member", head + `"items":[` + item + `],"futureMember":1}`, ""},
+		{"other major", `{"dpVersion":"2.0.0","title":"t","items":[` + item + `]}`, ""},
+		{"dynamicQuery with empty items", head + `"items":[],"dynamicQuery":{"profile":"graphql-v1","endpoint":"https://example.com/q","query":"query { items { source } }","responseMapping":{"itemsPath":"data.items","itemSchema":"dp1/1.1"}}}`, ""},
+		{"legacy dynamicQueries with empty items", head + `"items":[],"dynamicQueries":[{"endpoint":"https://example.com/q","params":{}}]}`, ""},
+		{"legacy dynamicQueries still needs a title", `{"dpVersion":"1.1.0","items":[],"dynamicQueries":[{"endpoint":"https://example.com/q"}]}`, "/"},
+		// The schema reports it as the dynamicQuery that would have allowed it.
+		{"empty items", head + `"items":[]}`, "/"},
+		{"short version", `{"dpVersion":"1.0","title":"t","items":[` + item + `]}`, "/dpVersion"},
+		{"missing version", `{"title":"t","items":[` + item + `]}`, "/"},
+		{"case variant does not satisfy required", `{"dpVersion":"1.1.0","Title":"t","items":[` + item + `]}`, "/"},
+		{"item without source", head + `"items":[{"title":"x"}]}`, "/items/0"},
+		{"item id not a uuid", head + `"items":[{"id":"work-1","source":"https://example.com/a"}]}`, "/items/0/id"},
+		{"not an object", `[]`, "/"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			core, logs := observer.New(zap.WarnLevel)
-			AuditDocument(zap.New(core), "test", []byte(tt.doc))
-			var got []string
-			for _, e := range logs.All() {
-				got = append(got, e.Message)
-			}
-			for _, w := range tt.wantWarn {
-				found := false
-				for _, g := range got {
-					found = found || g == w
+			err := CheckPlayable(zap.NewNop(), "test", []byte(tt.doc))
+			if tt.pointer == "" {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
 				}
-				if !found {
-					t.Errorf("missing warning %q, got %v", w, got)
-				}
+				return
 			}
-			if tt.wantWarn == nil && len(got) != 0 {
-				t.Errorf("unexpected warnings %v", got)
+			var schema *SchemaError
+			if !errors.As(err, &schema) || !errors.Is(err, ErrPlaylistInvalid) {
+				t.Fatalf("want a schema refusal, got %v", err)
+			}
+			if !slices.Contains(schema.Locations, tt.pointer) {
+				t.Errorf("want pointer %s, got %v", tt.pointer, schema.Locations)
 			}
 		})
+	}
+}
+
+// The refusal names locations, never what the sender wrote there.
+func TestCheckPlayableNeverCarriesValues(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	err := CheckPlayable(zap.New(core), "test", []byte(`{"dpVersion":"PRIVATE_CANARY","title":"t","items":[{"source":"PRIVATE_CANARY"}]}`))
+	if err == nil || strings.Contains(err.Error(), "PRIVATE_CANARY") {
+		t.Fatalf("error leaks or is missing: %v", err)
+	}
+	for _, e := range logs.All() {
+		if strings.Contains(fmt.Sprint(e.Message, e.ContextMap()), "PRIVATE_CANARY") {
+			t.Errorf("log leaks value: %v", e)
+		}
+	}
+}
+
+// A digits-only dpVersion passes the pattern at any length (leading zeros), so
+// the major-mismatch warning must log the parsed major, never the raw string.
+func TestMajorMismatchLogsBoundedValue(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	doc := `{"dpVersion":"` + strings.Repeat("0", 100000) + `2.0.0","title":"t","items":[{"source":"https://example.com/a.html"}]}`
+	if err := CheckPlayable(zap.New(core), "test", []byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	mm := logs.FilterMessage("DP-1 document major version differs from this build; playing it anyway")
+	if mm.Len() != 1 {
+		t.Fatalf("want one major-mismatch warning, got %v", logs.All())
+	}
+	for _, f := range mm.All()[0].Context {
+		if len(f.String) > 64 {
+			t.Errorf("field %q carries %d bytes of sender content", f.Key, len(f.String))
+		}
 	}
 }
 
@@ -118,98 +162,9 @@ func TestMarshalLeavesHTMLEscapingToTheOuterEncoder(t *testing.T) {
 	}
 }
 
-func TestAuditDocumentAsyncRunsOneAtATimeAndReleasesTheSlot(t *testing.T) {
-	core, logs := observer.New(zap.DebugLevel)
-	logger := zap.New(core)
-
-	auditSlot <- struct{}{} // another audit is "running"
-	AuditDocumentAsync(logger, "busy", []byte(`{}`))
-	<-auditSlot
-	if logs.FilterMessage("DP-1 audit skipped: another audit is running").Len() != 1 {
-		t.Fatalf("busy slot must skip the audit with a debug line: %v", logs.All())
-	}
-
-	AuditDocumentAsync(logger, "free", []byte(`{}`))
-	deadline := time.Now().Add(5 * time.Second)
-	for logs.FilterMessage("DP-1 document has no readable dpVersion").Len() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("audit did not run once the slot was free")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	for len(auditSlot) != 0 { // the goroutine releases the slot when it ends
-		if time.Now().After(deadline) {
-			t.Fatal("slot was not released")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // A malformed dpVersion is sender-controlled content: the warning names the
 // JSON pointer, never the value.
-func TestAuditDPVersionNeverLogsMalformedValue(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	AuditDocument(zap.New(core), "test", []byte(`{"dpVersion":"PRIVATE_CANARY","title":"t","items":[{"source":"https://example.com/a.html"}]}`))
-	for _, e := range logs.All() {
-		if strings.Contains(e.Message, "PRIVATE_CANARY") {
-			t.Errorf("message leaks value: %q", e.Message)
-		}
-		for _, f := range e.Context {
-			if strings.Contains(f.String, "PRIVATE_CANARY") {
-				t.Errorf("field %q leaks value: %q", f.Key, f.String)
-			}
-		}
-	}
-	if logs.FilterMessage("DP-1 document dpVersion is not a version").FilterField(zap.String("pointer", "/dpVersion")).Len() != 1 {
-		t.Errorf("want one warning carrying pointer /dpVersion, got %v", logs.All())
-	}
-}
-
 // A digits-only dpVersion passes the pattern at any length (leading zeros), so
 // the major-mismatch warning must log the parsed major, never the raw string.
-func TestAuditDPVersionMajorMismatchLogsBoundedValue(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	doc := `{"dpVersion":"` + strings.Repeat("0", 100000) + `.0.0","title":"t","items":[{"source":"https://example.com/a.html"}]}`
-	AuditDocument(zap.New(core), "test", []byte(doc))
-	mm := logs.FilterMessage("DP-1 document major version differs from this build; playing it anyway")
-	if mm.Len() != 1 {
-		t.Fatalf("want one major-mismatch warning, got %v", logs.All())
-	}
-	for _, f := range mm.All()[0].Context {
-		if len(f.String) > 64 {
-			t.Errorf("field %q carries %d bytes of sender content", f.Key, len(f.String))
-		}
-	}
-}
-
 // A missing top-level member is reported by the validator at the document
 // root (the empty-string location); the audit must keep that location, not log an empty list.
-func TestAuditDocumentKeepsRootSchemaLocation(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	AuditDocument(zap.New(core), "test", []byte(`{"dpVersion":"1.1.0","items":[{"source":"https://example.com/a.html"}]}`))
-	got := logs.FilterMessage("DP-1 document does not conform to the schema; playing it anyway")
-	if got.Len() != 1 {
-		t.Fatalf("want one schema warning, got %v", logs.All())
-	}
-	pointers := got.All()[0].ContextMap()["pointers"]
-	if list, _ := pointers.([]interface{}); len(list) == 0 {
-		t.Errorf("root violation lost its location: %v", pointers)
-	}
-}
-
-func TestWaitForAuditsReturnsOnlyAfterTheRunningAuditEnds(t *testing.T) {
-	auditSlot <- struct{}{} // an audit is "running"
-	done := make(chan struct{})
-	go func() { WaitForAudits(); close(done) }()
-	select {
-	case <-done:
-		t.Fatal("WaitForAudits returned while an audit held the slot")
-	case <-time.After(50 * time.Millisecond):
-	}
-	<-auditSlot
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForAudits did not return after the slot was released")
-	}
-}

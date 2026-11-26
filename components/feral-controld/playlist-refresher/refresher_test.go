@@ -843,6 +843,11 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 
 	playlistURL := "http://example.com/playlist.json"
 	cachedPlaylist := createMockPlaylistNoDynamic()
+	// The cached copy is read back through the schema, as a document that was
+	// fetched from a feed.
+	cachedPlaylist.DPVersion = "1.1.0"
+	cachedPlaylist.Title = "t"
+	cachedPlaylist.Items[0].ID = "22222222-2222-4222-8222-222222222222"
 	cachedRaw, err := json.Marshal(cachedPlaylist)
 	require.NoError(t, err)
 

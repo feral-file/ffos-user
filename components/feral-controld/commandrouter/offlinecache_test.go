@@ -152,7 +152,7 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmpty
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": item.Source}}}
-	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/index.html"}]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/index.html"}]}`)
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 	marshaled := []byte(`{"id":"playlist-1","resolved":true}`)
 
@@ -195,7 +195,7 @@ func TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody(t *testing.T
 	source := "data:text/html;base64,PGh0bWw+"
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
 	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": source}}}
-	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"` + source + `"}]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","id":"playlist-1","items":[{"id":"item-1","source":"` + source + `"}]}`)
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
@@ -386,7 +386,7 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 	defer ts.teardown()
 
 	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{}}
-	playlistBytes := []byte(`{"id":"playlist-1","items":[]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","id":"playlist-1","items":[{"source":"https://example.com/index.html"}]}`)
 	// Items explicitly non-nil-empty, not the zero value: resolveOfflineCachePlaylist
 	// now reaches it through dp1.CastPlan.Full() (feral-file/ffos-user#455, #453),
 	// which always allocates via make(...) — the same normalization dp1.CastPlan.Narrow
@@ -434,6 +434,7 @@ func TestCommandHandler_DownloadPlaylist_PersistsInlineManifest(t *testing.T) {
 	var playlistMap map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(`{
 		"dpVersion": "1.1.0",
+		"title": "t",
 		"id": "playlist-1",
 		"items": [{
 			"id": "item1",
@@ -928,10 +929,10 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).
 		Return(nil, assertError("no network")).Times(1)
 
-	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/item-1"},{"id":"item-2","source":"https://example.com/item-2"}]}`)
+	cachedRawBytes := []byte(`{"dpVersion":"1.1.0","title":"t","id":"` + testPlaylistUUID + `","items":[{"id":"` + testItemUUID1 + `","source":"https://example.com/item-1"},{"id":"` + testItemUUID2 + `","source":"https://example.com/item-2"}]}`)
 	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		ID:    "playlist-1",
-		Items: []dp1playlist.PlaylistItem{{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"}},
+		ID:    testPlaylistUUID,
+		Items: []dp1playlist.PlaylistItem{{ID: testItemUUID1, Source: "https://example.com/item-1"}, {ID: testItemUUID2, Source: "https://example.com/item-2"}},
 	}}
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), []offlinecache.SeriesSegment(nil), nil).Times(1)
 	ts.mockJSON.EXPECT().
