@@ -22,6 +22,13 @@ SUDO=""
 
 die() { echo "wifi-reading: $*" >&2; exit 1; }
 
+# zh <text>: the line again in Simplified Chinese, after the English one. Not
+# on the Linux text console, which cannot draw Chinese (unit-checks.sh has the
+# same rule and says why). ZH is the same choice for jq.
+zh() { [ "${TERM:-}" = linux ] || printf '%s\n' "$*"; }
+ZH=1
+[ "${TERM:-}" = linux ] && ZH=0
+
 wifi_iface() {
   local d
   for d in /sys/class/net/wl*; do
@@ -139,11 +146,12 @@ record() {
   for ((i = 1; i <= scans; i++)); do
     scan_once "$i" >>"$SAMPLES"
     count=$(gawk -F'\t' -v i="$i" '$1 == i' "$SAMPLES" | wc -l)
-    echo "  scan $i/$scans: $count access points"
+    echo "  scan $i/$scans: $count access points$( ((ZH)) && printf '   第 %s/%s 次扫描：%s 个接入点' "$i" "$scans" "$count")"
   done
   summarize <"$SAMPLES" >"$SUMMARY"
   lk=$(link)
   echo
+  zh "（下表每行一个接入点：频段、信号中位数/最小/最大 dBm、扫到次数、BSSID、SSID）"
   print_table <"$SUMMARY"
   if [ "$lk" != null ]; then
     jq -r '"\nconnected: \(.ssid) \(.bssid) \(.freq) MHz  rssi \(.rssi_dbm) dBm  avg \(.avg_rssi_dbm) dBm  \(.linkspeed_mbps) Mbit/s"' <<<"$lk"
@@ -169,7 +177,7 @@ record() {
 
 compare() {
   local base=$1 test=$2
-  jq -r -n --slurpfile b "$base" --slurpfile t "$test" '
+  jq -r -n --argjson zh "$ZH" --slurpfile b "$base" --slurpfile t "$test" '
     $b[0] as $b | $t[0] as $t |
     ($b.summary | map({key: (.band + "|" + .bssid), value: .}) | from_entries) as $bm |
     ($t.summary | map({key: (.band + "|" + .bssid), value: .}) | from_entries) as $tm |
@@ -187,9 +195,13 @@ compare() {
       "\(.band | . + "        "[:8 - length])\(.base | tostring | "      "[:6 - length] + .)\(.test | tostring | "      "[:6 - length] + .)\(fmt(.delta) | "      "[:6 - length] + .)  \(.bssid)  \(.ssid)"),
     "",
     ($rows | group_by(.band)[] |
-      "\(.[0].band): median delta \(fmt(map(.delta) | median)) dB over \(length) access points (test minus baseline; negative = weaker in test)"),
+      "\(.[0].band): median delta \(fmt(map(.delta) | median)) dB over \(length) access points (test minus baseline; negative = weaker in test)",
+      (if $zh == 1 then "\(.[0].band)：信号中位数变化 \(fmt(map(.delta) | median)) dB，共 \(length) 个接入点（本次减去基准；负数表示本次较弱）" else empty end)),
     (([$bm | keys[]] - [$tm | keys[]]) as $lost |
-      if ($lost | length) > 0 then "\nseen only in baseline (lost in test): \($lost | length) access points" else empty end)
+      if ($lost | length) > 0 then
+        "\nseen only in baseline (lost in test): \($lost | length) access points",
+        (if $zh == 1 then "只在基准中出现（本次没扫到）：\($lost | length) 个接入点" else empty end)
+      else empty end)
   '
 }
 
