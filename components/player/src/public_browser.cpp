@@ -1,4 +1,5 @@
 #include "ff/public_browser.hpp"
+#include "ff/capsule_engine.hpp"
 #include "ff/sketch_startup.hpp"
 
 #include <fcntl.h>
@@ -53,7 +54,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
                              bool render_ahead, bool allow_direct, Json streams, std::shared_ptr<const CaptureSnapshot> capture)
     : id(o.id),
-      backend_(backend),
+      backend_(capture && capture->capsule() ? "capsule-chromium" : backend),
       max_submissions_(render_ahead ? 2 : 1),
       playback_(p),
       presentation_(ui),
@@ -74,8 +75,19 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     std::filesystem::create_directories(profile_);
     auto source = occurrence_.item.at("source").get<std::string>();
     capture_ = std::move(capture);
+    std::string engine_digest, engine_version;
+    if (backend_ == "capsule-chromium") {
+      const auto& capsule = capture_->record.at("capsule");
+      engine_digest = capsule.value("engineSHA256", "");
+      engine_version = capsule.value("engineVersion", "");
+      require(valid_engine_digest(engine_digest) && !engine_version.empty(), "capsule_engine",
+              "Recast this signed capsule to load its engine pin");
+      require(offline_ && capture_replay_, "capsule_engine", "Pinned Chromium requires isolated replay");
+      require(std::filesystem::is_regular_file(capsule_engine_root(engine_digest) / "usr/lib/chromium/chromium"),
+              "capsule_engine", "Capsule Chromium engine is not installed: " + engine_digest);
+    }
     if (!offline_ && !capture_) {
-      const auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, source);
+      const auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, source, true);
       routed_document_ = route.url != source;
       navigation_url_ = gateway_document_url(source, route.url);
     }
@@ -154,7 +166,8 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                     const_cast<char*>(debugger ? "debug" : "normal"), const_cast<char*>(cage?"cage":"nested"),
                     const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),
                     const_cast<char*>(permissions.at("autoplay") == true ? "auto" : "gesture"),
-                    cache_key.data(), cache_bytes.data(), cache_days.data(), const_cast<char*>((capture_ ? capture_->root : bundle_root_).c_str()), nullptr};
+                    cache_key.data(), cache_bytes.data(), cache_days.data(), const_cast<char*>((capture_ ? capture_->root : bundle_root_).c_str()),
+                    engine_digest.empty() ? nullptr : engine_digest.data(), nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
@@ -173,9 +186,18 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     set_permission("local-network", permissions.at("localNetwork").get<bool>());
     set_permission("loopback-network", false);
     send("Browser.getVersion", Json::object(), "",
-         [this](const Json& value) { playback_.engine_status(value); });
-    send("Target.setAutoAttach",
-         {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}});
+         [this, engine_digest, engine_version](Json value) {
+           if (!engine_digest.empty()) {
+             if (value.value("product", "") != "Chrome/" + engine_version) {
+               fail("Installed capsule Chromium version differs from signed version " + engine_version);
+               return;
+             }
+             value["imageSHA256"] = engine_digest;
+           }
+           playback_.engine_status(id, value);
+           send("Target.setAutoAttach",
+                {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}});
+         });
   } catch (...) {
     if (pid_ > 0) {
       kill(-pid_, SIGKILL);
@@ -224,10 +246,10 @@ void PublicBrowser::send(const std::string& method, Json params, const std::stri
   replies_.emplace(sequence_,
                    Reply{method, session, reply ? std::move(reply) : [](const Json&) {}});
 }
-void PublicBrowser::fail(const std::string& error) {
+void PublicBrowser::fail(const std::string& error, bool retry_composited) {
   if (failed_) return;
   failed_ = true;
-  const bool retry_selected=direct() && playback_.desired() && playback_.desired()->id==id;
+  const bool retry_selected=retry_composited && direct() && playback_.desired() && playback_.desired()->id==id;
   if (!decoration_ && !retry_selected) playback_.failed(id, error);
   if (pid_ > 0) kill(-pid_, SIGKILL);
 }
@@ -253,7 +275,7 @@ void PublicBrowser::check_sketch_startup() {
 }
 void PublicBrowser::continue_live(const std::string& request, const std::string& session, const Json& network) {
   auto url = network.at("url").get<std::string>();
-  auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, url);
+  auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, url, true);
   Json params = {{"requestId", request}};
   if (route.url != url) params["url"] = route.url;
   if (!route.user_agent.empty()) {
@@ -282,7 +304,10 @@ void PublicBrowser::message(const Json& m) {
         auto text = m.at("error").value("message", "");
         // This optional read may race navigation or a disabled scripting
         // context. Only an affirmative bootstrap result can fail an artwork.
-        if (reply.method == "Runtime.evaluate") return;
+        if (reply.method == "Runtime.evaluate") {
+          reply.callback(Json{{"exceptionDetails", m.at("error")}});
+          return;
+        }
         // A short-lived worker/popup can close while its typed setup is queued.
         // Its stale session cannot invalidate the main artwork document.
         if (reply.session != session_ &&
@@ -376,11 +401,15 @@ void PublicBrowser::message(const Json& m) {
     const auto aux = context.value("auxData", Json::object());
     if (aux.value("isDefault", false) && aux.value("frameId", "") == main_frame_)
       main_world_ = context.at("id");
-  } else if (routed_document_ && session == session_ && !loaded_ && method == "Runtime.exceptionThrown") {
+  } else if (routed_document_ && session == session_ && method == "Runtime.exceptionThrown") {
     const auto& details = p.at("exceptionDetails");
     if (main_world_ && details.value("executionContextId", 0) == main_world_ &&
-        details.value("exception", Json::object()).value("className", "") == "ReferenceError")
-      missing_init_binding_ = true;
+        details.value("exception", Json::object()).value("className", "") == "ReferenceError") {
+      const auto description = details.at("exception").value("description", "");
+      if (description.starts_with("ReferenceError: fxhash is not defined") ||
+          description.starts_with("ReferenceError: fxrand is not defined"))
+        missing_init_binding_ = true;
+    }
   } else if (routed_document_ && session == session_ && method == "Audits.issueAdded") {
     const auto& issue = p.at("issue");
     if (issue.value("code", "") == "ContentSecurityPolicyIssue") {
@@ -395,6 +424,9 @@ void PublicBrowser::message(const Json& m) {
     const auto& frame = p.at("frame");
     if (!frame.contains("parentId")) {
       ++document_generation_;
+      checking_bootstrap_ = false;
+      loaded_ = false;
+      started_ = std::chrono::steady_clock::now();
       check_sketch_startup_ = false;
       main_world_ = 0;
       missing_init_binding_ = blocked_init_script_ = false;
@@ -458,11 +490,26 @@ void PublicBrowser::message(const Json& m) {
     auto mime = response.value("mimeType", "");
     Json classified = capture_ ? capture_->render_item(occurrence_.item) : occurrence_.item;
     classified["mimeType"] = mime;
-    if (native_media(classified)) resolved_native_mime = mime;
+    if (backend_ != "capsule-chromium" && native_media(classified)) resolved_native_mime = mime;
   } else if (method == "Page.lifecycleEvent" && (!bundled_ || decoration_) && session == session_ &&
              p.value("name", "") == "load" && p.value("frameId", "") == main_frame_) {
     if(document_url_.empty() || document_url_=="about:blank")return;
     loaded_ = true;
+    if (routed_document_) {
+      checking_bootstrap_ = true;
+      send("Runtime.evaluate", {{"expression",
+           "/\\bvar\\s+fxrand\\b/.test(document.querySelector('script#fxhash-snippet:not([src])')?.textContent || '') && "
+           "typeof fxhash === 'undefined' && typeof fxrand === 'undefined'"},
+           {"returnByValue", true}, {"throwOnSideEffect", true}, {"silent", true}, {"timeout", 250}},
+           session_, [this, generation = document_generation_](const Json& result) {
+             if (generation != document_generation_) return;
+             checking_bootstrap_ = false;
+             if (result.value("result", Json::object()).value("value", false) ||
+                 (result.contains("exceptionDetails") && blocked_init_script_ && missing_init_binding_))
+               fail(blocked_init_script_ ? "Artwork bootstrap blocked by gateway Content-Security-Policy"
+                                         : "Artwork edition bootstrap did not initialize", false);
+           });
+    }
     loaded_at_=std::chrono::steady_clock::now();
     navigation_load_ns_=static_cast<uint64_t>(p.value("timestamp",0.)*1e9);
     load_frame_ = direct()?direct_frames_:frames.count;
@@ -651,7 +698,7 @@ void PublicBrowser::poll() {
       }
     }
     if(direct()){
-      if(loaded_ && !window_admitted_ && playback_.desired() && playback_.desired()->id==id &&
+      if(!failed_ && loaded_ && !checking_bootstrap_ && !window_admitted_ && playback_.desired() && playback_.desired()->id==id &&
          playback_.overlay().is_null() && !playback_.service_failure() && !playback_.thermal_hold()){
         const char show=1;
         window_admitted_=::send(admission_fd_,&show,1,MSG_DONTWAIT|MSG_NOSIGNAL)==1;
@@ -766,6 +813,7 @@ void PublicBrowser::poll() {
   }
 }
 bool PublicBrowser::has_ready_frame() const {
+  if (checking_bootstrap_) return false;
   if(direct())return !failed_ && resolved_native_mime.empty() && loaded_ && navigation_load_ns_ && last_presentation_ns_>=navigation_load_ns_;
   return !failed_ && resolved_native_mime.empty() && loaded_ && frames.count > load_frame_ &&
          frames.latest().display_revision == occurrence_.display_revision;

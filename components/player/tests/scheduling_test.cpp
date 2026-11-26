@@ -17,6 +17,10 @@ int main(){
     {
       ff::Store store(path);ff::Playback p(store);p.tick(1000,1000);
       p.command("playback.replace",{{"playlist",playlist()}});auto id=p.desired()->id;p.committed(id);p.presented(id);
+      p.packaged_engine({{"identity", "packaged"}});
+      p.engine_status(id, {{"imageSHA256", "current"}});
+      p.engine_status("unrelated-worker", {{"imageSHA256", "stale"}});
+      check(p.snapshot()["engine"].value("imageSHA256","") == "current", "Unrelated worker replaced the selected engine");
       p.command("schedule.set",{{"playlist",playlist("mature")},{"atMs",2000}});
       p.tick(1001,2000);
       check(p.desired()->id==id&&p.visible()->id==id,"Blocked schedule must retain presentation");
@@ -41,6 +45,11 @@ int main(){
       p.tick(10002,10000);
       check(p.generation()==generation+1&&p.snapshot()["scheduleOutcome"]["outcome"]=="applied","Due schedule must retry after storage recovers");
       check(!p.visible(),"Applied schedule must not claim presentation");
+      auto applied_id = p.desired()->id;
+      p.packaged_engine({{"identity", "packaged"}});
+      p.engine_status(applied_id, {{"imageSHA256", "previous"}});
+      p.command("playback.replace", {{"playlist", playlist()}});
+      check(p.snapshot()["engine"].value("identity", "") == "packaged", "New selection retained previous engine pin");
       auto retained=p.state();
       try{p.command("playback.replace",{{"playlist",playlist()},{"playlistUrl",std::string(17000,'x')}});throw std::runtime_error("Oversized URL accepted");}
       catch(const ff::Error& error){check(error.code=="playlist_invalid","Wrong URL admission error");}

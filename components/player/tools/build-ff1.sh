@@ -57,7 +57,7 @@ PYTHON
 find "$stage/usr" -type f -perm /111 | sort | sed "s|$stage||" > "$trial/installed-executables.txt"
 while IFS= read -r executable; do
   case "$executable" in
-    /usr/lib/ff-player-native/ff-player-native|/usr/lib/ff-player-native/chrome-sandbox|/usr/lib/ff-player-native/chrome_crashpad_handler|*.so|*.so.*) ;;
+    /usr/lib/ff-player-native/ff-player-native|/usr/lib/ff-player-native/install-capsule-engine.sh|/usr/lib/ff-player-native/chrome-sandbox|/usr/lib/ff-player-native/chrome_crashpad_handler|*.so|*.so.*) ;;
     *) echo "Unexpected executable: $executable" >&2; exit 1 ;;
   esac
 done < "$trial/installed-executables.txt"

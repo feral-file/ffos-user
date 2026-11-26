@@ -83,16 +83,10 @@ var DefaultHosts = []string{
 // DefaultReplacementGateway is where `/ipfs/<cid>` requests bound for a
 // retired host are sent instead.
 //
-// Filebase is the FETCHING public gateway the indexer's own pool falls back
-// to (ff-indexer-v2 `FF_INDEXER_URI_IPFS_GATEWAYS`), and it is the one
-// verified to return the bytes to a native fetch on 2026-09-26 while ipfs.io
-// returned 429. It is deliberately NOT `ipfs.feralfile.com`: that node runs
-// `Gateway.NoFetch=true`, so it can only serve what Feral File itself pinned,
-// and the retired-gateway URLs on a device are overwhelmingly external
-// tokens (objkt, fxhash) that it does not hold (feral-file/feral-file#3500
-// records that decision). Overridable from config for the same reason the
-// host list is: the next gateway change must not need a release.
-const DefaultReplacementGateway = "https://ipfs.filebase.io"
+// The playback gateway must serve executable artwork documents as well as
+// assets. A successful byte probe does not check whether the page can start.
+// Filebase's shared gateway blocks the inline edition bootstrap in fxhash works.
+const DefaultReplacementGateway = "https://ipfs.raribleuserdata.com"
 
 // Policy answers "does this URL need its User-Agent replaced, and with
 // what". It is immutable after construction and safe for concurrent use;

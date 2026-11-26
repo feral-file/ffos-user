@@ -1036,9 +1036,15 @@ responses match and refuses to replace a different capture.
 
 Controld submits the playlist through its normal content policy and display
 path. The native player checks that its offline capture still matches the
-requested archive digest, then uses the existing network-isolated offline
-replay and the installed renderer. The signed engine pin and reference PNG
-are kept in the capsule for reproduction checks.
+requested archive digest. Capsule playback uses the signed Chromium root filesystem in
+a network-isolated process. Install a trusted engine with
+`sudo /usr/lib/ff-player-native/install-capsule-engine.sh SHA256 ARCHIVE.tar.zst`.
+The installer checks the compressed archive digest before publishing its read-only
+contents under `/var/lib/ff-player-native/engines/SHA256`. A missing engine
+rejects the cast. Recast older imports to recover their pin from the signed archive.
+The player checks the running Chromium version before navigation and reports the
+engine digest in `runtime.engine.imageSHA256`. The reference PNG supports a
+separate deterministic render check.
 
 ## 5. On-disk format (simplified, no redundancy)
 

@@ -266,7 +266,7 @@ struct Pool {
     // Controld's older manifests omit CSP and repeated response headers.
     // They can supply native media bytes, but never synthesize a browser response.
     auto mime = found->value("contentType", found->value("sniffedContentType", ""));
-    if (!job.open_file && method == "GET" && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
+    if (!capture->capsule() && !job.open_file && method == "GET" && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
       reply.metadata = {{"nativeMime", mime}};
       return;
     }

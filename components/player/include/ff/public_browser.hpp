@@ -72,7 +72,7 @@ class PublicBrowser {
   bool routed_document_ = false, blocked_init_script_ = false, missing_init_binding_ = false;
   int main_world_ = 0;
   uint64_t document_generation_ = 0;
-  bool check_sketch_startup_ = false;
+  bool check_sketch_startup_ = false, checking_bootstrap_ = false;
   void check_sketch_startup();
   struct Pending {
     std::string data;
@@ -117,7 +117,7 @@ class PublicBrowser {
   bool continue_mixed_request(const std::string& session, const std::string& request);
   void continue_live(const std::string& request, const std::string& session, const Json& network);
   void message(const Json&);
-  void fail(const std::string&);
+  void fail(const std::string&, bool retry_composited = true);
 };
 void reap_public_browsers();
 }  // namespace ff

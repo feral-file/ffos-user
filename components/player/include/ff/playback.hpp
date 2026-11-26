@@ -74,7 +74,10 @@ class Playback {
   bool display_rejected() const { return rejection_until_ != 0 && rejection_generation_ == generation_; }
   Json runtime_notice() const { return selected_&&!runtime_notice_.is_null()&&runtime_notice_.value("occurrence","")==selected_->id?runtime_notice_:Json(nullptr); }
   void runtime_notice(const std::string& id,const std::string& message);
-  void engine_status(const Json& info) { engine_status_=info;++revision_; }
+  void packaged_engine(const Json& info) { packaged_engine_ = engine_status_ = info; ++revision_; }
+  void engine_status(const std::string& occurrence, const Json& info) {
+    if (selected_ && selected_->id == occurrence) { engine_status_ = info; ++revision_; }
+  }
   void media_status(const std::string& occurrence, const Json& status);
   void release_input();
   void defer_input_release(bool defer);
@@ -102,7 +105,7 @@ class Playback {
   InputRelease input_release_ = InputRelease::immediate;
   std::function<void(const std::string&, double)> seek_;
   Json media_status_ = nullptr;
-  Json engine_status_ = nullptr;
+  Json engine_status_ = nullptr, packaged_engine_ = nullptr;
   Json runtime_notice_ = nullptr;
   Json presentation_failure_ = nullptr;
   Json composition_ = nullptr;

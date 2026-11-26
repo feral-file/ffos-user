@@ -252,6 +252,7 @@ void Playback::select(bool recovering,bool skipping_failure) {
   eos_pending_ = false;
   selected_.reset();
   media_status_ = nullptr;
+  engine_status_ = packaged_engine_;
   ++revision_;
   if (thermal_hold_ || state_["playlist"].is_null() || state_["stopped"] == true || state_["sleeping"] == true) { presented_.reset(); return; }
   const auto& items = state_["playlist"]["items"];
