@@ -219,7 +219,10 @@ type relayer struct {
 	json       wrapper.JSON
 
 	// Internal state
-	endpoint         string
+	endpoint string
+	// deviceID is the v2 channel this carrier dials (NewV2): the device ID
+	// or thumb(devSig). Empty on the legacy relayer, which is how the two
+	// kinds are told apart throughout this file.
 	deviceID         string
 	session          *deviceSession
 	drops            *dropLog
@@ -481,8 +484,8 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 
-	// The v2 carrier is addressed by the device ID and never reads the claim:
-	// no topic goes into its URL or its logs.
+	// A v2 carrier is addressed by its channel and never reads the claim: no
+	// topic goes into its URL or its logs.
 	var connectURL, topicID string
 	var headers http.Header
 	if r.deviceID != "" {

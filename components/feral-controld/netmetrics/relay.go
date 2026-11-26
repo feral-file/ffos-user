@@ -15,14 +15,18 @@ import (
 // local file, never from the network.
 
 var (
+	// relayV2State counts the v2 carriers whose socket is up. The device
+	// dials two channels (keyed and device-ID, spec §10); "connected" is
+	// either, so one channel held full by a stranger does not read as the
+	// device being off v2.
 	relayV2State struct {
 		sync.RWMutex
-		connected bool
+		up int
 	}
 
 	relayV2Connected = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "relay_v2_connected",
-		Help: "1 while the v2 device-ID relay websocket is connected, 0 otherwise.",
+		Help: "1 while at least one v2 relay websocket (keyed or device-ID channel) is connected, 0 otherwise.",
 	})
 
 	registerDeviceStateOnce sync.Once
@@ -44,23 +48,29 @@ func init() {
 	registry.MustRegister(relayV2Connected)
 }
 
-// SetRelayV2Connected records the v2 relay socket state.
+// SetRelayV2Connected records one v2 carrier's socket going up or down. Each
+// carrier calls it once per connection and once per teardown of that
+// connection, so the calls pair up per carrier.
 func SetRelayV2Connected(connected bool) {
 	relayV2State.Lock()
 	defer relayV2State.Unlock()
-	relayV2State.connected = connected
-	v := 0.0
 	if connected {
+		relayV2State.up++
+	} else if relayV2State.up > 0 {
+		relayV2State.up--
+	}
+	v := 0.0
+	if relayV2State.up > 0 {
 		v = 1.0
 	}
 	relayV2Connected.Set(v)
 }
 
-// RelayV2Connected reports the cached v2 socket state for the LAN status.
+// RelayV2Connected reports whether any v2 carrier is up, for the LAN status.
 func RelayV2Connected() bool {
 	relayV2State.RLock()
 	defer relayV2State.RUnlock()
-	return relayV2State.connected
+	return relayV2State.up > 0
 }
 
 // DeviceStateSources are the scrape-time readers for the retirement gauges.

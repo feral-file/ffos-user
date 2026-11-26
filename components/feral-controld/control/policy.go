@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 
@@ -14,10 +15,11 @@ type Route int
 const (
 	RouteLAN Route = iota
 	RouteRelayer
-	// RouteRelayV2 is the device-ID relay (ff-relayer#26). Its address is
-	// the public device ID and it authenticates nobody, so no plaintext
-	// command is ever admitted on it, in any state (§7.2 v2 column). Not
-	// wired to a transport yet: the v2 integration lands that.
+	// RouteRelayV2 is relay v2 (ff-relayer#26), on either of its channels.
+	// The relay authenticates nobody and one channel is addressed by the
+	// public device ID, so no plaintext command is admitted on it, with one
+	// exception: the request that asks an ownerless device to show its
+	// code (§7.2 v2 column, relayV2Plaintext).
 	RouteRelayV2
 )
 
@@ -46,9 +48,9 @@ func deny(code string) Decision { return Decision{Code: code} }
 // Before an owner exists the one owner-tier plaintext admitted is
 // showPairingQRCode, which puts the first-owner invitation on the physical
 // screen (§5.1); enroll itself is an envelope.
-func Policy(state State, lanOpen bool, route Route, cmd string, _ json.RawMessage) Decision {
+func Policy(state State, lanOpen bool, route Route, cmd string, req json.RawMessage) Decision {
 	if route == RouteRelayV2 {
-		return relayV2Refusal(state)
+		return relayV2Plaintext(state, cmd, req)
 	}
 	tier := TierOf(cmd)
 	switch state {
@@ -88,11 +90,11 @@ func Policy(state State, lanOpen bool, route Route, cmd string, _ json.RawMessag
 // device with no remote way to finish the reset its owner asked for; the
 // reset only wipes a device that was already being wiped.
 func (a *Authority) Policy(route Route, cmd string, req json.RawMessage) Decision {
-	// The v2 refusal runs before the retired exception: on the public
+	// The v2 rule runs before the retired exception: on the public
 	// device-ID relay anyone could otherwise wipe a device whose reset rolled
 	// back. The exception stays for the LAN and the legacy relayer.
 	if route == RouteRelayV2 {
-		return relayV2Refusal(a.State())
+		return relayV2Plaintext(a.State(), cmd, req)
 	}
 	if errors.Is(a.LockErr(), ErrRetired) {
 		// Retired: factoryReset on any route, and nothing else on any route
@@ -111,7 +113,37 @@ const (
 	cmdShowPairingQRCode = string(commands.CMD_SHOW_PAIRING_QR_CODE)
 )
 
-// relayV2Refusal is the public code for any plaintext on RouteRelayV2:
+// relayV2Plaintext is the whole plaintext policy of RouteRelayV2. It admits
+// one request: showPairingQRCode with exactly {"show":true,"purpose":"enroll"}
+// on a legacy device, which a phone that cannot reach the LAN sends to get
+// the first-owner code on the physical screen (§5.1). The code itself never
+// travels: whoever asks still needs sight of the screen.
+//
+// The shape is exact on purpose. show:false must never be admitted here: it
+// latches the pairing confirmation and takes the code down, so any stranger
+// on the public channel could stop a new device from ever showing one. A
+// request without purpose:"enroll" would repaint a claimed device's topic QR.
+//
+// Admission here is not sufficient: the transport also runs the executor's
+// precheck (claimed, already showing, per-boot budget) before anything runs.
+func relayV2Plaintext(state State, cmd string, req json.RawMessage) Decision {
+	if state == StateLegacy && cmd == cmdShowPairingQRCode && isShowEnrollCodeShape(req) {
+		return allow
+	}
+	return relayV2Refusal(state)
+}
+
+// isShowEnrollCodeShape: exactly the members show and purpose, show the
+// literal true and purpose "enroll".
+func isShowEnrollCodeShape(req json.RawMessage) bool {
+	m, err := strictObject(req, []string{"show", "purpose"}, nil)
+	if err != nil || string(bytes.TrimSpace(m["show"])) != "true" {
+		return false
+	}
+	return expectString(m, "purpose", "enroll") == nil
+}
+
+// relayV2Refusal is the public code for a refused plaintext on RouteRelayV2:
 // legacy has no owner yet (enroll first), locked refuses everything, and an
 // owned device wants an envelope.
 func relayV2Refusal(state State) Decision {

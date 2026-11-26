@@ -19,12 +19,16 @@ func V2Eligible(endpoint, deviceID string, authorityPresent bool) bool {
 	return endpoint != "" && authorityPresent && regexp.MustCompile(`^FF1-[A-Z0-9]{8}$`).MatchString(deviceID)
 }
 
-// NewV2 creates an independent carrier. The caller supplies only RouteRelayV2
-// gate handlers; no legacy system/topic messages may reach their state handlers.
-func NewV2(endpoint, deviceID string, dialer wrapper.WebSocketDialer, randomizer wrapper.Randomizer,
+// NewV2 creates an independent carrier on one relay channel. The device runs
+// two (spec §10): the keyed channel, thumb(devSig), and the device-ID
+// channel. Each is its own socket, session, redial backoff and peer set, so
+// a channel that is full or refused costs the other nothing. The caller
+// supplies only RouteRelayV2 gate handlers; no legacy system/topic messages
+// may reach their state handlers.
+func NewV2(endpoint, channel string, dialer wrapper.WebSocketDialer, randomizer wrapper.Randomizer,
 	clock wrapper.Clock, os wrapper.OS, json wrapper.JSON, logger *zap.Logger) Relayer {
 	r := New(endpoint, "", dialer, randomizer, clock, os, json, logger).(*relayer)
-	r.deviceID = deviceID
+	r.deviceID = channel
 	r.v2Wake = make(chan struct{}, 1)
 	return r
 }

@@ -138,3 +138,29 @@ func TestNoGaugeLabelCollidesWithRemoteWriteLabels(t *testing.T) {
 	}
 	assert.Equal(t, []string{"target_version"}, labelsOf["reset_target_version_info"])
 }
+
+// The device dials two v2 channels; the gauge and the status flag mean
+// "either is up", so losing one of them changes nothing.
+func TestRelayV2ConnectedMeansEitherCarrier(t *testing.T) {
+	steps := []struct {
+		connected bool
+		want      bool
+	}{
+		{true, true},   // keyed up
+		{true, true},   // device-ID up
+		{false, true},  // device-ID refused or dropped: still on v2
+		{false, false}, // keyed down too
+		{false, false}, // an unpaired teardown never goes negative
+		{true, true},
+		{false, false},
+	}
+	for i, s := range steps {
+		SetRelayV2Connected(s.connected)
+		assert.Equal(t, s.want, RelayV2Connected(), "step %d", i)
+		want := 0.0
+		if s.want {
+			want = 1
+		}
+		assert.Equal(t, map[string]float64{"": want}, gathered(t, "relay_v2_connected")["relay_v2_connected"], "step %d", i)
+	}
+}

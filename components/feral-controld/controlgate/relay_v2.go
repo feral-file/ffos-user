@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -69,7 +70,24 @@ type RelayV2 struct {
 	// type that went out on v2: v2's own dedupe, and what a new binding is
 	// sent. It is separate from the status poller's per-channel hashes.
 	latest map[string]json.RawMessage
+
+	// showCode is the precheck of the one plaintext request the v2 policy
+	// admits (SetShowCodeHook). nil refuses it.
+	showCode ShowCodeHook
 }
+
+// ShowCodeHook decides a policy-admitted "show your code" request before it
+// runs (devicectl's RelayShowCode). Exactly one result is set:
+//   - code: refuse with this public error code;
+//   - reply: answer with it and run nothing;
+//   - done: run the command, then call done.
+type ShowCodeHook func() (reply any, done func(), code string)
+
+// SetShowCodeHook wires the precheck. Call before serving. Without it the
+// request is refused: the policy alone never runs a command on v2, because
+// the policy cannot see whether the device is claimed, what is on screen, or
+// how many runs this boot has already spent.
+func (r *RelayV2) SetShowCodeHook(fn ShowCodeHook) { r.showCode = fn }
 
 // NewRelayV2 installs the transport binding hook on a dedicated v2 gate.
 func NewRelayV2(gate *Gate) *RelayV2 {
@@ -227,7 +245,8 @@ func (r *RelayV2) unbindCtl(ctl string) {
 }
 
 // Handle admits every v2 request through RouteRelayV2. It never dispatches legacy
-// system messages, plaintext commands or public-profile shortcuts.
+// system messages or public-profile shortcuts, and the only plaintext command
+// it runs is the one of plaintext below.
 func (r *RelayV2) Handle(ctx context.Context, payload relayer.Payload) error {
 	peer, ok := r.source(ctx)
 	// §10: a frame with no command is never answered, and nothing without a
@@ -246,18 +265,7 @@ func (r *RelayV2) Handle(ctx context.Context, payload relayer.Payload) error {
 	var result any
 	switch {
 	case *payload.Message.Command != control.CmdEnvelope:
-		// §7.2: every plaintext command is refused on v2, with the code of
-		// the current state (or invalid_message for an ambiguous message).
-		d, _ := r.gate.Plaintext(control.RouteRelayV2, commands.Command{
-			Type:         commands.Type(*payload.Message.Command),
-			RawArguments: payload.Message.RawRequest,
-			Ambiguous:    payload.Message.Ambiguous,
-		})
-		code := d.Code
-		if d.Allow {
-			code = control.CodeEnvelopeRequired // unreachable: the v2 policy allows nothing
-		}
-		result = json.RawMessage(control.PublicErrorBody(code))
+		result = r.plaintext(ctx, payload)
 	case payload.Message.Ambiguous:
 		result = json.RawMessage(control.PublicErrorBody(control.CodeBadEnvelope))
 	default:
@@ -273,6 +281,49 @@ func (r *RelayV2) Handle(ctx context.Context, payload relayer.Payload) error {
 		return err
 	}
 	return peer.Send(ctx, body)
+}
+
+// plaintext answers a non-envelope v2 request. §7.2: all of them are refused
+// with the code of the current state (or invalid_message for an ambiguous
+// message), except the one request that asks an ownerless device to show its
+// first-owner code, which runs behind the executor's precheck.
+//
+// The reply is in clear and unauthenticated, like the request: a controller
+// must not read it as proof of anything (any peer on the channel can forge
+// it). It exists so an honest sender is not left waiting.
+func (r *RelayV2) plaintext(ctx context.Context, payload relayer.Payload) json.RawMessage {
+	refuse := func(code string) json.RawMessage { return control.PublicErrorBody(code) }
+	d, cmd := r.gate.Plaintext(control.RouteRelayV2, commands.Command{
+		Type:         commands.Type(*payload.Message.Command),
+		RawArguments: payload.Message.RawRequest,
+		Ambiguous:    payload.Message.Ambiguous,
+	})
+	if !d.Allow {
+		return refuse(d.Code)
+	}
+	if r.showCode == nil {
+		return refuse(control.CodeEnrollmentRequired)
+	}
+	reply, done, code := r.showCode()
+	if code != "" {
+		return refuse(code)
+	}
+	if done != nil {
+		defer done()
+		var err error
+		if reply, err = r.gate.handler.Process(commands.FromController(ctx), cmd); err != nil {
+			r.logger.Warn("V2 show-code request failed", zap.Error(err))
+			if commandrouter.IsRateLimited(err) {
+				return refuse(control.CodeRateLimited)
+			}
+			return refuse(control.CodeCommandFailed)
+		}
+	}
+	body, err := json.Marshal(reply)
+	if err != nil {
+		return refuse(control.CodeCommandFailed)
+	}
+	return body
 }
 
 // releaseAfterReply releases a new binding's queue after its reply, first
