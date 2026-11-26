@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# display-check.sh: the live-ISO "Display check" boot entries (ffos
-# archiso-x86_64-linux-display-check-*.conf). Boots an assembled unit from the
-# installer USB stick straight into full-screen test slides, nothing installed,
+# display-check.sh: the "Display check" boot entries of the factory ISO (ffos
+# factory-iso/entries/archiso-x86_64-linux-display-check-*.conf; on the factory
+# stick only, which has no install entry: the normal ISO boots Auto Install,
+# which wipes the NVMe, unless a key is held). Boots an assembled unit from the
+# factory USB stick straight into full-screen test slides, nothing installed,
 # nothing on the NVMe touched, no network. The slides are one offline page,
 # /home/feralfile/display-check/index.html (source: feral-file/toko-batch-2
 # factory/assembly-check; change it there and copy it here).
@@ -17,7 +19,10 @@
 #   display_check=panel       black 15 s, gray 15 s, no caption: the Panel Check
 #                             loop Feral File scores from a phone capture.
 # Hands-off like factory-check.sh: the keyboard is needed for the boot menu
-# only. Runs as root on tty1 via /root/.automated_script.sh, so Chromium needs
+# only (hold a key at power-on; the factory ISO boots the Factory check
+# otherwise). The entries mask kmsconvt@tty1, which would run the factory
+# check on tty1 and hold the display, so the getty@tty1 autologin logs root in
+# and runs this through /root/.automated_script.sh; Chromium therefore needs
 # --no-sandbox; the page is a local file and nothing else is loaded. Ends when
 # the power is pulled.
 set -uo pipefail
