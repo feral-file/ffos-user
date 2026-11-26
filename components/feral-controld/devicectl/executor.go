@@ -1144,6 +1144,10 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 	e.enrollQR.Store(cmdArgs.Show && cmdArgs.Purpose == "enroll")
+	// The deadline of an earlier request must not fire while this one is in
+	// its gate: the takedown would reset enrollQR under it and the paint
+	// that follows would carry no invitation. It is re-armed after the paint.
+	e.setRequestedCodeDeadline(time.Time{})
 
 	// controld drives the claim/pairing QR in-process: on show=true it runs the
 	// mandatory pre-claim OTA gate and, only on a supported build, paints the

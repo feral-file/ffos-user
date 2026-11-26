@@ -1,6 +1,11 @@
 package devicectl
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,8 +16,10 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 func stateClaim(t *testing.T, claimed bool) {
@@ -183,4 +190,69 @@ func TestRequestedCodeDeadline(t *testing.T) {
 		e.refreshInvitationQR()
 		assert.Empty(t, spy.hidden)
 	})
+}
+
+// The command itself owns the deadline: an earlier request's deadline is
+// cleared before the gate (its takedown must not fire under this request),
+// and the paint of a requested code on a claimed device arms a new one.
+func TestShowPairingQRCode_ArmsRequestedCodeDeadline(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      string
+		wantArmed bool
+	}{
+		{"purpose enroll on a claimed device", `{"show":true,"purpose":"enroll"}`, true},
+		{"no purpose", `{"show":true}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			sm := mocks.NewMockStateManager(ctrl)
+			state.InjectStateManagerForTesting(sm)
+			t.Cleanup(state.ResetForTesting)
+			sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+			sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{Claimed: true, TopicID: "topic-abc", TopicReady: true}).AnyTimes()
+			mockOS := mocks.NewMockOS(ctrl)
+			mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+			mockOS.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
+			mockOS.EXPECT().Stat(gomock.Any()).Return(nil, errors.New("absent")).AnyTimes()
+
+			var e *executor
+			var duringGate time.Time
+			mockHTTP := mocks.NewMockHTTPClient(ctrl)
+			mockHTTP.EXPECT().NewRequest(gomock.Any(), gomock.Any(), gomock.Any()).
+				DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+					return http.NewRequest(method, url, body)
+				}).AnyTimes()
+			mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+				e.invMu.Lock()
+				duringGate = e.requestedCodeDeadline
+				e.invMu.Unlock()
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(
+					`{"min_runtime_version":"0.0.1","latest_version":"1.0.0"}`))}, nil
+			}).AnyTimes()
+
+			clk := &autoClaimClock{now: time.Unix(1_000_000, 0)}
+			fc := &fakeControl{fields: []string{"i", "s", "e", "g"}, ok: true, pins: []string{"", "s", "e", "g"}}
+			e = &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, clock: clk, os: mockOS, json: wrapper.NewJSON(),
+				otaGate: otagate.New(otagate.Deps{HTTP: mockHTTP, Clock: clk, Runner: fakeGateRunner{}, Config: &fakeGateConfig{}})}
+			e.SetControl(fc)
+			e.setRequestedCodeDeadline(time.Now().Add(-time.Minute)) // an earlier request's, already over
+
+			before := time.Now()
+			_, err := e.showPairingQRCode(context.Background(), []byte(tc.args))
+			require.NoError(t, err)
+			defer e.stopInvitationRefresh()
+
+			assert.True(t, duringGate.IsZero(), "the earlier deadline must be cleared before the gate runs")
+			e.invMu.Lock()
+			got := e.requestedCodeDeadline
+			e.invMu.Unlock()
+			if !tc.wantArmed {
+				assert.True(t, got.IsZero())
+				return
+			}
+			assert.False(t, got.Before(before.Add(requestedCodeLife)), "armed for requestedCodeLife from the paint")
+		})
+	}
 }

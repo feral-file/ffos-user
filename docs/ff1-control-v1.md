@@ -1655,7 +1655,9 @@ and the ff1-cli test suite does the same with `jose`.
     choose (§7.2). Taking it needs a view of the screen in that window (a
     person, a camera, a window) and yields the owner tier. Spending the 3
     runs also blocks the off-LAN "Secure this Art Computer" request until
-    the device restarts.
+    the device restarts. "Per boot" is per daemon run: the count is in
+    memory, so a controld restart without a reboot (a crash, a package
+    update) starts it over.
   - Device IDs are an 8-character hash of the MAC, so "anyone with the
     device ID" includes anyone willing to enumerate them.
   - Each admitted "show your code" request runs the pre-claim OTA gate, so
