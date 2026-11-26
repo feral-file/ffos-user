@@ -18,7 +18,7 @@ type gen struct {
 func Generate() (map[string][]byte, error) {
 	g := &gen{k: NewKeys(), files: map[string][]byte{}}
 	g.files["keys.json"] = Encode(g.k)
-	steps := []func() error{g.positives, g.approvalCodes, g.negativeRequests, g.negativeClient, g.registrationVectors}
+	steps := []func() error{g.positives, g.approvalCodes, g.negativeRequests, g.negativeClient, g.registrationVectors, g.claimQR}
 	for _, step := range steps {
 		if err := step(); err != nil {
 			return nil, err

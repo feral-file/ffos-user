@@ -1,7 +1,7 @@
 package commandrouter_test
 
 // Media health on the displayPlaylist path (feral-file/ffos-user#392): the
-// per-item hint field rides every cast on the FINAL item list, a
+// per-item hint field rides every display request on the FINAL item list, a
 // controller can never inject it, and getMediaHealth reports one verdict
 // per item of the playlist on screen. The pass's verdicts and the admission
 // rule are covered by handler_sourceprobe_test.go; the probe itself by the

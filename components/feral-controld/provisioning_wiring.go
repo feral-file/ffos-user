@@ -610,7 +610,7 @@ func provisioningTuningFromConfig(t config.ProvisioningTuning, logger *zap.Logge
 
 // wireNetworkHealth attaches the executor's getDeviceStatus network-object
 // composer: the machine's cached snapshot plus the cached monitord internet
-// verdict — the relayer/cast reply then carries the same §4.7 diagnosis the
+// verdict — the relayer/display reply then carries the same §4.7 diagnosis the
 // hub status routes serve. File scope for the `context`-shadowing reason;
 // type-asserted like the sibling seams.
 func wireNetworkHealth(ex any, m *provisioning.Machine, internet func(context.Context) bool) {

@@ -59,7 +59,7 @@ func TestHintSender_ReplyBranches(t *testing.T) {
 		send cdpSend
 		want error
 	}{
-		{"stale cast", reply(map[string]interface{}{"ok": false, "error": "staleCast"}, nil), mediahealth.ErrStaleCast},
+		{"stale display request", reply(map[string]interface{}{"ok": false, "error": "staleCast"}, nil), mediahealth.ErrStaleCast},
 		{"unknown command", reply(map[string]interface{}{"ok": false, "error": "Unknown command"}, nil), mediahealth.ErrHintPushRefused},
 		{"bare legacy failure", reply(map[string]interface{}{"ok": false}, nil), mediahealth.ErrHintPushRefused},
 		{"not an object", reply(nil, nil), mediahealth.ErrHintPushRefused},

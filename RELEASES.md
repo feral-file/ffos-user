@@ -32,7 +32,7 @@ and the OTA carry of `.state/media-health` is an image-rail script
 
 ffos-user, package rail (`components/**`):
 
-- **Media health (#392).** L0 source probes at cast and ahead of play
+- **Media health (#392).** L0 source probes at display and ahead of play
   (#438), the nightly L1 render (#443), the wall's own frame and a render
   negative as play evidence (#450, `renderConclusive` off), `lastObservedAt`
   (#451), the probe sends the kiosk's User-Agent (#456), onchfs sources never
@@ -41,7 +41,7 @@ ffos-user, package rail (`components/**`):
 - **onchfs works on the device (#427).** The chain reader (#428) and the
   on-device materializer and replay (#461); `onchfs://` is no longer
   rewritten to the dead fxhash gateway.
-- **Playlists.** Series playback on every live-cast path (#446, #447,
+- **Playlists.** Series playback on every live-display path (#446, #447,
   #454), series-group identity through the offline cache (#459), a
   `displayPlaylist` `startItem` passed to the player (#462).
 - **Control.** Display grants may read the screen orientation (#449); a
@@ -51,9 +51,9 @@ ffos-user, package rail (`components/**`):
   - A damaged media-health store is replaced by a fresh one instead of crash-looping or
     hanging controld before SoftAP and the hub start; at most one restart
     (`mediahealth/store_open.go`).
-  - A render-only verdict no longer refuses a cast of that work with
+  - A render-only verdict no longer refuses a display request of that work with
     `sourceUnreachable`.
-  - A cast waits for onchfs only when the work it opens on is onchfs.
+  - A display request waits for onchfs only when the work it opens on is onchfs.
   - A malformed `mediaHealth` block keeps an explicit `disabled:true`.
   - A series whose catalog editions are onchfs works keeps their
     device-local sources on the 5-minute refresh; the refresher's re-narrow
@@ -92,8 +92,8 @@ moves, `startItem`.
     Known risks).
   - The `docs/onchfs.md` verification bench (an Ethereum and a Tezos work,
     the second play with the WAN unplugged), plus a mixed IPFS + onchfs
-    playlist that opens on the IPFS work: the cast does not wait.
-  - Series playback: cast a `seriesRegistry` playlist and change the mode.
+    playlist that opens on the IPFS work: the display request does not wait.
+  - Series playback: display a `seriesRegistry` playlist and change the mode.
   - A damaged store: stop controld, write garbage over `store.db`, start
     it; the hub answers, the journal logs "damaged store deleted" and
     `getMediaHealth` answers from an empty store.
@@ -121,21 +121,21 @@ After the Production run, tag `v3.0.1` on the ffos-user
 - A content-type HEAD that outlives the player's 10 s budget
   (`detect/unreachable`) counts as a failed play by design (ff-player#329).
   Two such plays conclude the work broken and the wall skips it for 24 h;
-  a cold IPFS CID or a saturated link can do this to a healthy work. A cast
+  a cold IPFS CID or a saturated link can do this to a healthy work. A display request
   of that work alone still plays it (the render-verdict fix above).
-- A series mode set on a `playlistUrl` cast reverts to `full` at the next
+- A series mode set on a `playlistUrl` display reverts to `full` at the next
   periodic refresh (#453, #455).
 - Every `/ipfs/` and `arweave.net` request in the kiosk makes a CDP round
   trip through controld while the UA rewrite is on (bench item above).
 - A wrongly blank wall frame can turn one later transient failure into a
   24 h skip while `renderConclusive` is off.
 - onchfs: no negative cache (an unreachable work is re-read on every
-  refresher pass and cast); an RPC answer may be up to ~129 MiB before the
+  refresher pass and display); an RPC answer may be up to ~129 MiB before the
   tree budget is charged.
 - All display grants share one `getDeviceStatus` rate budget.
 - A develop build before this release could write an offline-cache
   series-segments sidecar with raw `onchfs://` editions; offline, the
-  refresher's cached fallback replays it until the next cast rewrites it.
+  refresher's cached fallback replays it until the next display request rewrites it.
   Bench and dev devices only (3.0.0 writes no sidecar).
 
 ### Release notes (must say)
@@ -183,12 +183,12 @@ ffos-user, package rail (`components/**`):
 - **Hub and player.**
   - Browser-originated requests refused on every hub route (#376).
   - Relayer connectivity in the LAN status (#397).
-  - A controller's cast wakes a sleeping player (#409).
+  - A controller's display request wakes a sleeping player (#409).
   - Device-local origins for on-chain data (#418, cross-rail: controld
     plus `serve-feral-player.sh`, below); the player contract fixture
     resynced (#419).
 - **Playlists.**
-  - The Raster wallet walk ff-app casts is resolved on the device (#413).
+  - The Raster wallet walk ff-app sends is resolved on the device (#413).
   - A `seriesRegistry` item expands into the series' editions (#421), and
     the series playback mode is resolved in controld, not the player
     (#426, merged 2026-11-02, after the G3 bench rounds).
@@ -221,7 +221,7 @@ ffos-user, image rail (`users/**`):
   and §15.1 puts the app, like ff-cli below, ahead of any FF OS with §5.7,
   Staging included. Then, before P1, raise remote config
   `app_update.ios.required_version` and `app_update.android.required_version`
-  to it: a released app older than G3 cannot cast on the LAN to an
+  to it: a released app older than G3 cannot send commands on the LAN to an
   `enrolled` device.
 - **ff-cli first, too** (spec §15.1: the app and ff-cli that list display
   rows ship before any FF OS with §5.7, which #414 brings). The latest
@@ -266,7 +266,7 @@ ffos-user, image rail (`users/**`):
     update to 3.0.0 (the 2.0.11 round could not join the 2.0.0 portal from
     a phone); afterwards `reset_target_version_info` reads `2.0.0` (the
     3.0.0 recovery updater writes it; `unknown` before that).
-  - Series playback (#426, merged after the G3 bench rounds): cast a
+  - Series playback (#426, merged after the G3 bench rounds): display a
     `seriesRegistry` playlist, then change the series playback mode
     (`setSeriesPlayback` / `getSeriesPlayback`).
   - iOS (not covered by the develop bench rounds).

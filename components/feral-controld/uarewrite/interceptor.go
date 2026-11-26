@@ -679,7 +679,7 @@ func hasPattern(patterns []map[string]interface{}, p map[string]interface{}) boo
 // a synthetic 301 to its directory form: Chromium then navigates to the
 // slashed URL, `location.search` keeps the query, relative assets resolve
 // under `/<cid>/`, and the DP-1 source stays byte-for-byte what the app
-// cast. The redirected navigation is paused again and goes through the
+// display. The redirected navigation is paused again and goes through the
 // ordinary rules. A failed fulfill is handled like a failed continue: the
 // request is lost either way, and a dead session must be retired.
 func (i *Interceptor) redirectDocument(ctx context.Context, session offlinecache.CDPSession, requestID, from, to string) {

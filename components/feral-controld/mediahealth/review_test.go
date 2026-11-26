@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// F1: the player numbers entries for the page lifetime, so a cast must not
+// F1: the player numbers entries for the page lifetime, so a display request must not
 // reset the cursor; a sequence rollback (page restart) must.
 func TestDrainer_CursorSurvivesCastsAndResetsOnRollback(t *testing.T) {
 	var d Drainer
@@ -25,7 +25,7 @@ func TestDrainer_CursorSurvivesCastsAndResetsOnRollback(t *testing.T) {
 	fresh, _, _ := d.Drain(&Outcomes{CastSeq: 1, Entries: ring})
 	assert.Len(t, fresh, 1)
 	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: ring})
-	assert.Empty(t, fresh, "a cast with the same ring re-applies nothing")
+	assert.Empty(t, fresh, "a display request with the same ring re-applies nothing")
 	fresh, _, _ = d.Drain(&Outcomes{CastSeq: 2, Entries: append(ring, Outcome{Seq: 2, Source: "b", Kind: OutcomeOK, Stage: StageReady, MediaType: "image"})})
 	assert.Equal(t, []string{"b"}, sourcesOf(fresh))
 
@@ -154,7 +154,7 @@ func TestStore_TransientRetryHoldDoesNotExtendAnExpiredVerdict(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, hints)
 
-	// The cast-time pass respects the hold too: no request, inconclusive.
+	// The accept-time pass respects the hold too: no request, inconclusive.
 	f := newTableFetcher()
 	f.answers[src] = ok(404, "", nil, -1)
 	prober := &Prober{Probe: &Probe{Fetcher: f}, Store: s, Now: clock.Now}

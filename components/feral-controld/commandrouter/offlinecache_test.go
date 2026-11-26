@@ -390,7 +390,7 @@ func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *t
 	// Items explicitly non-nil-empty, not the zero value: resolveOfflineCachePlaylist
 	// now reaches it through dp1.CastPlan.Full() (feral-file/ffos-user#455, #453),
 	// which always allocates via make(...) — the same normalization dp1.CastPlan.Narrow
-	// already applies on every live-cast path — so a playlist with zero items comes
+	// already applies on every live-display path — so a playlist with zero items comes
 	// back with a non-nil empty Items slice, not whatever this fixture started with.
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{}}}
 	marshaledResolved := []byte(`{"id":"playlist-1"}`)
@@ -496,7 +496,7 @@ func TestCommandHandler_DownloadPlaylist_ServiceError(t *testing.T) {
 	// Items explicitly non-nil-empty, not the zero value: resolveOfflineCachePlaylist
 	// now reaches it through dp1.CastPlan.Full() (feral-file/ffos-user#455, #453),
 	// which always allocates via make(...) — the same normalization dp1.CastPlan.Narrow
-	// already applies on every live-cast path — so a playlist with zero items comes
+	// already applies on every live-display path — so a playlist with zero items comes
 	// back with a non-nil empty Items slice, not whatever this fixture started with.
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
@@ -2000,7 +2000,7 @@ func (m deadlineMatcher) String() string {
 // resolveDisplayedPlaylist's defensive series expansion, then only re-points
 // interception — it never sends the player a playlist.
 //
-// A seriesRegistry item cast while the catalog was unreachable keeps its
+// A seriesRegistry item display request while the catalog was unreachable keeps its
 // representative, so that is what the kiosk holds and what the cache
 // captured. If the catalog has recovered by the time a clear triggers this
 // resync, the expansion now answers with the real editions; scoping replay to

@@ -55,7 +55,7 @@ type CommandStormConfig struct {
 }
 
 // SourceProbeConfig is the RETIRED "sourceProbe" block of the former
-// cast-time preflight (#304), kept only so a fielded controld.json that sets
+// accept-time preflight (#304), kept only so a fielded controld.json that sets
 // `sourceProbe.disabled` keeps its meaning: MediaHealthTuning reads it as
 // `mediaHealth.disabled` (the preflight is now the media-health pass) and
 // warns. Do not add fields; new tuning goes on MediaHealthConfig.
@@ -69,7 +69,7 @@ type SourceProbeConfig struct {
 // same reason as ContentPolicy: the block is optional and a hand-edited
 // typo must never crash-loop this recovery-critical daemon.
 type MediaHealthConfig struct {
-	// Disabled turns the whole feature off: no store, no cast-time pass (casts
+	// Disabled turns the whole feature off: no store, no accept-time pass (display requests
 	// are forwarded unprobed, the pre-#304 behavior), no hints, no lookahead,
 	// no per-item status. The remedy if a verdict rule ever systematically
 	// misjudges an origin class on the fleet — a config edit, not a rollback.
@@ -86,7 +86,7 @@ type MediaHealthConfig struct {
 	// lookahead now walks the whole wall, so a positive value is accepted
 	// and ignored.)
 	Lookahead int `json:"lookahead,omitempty"`
-	// CastItems is how many sources, in play order, the cast-time pass
+	// CastItems is how many sources, in play order, the accept-time pass
 	// probes before leaving the rest to the lookahead (default 24); 0
 	// keeps the default. CastConcurrency is that pass's worker pool
 	// (default 4). Both are operator tuning for an origin that still
@@ -119,7 +119,7 @@ type MediaHealthConfig struct {
 	// RenderConclusive lets a corroborated render negative — a blank or
 	// known-bad frame from the nightly render or the wall, agreed by an
 	// earlier night, another play or the other source — conclude broken:
-	// skipped, and counted toward rejecting an all-broken cast. Off (the
+	// skipped, and counted toward rejecting an all-broken display. Off (the
 	// default) keeps every render negative suspect, advisory. Turn it on
 	// only once the office fixture shows no false blanks among its healthy
 	// works: a false blank hides real art.

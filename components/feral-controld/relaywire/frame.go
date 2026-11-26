@@ -69,7 +69,8 @@ func Decode(frame []byte) (Header, []byte, error) {
 	return h, frame[2+n:], nil
 }
 
-// ConnectionURL routes by public device ID without a topic or bearer credential.
+// ConnectionURL routes by channel ID (the public device ID, or thumb(devSig)
+// for the keyed channel) without a topic or bearer credential.
 func ConnectionURL(endpoint, deviceID string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "ws" && u.Scheme != "wss") || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") || !playerID.MatchString(deviceID) {

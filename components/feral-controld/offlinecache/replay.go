@@ -17,6 +17,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/contentpath"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -442,9 +443,11 @@ func (r *replayer) isCurrentRootLocked(root CDPSession) bool {
 // generation boundary: every child target from the prior connection
 // belonged to a now-dead socket and its sessionId is meaningless against
 // this one, so the entire target set is replaced. Scope is reset too —
-// the new socket starts with Fetch disabled, and whichever caller next
+// the new socket starts with Fetch disabled; kioskReplay.restoreScope
+// re-arms the remembered scope right after, and whichever caller next
 // runs SyncPlaylist (main.go's onConnect ForceRefresh, or the next
-// displayPlaylist) re-establishes it. Caller holds transitionMu.
+// displayPlaylist) establishes the authoritative one. Caller holds
+// transitionMu.
 func (r *replayer) attachRoot(session CDPSession) {
 	r.mu.Lock()
 	previous := r.targets[""]
@@ -632,7 +635,7 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, sources []string, mixe
 	for _, source := range sources {
 		rec, err := r.store.LoadItem(SourceKey(source))
 		if err != nil {
-			return fmt.Errorf("offline cache replay: load item %s: %w", source, err)
+			return fmt.Errorf("offline cache replay: load item %s: %w", redactSourceForLog(source), err)
 		}
 		for _, res := range rec.Resources {
 			if rec.Automatic {
@@ -1059,12 +1062,89 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 		return
 	}
 
+	// The kiosk heals a bare CID with a query into its directory form
+	// before this handler sees the request (uarewrite, on any host), but
+	// capture stored the bare source. When every lookup on the URL as it
+	// arrived misses, the same lookups run once more on the unslashed
+	// spelling (contentpath.UnslashBeforeQuery, ffos-user#484): without
+	// it a kept bare-CID work fails closed offline, because the player's
+	// probe and iframe params always give it a query.
+	//
+	// Only when the player's own params were the whole query: then the
+	// slash exists only because of them, and the bare key is the work
+	// the player asked for. A source that carries its own query (fxhash
+	// `?fxhash=…` on a directory CID) is NOT retried: capture, which does
+	// not heal, stored the gateway's 301 that drops the query, so the
+	// bare key would serve the null-hash page — a different iteration,
+	// silently — where failing closed is honest (PR review, #484).
+	resource, headFromGet, found := lookupResource(resources, evt.Request.Method, evt.Request.URL)
+	if !found {
+		if bare, ok := unslashForPlayerParams(evt.Request.Method, evt.Request.URL); ok {
+			resource, headFromGet, found = lookupResource(resources, evt.Request.Method, bare)
+		}
+	}
+	if found && headFromGet {
+		if !resource.freshAt(time.Now()) {
+			r.continueRequest(ctx, session, evt.RequestID)
+			return
+		}
+		r.fulfillHeadFromGet(ctx, session, evt.RequestID, resource, mixed)
+		return
+	}
+	if !found {
+		r.handleMiss(ctx, session, evt.RequestID, mixed)
+		return
+	}
+	if !resource.freshAt(time.Now()) {
+		r.continueRequest(ctx, session, evt.RequestID)
+		return
+	}
+
+	switch {
+	case resource.IsRedirect():
+		r.fulfill(ctx, session, evt.RequestID, statusOrDefault(resource.Status, go_http.StatusFound), "", nil, resource.RedirectTo, resource.Headers)
+	case resource.SHA256 != "":
+		r.fulfillFromBlob(ctx, session, evt.RequestID, resource, mixed)
+	default:
+		// Captured but with no body (e.g. its fetch failed at capture
+		// time) — nothing to serve, so treat exactly like a miss.
+		r.handleMiss(ctx, session, evt.RequestID, mixed)
+	}
+}
+
+// unslashForPlayerParams returns the unslashed spelling of a healed bare-CID
+// URL (contentpath.UnslashBeforeQuery) only when stripping the params the
+// player appends for this method leaves no query at all: display_mode for
+// any request, plus the probe's v/x-request for a HEAD (the same split as
+// lookupResource, so a GET's own `v` still only misses).
+func unslashForPlayerParams(method, rawURL string) (string, bool) {
+	bare, ok := contentpath.UnslashBeforeQuery(rawURL)
+	if !ok {
+		return "", false
+	}
+	stripped := stripPlayerAppendedParams(bare)
+	if method == go_http.MethodHead {
+		stripped = headLookupURL(bare)
+	}
+	if strings.Contains(stripped, "?") {
+		return "", false
+	}
+	return bare, true
+}
+
+// lookupResource finds the captured resource for a paused request's method
+// and URL: the exact key, then the key with the player's appended params
+// stripped, then (for a HEAD) the same URL's GET resource. headFromGet
+// reports that last case, which the caller must answer with
+// fulfillHeadFromGet, never a body. processRequestPaused runs it once on
+// the URL as it arrived and once on its unslashed spelling.
+func lookupResource(resources map[string]Resource, method, rawURL string) (resource Resource, headFromGet, found bool) {
 	// Looking up a key on a nil map is safe in Go (returns zero value,
 	// ok=false), so no explicit nil-check is needed here when disabled.
 	// Keyed by method+URL, not URL alone — see resources' doc for why a
 	// paused request must only ever match a resource captured for the
 	// SAME method.
-	resource, found := resources[resourceKey(evt.Request.Method, evt.Request.URL)]
+	resource, found = resources[resourceKey(method, rawURL)]
 	if !found {
 		// The live kiosk (ff-player's ArtworkPlayer.tsx) unconditionally
 		// appends "&display_mode=fit|crop" to a software/iframe artwork's
@@ -1090,9 +1170,12 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 		// from an explicit allowlist (never a blanket query-string drop),
 		// so a genuinely different URL can still only ever miss, never
 		// be mismatched to the wrong cached resource.
-		if normalizedURL := stripPlayerAppendedParams(evt.Request.URL); normalizedURL != evt.Request.URL {
-			resource, found = resources[resourceKey(evt.Request.Method, normalizedURL)]
+		if normalizedURL := stripPlayerAppendedParams(rawURL); normalizedURL != rawURL {
+			resource, found = resources[resourceKey(method, normalizedURL)]
 		}
+	}
+	if found {
+		return resource, false, true
 	}
 	// ff-player's content-type probe (see headProbeQueryParams' doc)
 	// issues a HEAD to the item's source before ever issuing the GET its
@@ -1106,35 +1189,12 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 	// params first) is what lets the player determine the correct
 	// Content-Type and select its native renderer instead of degrading
 	// to the iframe fallback — see docs/offline-artwork-capture.md §6.
-	if !found && evt.Request.Method == go_http.MethodHead {
-		if getResource, ok := resources[resourceKey(go_http.MethodGet, headLookupURL(evt.Request.URL))]; ok {
-			if !getResource.freshAt(time.Now()) {
-				r.continueRequest(ctx, session, evt.RequestID)
-				return
-			}
-			r.fulfillHeadFromGet(ctx, session, evt.RequestID, getResource, mixed)
-			return
+	if method == go_http.MethodHead {
+		if getResource, ok := resources[resourceKey(go_http.MethodGet, headLookupURL(rawURL))]; ok {
+			return getResource, true, true
 		}
 	}
-	if !found {
-		r.handleMiss(ctx, session, evt.RequestID, mixed)
-		return
-	}
-	if !resource.freshAt(time.Now()) {
-		r.continueRequest(ctx, session, evt.RequestID)
-		return
-	}
-
-	switch {
-	case resource.IsRedirect():
-		r.fulfill(ctx, session, evt.RequestID, statusOrDefault(resource.Status, go_http.StatusFound), "", nil, resource.RedirectTo, resource.Headers)
-	case resource.SHA256 != "":
-		r.fulfillFromBlob(ctx, session, evt.RequestID, resource, mixed)
-	default:
-		// Captured but with no body (e.g. its fetch failed at capture
-		// time) — nothing to serve, so treat exactly like a miss.
-		r.handleMiss(ctx, session, evt.RequestID, mixed)
-	}
+	return Resource{}, false, false
 }
 
 // isStaticServerFollowUp reports whether rawURL is genuinely one of

@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// Prober runs the cast-time L0 pass over a playlist's sources: the one
-// probe pass with two consumers — the cast admission verdict (every item
+// Prober runs the accept-time L0 pass over a playlist's sources: the one
+// probe pass with two consumers — the display request admission verdict (every item
 // dead ⇒ sourceUnreachable, the former standalone preflight of #304) and
 // the observation store. It replaces offlinecache.SourceProber.
 //
@@ -22,22 +22,22 @@ import (
 // distinct wire URLs, a per-item deadline covering guard DNS plus the
 // request, and a phase ceiling on the whole pass. What changed: there is
 // NO early exit on the first alive source any more. The preflight stopped
-// there because it only asked "is this cast all dead?"; this pass also
+// there because it only asked "is this display request all dead?"; this pass also
 // records every verdict, so every source inside the budget is probed. The
 // latency that early exit saved is bought back by the store: a source with
 // a conclusive record is answered from it without a request, so a playlist
-// seen before costs no network at cast.
+// seen before costs no network at display.
 //
 // What the pass does NOT do any more is probe a whole 256-item playlist
-// at cast with 16 workers: that burst looked like a scrape to a CDN and a
-// 429 there was the fleet's own doing. The cast pass now covers the first
+// at display with 16 workers: that burst looked like a scrape to a CDN and a
+// 429 there was the fleet's own doing. The display request pass now covers the first
 // Items sources in play order with a small pool, paced per host by the
 // shared HostLimiter, and leaves the rest to the lookahead, which walks
 // the whole wall at one request every Gap. Items beyond the pass are
-// unknown at cast (no hint — fail-open) and get their hint on the next
+// unknown at display (no hint — fail-open) and get their hint on the next
 // push. The all-dead rejection keeps its reach: while every source seen so
 // far is dead the pass continues, batch by batch, up to the budget, so a
-// cast of 200 dead items is still refused and a cast of 24 dead items in
+// display of 200 dead items is still refused and a display request of 24 dead items in
 // front of a live one still plays.
 type Prober struct {
 	Probe  *Probe
@@ -62,9 +62,9 @@ type Prober struct {
 	// PhaseCeiling bounds the whole pass (DefaultPhaseCeiling when 0).
 	PhaseCeiling time.Duration
 	// BackgroundItemTimeout is the per-item deadline for probes outside a
-	// cast (the lookahead, the wall walk, the sweep), via ProbeAndRecord
-	// (DefaultBackgroundItemTimeout when 0). The cast pass keeps the
-	// Probe's short ItemTimeout because it sits on the cast's latency;
+	// display (the lookahead, the wall walk, the sweep), via ProbeAndRecord
+	// (DefaultBackgroundItemTimeout when 0). The display request pass keeps the
+	// Probe's short ItemTimeout because it sits on the display request's latency;
 	// background probes sit on nothing, and a short deadline there only
 	// turned slow answers into timeouts: arweave.net answers some
 	// transactions with its 404 page after 7–27 s, so a 5 s probe recorded
@@ -98,16 +98,16 @@ const (
 	// serving the whole playlist sees DefaultHostInFlight connections,
 	// not the pool.
 	DefaultConcurrency = 4
-	// DefaultPassItems is how far into the playlist the cast pass looks.
+	// DefaultPassItems is how far into the playlist the display request pass looks.
 	// 24 items at 2 per host and ~300 ms each is a few seconds; it covers
 	// the opening of any real wall, and the lookahead reaches the rest
 	// before playback does, one request after another.
 	DefaultPassItems = 24
 	// DefaultMaxAttempts bounds the all-dead extension (the dynamic
-	// resolution path caps at 255) while keeping a hostile cast's worst
+	// resolution path caps at 255) while keeping a hostile display request's worst
 	// case bounded.
 	DefaultMaxAttempts = 256
-	// DefaultPhaseCeiling bounds the pass's share of the cast request's
+	// DefaultPhaseCeiling bounds the pass's share of the display request's
 	// time. It does not guarantee the whole command answers inside the
 	// hub's 30 s write deadline (DP-1 resolution before it is unbounded by
 	// anything here); it guarantees a black-holing origin cannot hang the
@@ -156,7 +156,7 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 		var err error
 		stored, err = p.Store.GetMany(sources)
 		if err != nil {
-			logger.Warn("media health: stored verdicts unavailable for the cast pass; probing everything", zap.Error(err))
+			logger.Warn("media health: stored verdicts unavailable for the display request pass; probing everything", zap.Error(err))
 			stored = nil
 		}
 	}
@@ -191,7 +191,7 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 				writes = append(writes, ProbeWrite{Source: source, Result: results[i]})
 			case probeWritesRecord(results[i]) && stored[source].Due(at):
 				// A checked payload (ok) or one that would not decode (a
-				// hold): recorded when due, not on every cast — the bytes
+				// hold): recorded when due, not on every display request — the bytes
 				// cannot change under the same URI.
 				writes = append(writes, ProbeWrite{Source: source, Result: results[i]})
 			}
@@ -213,7 +213,7 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 			}
 			if !rec.Due(at) {
 				// Under a transient retry hold (a 429 minutes ago): the
-				// cast must not re-dial an origin asking to be left
+				// display must not re-dial an origin asking to be left
 				// alone, and nothing conclusive is known — inconclusive,
 				// fail-open, no request.
 				results[i] = ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, FromStore: true, Err: errRetryHold}
@@ -242,9 +242,9 @@ func (p *Prober) Preflight(ctx context.Context, sources []string) []ProbeResult 
 	// The network work runs in batches of Items. The first batch always
 	// runs; a later one runs only while every source seen so far — the
 	// settled ones included — is dead, because that is the only state in
-	// which probing further can change the cast's fate (allSourcesDead
+	// which probing further can change the display request's fate (allSourcesDead
 	// needs every item dead; one alive, inline or inconclusive item admits
-	// the cast, and the lookahead will look at the rest). probed marks the
+	// the display request, and the lookahead will look at the rest). probed marks the
 	// unique positions whose request actually ran (not cut off by the
 	// ceiling), so a shared verdict is recorded for the siblings only when
 	// it is a real verdict.
@@ -349,7 +349,7 @@ func (p *Prober) runPool(ctx context.Context, sources []string, indices []int, r
 	wg.Wait()
 }
 
-// ProbeAndRecord probes one source outside a cast pass (the lookahead and
+// ProbeAndRecord probes one source outside a display request pass (the lookahead and
 // the background sweep) and writes the result.
 func (p *Prober) ProbeAndRecord(ctx context.Context, source string) ProbeResult {
 	logger := p.Logger
@@ -390,8 +390,8 @@ func (p *Prober) probeOne(ctx context.Context, source string, timeout time.Durat
 	}
 	res = p.Probe.ProbeOneWithin(ctx, source, timeout)
 	if timeout == 0 && res.Verdict == VerdictInconclusive && fetchErrorKind(res.Err) == FetchErrTimeout {
-		// The cast pass's SHORT item deadline (Probe.ItemTimeout, 5 s)
-		// expired: it bounds the cast's latency, not the source. Recording
+		// The display request pass's SHORT item deadline (Probe.ItemTimeout, 5 s)
+		// expired: it bounds the display request's latency, not the source. Recording
 		// it held a slow-but-healthy origin for an hour, counted toward
 		// its unreachable streak and showed the app `no_answer` while a
 		// 30 s background probe would have answered in seconds. Unrecorded,
@@ -400,7 +400,7 @@ func (p *Prober) probeOne(ctx context.Context, source string, timeout time.Durat
 		return ProbeResult{Source: redactForLog(source), Verdict: VerdictInconclusive, Err: res.Err}, false
 	}
 	if ctx.Err() != nil && res.Verdict == VerdictInconclusive {
-		// The CALLER's context ended — the cast pass's phase ceiling, or
+		// The CALLER's context ended — the display request pass's phase ceiling, or
 		// shutdown — not this source's own ItemTimeout. Running out of our
 		// own budget says nothing about the source: recording it as a
 		// transient failure put a one-hour hold on every item still in
@@ -514,7 +514,7 @@ func fromStoreVerdict(rec *Record, now time.Time) Verdict {
 			// blank wall frame), which says nothing about whether its
 			// origin answers. Answered without a request, as any stored
 			// verdict is, but inconclusive: the hint still steps the wall
-			// past it, while an owner who casts that one work on purpose
+			// past it, while an owner who display requests that one work on purpose
 			// gets it played (the player's retry budget judges it) instead
 			// of a sourceUnreachable that names no unreachable source.
 			return VerdictInconclusive
@@ -529,7 +529,7 @@ func fromStoreVerdict(rec *Record, now time.Time) Verdict {
 // renderVerdict reports a broken record whose verdict is about rendering on
 // this device, not about the origin: the play layer's mounted-and-failed
 // class and the render (frame) class. A play-layer content-type answer
-// (404, 403) keeps its fetch category and still counts as dead at cast.
+// (404, 403) keeps its fetch category and still counts as dead at display.
 func renderVerdict(rec *Record) bool {
 	return rec.Category == CategoryRenderFailed || rec.Category == CategoryRenderBlank
 }
@@ -561,14 +561,14 @@ func wireKey(source string) string {
 
 type budgetError struct{}
 
-func (budgetError) Error() string { return "media health: per-cast probe budget exhausted" }
+func (budgetError) Error() string { return "media health: per-display probe budget exhausted" }
 
 var errBudgetExhausted error = budgetError{}
 
 type beyondPassError struct{}
 
 func (beyondPassError) Error() string {
-	return "media health: beyond the cast pass; left to the lookahead"
+	return "media health: beyond the display request pass; left to the lookahead"
 }
 
 var errBeyondPass error = beyondPassError{}

@@ -186,14 +186,14 @@ func TestWallDocument_AnUntypedRecordIsJudgedOnItsErrorPagePlay(t *testing.T) {
 	assert.Zero(t, rec.Plays.OK, "the error page's ready is not a success")
 }
 
-// A cast's first item loads before the next poll reports the new wall: its
+// A display request's first item loads before the next poll reports the new wall: its
 // document navigation is matched against the playlist last pushed (Hints),
 // so a 504 there is observed and its error-page frame is no evidence.
 func TestWallDocument_TheFirstItemOfACastIsObserved(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	cap := &fakeWall{frames: []*WallFrame{{Image: errorPage(), Clipped: true}}}
 	svc, w := newWallRig(t, clock, cap)
-	src := "https://o/first-of-cast"
+	src := "https://o/first-of-display"
 	seedSoftware(t, svc.Store(), src)
 	svc.Hints([]string{src, "https://o/second"})                                    // the push
 	svc.ObserveNavigation(Navigation{URL: src + "?display_mode=crop", Status: 504}) // the kiosk loads it at once

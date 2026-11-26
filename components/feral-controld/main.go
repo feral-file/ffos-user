@@ -114,7 +114,10 @@ type app struct {
 	MintPairing       mintpairing.Service
 	// KioskReplay, OfflineCacheService, and OfflineCacheStaticServer may
 	// all be nil (feature disabled via config.OfflineCacheConfig).
-	KioskReplay              offlinecache.KioskReplay
+	KioskReplay offlinecache.KioskReplay
+	// ReplayInternet is the internet verdict kiosk replay's remembered-scope
+	// restore is gated on (see internetVerdict). Nil when replay is not wired.
+	ReplayInternet           *internetVerdict
 	OfflineCacheService      offlinecache.Service
 	OfflineCacheStaticServer offlinecache.StaticServer
 	// OfflineCacheNotifier's shutdown (its background WS-delivery worker,
@@ -445,6 +448,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Logger.Error("Failed to get connectivity status", zap.Error(err))
 	} else {
 		app.Logger.Info("Connectivity status", zap.Bool("connected", connected))
+		// The mediator applies no verdict until the first connectivity edge
+		// or cold probe, which on a boot can come after the kiosk attaches;
+		// this read is the one answer available before CDP starts below.
+		if app.ReplayInternet != nil {
+			app.ReplayInternet.seed(connected)
+		}
 	}
 	// Single snapshot: relayer_ready and topic_id must come from the SAME
 	// write, not two separate GetState() field reads racing a concurrent
@@ -650,9 +659,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// no page JS: it arms Fetch interception on offlinecache's own CDP
 		// socket, and it must be armed as early as possible so the reloaded
 		// document's asset requests are intercepted rather than escaping to
-		// the live network. Its COMPANION half — re-applying the previously
-		// enabled item scope, which does need a hydrated page to resolve what
-		// is playing — is the "replay-scope-resync" reconciler instead; see
+		// the live network. While the device is known to have no internet it
+		// also re-arms the scope remembered on disk from the last successful
+		// sync, which is what serves a kept work to the first load after a
+		// boot with no network. Its COMPANION half —
+		// syncing scope to what is actually playing, which does need a
+		// hydrated page — is the "replay-scope-resync" reconciler instead; see
 		// replayScopeResyncReconciler for why splitting them is load-bearing.
 		//
 		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
@@ -784,6 +796,51 @@ func resolveMDNSDeviceInfo(os wrapper.OS, json wrapper.JSON, claim state.ClaimIn
 	}
 }
 
+// internetVerdict holds sys-monitord's internet-reachability answer for kiosk
+// replay: unknown until the startup read (seed) or the mediator's first
+// applied verdict (observe), then the latest one. Replay restores its
+// remembered scope on a kiosk attach only while this says offline; unknown
+// reads as "not offline", so a failed startup read keeps the attach exactly
+// as it was before the remembered scope existed.
+type internetVerdict struct{ state atomic.Int32 }
+
+const (
+	internetUnknown int32 = iota
+	internetOnline
+	internetOffline
+)
+
+func internetState(connected bool) int32 {
+	if connected {
+		return internetOnline
+	}
+	return internetOffline
+}
+
+// observe records an applied verdict; it always wins.
+func (v *internetVerdict) observe(connected bool) { v.state.Store(internetState(connected)) }
+
+// seed records the startup read unless a verdict already arrived.
+func (v *internetVerdict) seed(connected bool) {
+	v.state.CompareAndSwap(internetUnknown, internetState(connected))
+}
+
+func (v *internetVerdict) offline() bool { return v.state.Load() == internetOffline }
+
+// restoredScopeDropper is kiosk replay's optional "internet is back" seam,
+// named here because initializeApp's local `context` shadows the package.
+type restoredScopeDropper interface {
+	DropRestoredScope(ctx context.Context)
+}
+
+// attachContext and restoredScopeNotifier name kiosk replay's optional
+// "remembered scope armed" seam, for the same reason.
+type attachContext = context.Context
+
+type restoredScopeNotifier interface {
+	SetOnScopeRestored(notify func(ctx context.Context))
+}
+
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
 	logger.Info("Getting connectivity status")
 
@@ -854,7 +911,10 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // This is the half of the reconnect resync that cannot run inline on the CDP
 // connect callback next to AttachOnReconnect. AttachOnReconnect resets scope
 // (a new top-level socket starts with Fetch disabled — see replayer.attachRoot)
-// and deliberately does not re-apply it; something must call SyncPlaylist.
+// and, only with no internet, re-arms the scope remembered from the last
+// successful sync as a pass-through-on-miss head start
+// (offlinecache/replayscope.go); the scope
+// for what is actually on screen still needs something to call SyncPlaylist.
 // ForceRefresh is that something, but the pass it triggers resolves what is
 // playing via statusPoller.FetchPlayerStatus, which evaluates
 // window.handleCDPRequest in the page. Fired inline at connect time that
@@ -865,9 +925,9 @@ func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 // the resync exists to close. As a reconciler it runs once the new document
 // has installed its command handler, so the status fetch can actually answer.
 //
-// Nothing is lost by deferring it: scope is disabled between attach and
-// handler-ready either way, so assets fetched in that window miss
-// interception regardless of when this runs.
+// Nothing is lost by deferring it: between attach and handler-ready scope is
+// off (or, with no internet, only the remembered scope is armed) either way,
+// so the window is the same regardless of when this runs.
 //
 // Known residual, deliberately accepted: the generation-ready worker gates on
 // StageHandler, which proves window.handleCDPRequest is INSTALLED, not that
@@ -888,10 +948,10 @@ func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(co
 // contentPolicySyncAttempts bounds the reconnect sync retry. Reconcilers run
 // SEQUENTIALLY in registration order and this one is registered before
 // playlist-recompute, so retrying here is what keeps a transient failure from
-// being followed by a scheduled cast to a player still on its own defaults —
+// being followed by a scheduled display request to a player still on its own defaults —
 // a cohort the scheduler then records as delivered and never re-pushes. Bounded
 // rather than persistent: a player that is genuinely gone must not hold the
-// whole reconnect lane, and every other trigger (cast, refresh, cutover, the
+// whole reconnect lane, and every other trigger (display request, refresh, cutover, the
 // next generation) re-syncs anyway.
 const contentPolicySyncAttempts = 3
 
@@ -922,7 +982,7 @@ func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy
 			case <-time.After(contentPolicySyncRetryDelay):
 			}
 		}
-		// Left deliberately non-fatal: the scheduled cast that follows is still
+		// Left deliberately non-fatal: the scheduled display request that follows is still
 		// better than a blank wall, and it is filtered by the daemon either way.
 		// What this cannot do on its own is guarantee the PLAYER is in step —
 		// see the per-generation verification discussion on #349.
@@ -938,7 +998,7 @@ func contentPolicyReconciler(handler commandrouter.Handler, store *contentpolicy
 // soon as CDP reports initialized, so a restarted player can render a refresh
 // under ITS defaults before the owner's policy lands, and nothing re-sends
 // afterwards. A persisted showMatureContent:true then visibly fails until the
-// next periodic pass or cast.
+// next periodic pass or display.
 //
 // Deliberately conditional on the policy being non-default. An unconditional
 // force here would put a soft artwork refresh on EVERY generation bump — every
@@ -1062,7 +1122,7 @@ func initializeApp(
 	// notification producers get sealing handles when it is on (§9).
 	controlWire := newControlWiring(controlConfig, deviceIDFromHostname(), control.DefaultDir, &control.OSFS{}, logger)
 	if len(v2Config) > 0 && relayV2Eligible(v2Config[0], controlWire, deviceIDFromHostname()) {
-		controlWire.v2 = newRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
+		controlWire.dialRelayV2(v2Config[0].Endpoint, deviceIDFromHostname(), webSocketDialer, randomizer, clock, os, json, logger)
 	}
 	controlWire.setTransports(relayerEndpoint != "")
 	notifyRelayer, notifyWS := controlWire.notificationHandles(relayer, wsHandler, logger)
@@ -1092,14 +1152,14 @@ func initializeApp(
 
 	// DP1
 	// DP-1 signature verification (feral-file/ffos-user#307). Verdicts are
-	// computed on every fetched or inline playlist and reported on the cast
+	// computed on every fetched or inline playlist and reported on the display request
 	// reply and player_status for diagnostics, without changing what plays
 	// or showing notices. The config flag is the kill
 	// switch for a verifier/canonicalization divergence (see
 	// config.SignatureVerificationConfig).
 	sigVerifyEnabled := config.Get().SignatureVerificationEnabled()
 	if !sigVerifyEnabled {
-		logger.Warn("DP-1 signature verification disabled by config; casts carry no signature verdict")
+		logger.Warn("DP-1 signature verification disabled by config; display requests carry no signature verdict")
 	}
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug, sigVerifyEnabled)
 
@@ -1142,7 +1202,7 @@ func initializeApp(
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, notifyRelayer, cdp, httpClient, relayerAPIKey, json, logger)
 	// Display grants for Play 0.5 sites need the control authority and the
-	// v2 endpoint the site will cast through; with either missing every 0.5
+	// v2 endpoint the site will send through; with either missing every 0.5
 	// request is refused display_grant_unavailable (spec §5.7).
 	if controlWire != nil && controlWire.v2 != nil {
 		mintPairing.SetDisplayGrants(controlWire.auth, v2Config[0].Endpoint)
@@ -1354,7 +1414,40 @@ func initializeApp(
 	} else {
 		logger.Warn("Command handler does not support series playback status wiring")
 	}
-	// Media health (#304, #392, docs/media-health.md): the cast-time L0 pass
+	// Kiosk replay restores its remembered scope on attach only while the
+	// device is known to have no internet (feral-file/feral-file#3635); it
+	// reads the same applied verdict media health does, plus the startup
+	// read in run(). Type-asserted like the other optional seams, so the
+	// KioskReplay interface and its mocks stay as they are.
+	var replayInternet *internetVerdict
+	if sink, ok := kioskReplay.(interface{ SetOffline(func() bool) }); ok {
+		replayInternet = &internetVerdict{}
+		internetObservers = append(internetObservers, replayInternet.observe)
+		sink.SetOffline(replayInternet.offline)
+		// A scope restored while offline is dropped once internet is back,
+		// after the verdict above is recorded so no later attach restores
+		// it again. Off the mediator's goroutine: it waits for the playback
+		// lock and sends to the kiosk.
+		// The kiosk's first load of the work on a no-network start runs
+		// before replay can be armed, and fails; once the remembered scope
+		// is in force, ask the player to load it again rather than leave
+		// the screen black until the player's own retry 15s later.
+		// The callback's context ends at the next kiosk attach, so a
+		// refresh still waiting on the player never reaches a later page.
+		if notifier, ok := kioskReplay.(restoredScopeNotifier); ok {
+			notifier.SetOnScopeRestored(func(attachCtx attachContext) {
+				go devicectl.RefreshArtworkAfterReplayRestore(attachCtx, executor, logger)
+			})
+		}
+		if dropper, ok := kioskReplay.(restoredScopeDropper); ok {
+			internetObservers = append(internetObservers, func(connected bool) {
+				if connected {
+					go dropper.DropRestoredScope(context)
+				}
+			})
+		}
+	}
+	// Media health (#304, #392, docs/media-health.md): the accept-time L0 pass
 	// replaces the former source preflight — a displayPlaylist whose every
 	// item source definitively answers dead is still rejected at accept time
 	// — and additionally records every verdict in the device's observation
@@ -1376,7 +1469,7 @@ func initializeApp(
 	internetObservers = append(internetObservers, func(connected bool) { mediaHealthOnline.Store(connected) })
 	// A source the offline cache can replay is never hinted (the hint would
 	// hide what replay interception could show); the check is the same one
-	// the cast rescue uses, and only counts when kiosk replay is wired.
+	// the display request rescue uses, and only counts when kiosk replay is wired.
 	var mediaHealthReplayable func(string) bool
 	if offlineCache != nil && kioskReplay != nil {
 		mediaHealthReplayable = func(source string) bool { return offlineCache.HasReplayableItem(source) }
@@ -1458,13 +1551,13 @@ func initializeApp(
 		})
 	}
 	// Signature verification wiring: the same Active slot feeds the raw
-	// handler (writes on cast), the refresher (writes on re-push, below)
+	// handler (writes on display request), the refresher (writes on re-push, below)
 	// and the status poller (reads on every poll). Wired against the raw
 	// handler for the same reason as SetMediaHealth above.
 	activeVerdict := &sigverify.Active{}
 	if sigVerifyEnabled {
 		commandrouter.SetSignatureVerification(rawCmdHandler, commandrouter.SignatureVerificationOptions{Active: activeVerdict}, logger)
-		// A displayAt-deferred cast parks its verdict as pending; the
+		// A displayAt-deferred display request parks its verdict as pending; the
 		// scheduler's own cutover push is the only point that proves the
 		// cohort reached the screen, so that is where it is promoted — and
 		// the slot is invalidated as the push starts, so no status round
@@ -1511,18 +1604,18 @@ func initializeApp(
 	}
 	playlist_refresher.SetContentPolicy(playlistRefresher, policyStore)
 	commandrouter.SetPolicyRefresher(rawCmdHandler, playlistRefresher, logger)
-	// Same device-level series-playback store commandrouter's own cast
+	// Same device-level series-playback store commandrouter's own display
 	// paths and status.Poller already read (see the SeriesPlaybackSource
 	// wiring above), so the refresher's resync narrows a series exactly
-	// the way a live cast would (feral-file/ffos-user#453) instead of
+	// the way a live display would (feral-file/ffos-user#453) instead of
 	// following no override at all.
 	if seriesPlaybackSource, ok := commandrouter.SeriesPlaybackSource(rawCmdHandler); ok {
 		playlist_refresher.SetSeriesPlaybackSource(playlistRefresher, seriesPlaybackSource, logger)
 	}
-	// The reverse direction of the wiring above: every accepted cast's own
+	// The reverse direction of the wiring above: every accepted display request's own
 	// SeriesPlaybackRandom pick is pushed straight into the refresher's
 	// stable-pick memory, so its periodic resync never has to rediscover a
-	// newer cast's choice by reading the live display — a read that skips
+	// newer display's choice by reading the live display — a read that skips
 	// itself entirely when the group's previously remembered pick is
 	// content-policy withheld (feral-file/ffos-user#459, F6 reopened).
 	if recordPick, ok := playlist_refresher.AcceptedPickRecorder(playlistRefresher); ok {
@@ -1549,7 +1642,7 @@ func initializeApp(
 	})
 	if sigVerifyEnabled {
 		playlist_refresher.SetSignatureVerification(playlistRefresher, activeVerdict, logger)
-		// Same generation fence for the refresher's force casts.
+		// Same generation fence for the refresher's force-displays.
 		playlist_refresher.SetSessionGeneration(playlistRefresher, session.Generation, logger)
 	}
 
@@ -1580,10 +1673,10 @@ func initializeApp(
 	// mediator.SetRelayV2Waker). Wired whenever this device carries v2,
 	// independent of the netlog recorder that owns SetInternetObserver.
 	if controlWire != nil && controlWire.v2 != nil {
-		waker, okWaker := controlWire.v2.(interface{ WakeV2() })
+		wake, okWaker := controlWire.v2Wakers()
 		sink, okSink := mediator.(interface{ SetRelayV2Waker(func()) })
 		if okWaker && okSink {
-			sink.SetRelayV2Waker(waker.WakeV2)
+			sink.SetRelayV2Waker(wake)
 		} else {
 			// Both are this module's own types; a miss means a rename broke
 			// the seam and v2 is back to minutes of downtime per network
@@ -1713,7 +1806,7 @@ func initializeApp(
 	// Content policy MUST reconcile before playlist-recompute. A freshly
 	// initialized player starts on default policy, so a recompute that
 	// force-pushes a scheduled cohort first would have its mature items
-	// withheld by the player until some later cast, refresh or cutover —
+	// withheld by the player until some later display request, refresh or cutover —
 	// a durable, acknowledged Content setting visibly failing after a player
 	// restart. Nothing re-pushes the scheduler when the policy syncs later.
 	if policyStore != nil {
@@ -1817,9 +1910,9 @@ func initializeApp(
 	// The claim flow's remote-route wait ends on a live v2 socket too, so a
 	// device that never gets a legacy topic is still claimable (see
 	// executor.v2Wired). Only wired when this device actually carries v2.
+	// "Live" is the keyed carrier: see controlWiring.v2KeyedConnected.
 	if rv, ok := executor.(relayV2RouteSink); ok && controlWire != nil && controlWire.v2 != nil {
-		v2 := controlWire.v2
-		rv.SetRelayV2Route(func() bool { return true }, v2.IsConnected)
+		rv.SetRelayV2Route(func() bool { return true }, controlWire.v2KeyedConnected)
 	}
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
@@ -1952,6 +2045,7 @@ func initializeApp(
 		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
+		ReplayInternet:           replayInternet,
 		UARewrite:                uaRewrite,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,

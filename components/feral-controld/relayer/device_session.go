@@ -36,6 +36,8 @@ type deviceSession struct {
 	done         chan struct{}
 	once         sync.Once
 	onDisconnect func(Peer)
+	// onDrop reports a request this session discarded; nil discards in silence.
+	onDrop func(reason string, peer string)
 }
 
 func newDeviceSession(conn wrapper.WebSocketConn) *deviceSession {
@@ -50,12 +52,52 @@ func (s *deviceSession) close() {
 		for id := range s.peers {
 			ids = append(ids, id)
 		}
+		unfinished := s.unfinishedLocked(ids)
 		s.peers = make(map[string]*relayPeer)
 		s.mu.Unlock()
+		for _, id := range unfinished {
+			s.dropped(dropUnfinished, id)
+		}
 		for _, id := range ids {
 			s.disconnected(id)
 		}
 	})
+}
+
+// Reasons a v2 request is dropped before dispatch; see dropLog.
+const (
+	dropUnknownSource = "unknown source"
+	dropBadFrame      = "malformed frame"
+	dropBadChunk      = "malformed payload, or chunk out of order or expired"
+	dropNotJSON       = "body is not JSON"
+	dropReceiptFailed = "receipt could not be written"
+	dropSessionClosed = "arrived as the connection closed"
+	// The sender left, the socket closed, or the sender began another
+	// transfer, with a chunked request part way in: what a page suspended
+	// mid-send looks like from the device. A sender that stays connected and
+	// sends nothing more is reported when it leaves, not when its transfer
+	// expires.
+	dropUnfinished = "chunked request left unfinished"
+)
+
+// unfinishedLocked lists the peers among ids holding a partial chunked
+// request. The caller holds s.mu.
+func (s *deviceSession) unfinishedLocked(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if peer := s.peers[id]; peer != nil {
+			if _, _, partial := peer.assembly.Partial(); partial {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+func (s *deviceSession) dropped(reason, peer string) {
+	if s.onDrop != nil {
+		s.onDrop(reason, peer)
+	}
 }
 
 func (s *deviceSession) disconnected(id string) {
@@ -110,8 +152,12 @@ func (s *deviceSession) receive(kind int, body []byte) ([]byte, string, error) {
 		}
 		if event.Type == "peer_disconnected" {
 			s.mu.Lock()
+			unfinished := s.unfinishedLocked([]string{event.ConnectionID})
 			delete(s.peers, event.ConnectionID)
 			s.mu.Unlock()
+			for _, id := range unfinished {
+				s.dropped(dropUnfinished, id)
+			}
 			s.disconnected(event.ConnectionID)
 			return nil, "", nil
 		}
@@ -148,20 +194,39 @@ func (s *deviceSession) receive(kind int, body []byte) ([]byte, string, error) {
 	}
 	h, payload, err := relaywire.Decode(body)
 	if err != nil {
+		s.dropped(dropBadFrame, "")
 		return nil, "", err
 	}
-	s.mu.Lock()
-	peer := s.peers[h.From]
-	s.mu.Unlock()
 	// Receipt credit belongs to transport, even when application data is invalid.
 	if err = s.control(map[string]string{"type": "ack", "from": h.From, "id": h.ID}); err != nil {
+		s.dropped(dropReceiptFailed, h.From)
 		return nil, "", err
 	}
+	// The peer is looked up after the receipt, and the assembly changed, under
+	// s.mu: close and peer_disconnected clear s.peers and read assemblies from
+	// other goroutines, and the receipt write can outlast either. A frame that
+	// lost that race must not land in an assembly nobody reads again.
+	s.mu.Lock()
+	peer := s.peers[h.From]
 	if peer == nil {
+		s.mu.Unlock()
+		select {
+		case <-s.done:
+			s.dropped(dropSessionClosed, h.From)
+			return nil, "", ErrNotConnected
+		default:
+		}
+		s.dropped(dropUnknownSource, h.From)
 		return nil, "", errors.New("unknown relay source")
 	}
 	complete, err := peer.assembly.Add(payload, time.Now())
+	replaced := peer.assembly.TakeReplaced()
+	s.mu.Unlock()
+	if replaced {
+		s.dropped(dropUnfinished, h.From)
+	}
 	if err != nil {
+		s.dropped(dropBadChunk, h.From)
 		return nil, "", err
 	}
 	return complete, h.From, nil

@@ -10,6 +10,7 @@ import (
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
+	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/netmetrics"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -283,16 +284,9 @@ func (p *stateStatusProvider) FF1DeviceID() string {
 // LAN payload can never disagree with the QR. Best-effort: any read/parse
 // failure yields empty values rather than failing the whole status response.
 func (p *stateStatusProvider) installedBuild() (version, branch string) {
-	configBytes, err := p.os.ReadFile(constants.FF1_CONFIG_FILE)
+	build, err := ff1config.Read(p.os, p.json)
 	if err != nil {
 		return "", ""
 	}
-	var cfg struct {
-		Version string `json:"version"`
-		Branch  string `json:"branch"`
-	}
-	if err := p.json.Unmarshal(configBytes, &cfg); err != nil {
-		return "", ""
-	}
-	return cfg.Version, cfg.Branch
+	return build.Version, build.Branch
 }

@@ -329,7 +329,7 @@ func TestVerify_AtCap_StillVerified(t *testing.T) {
 
 // TestVerify_OversizedKid_MalformedAndNotEchoed pins the field bounds: an
 // entry whose kid exceeds MaxKidLen is malformed, its kid is blanked so
-// nothing caster-sized reaches the reply or the log, and nothing is verified.
+// nothing sender-sized reaches the reply or the log, and nothing is verified.
 func TestVerify_OversizedKid_MalformedAndNotEchoed(t *testing.T) {
 	doc := unsignedDoc()
 	signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
@@ -428,4 +428,36 @@ func TestVerify_ReindentedDocument_StillValid(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, sigverify.StatusValid, sigverify.Verify(pretty).Status)
+}
+
+// TestVerify_RoleOutsideDP1Enum: §7.1 makes role REQUIRED and one of a closed
+// set, and dp1-go never checks it, so a cryptographically good entry with an
+// unknown or empty role must not come back valid.
+func TestVerify_RoleOutsideDP1Enum(t *testing.T) {
+	for _, role := range []string{"admin", "Feed", "", "publisher"} {
+		t.Run("role="+role, func(t *testing.T) {
+			doc := unsignedDoc()
+			signWith(t, doc, newKey(t), role)
+
+			v := sigverify.Verify(mustJSON(t, doc))
+
+			assert.Equal(t, sigverify.StatusInvalid, v.Status)
+			require.Len(t, v.Signers, 1)
+			assert.False(t, v.Signers[0].OK)
+			assert.Equal(t, sigverify.ReasonMalformed, v.Signers[0].Reason)
+		})
+	}
+}
+
+// TestVerify_EveryDP1RoleIsValid pins the accepted set: the five core roles
+// (publisher is a Channels role, not a playlist one).
+func TestVerify_EveryDP1RoleIsValid(t *testing.T) {
+	for _, role := range []string{"curator", "feed", "agent", "institution", "licensor"} {
+		t.Run(role, func(t *testing.T) {
+			doc := unsignedDoc()
+			signWith(t, doc, newKey(t), role)
+
+			assert.Equal(t, sigverify.StatusValid, sigverify.Verify(mustJSON(t, doc)).Status)
+		})
+	}
 }

@@ -39,7 +39,7 @@ const (
 // dial it:
 //
 //   - classify.go's HEAD / ranged-GET probe,
-//   - mediahealth_fetcher.go's L0 media probe (the cast-time pass of #304
+//   - mediahealth_fetcher.go's L0 media probe (the accept-time pass of #304
 //     and #392, and the during-play lookahead),
 //   - mediacapture.go's direct body download,
 //   - capture.go's Page.navigate in the headless browser.

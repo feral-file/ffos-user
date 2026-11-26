@@ -702,9 +702,9 @@ func TestHandleCast_ProcessError(t *testing.T) {
 }
 
 // TestHandleCast_SourceUnreachableRejected422 pins the one behavior LAN
-// callers observe from the #304 cast-time source preflight: an all-dead
+// callers observe from the #304 accept-time source preflight: an all-dead
 // playlist maps to 422 with the per-item detail in the body, not the
-// generic 500 above — that detail is what tells the caster WHICH links
+// generic 500 above — that detail is what tells the sender WHICH links
 // are dead.
 func TestHandleCast_SourceUnreachableRejected422(t *testing.T) {
 	ts := setup(t)
@@ -1094,7 +1094,7 @@ func TestRespondJSON_Success(t *testing.T) {
 // it, used to prove the storm gate sheds excess before they hit the device.
 
 // fromControllerCtx matches a context the hub marked with
-// commands.FromController: every cast that enters through the LAN API is a
+// commands.FromController: every command that enters through the LAN API is a
 // controller's, and the router wakes a sleeping player only for those.
 type fromControllerCtx struct{}
 
@@ -1140,7 +1140,7 @@ func TestMiddleware_RejectsWhenAtCapacity(t *testing.T) {
 
 	// No mockCmd.Process / mockJSON.NewDecoder expectations: the capacity check
 	// in the middleware runs before either, so a satisfied gomock controller
-	// asserts they are never reached. The cast handler is reached only through
+	// asserts they are never reached. The display handler is reached only through
 	// the shared middleware, so exercise the wrapped handler here.
 	hubImpl.withMiddleware("cast", hubImpl.handleCast)(w, req)
 
@@ -1201,7 +1201,7 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 }
 
 // TestHandleCast_OversizedBodyRejected413: the storm cap bounds concurrency,
-// not allocations — the middleware body cap must stop an oversized cast
+// not allocations — the middleware body cap must stop an oversized command
 // inside the decoder with 413 (not 400: the caller sent too much, not
 // garbage), before anything reaches the command router. The command handler
 // mock carries no expectations, so any call through to it fails the test.
@@ -1374,7 +1374,7 @@ func TestHandleStatus_InvalidMethod(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 }
 
-// TestMiddleware_EnvelopeRoundTrip proves a normal cast envelope flows through
+// TestMiddleware_EnvelopeRoundTrip proves a normal command envelope flows through
 // the shared middleware (in-flight limiter + logging active) and the storm gate
 // to the inner handler and back, unharmed.
 func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
@@ -1408,7 +1408,7 @@ func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
 	assert.Equal(t, int64(1), stub.calls.Load())
 }
 
-// TestHandleCast_StormProtection drives a burst of cast requests through the LAN
+// TestHandleCast_StormProtection drives a burst of commands through the LAN
 // hub ingress wrapped with a real command-storm gate. Beyond the configured
 // burst the hub must answer 429 and the inner handler must never see the
 // excess (feral-file/ffos-user#208).

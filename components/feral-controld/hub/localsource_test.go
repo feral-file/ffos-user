@@ -75,7 +75,7 @@ func TestIsLocalSource(t *testing.T) {
 func TestMiddlewareRefusesNonLocalSource(t *testing.T) {
 	h := &hub{logger: zap.NewNop(), reqSlots: make(chan struct{}, 1)}
 	served := false
-	handler := h.withMiddleware("cast", func(http.ResponseWriter, *http.Request) { served = true })
+	handler := h.withMiddleware("display", func(http.ResponseWriter, *http.Request) { served = true })
 	for _, tc := range []struct {
 		remote string
 		status int

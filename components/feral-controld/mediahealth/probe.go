@@ -13,7 +13,7 @@ import (
 )
 
 // Verdict is the outcome of probing one item source, in the vocabulary the
-// cast admission rule (commandrouter) needs.
+// display admission rule (commandrouter) needs.
 type Verdict string
 
 const (
@@ -23,12 +23,12 @@ const (
 	VerdictAlive Verdict = "alive"
 	// VerdictDead: a conclusive failure — an identity-independent HTTP
 	// error, a content rule, an unresolvable host, or a proven-malformed
-	// data: URI. The only verdict that counts toward rejecting a cast.
+	// data: URI. The only verdict that counts toward rejecting a display request.
 	VerdictDead Verdict = "dead"
 	// VerdictInconclusive: no conclusive answer — a transient status
 	// (identity-dependent 4xx, 5xx, 429), a timeout, a transport error, a
 	// guard refusal, an over-long URL, or a source the pass never reached.
-	// Treated exactly like alive when deciding a cast's fate.
+	// Treated exactly like alive when deciding a display request's fate.
 	VerdictInconclusive Verdict = "inconclusive"
 	// VerdictInline: a well-formed data: URI; nothing to dial.
 	VerdictInline Verdict = "inline"
@@ -39,7 +39,7 @@ type ProbeResult struct {
 	// Source is the probed source as the Fetcher's redacted label (query,
 	// fragment and userinfo removed, truncated) — for the daemon log ONLY.
 	// It must never ride an error message or a reply: resolved sources are
-	// playlist content the caster may never have supplied, and signed CDN
+	// playlist content the sender may never have supplied, and signed CDN
 	// URLs carry credentials in their query strings. The raw source is kept
 	// by the caller, keyed by input position.
 	Source  string
@@ -170,8 +170,8 @@ const (
 	// sniff as text and false-broken real artworks.
 	minClassifiableBytes = 512
 	// DefaultItemTimeout is deliberately short: a slow origin costs seconds on
-	// the synchronous cast path, and a slow origin is inconclusive, which
-	// counts in the cast's favor.
+	// the synchronous display path, and a slow origin is inconclusive, which
+	// counts in the display request's favor.
 	DefaultItemTimeout = 5 * time.Second
 )
 
@@ -183,8 +183,8 @@ func (p *Probe) ProbeOne(ctx context.Context, source string) ProbeResult {
 }
 
 // ProbeOneWithin is ProbeOne with the item deadline given by the caller
-// (ItemTimeout when timeout <= 0). The cast pass keeps the short default:
-// it sits on the cast request's latency. Background probes pass a longer
+// (ItemTimeout when timeout <= 0). The display request pass keeps the short default:
+// it sits on the display request's latency. Background probes pass a longer
 // one (Prober.BackgroundItemTimeout).
 func (p *Probe) ProbeOneWithin(ctx context.Context, source string, timeout time.Duration) ProbeResult {
 	if IsDataURI(source) {
@@ -657,7 +657,7 @@ var defaultGateways = NewGateways(nil, nil)
 //     when no other gateway is configured for the network: a transient
 //     server_error feeding the streak, because one gateway's 404 is not
 //     evidence the content is gone; a deadline that ran out carries the
-//     timeout error, so the cast pass's short deadline records nothing.
+//     timeout error, so the display request pass's short deadline records nothing.
 //
 // The confirmation is a WHOLE-FILE request (no Range header, the body
 // read capped at the probe window), the request shape the kiosk makes:

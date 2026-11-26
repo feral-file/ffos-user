@@ -14,15 +14,15 @@ import (
 // HintPusher closes the push-lag gap (#392 follow-up, the issue comment
 // "hint-only push"): a verdict reached BETWEEN pushes — by the lookahead,
 // the sweep or the outcome drain — used to reach the player only on the
-// next cast, cutover or refresh, and a static inline cast is never
+// next display request, cutover or refresh, and a static inline display is never
 // re-pushed, so the player kept playing a work the device knew was dead.
-// Since the cast pass probes only its first items (Prober.Items), most of
+// Since the display request pass probes only its first items (Prober.Items), most of
 // a long wall's verdicts are reached exactly there.
 //
 // The pusher re-sends ONLY the hint map, through the player's
 // `setMediaHealth {castSeq, mediaHealth}` command (contract mediaHealth v1,
 // feature-detected by its `commands` list). The player replaces its held
-// map for the cast on the wall and honors it at the next selection; it
+// map for the display request on the wall and honors it at the next selection; it
 // never unmounts the work on screen, so a push can never interrupt what is
 // showing — and it carries no DP-1 body, so nothing is re-verified,
 // re-projected or re-rendered.
@@ -37,17 +37,17 @@ import (
 // The cost is one read transaction over the wall's sources per Interval.
 //
 // What the player holds is a belief, not a read-back: the map the last push
-// path attached (Attached) or the last successful send, bound to the cast
+// path attached (Attached) or the last successful send, bound to the display request
 // generation (castSeq) it was observed under. An unknown or mismatched
 // belief costs at most one redundant send — replace semantics make
 // re-sending an equal map harmless — so the belief only has to be good
 // enough to avoid chatter, never exact.
 //
-// Fences: the player refuses a castSeq that is not the cast on the wall
-// (ErrStaleCast), so a send racing a new cast can never install one cast's
+// Fences: the player refuses a castSeq that is not the display request on the wall
+// (ErrStaleCast), so a send racing a new display request can never install one display request's
 // hints on another; and the pusher waits Interval after a new castSeq
-// before its first send, because the cast's own push already carried the
-// map computed at cast time.
+// before its first send, because the display request's own push already carried the
+// map computed at display time.
 type HintPusher struct {
 	// Send delivers the map to the player (production: the kiosk CDP
 	// client, generation-fenced; see main's wiring). nil disables the
@@ -58,7 +58,7 @@ type HintPusher struct {
 	// Supported reports whether the installed player declares the push
 	// command (PlayerContract.SupportsHintPush).
 	Supported func() bool
-	// Interval is the recompute period and the settle after a new cast
+	// Interval is the recompute period and the settle after a new display request
 	// (DefaultPushInterval when 0).
 	Interval time.Duration
 	Logger   *zap.Logger
@@ -67,7 +67,7 @@ type HintPusher struct {
 
 	mu sync.Mutex
 	// The wall as last observed: its sources (as pushed) and the player's
-	// cast generation; haveWall is false while no playlist with an outcome
+	// display generation; haveWall is false while no playlist with an outcome
 	// ring is on screen.
 	sources  []string
 	castSeq  int64
@@ -78,21 +78,21 @@ type HintPusher struct {
 	held     map[string]Hint
 	heldCast int64
 	// parkedCast stops sending to a player that refused the command with
-	// anything but staleCast, for the rest of that cast (parked is the
+	// anything but staleCast, for the rest of that display request (parked is the
 	// flag; castSeq 0 is a real generation).
 	parkedCast int64
 	parked     bool
 }
 
 // HintSender sends one hint-only push and returns the player's
-// skippedIndices. Errors: ErrStaleCast when the player is on another cast,
+// skippedIndices. Errors: ErrStaleCast when the player is on another display request,
 // ErrHintPushRefused when it answered but refused the command (an old or
 // lying manifest), anything else is transport weather (retried next tick).
 type HintSender func(ctx context.Context, castSeq int64, hints map[string]Hint) ([]int, error)
 
 var (
-	// ErrStaleCast: the castSeq is not the cast on the wall.
-	ErrStaleCast = errors.New("media health: hint push for a cast that is no longer on the wall")
+	// ErrStaleCast: the castSeq is not the display request on the wall.
+	ErrStaleCast = errors.New("media health: hint push for a display request that is no longer on the wall")
 	// ErrHintPushRefused: the player answered and refused the command.
 	ErrHintPushRefused = errors.New("media health: player refused the hint push")
 )
@@ -101,7 +101,7 @@ const (
 	// DefaultPushInterval bounds a verdict's trip to the player at about
 	// one item duration while costing one store read per 15 s.
 	DefaultPushInterval = 15 * time.Second
-	// pendingCast marks a belief attached by a push whose cast generation
+	// pendingCast marks a belief attached by a push whose display generation
 	// is not observed yet (castSeq values are >= 0).
 	pendingCast = -1
 )
@@ -144,8 +144,8 @@ func (p *HintPusher) Observe(sources []string, castSeq int64, ok bool) {
 	p.haveWall = true
 	if p.heldCast == pendingCast {
 		// The push that attached the belief is the one that opened (or
-		// refreshed) this cast. If the poll beat the push, the belief binds
-		// to the outgoing cast and the incoming one starts unknown: one
+		// refreshed) this display request. If the poll beat the push, the belief binds
+		// to the outgoing display and the incoming one starts unknown: one
 		// redundant send at worst.
 		p.heldCast = castSeq
 	}
@@ -208,7 +208,7 @@ func (p *HintPusher) step(ctx context.Context) bool {
 	// pushed, and if those verdicts have healed or expired since, only an
 	// explicit empty replacement stops the player skipping works the
 	// device no longer judges broken (PR #438 review, F20). The cost is
-	// one send per cast with no belief, which replace semantics make
+	// one send per display request with no belief, which replace semantics make
 	// harmless.
 	skipped, err := p.Send(ctx, castSeq, want)
 	switch {
@@ -223,13 +223,13 @@ func (p *HintPusher) step(ctx context.Context) bool {
 			zap.Int("hinted", len(want)),
 			zap.Int("skipped_indices", len(skipped)))
 	case errors.Is(err, ErrStaleCast):
-		// A new cast is on the wall; its castSeq arrives on the next poll.
-		logger.Debug("media health: hint push raced a new cast", zap.Int64("cast_seq", castSeq))
+		// A new display request is on the wall; its castSeq arrives on the next poll.
+		logger.Debug("media health: hint push raced a new display request", zap.Int64("cast_seq", castSeq))
 	case errors.Is(err, ErrHintPushRefused):
 		p.mu.Lock()
 		p.parked, p.parkedCast = true, castSeq
 		p.mu.Unlock()
-		logger.Warn("media health: player refused the hint-only push; parked until the next cast",
+		logger.Warn("media health: player refused the hint-only push; parked until the next display request",
 			zap.Int64("cast_seq", castSeq), zap.Error(err))
 	default:
 		// CDP down, the page generation moved: the belief is unchanged, so

@@ -269,22 +269,29 @@ The first owner.
 
 - Valid only in state `legacy` (no active owner grant); otherwise the reply is
   `invitation_invalid`.
-- Refused with `invitation_invalid` on the device-ID relay (`RouteRelayV2`),
-  before the invitation is compared, so v2 is no oracle for it. On v2 a first
-  owner has no way to seal anyway: there is no plaintext profile read (§7.2).
-- The device also admits it on the legacy relayer, but a client sends it only
-  on the LAN (§14 rule 11): becoming the first owner needs both the
-  invitation on the screen and a phone on the FF1's own network. The relayer
-  admission is a residual that ends with the legacy relayer (§13); it is not
-  a migration path.
-- `inv` is the current invitation: `b64u(16 random bytes)`, single use, 10-minute
-  life, compared in constant time. There is **no attempt limit**: 128 random
-  bits need none, and voiding the invitation after some number of misses
-  would let any LAN peer block first-owner and migration enrollment forever.
-  A wrong value is `invitation_invalid` and changes nothing but the spent
-  `ctr` of a `ctl` that has a record or a pending request (§3.4 step 6).
-  Issuing a new
-  invitation replaces the old one.
+- Admitted on every route: the LAN, the legacy relayer and relay v2
+  (`RouteRelayV2`, either channel, §10). Becoming the first owner needs
+  sight of the screen and nothing else. Everything the controller trusts
+  comes from the claim QR: the invitation, and the device keys (§11 fields
+  11 and 12, checked against the pins). The enroll is sealed to `devEnc`
+  and its reply must verify under `devSig`, so the invitation is inside
+  ciphertext only the device opens; other peers on a relay channel learn
+  nothing, and the carrier adds nothing. The accepted exposure is in §13.
+- `inv` is an invitation on offer: `b64u(16 random bytes)`, single use,
+  120-second life, compared in constant time. There is **no attempt limit**:
+  128 random bits need none, and voiding the invitation after some number of
+  misses would let any peer block first-owner and migration enrollment
+  forever. A wrong value is `invitation_invalid` and changes nothing but the
+  spent `ctr` of a `ctl` that has a record or a pending request (§3.4
+  step 6).
+- Two invitations can be on offer at once. Issuing a new one keeps the one
+  it replaces redeemable until that one's own expiry, and drops the one
+  before it. The on-screen QR is repainted with a new invitation 60 s
+  before the current one expires, so a code read off the screen always has
+  at least 60 s left while its QR stays up. The check for "still fresh
+  enough" and the rotation happen under one lock hold, so painters racing
+  each other rotate once. Both invitations are compared, each in constant
+  time, with no early exit.
 - A client MUST enroll with the invitation **before** it sends `connect` on
   an unclaimed device. `connect` claims the device on the relayer, which takes
   the claim QR down and with it voids the invitation (below); a client that
@@ -293,14 +300,15 @@ The first owner.
   painted, and voided at once if the paint does not take. A repaint after the
   QR was hidden or replaced therefore carries a new invitation; a repaint of
   a QR that is still on screen reuses its invitation unless less than
-  2 minutes of it remain.
-- The invitation lives only as long as the QR that carries it: it is voided
-  whenever that QR is hidden or replaced (pairing ended with
+  60 seconds of it remain.
+- The invitations live only as long as the QR that carries them: both are
+  voided whenever that QR is hidden or replaced (pairing ended with
   `showPairingQRCode{show:false}`, a legacy relayer claim, another narration
-  taking the panel, or a repaint without the invitation fields). The device
-  checks at least every 15 s that the QR is still on screen.
+  taking the panel, a repaint without the invitation fields, or the
+  10-minute takedown of a requested code, §7.2). The device checks at least
+  every 15 s that the QR is still on screen.
 - On success: create an owner grant (`approvedBy` = `"invitation"`), consume
-  the invitation, and remove the claim QR.
+  both invitations, and remove the claim QR.
 - `res` = `{"role":"owner","nk":b64u(32),"profile":profile}`.
 - After `internal_error` the grant may have been written and the invitation
   spent anyway (§4.3). The first owner retries `enroll` with a new `ctr`,
@@ -672,8 +680,10 @@ idempotent per `ctl`:
 
 A **display grant** is what a Play site (`@feralfile/play` 0.5 and later)
 holds after an owner approved it through mint pairing: a display-only
-controller record, issued by the FF1, that the site uses to cast as sealed
-envelopes over the v2 relay. It replaces the relayer session token of
+controller record, issued by the FF1, with which the site sends display
+requests as sealed envelopes over the v2 relay. A display request is a
+`displayPlaylist` command in the exact Play shape (§7.2); it is the one
+command a display grant may send. It replaces the relayer session token of
 earlier Play versions (§15.3). The approval UX is the mint pairing one, in
 every control state but `locked`: `legacy` included, where the device
 accepts the decision from whoever it accepts mint pairing decisions from
@@ -834,7 +844,7 @@ update, `shutdown`, which leaves the device off until someone presses its
 button, owner settings, input injection) is owner tier, on every route. A
 command added to the controller tier is checked against this test first.
 
-`connect` is controller tier because every ff-app cast, released and new,
+`connect` is controller tier because every ff-app command, released and new,
 starts with it. Only an owner claims or rebinds: under the protocol (any
 state but `legacy`) a non-owner `connect` to a claimed device is answered
 `ok` and changes nothing, and one to an unclaimed device is refused. In
@@ -844,7 +854,7 @@ The names are the real catalog: `commands/types.go`, the literal names
 `commandrouter` special-cases, and ff-player's `CastCommand` plus
 `CDPRequestHandler` commands. `pause`, `resume`, `pauseCasting`,
 `resumeCasting`, `nextArtwork` and `previousArtwork` exist in neither controld
-nor the player (ff-app's legacy cast enum still names some of them; the
+nor the player (ff-app's legacy command enum still names some of them; the
 player answers them `{ok:false}`), so they are unknown and owner-only.
 
 The implementation MUST keep this list in one table in code
@@ -863,7 +873,7 @@ LAN to plaintext altogether with `setLanControl` (§5.5).
 
 | State | Condition | Plaintext on the LAN (hub, local sources only) | Plaintext via legacy relayer | Envelopes |
 |---|---|---|---|---|
-| `legacy` | no active owner grant | the LAN-open set and `showPairingQRCode` (any arguments; the first-owner path); anything else → `enrollment_required` | allowed | `enroll` (with inv); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's cast (§5.7) is admitted |
+| `legacy` | no active owner grant | the LAN-open set and `showPairingQRCode` (any arguments; the first-owner path); anything else → `enrollment_required` | allowed | `enroll` (with inv, on every route); `requestAccess` and `enroll` without inv → `not_approved`; a `grants.json` `cmd` → `not_approved`; a display grant's display (§5.7) is admitted |
 | `enrolled` | ≥1 active owner grant | owner's switch open (`lan.json`, §8; the default): the LAN-open set; anything else, and everything while the switch is closed → `enrollment_required` | controller tier only; anything else → `envelope_required` | full |
 | `locked` | identity or grant store unreadable/corrupt | refused: `locked` | controller tier only, else `locked` | refused: public `locked` (display grants included) |
 
@@ -892,9 +902,10 @@ it, and a screenshot would hand any LAN host the first-owner invitation.
 Otherwise it is served.
 
 `showPairingQRCode` stays open on the LAN in `legacy` by design (§11
-migration and first claim depend on it). What protects the first enrollment
-is that the invitation is shown only on the physical screen and never served
-over the network.
+migration and first claim depend on it), and one exact form of it is
+admitted on relay v2 (below). What protects the first enrollment is that
+the invitation is shown only on the physical screen and never served over
+the network.
 
 Outside `legacy`, two more LAN surfaces close:
 - `GET /api/screenshot` answers `403 enrollment_required`. It has no envelope
@@ -919,20 +930,72 @@ IPv6 address on the same LAN, is local, while a port forward or DMZ host
 from the Internet is not. Remote control is relay v2's job. Only the legacy
 (topic) relayer path gets the relayer column.
 
-**Device-ID relay (v2, ff-relayer#26).** Its address is the public device ID
-and it authenticates nobody, so the relayer column above never applies to
-it. On v2 (`RouteRelayV2`) every plaintext command is refused in every state:
-`enrollment_required` in `legacy`, `envelope_required` in `enrolled`,
-`locked` in `locked`. The check runs before the state switch and
-before the retired `factoryReset` exception, which stays for the LAN and the
-legacy relayer only. Envelopes are admitted exactly as on any other route.
-`requestAccess` is refused on v2 (§5.2) and so is first-owner `enroll` with
-`inv` (§5.1). `enroll` without `inv` (§5.3) is admitted on v2 as on any
-route; a client sends it there only with a profile pinned from a §5.6
-registration result or confirmed by a grant it holds (§10). There is no plaintext exception on v2, not even a profile read:
-a controller learns the profile from the screen QR pins (first owner, on the
-LAN, §14 rule 11) or from its registration result (§5.6), so v2
-carries envelopes only.
+**Relay v2 (ff-relayer#26).** The relay authenticates nobody, and one of
+the device's two channels is addressed by the public device ID (§10), so
+the relayer column above never applies to it. Both channels enter the gate
+as `RouteRelayV2`. On v2 every plaintext command is refused in every state,
+with one exception (below): `enrollment_required` in `legacy`,
+`envelope_required` in `enrolled`, `locked` in `locked`. The check runs
+before the state switch and before the retired `factoryReset` exception,
+which stays for the LAN and the legacy relayer only. Envelopes are admitted
+exactly as on any other route, first-owner `enroll` with `inv` included
+(§5.1). `requestAccess` is refused on v2 (§5.2). `enroll` without `inv`
+(§5.3) is admitted on v2 as on any route; a client sends it there only with
+a profile pinned from a §5.6 registration result or confirmed by a grant it
+holds (§10). There is no profile read on v2: a controller learns the
+profile from the claim QR (first owner, §11) or from its registration
+result (§5.6).
+
+**The one plaintext request on v2: "show your code".** In state `legacy`
+the policy admits `showPairingQRCode` whose `request` is exactly
+`{"show":true,"purpose":"enroll"}`: exactly those two members (order and
+whitespace free), `show` the literal `true`, `purpose` the string
+`"enroll"`. A phone that cannot reach the device on the LAN sends it to get
+the first-owner code onto the physical screen of an ownerless, claimed
+device ("Secure this Art Computer", a released device). The code itself
+never travels: whoever asks still needs sight of the screen. Every other
+shape is refused as above. `show:false` is never admitted on v2: it latches
+the pairing confirmation and takes the code down, so any stranger on the
+public channel could stop a new device from ever showing one. A request
+without `purpose:"enroll"` would repaint a claimed device's topic QR.
+
+Policy admission is not sufficient. Before the command and any of its side
+effects run, the device applies a precheck, in this order:
+
+1. The device is not claimed → `enrollment_required`, the code v2 gives
+   every `legacy` plaintext. An unclaimed device paints its code on its own.
+2. A claim QR carrying a live invitation is on screen, or an earlier
+   admitted request is still in its pre-claim gate or paint → the success
+   body the command returns (`{"ok":true}`); nothing runs and nothing is
+   counted. A claim QR without an invitation (pins only) is not a live
+   code: the request runs and repaints it with one.
+3. Three pre-claim gate runs were already started from v2 since the daemon
+   started → `rate_limited`. The unit is gate runs started, not requests or
+   paints: each run can start an update ladder, and repeated requests
+   during one run spend nothing. The same request on the LAN is not
+   counted.
+
+Otherwise the request runs the ordinary `showPairingQRCode` command (the
+pre-claim OTA gate, then the paint) and its result is the reply. The check
+and the marks (run counted, run in flight) share one critical section. A
+daemon in which the precheck is not wired refuses the request with
+`enrollment_required`: the policy alone never runs a command on v2. A
+command error is answered `command_failed`, or `rate_limited` when the
+command router shed it.
+
+The reply is plaintext and unauthenticated, like the request: any peer on
+the channel can forge it, so a controller MUST NOT read it as proof of
+anything (§14 rule 11).
+
+**Takedown of a requested code.** A first-owner code that a
+`showPairingQRCode{"show":true,"purpose":"enroll"}` request (any route) put
+on a claimed device comes down after 10 minutes on screen without an
+enroll: the claim QR is hidden and both invitations are voided, within the
+15 s watch of §5.1. A phone off the LAN cannot take the code down, so this
+deadline is the takedown there. A later `showPairingQRCode` re-arms or
+clears it. The code an unclaimed device paints on its own has no deadline,
+and neither has the code a released device paints (§5.5
+`releaseOwnership`).
 
 **Dual-stack transport config.** The v2 endpoint is its own `controld.json`
 key, `relayV2.endpoint`; `relayer.endpoint` and `relayer.apiKey` keep their
@@ -944,7 +1007,10 @@ on disk forces one whatever `control.enabled` says; a device without state,
 fresh or factory-reset, gets one only when `control.enabled` is `true`), and
 the device ID is the stable MAC-derived one (a hostname that fell back to `FF1`, or the
 `FF1-UNKNOWN` placeholder, never dials v2).
-Otherwise it stays legacy-only.
+Otherwise it stays legacy-only. A device that dials v2 dials two channels,
+the keyed channel and the device-ID channel (§10); a `locked` device, which
+has no identity to derive the keyed channel from, dials the device-ID
+channel only.
 
 Internal callers (OOM recovery, `playRecentlyPlayed` re-entry) are not subject
 to this policy. An unrecognized state is treated as `locked`.
@@ -1124,8 +1190,8 @@ Every notification is sealed separately for each channel it goes out on, so
 the LAN and relayer copies of one event carry different `seq` values.
 
 **v2 relay.** The relayer columns above apply to the legacy (topic) relayer
-only. On the device-ID relay nothing is ever sent in plaintext, in any state
-(a `legacy` or `locked` device sends nothing there), and
+only. On relay v2 no notification is ever sent in plaintext, in any state
+(a `legacy` or `locked` device sends none there), and
 `persist_record_count` is ignored: v2 stores nothing. Sealed copies are
 addressed per controller, not fanned out to every peer: the device learns a
 peer→`ctl` binding only from a request whose replay window just accepted a
@@ -1167,7 +1233,7 @@ browser is not told `approval_unavailable`. On the legacy relayer `SealAll`
 still sends the mint pairing types to every active grant, controllers
 included; "owner only" is a v2 rule. A `legacy` device has no owner
 binding, so after the legacy relayer is retired it cannot deliver an
-approval: existing display grants keep casting, and a new pairing is
+approval: existing display grants keep working, and a new pairing is
 rejected by the device with `approval_expired` once its approval deadline
 (5 min by default) passes, until the device is Secured. The device cannot
 tell earlier that nobody received the request: its own send still succeeds
@@ -1189,35 +1255,73 @@ every new subscriber: `device_status`, `player_status`, `ddc_status` and
 | Route | Request | Reply |
 |---|---|---|
 | LAN | `POST /api/cast`, body `{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}` | 200 `{"v":1,"jwe":"<compact>"}` |
-| legacy relayer | the same JSON as a topic cast | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
+| legacy relayer | the same JSON as a topic command | RPC `message` = `{"v":1,"jwe":"<compact>"}` |
 | v2 relay | frame payload = `{"messageID":<client id>,"message":{"command":"ff1Envelope","request":{"v":1,"jwe":"<compact>"}}}`, split into `{"relayChunk":{…}}` frames above 32 KiB (whole message ≤ 4 MiB, reassembled within 180 s) | `{"type":"RPC","messageID":<same>,"message":{"v":1,"jwe":"<compact>"}}`, or `message` = the public `{"error":{"code"}}` |
+| v2 relay, the "show your code" request (§7.2) | the same frame with `"message":{"command":"showPairingQRCode","request":{"show":true,"purpose":"enroll"}}` | `{"type":"RPC","messageID":<same>,"message":{"ok":true}}`, or `message` = the public `{"error":{"code"}}`; plaintext, never evidence |
 
 The `request` carrier is parsed strictly (§1): exactly the members `v` (the
 integer 1) and `jwe` (a non-empty string), no duplicate, case-variant or
 extra member; anything else is `bad_envelope`.
 
 The LAN hub caps the whole request body at 4 MiB, so on the LAN the compact
-must leave room for the ~50-byte cast wrapper. The v2 relay caps the whole
+must leave room for the ~50-byte command wrapper. The v2 relay caps the whole
 JSON message at 4 MiB the same way. Because the request is base64url-encoded
 twice (JWS, then JWE), the compact is about 16/9 of the plaintext `req`: the
 effective plaintext limit on any sealed route is about 2.25 MiB. Clients
 should check the sealed size before sending and say so, rather than fail
 generically.
 
-On v2 the device holds one socket to `/v2/channels/{deviceId}/connections`
-(WebSocket subprotocol `ff-relay.v2`), independent of its legacy relayer
-socket. Peers on the channel have no roles or tokens; every request from one
-enters the gate as `RouteRelayV2` (§7.2) and must be an `ff1Envelope`.
-The `messageID` is chosen by the client and only routes the reply; the
-authenticated correlation is `rid` (§3.3). Relay acknowledgements are
+On v2 the device holds two sockets (WebSocket subprotocol `ff-relay.v2`),
+each independent of the other and of its legacy relayer socket, to
+`/v2/channels/{channelId}/connections`:
+
+| Channel | `channelId` | Who uses it |
+|---|---|---|
+| keyed | `thumb(devSig)`: 43 characters, field 7 of the claim QR, derivable from every pinned profile | ff-app and ff-cli, for every envelope; `@feralfile/display`, first |
+| device-ID | the public device ID | the "show your code" request (§7.2), which an ownerless device gives the sender no profile to derive the keyed channel from; `@feralfile/display` as its second attempt, and Play sites on a library that predates the keyed channel |
+
+The keyed channel needs no new secret and nothing stored on the relay: the
+relay is unchanged, stays opaque and holds no identity. The device dials the
+device-ID channel in every state and keeps doing so; there is no stage that
+stops it. A `locked` device dials only that one (§7.2). Each channel is its
+own socket, session, peer set and redial backoff, so a device-ID channel
+that is refused at connect or held full by a stranger changes nothing for a
+client on the keyed channel. Both feed one gate: peers have no roles or
+tokens, every request from one enters as `RouteRelayV2` (§7.2) and must be
+an `ff1Envelope` or the one admitted plaintext request, and a notification
+binding (§9) belongs to the peer of one socket, so the two channels never
+collide. The `messageID` is chosen by the client and only routes the reply;
+the authenticated correlation is `rid` (§3.3). Relay acknowledgements are
 transport receipts, never success.
+
+What the keyed channel fixes: a party that holds only the device ID finds no
+channel that ff-app or ff-cli use. What it does not: a profile holder (a
+LAN peer through status, someone who saw the QR, a revoked controller, a
+paired Play site) can still join the keyed channel (§13).
+
+"v2 connected" with two sockets: notifications (§9), the hub status flag
+and the `relay_v2_connected` gauge mean either socket is up; the claim
+flow's remote-route wait (ffos-user `setup-flow.md`) means the keyed socket,
+the one the scanning phone enrolls on; the offline→online wake below
+reaches both.
+
+**Clients.** ff-app and ff-cli dial the keyed channel only, with
+`thumb(sig)` of the profile they pinned (for a first-owner enroll, of the
+keys on the claim QR); their one use of the device-ID channel is ff-app's
+"show your code" request. Against firmware that does not dial the keyed
+channel they have no relay route; the LAN still works. `@feralfile/display`
+(one connection per display request) connects to the keyed channel first
+and, only when that attempt is proven undelivered (the relay's hello lists
+no peer, or the relay refused the connection), once more to the device-ID
+channel, with a new envelope. Sites on an older library keep working on
+the device-ID channel.
 
 v2 errors are typed by what they prove. A request is **proven undelivered**
 only when the relay refused it for every target and no chunk of it was
 acknowledged; only then may a client resend it or fall back to another
 route. Anything else (a timeout after an acknowledgement, a socket drop
 after sending) is **ambiguous** and is never resent (§14.4). A client's
-first envelope on a device channel goes to `to:"peers"` and it then pins
+first envelope on one of the device's channels goes to `to:"peers"` and it then pins
 the peer whose reply verifies under the pinned `devSig`.
 
 **Liveness.** Every v2 endpoint (the device and each client, on device and
@@ -1240,13 +1344,14 @@ frames on a live socket) is **transient**: the device and every client retry
 with backoff and never treat it as permanent. Close code 1008 is not an
 admission refusal: the relay sends it to a socket that held a forwarded
 frame unacknowledged for 30 s. It is retried with backoff all the same. The
-device-ID channel is public, so strangers can contend for it. (The legacy
+device-ID channel is public, so strangers can contend for it, and so can
+profile holders for the keyed one. (The legacy
 relayer's handshake semantics are unchanged: released firmware treats a 4xx
 there as permanent, which is why the legacy host's shutdown waits for the
 device population, §15.4 Gate B.)
 
-**Device redial.** The device's backoff starts over after a session that
-lasted a minute. An offline→online connectivity edge ends any redial wait
+**Device redial.** Each of the device's two sockets has its own backoff,
+which starts over after a session that lasted a minute. An offline→online connectivity edge ends any redial wait
 in progress and restarts the backoff at the floor, including an edge that
 arrives while a socket is still up: that socket was often dialed on the
 network just left, and when it dies the next redial waits at most the
@@ -1254,17 +1359,19 @@ floor. Without this the backoff grown while the device was offline outlives
 the network change, and the device has no v2 for minutes after every
 Configure Wi-Fi (feral-file#3551 G3 bench, finding F2).
 
-First-owner `enroll` with `inv` (§5.1) is never carried on v2, and the
-device refuses it there. `enroll` without `inv` (§5.3) MAY be carried on v2
+First-owner `enroll` with `inv` (§5.1) is carried on the keyed channel when
+the LAN attempt gave no verified reply (§14 rule 11); the profile it is
+sealed to comes from the claim QR. `enroll` without `inv` (§5.3) MAY be
+carried on v2
 by a controller whose profile is already trustworthy: pinned from a verified
 §5.6 registration result (sealed to the controller under `ps`, which exists
 only in the controller QR, so the profile is the owner's verified view of the
 FF1), or confirmed by a grant the controller already holds (a role refresh,
 whose ordinary sealed commands already use v2 under the same profile). A
 profile from any other source (an unconfirmed LAN status, a pairing reply
-that verifies only under itself) MUST NOT be enrolled over v2: the device
-channel is addressed by the public device ID and anyone can join it, so a v2
-reply that verifies under an unconfirmed profile proves nothing.
+that verifies only under itself) MUST NOT be enrolled over v2: anyone who
+knows such a profile's `thumb(sig)` can join that channel, so a v2 reply
+that verifies under an unconfirmed profile proves nothing.
 
 Route order for a §5.6 newcomer: a legacy topic it held from **before** the
 pairing first. That topic reaches the real FF1's authenticated legacy
@@ -1286,7 +1393,8 @@ LAN once the legacy relayer is retired.)
 
 At most 4 envelopes are authenticated at a time (decrypt, verify, parse);
 an envelope that cannot get a slot within 1 s is answered with the public
-error `busy` (LAN 503) and should be retried. No lock other than that bound
+error `busy` (LAN 503) and should be retried. The bound belongs to the
+authority, so every route shares it, both v2 channels included. No lock other than that bound
 is held while an envelope is unauthenticated.
 
 Under the protocol, a relayer frame with no `command` (the relayer's own
@@ -1314,7 +1422,8 @@ reply rather than `bad_envelope`.
   `control.transports` lists the routes this device is configured to carry
   envelopes on, in this order: `"lan"` (always), `"relayer"` (a legacy
   relayer endpoint is configured), `"relayV2"` (the device dials the v2 relay,
-  §7.2 dual-stack rules). It reports configuration, not whether a socket is
+  §7.2 dual-stack rules; a device that lists it and has an identity dials
+  the keyed channel of §10, and there is no separate token for that). It reports configuration, not whether a socket is
   up right now. Clients treat an absent `transports` as `["lan","relayer"]`.
 - With the protocol on, the claim QR appends four pipe fields to the
   existing six in every state but `locked`:
@@ -1338,10 +1447,33 @@ reply rather than `bad_envelope`.
   - The only builder is `formatDeviceConnectURL` in devicectl
     (`components/launcher-ui`, the other builder this once had to match, was
     deleted with feral-setupd).
+  - A QR that carries an invitation, on a device that dials relay v2
+    (§7.2), appends four more fields:
+
+    | Index | Field | Value |
+    |---|---|---|
+    | 10 | `exp` | the invitation's expiry, Unix seconds, device clock |
+    | 11 | `sig` | `b64u` of the 33-byte compressed SEC 1 point of `devSig` |
+    | 12 | `enc` | the same for `devEnc` |
+    | 13 | `host` | the device's LAN IPv4 literal, or empty |
+
+    With them the QR is the whole profile (`dev` at index 0, `gen` at
+    index 9, the two keys), so a controller that cannot read LAN status
+    can still seal an enroll. A controller decodes the points and checks
+    that their thumbprints equal the pins at indices 7 and 8: a decoder
+    self-check, not a trust decision (the pins and the keys come from the
+    same QR). `host` is the source address of the device's default IPv4
+    route, re-read on every paint, and is emitted only when it is a private
+    (RFC 1918) or IPv4 link-local address; otherwise the field is empty. It
+    is a transport shortcut for the scanning phone, never a security gate.
+    A QR without an invitation (pins only) has ten fields, and so has an
+    invitation QR on a device that does not dial v2: the key fields being
+    present therefore tells a controller the device is reachable on the
+    keyed channel. The link grows from about 215 to about 350 characters.
   - The invitation is issued when the QR is painted, replaced when it has
-    less than 2 minutes left, and refreshed in place one minute before it
-    expires while the claim QR is still on screen. A QR that is no longer on
-    screen mints nothing.
+    less than 60 seconds left, and refreshed in place 60 seconds before it
+    expires while the claim QR is still on screen (§5.1). A QR that is no
+    longer on screen mints nothing.
   - When the first owner enrolls, the invitation is consumed and the claim
     QR is taken down; from then on the auto-claim flow treats the device as
     settled and does not repaint the topic-carrying QR.
@@ -1357,9 +1489,12 @@ reply rather than `bad_envelope`.
 - `showPairingQRCode` with `{"show":true,"purpose":"enroll"}` on a `legacy`,
   claimed device displays the invitation QR. This is the migration path for
   2.0.x owners, and for a device released by "Forget I exist" (§5.5) whose
-  claim QR carries no invitation. Clients send it, and the enroll that
-  follows, on the LAN only (§14 rule 11). On a device that is not `legacy`
-  the same request paints the ordinary claim QR without invitation fields.
+  claim QR carries no invitation. Clients send it on the LAN and then on
+  the device-ID channel of relay v2, where this exact request is the one
+  admitted plaintext (§7.2), and enroll from the code it shows (§14
+  rule 11). The code comes down after 10 minutes without an enroll (§7.2).
+  On a device that is not `legacy` the LAN request paints the ordinary
+  claim QR without invitation fields, and the v2 request is refused.
 
 ## 12. Fixtures
 
@@ -1427,6 +1562,16 @@ reply rather than `bad_envelope`.
     header member, DER signature, wrong `nk`, header `kid` ≠ claims `ctl`,
     `ep` that is not `b64u(8 bytes)` (short, or padded).
 
+- `claim_qr.json`: one claim-QR link as a `legacy` device that dials relay
+  v2 paints it (§11). `url` is the QR payload; `fields` are its fourteen
+  pipe fields in order (index 3, the branch, as it appears in the link,
+  with `/` as `%2F`); `invitation`, `expiresAt` and `host` are fields 6, 10
+  and 13 parsed; `pins` are fields 7 and 8; `profile` is the device profile
+  of `keys.json`. A controller's parser MUST derive `profile` from `url`
+  alone (fields 0, 9, 11 and 12) and find its thumbprints equal to `pins`.
+  The two keys compress to different parities (`02…` and `03…`). A Go test
+  pins the production URL builder to `url` byte for byte.
+
 `setup` describes the device a request vector is opened against: `now`,
 `grants` (which `keys.json` controllers are in `grants.json`), optional
 `displayGrants` (`[{name, expiresAt?}]`, the display records of §5.7,
@@ -1452,7 +1597,7 @@ and the ff1-cli test suite does the same with `jose`.
 ## 13. Security notes
 
 - The relayer's `messageID:"system"` topic message is not a controller path
-  on the legacy relayer: ff-relayer generates every cast's `messageID` server
+  on the legacy relayer: ff-relayer generates every command's `messageID` server
   side (`crypto.randomUUID()` in `handleCast`), and the system message is
   relayer-originated on connect, so a controller cannot forge one. On the v2
   relay the `messageID` is chosen by the client, so a v2 frame with
@@ -1499,14 +1644,62 @@ and the ff1-cli test suite does the same with `jose`.
   the screen can then take ownership with the invitation it shows. It is
   the first-owner path (§7.2), and the invitation itself only ever appears
   on the physical screen.
+- First-owner setup off the LAN (§5.1, §7.2, §10, §11). The owner accepted
+  each of these; none has a mitigation beyond what the sections state.
+  - Sight of the screen is the whole first-owner credential: a photo of the
+    code is usable from anywhere, on any route, for up to 120 s. An owned
+    device never shows it. The same-network requirement is gone, and with
+    it the protection it gave in public venues.
+  - Anyone with the device ID can make an ownerless, claimed device show
+    its code up to 3 times per boot, 10 minutes each, at a time they
+    choose (§7.2). Taking it needs a view of the screen in that window (a
+    person, a camera, a window) and yields the owner tier. Spending the 3
+    runs also blocks the off-LAN "Secure this Art Computer" request until
+    the device restarts. "Per boot" is per daemon run: the count is in
+    memory, so a controld restart without a reboot (a crash, a package
+    update) starts it over.
+  - Device IDs are an 8-character hash of the MAC, so "anyone with the
+    device ID" includes anyone willing to enumerate them.
+  - Each admitted "show your code" request runs the pre-claim OTA gate, so
+    a device-ID holder can pick the moment a claimed, ownerless device
+    takes a required update, up to 3 times per boot (a LAN peer can
+    today).
+  - A released device that was rebooted, with no LAN reach, has only those
+    3 runs per boot.
+  - A link crafted with an attacker's keys makes a phone with no record of
+    that device believe in a fake FF1 (the class of the forwarded-link
+    residual below); it gains nothing on the real device. The real code is
+    then refused by the pins guard (§14 rule 1) until that row is removed.
+  - A phone that loses the race for a code (a second phone, someone's
+    photo) is told the code changed while the screen shows none.
+  - Enroll delivered, reply lost, and the app killed before any retry: the
+    phone has no grant and the code is gone. Reopening the same link
+    recovers (§14 rule 11); otherwise a factory reset.
+  - A first-time user who arrives by camera link through install and
+    onboarding always needs a second scan.
+  - Until the app release that reads the key fields (§15.3), the released
+    app meets a 120 s code instead of a 10 min one: a slow entry more
+    often ends claimed without an owner, which "Secure this Art Computer"
+    recovers.
+  - A claimed or released device that cannot take the first image with the
+    key fields (a link too slow for the download) can no longer be secured
+    once that app release is out, on the LAN either. It stays controllable
+    in plaintext on its LAN.
+  - An owned device still below that image when the app and ff-cli
+    releases land has no relay route from them until it updates.
+  - A device whose ID fell back to `FF1` or `FF1-UNKNOWN` never dials v2,
+    so its code has no key fields and the app cannot set it up. Such a
+    device is already faulty.
+  - `@feralfile/display`: when the keyed channel lists a peer that is not
+    the device while the device is only on the device-ID channel (older
+    firmware), that request times out instead of falling back.
+  - ff-cli's required version (ff1-cli `docs/CONFIGURATION.md`) is a
+    compatibility lever, not a security control: deleting the kept value
+    and blocking the network bypasses it.
 - Residual, accepted, only on an image that still configures a legacy
   relayer (none from the 3.0.0 LAN-open build on, §15.4): there the legacy
   relayer column of §7.2 applies, so a topic holder has every plaintext
-  command of a `legacy` device (`factoryReset` and `sshAccess` included),
-  and the device admits a first-owner `enroll` with `inv` on that route
-  (§5.1), which §14 rule 11 forbids clients to send. The claim QR carries
-  the topic, so anyone who saw it during the invitation's 10-minute life
-  could enroll from anywhere with a client of their own.
+  command of a `legacy` device (`factoryReset` and `sshAccess` included).
 - Residual, accepted: every authenticated denial is a synchronous durable
   write (§3.4 step 6). A holder of a revoked key can drive a few hundred
   small writes a second and serialize admissions behind them; it gains
@@ -1553,7 +1746,7 @@ and the ff1-cli test suite does the same with `jose`.
   the same party no longer needs the LAN once the controller has no
   pre-pairing topic (or that topic is retired): holding `ps`, it forges the
   result under its own profile and answers the controller's sealed `enroll`
-  on the public device channel. The reach is unchanged: the controller believes in a
+  on the keyed channel of the profile it forged. The reach is unchanged: the controller believes in a
   fake FF1 (what it sends goes to the forger), and the real FF1 grants that
   party nothing.
 - Residual, accepted: the app-link form of the controller QR (§5.6.1.1)
@@ -1575,16 +1768,22 @@ and the ff1-cli test suite does the same with `jose`.
   copy captured on the relay can be replayed if the owner registers those
   keys within its `exp` + 30 s. The §5.6 flow sends nothing before the
   protected `enroll`, and ff-cli sends no command while a pairing is open.
-- Residual, accepted: the v2 device channel is public and the relay cannot
-  tell the device from a stranger (a legacy topic is not bound to a device
-  ID and anyone can mint one). Per-address limits (IPv4 address, IPv6 /64),
-  idle close and refusal at capacity raise the cost, but a party with a
-  handful of addresses that keep pinging can still fill a channel. While
-  the legacy relayer exists the effect is a 429 at connect, which is proven
-  undelivered, so clients fall back to the legacy relayer and the device's
-  legacy session is unaffected. After the legacy relayer is gone, a device
-  whose channel is held full has no remote route until the squatters leave;
-  the LAN is unaffected. Until 2026-10-30 this section required a relay
+- Residual, accepted: the relay cannot tell the device from a stranger on
+  either of its channels (§10). Per-address limits (IPv4 address, IPv6
+  /64), idle close and refusal at capacity raise the cost, but a party with
+  a handful of addresses that keep pinging can still fill a channel.
+  Profile holders (a LAN peer through status, someone who saw the QR, a
+  revoked controller, a paired Play site) can fill the keyed channel.
+  Device-ID holders can fill the device-ID channel, which blocks Play
+  sites on a library that predates the keyed channel and the off-LAN
+  "show your code" request, and they can still send sealed, useless
+  envelopes to an owned device there; they find no channel ff-app or
+  ff-cli use. While the legacy relayer exists the effect of a full channel
+  is a 429 at connect, which is proven undelivered, so clients that have a
+  legacy route fall back to it and the device's legacy session is
+  unaffected. After the legacy relayer is gone, a device whose keyed
+  channel is held full has no remote route for ff-app and ff-cli until the
+  squatters leave; the LAN is unaffected. Until 2026-10-30 this section required a relay
   connection slot attributable to the device before retirement; that was
   withdrawn: the squat needs no
   credential and grants nothing, and a device credential on the relay would
@@ -1612,7 +1811,7 @@ and the ff1-cli test suite does the same with `jose`.
   and the share of unsecured (`legacy`) devices must be acceptable: on
   those a new 0.5 pairing is rejected `approval_expired` after the
   device's approval deadline (§9; the browser's own timeout may come
-  first) while existing grants keep casting. A grant issued in `legacy` carries
+  first) while existing grants keep sending display requests. A grant issued in `legacy` carries
   the trust of today's session token (display only) and stays valid after
   the device is Secured.
 - Residual, accepted: the mint pairing broker is trusted for the announced
@@ -1630,7 +1829,10 @@ these rules. The device cannot enforce them; review findings on both clients
 showed what goes wrong without them.
 
 1. **Pin sources.** A device profile is pinned only from:
-   - the physical claim QR (first owner, migration);
+   - the physical claim QR (first owner, migration). For a first-owner
+     enroll the whole profile comes from it: the device ID, `gen` and the
+     two keys of §11 fields 11 and 12, whose thumbprints MUST equal the
+     pins in fields 7 and 8. Nothing is read from the network for it;
    - an owner's sealed registration result (§5.6), checked per §5.6.3;
    - an owner's end-to-end encrypted handoff (the earlier short-code ff1-cli
      pairing that carried a profile; superseded by §5.6). The short-code
@@ -1764,46 +1966,75 @@ showed what goes wrong without them.
     grant as one record; a re-pair replaces the record only on a
     `mint_succeeded` that carries a `displayGrant`, then self-revokes the
     old grant best-effort with the old keys. It connects to the v2 relay
-    per cast and closes right after (never an idle socket), fans the
+    per display request and closes right after (never an idle socket), fans the
     envelope out and pins the first reply that verifies under the pinned
-    `profile.sig`. Rules 4 and 5 apply: every attempt is a new envelope, and
+    `profile.sig`. It connects to the keyed channel, `thumb(profile.sig)`,
+    first and, only when that attempt is proven undelivered (the hello
+    lists no peer, or the relay refused the connection), once more to the
+    device-ID channel with a new envelope (§10); a keyed attempt that was
+    delivered or is ambiguous is never followed by the other channel. Rules 4 and 5 apply: every attempt is a new envelope, and
     a `replay` on v2 is an unknown outcome, which the browser (no LAN path
     to resync) answers by moving its counter past the window without a
     resend. A verified `access_revoked` or `expired` deletes the grant and
-    re-pairs on the user's next cast; an unverified public
+    re-pairs on the user's next display request; an unverified public
     `unknown_controller` or `bad_envelope` seen after the deadline is
     reported as "unrecognized" and **never** deletes the grant (rule 3:
     any channel peer can forge it); only a user action re-pairs. A
     `mint_succeeded` without `displayGrant` (older firmware) is
     `device_unsupported`: the session it carries is discarded.
-11. **First owner on the LAN only.** Becoming an FF1's first owner needs
-    the invitation on its screen and a phone on its own network. A
-    controller sends a first-owner `enroll` with `inv` (§5.1) and
-    `showPairingQRCode{purpose:"enroll"}` (§11) only to a LAN endpoint
-    whose identity it validated, never through the legacy relayer or v2,
-    whichever flow it is in (a scanned or opened claim QR, or "Secure this
-    Art Computer"). When a claim falls back to the relayer (the controller
-    found no LAN endpoint for the device) it reads `getDeviceStatus` there
-    first and decides on its `control` block, before any `connect`, write
-    or enroll:
-    - `legacy` (the protocol runs and nobody owns the device): it stops,
-      sends nothing more and writes nothing, and asks the person to join the
-      FF1's Wi-Fi. A plaintext `connect` there would claim a device that
-      should get an owner, leaving it ownerless and, when it was already
-      claimed, with its live invitation QR still on the screen. The
-      guidance covers a phone that is on that Wi-Fi but cannot see the
-      device (client isolation, a denied local-network permission).
-    - `enrolled`: the device has an owner. The controller writes nothing
-      and sends no `connect`: it opens the device when it holds a grant,
-      and otherwise shows its controller QR to an owner (§5.6). (The
-      LAN-open set of rule 1 is a LAN rule; it never applies off the LAN.)
-    - no `control` block (firmware without the protocol): the relayer claim
-      continues as before.
+11. **First owner from the screen code.** Becoming an FF1's first owner
+    needs the code on its screen and nothing else; the phone need not be
+    on the FF1's network. One path serves every entry (a code scanned in
+    the app, an opened claim link, a LAN-list pick followed by a scan,
+    "Secure this Art Computer"):
+    - **Parse.** The code MUST carry the invitation and the key fields
+      (§11 fields 10 to 13), and the thumbprints of the keys MUST equal the
+      pins. `host`, if present, MUST be a private or IPv4 link-local
+      literal; the controller posts only to port 1111 of such an address.
+      `host` is a transport shortcut, never a security gate: nothing is
+      trusted because it was reachable there.
+    - **Existing records.** A link whose pins contradict a confirmed grant
+      or the stored record for that device ID is refused (rule 1).
+    - **No key fields.** A code with an invitation but no key fields comes
+      from firmware that predates them, or from a device that does not dial
+      v2. The controller sends nothing and tells the person the Art
+      Computer needs its update first. There is no fallback to reading the
+      profile from LAN status.
+    - **Stale links.** Only for a code that arrived as an opened link,
+      never for one the controller's own scanner just read: when now is
+      past `exp` + 300 s and the controller holds no pending credential for
+      that device and `gen`, it sends nothing and asks for a new scan. A
+      code just scanned is always sent, so a wrong clock on either side
+      still converges: a verified `expired` or `invalid_request` teaches
+      the device time (rule 5) and the flow retries once.
+    - **Send.** The enroll is sealed to the profile from the code. It goes
+      to `http://host:1111/api/cast` when `host` is set and, on any outcome
+      other than a verified reply, to the keyed channel of relay v2
+      (`thumb(sig)`, field 7). Every attempt is a new envelope (rule 4);
+      the device answers a repeated enroll from the same keys with the same
+      grant (§5.1), so an ambiguous first attempt is safe to follow, and a
+      verified `replay` is answered by one more new envelope. It is never
+      sent through the legacy relayer.
+    - **Outcome.** On a verified `ok` the controller saves the grant,
+      records the device with `relayV2` in its transports, and, on a first
+      claim, sends the sealed `connect` on the route that just worked. A
+      verified `invitation_invalid` returns to the scanner. Enroll comes
+      before `connect` (§5.1): a claimed `legacy` device is never claimed
+      in plaintext.
+    - **Asking for the code.** A claimed `legacy` device whose code is not
+      on screen is asked to show it with
+      `showPairingQRCode{"show":true,"purpose":"enroll"}`: on the LAN
+      first, then always on the device-ID channel of relay v2 (§7.2), on a
+      connection of its own, with no version check. The reply on v2 is not
+      evidence (any peer on that public channel can answer), so the
+      controller treats the request as sent, opens its scanner and tells
+      the person to look at the screen. Off the LAN it cannot take the code
+      down; the device's 10-minute deadline does.
 
-    On the LAN, a claimed `legacy` device whose scanned QR carries no
-    invitation is asked to show one (`showPairingQRCode{purpose:"enroll"}`)
-    and enrolled from it; it is never claimed in plaintext. ff1-cli never
-    becomes a first owner, so in practice this rule binds ff-app.
+    ff-app and ff-cli use the keyed channel for every envelope and no
+    device-ID channel, except the request above (§10). ff1-cli never
+    becomes a first owner, so in practice the rest of this rule binds
+    ff-app.
 
 ## 15. Rollout and retirement
 
@@ -1861,7 +2092,8 @@ release operator applies them.
   together with the `RouteRelayV2` wiring, the route-aware `system`
   handling and reply target (§13), the per-controller notification binding
   (§9) and the topic-independent claim QR (§11). A build that dials v2
-  without all of them is open to anyone who knows the device ID.
+  without all of them is open to anyone who knows the device ID. The
+  device dials the keyed channel and the device-ID channel together (§10).
 - Legacy retirement is one step, decided 2026-10-30: the legacy host is
   shut down, not flag-retired (§15.4). The relayer's split flags remain for
   a relay that is still up with a route switched off: `ff-relayer-v2`
@@ -1869,7 +2101,7 @@ release operator applies them.
   deployment uses them to simulate retirement.
 - Turning the legacy relayer off is gated on fleet telemetry of
   `control.state`, not on firmware version: a `legacy` device has no
-  controller grants and v2 admits no plaintext (§7.2), so retirement strands every unmigrated
+  controller grants and v2 admits no plaintext command but the request to show its code (§7.2), so retirement strands every unmigrated
   device off the LAN. It also waits for Play to move from relayer session
   tokens to device-issued display grants (§5.7, Play 0.5), with the
   retirement prerequisites listed in §13, and for the §15.4 gates
@@ -1877,21 +2109,45 @@ release operator applies them.
 - There is no topic-to-grant migration and no locally generated topic. A
   legacy topic is an HMAC credential minted by the relayer, and v2 never
   reads one. A device claimed under legacy (topic, no owner) becomes
-  v2-reachable only when an owner enrolls it on the LAN with the screen
-  QR: the "Secure this Art Computer" flow sends plaintext
-  `showPairingQRCode{purpose:"enroll"}` on the LAN, by device ID, and
-  enrolls from the invitation QR (§5.1), never through the relayer (§14
-  rule 11). The request needs no topic on the LAN
-  (the §13 residual: any LAN peer may send it in `legacy`), so a phone on
-  the device's Wi-Fi that never held the topic sets up a claimed `legacy`
-  device the same way, including one released by "Forget I exist"
-  (§5.5), whose invitation QR is memory only and gone after a reboot.
-  Off the LAN a client has no first-owner route, with or without the topic
-  (§14 rule 11; the device still admits one on the legacy relayer, the §13
-  residual).
+  v2-reachable only when an owner enrolls it with the screen code: the
+  "Secure this Art Computer" flow asks for the code with plaintext
+  `showPairingQRCode{purpose:"enroll"}`, on the LAN by device ID and then
+  on the device-ID channel of relay v2, and enrolls from the invitation QR
+  (§5.1, §14 rule 11), on the LAN or the keyed channel, never through the
+  legacy relayer. The request needs no topic (the §13 residuals: any LAN
+  peer, and anyone with the device ID, may send it in `legacy`), so a phone
+  that never held the topic sets up a claimed `legacy` device the same
+  way, including one released by "Forget I exist" (§5.5), whose invitation
+  QR is memory only and gone after a reboot.
+- Off-LAN first-owner setup rolls out in this order; the stages are release
+  gates, not build order.
+  1. One image version carries the two-slot invitation, the claim-QR key
+     fields, first-owner enroll on v2, the keyed channel and the "show
+     your code" request (§5.1, §7.2, §10, §11), with the ff-player claim
+     panel that no longer asks for the same Wi-Fi. It is additive for the
+     released app, which keeps working on the LAN: fields 0 to 9, LAN
+     status and the device-ID channel are unchanged; only the code's life
+     is shorter (§13). The operator then raises `min_runtime_version` to
+     that version on every channel the app can meet: an unclaimed device
+     already updates before it shows a code, and claimed devices take the
+     required update at boot or overnight.
+  2. One force-updated ff-app release, once the fleet version panel shows
+     devices below that image at or near zero: the screen-code path of §14
+     rule 11 as the only setup path, the keyed channel only, the "show
+     your code" send. Off-LAN setup starts working here. There is no old
+     path in that app, so a device still below the image cannot be set up
+     or reached over the relay by it (§13).
+  3. The ff-cli release with the keyed channel only and a required-version
+     floor read from the app's remote config document
+     (`cli_update.required_version`), at the same gate as stage 2. Earlier
+     installs are told by hand; from this release on the floor does it.
+  4. The `@feralfile/display` release with the keyed-first order (§10).
+     It gates nothing: sites on an older library keep working on the
+     device-ID channel, which the device keeps dialing.
 - A client sends a sealed command on v2 only when the device's last status
-  listed `relayV2` in `control.transports` (§11), or under the ff-cli
-  exception in §15.4: a v2 send to a device that is not on v2 can be
+  listed `relayV2` in `control.transports` (§11), when the claim QR it
+  enrolls from carries the key fields (§11, which only a device that dials
+  v2 emits), or under the ff-cli exception in §15.4: a v2 send to a device that is not on v2 can be
   receipted by another peer and become ambiguous instead of falling back.
   Every G3 device with a control authority and a stable device ID (§7.2)
   lists `relayV2`: the ffos image workflows refuse a `controld.json` without
@@ -2054,7 +2310,7 @@ fetch reads the cached `true` again).
   §5.6 enroll stops there, and a command whose FF1 never listed `relayV2`
   is not tried over v2. Accepted residual (2026-10-30); the remedy is
   updating ff-cli.
-- Play 0.4 sites: their session casts fail (on a 3.0.0 device already, which has no legacy relayer); they move to 0.6 (Gate A).
+- Play 0.4 sites: their session display requests fail (on a 3.0.0 device already, which has no legacy relayer); they move to 0.6 (Gate A).
 
 **No legacy relayer on new images.** Before the 3.0.0 LAN-open build, the
 release operator deletes the `relayer` block from every environment's
