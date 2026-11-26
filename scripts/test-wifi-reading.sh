@@ -80,6 +80,31 @@ echo 'BOOT_IMAGE=/vmlinuz-linux root=UUID=x' > "$tmp_dir/cmdline.installed"
 [ -z "$(pick "$results_stick_line" "$tmp_dir/cmdline.installed")" ] || \
   fail "factory check used a stick without an archisodevice"
 
+# --- factory-check: the board is named as ffos auto-install.sh will name it.
+
+# nmcli lists eth0 and wlan0; ethtool reports the permanent MAC from
+# FF_TEST_MAC_<dev> (unset: no permanent address).
+cat > "$fake_bin/nmcli" <<'EOF'
+#!/usr/bin/env bash
+printf 'wlan0:wifi\neth0:ethernet\nlo:loopback\n'
+EOF
+cat > "$fake_bin/ethtool" <<'EOF'
+#!/usr/bin/env bash
+var="FF_TEST_MAC_$2"
+[ -n "${!var:-}" ] && echo "Permanent address: ${!var}"
+exit 0
+EOF
+chmod +x "$fake_bin/nmcli" "$fake_bin/ethtool"
+# shellcheck disable=SC2016 # expands in the child bash
+name_board() { env "$@" bash -c 'source "$1"; device_id' _ "$factory_check" || true; }
+
+# The expected names are what auto-install.sh's own code gives these MACs.
+[ "$(name_board FF_TEST_MAC_eth0=3c:3b:ad:00:00:01 FF_TEST_MAC_wlan0=00:e0:4c:68:12:34)" = FF1-AMG1YBBW ] || \
+  fail "factory check did not name the board from the ethernet MAC as auto-install.sh does"
+[ "$(name_board FF_TEST_MAC_eth0=00:00:00:00:00:00 FF_TEST_MAC_wlan0=00:e0:4c:68:12:34)" = FF1-S7MZGKMB ] || \
+  fail "factory check did not fall back to the Wi-Fi MAC"
+[ -z "$(name_board FF_TEST_NONE=1)" ] || fail "factory check named a board that has no permanent MAC"
+
 # --- wifi-reading: a sample is only what this scan saw, read past wpa_cli's 4 KiB cap.
 
 # id bssid freq level age ssid. Age 0 arrived after the scan request;
