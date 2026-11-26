@@ -228,6 +228,12 @@ retired device's `factoryReset` is the one exception, spec §8). The
 relayer column applies only to an image that still configures a legacy
 relayer (none from the 3.0.0 LAN-open build on, spec §15.4).
 
+Relay v2 (both channels, spec §10) has no column: every plaintext command
+there is refused with the public `{"error":{"code":…}}` of the state
+(`enrollment_required`, `envelope_required`, `locked`), except one request
+in `legacy`, `showPairingQRCode` with exactly
+`{"show":true,"purpose":"enroll"}` (see that command, and spec §7.2).
+
 A refused relayer plaintext command gets the RPC `message`
 `{"ok":false,"error":"envelope_required"|"locked","command":"<name>","message":"<text>"}`:
 `ok:false` and a flat string `error`, the shape every released client
@@ -333,6 +339,12 @@ Example:
 }
 ```
 
+`request.purpose`, optional: `"enroll"` with `show:true` asks a claimed
+`legacy` device (set up under 2.0.x, or released by its owner) to put the
+first-owner invitation on its claim QR (spec §11). A code requested this way
+on a claimed device comes down after 10 minutes on screen without an
+enroll; a later `showPairingQRCode` re-arms or clears that deadline.
+
 Current success response: `{"ok": true}`.
 
 Current error cases:
@@ -340,6 +352,18 @@ Current error cases:
 - Invalid `request.show` shape causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
+
+Relay v2: in `legacy` this command is the one plaintext request admitted,
+and only with `request` exactly `{"show":true,"purpose":"enroll"}` (those
+two members, `show` the literal `true`). `show:false`, a missing or other
+`purpose`, or any extra member is refused `enrollment_required`. Before the
+command runs the device applies a precheck (spec §7.2): not claimed →
+`enrollment_required`; a live code already on screen, or an earlier request
+still in its gate or paint → `{"ok":true}` with nothing run; three gate runs
+already started from v2 since the daemon started → `rate_limited`. A
+command failure is `command_failed`. Errors are the public
+`{"error":{"code":"…"}}` body in the RPC `message`. The reply is plaintext
+on a public channel and proves nothing to the sender.
 
 ### getDeviceStatus
 
@@ -3641,6 +3665,8 @@ Rules:
   control protocol on, plaintext on it is limited to the LAN-open set
   (controller tier) in every state, plus `showPairingQRCode` before an
   owner exists, and to nothing once the owner closes the switch; see
-  "Plaintext policy" above. With the protocol off (no control state and
+  "Plaintext policy" above. Relay v2 admits one plaintext request, the
+  exact "show your code" form of `showPairingQRCode`, before an owner
+  exists. With the protocol off (no control state and
   `control.enabled` false) the hub admits every command from a local
   source, as before the protocol.
