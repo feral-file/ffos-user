@@ -26,8 +26,27 @@ for set in brightness panel assembly; do
   grep -Eq "^[[:space:]]*$set:" "$page_dir/index.html" || fail "the page has no '$set' set"
 done
 
+# The Factory check runs one pass after every reading, fail-open.
+# shellcheck disable=SC2016 # the literal line in factory-check.sh
+grep -Fq 'bash "$SCRIPTS/display-check.sh" once >/dev/null 2>&1 || true' \
+  "$repo_root/users/feralfile/scripts/factory-check.sh" || \
+  fail "factory-check.sh no longer runs a fail-open display-check.sh once"
+
 # shellcheck source=/dev/null
 source "$display_check"
+
+# ONCE_SECONDS must hold a whole assembly pass, with room for Chromium's start,
+# or the factory check would cut the graphics slide (the last) short.
+assembly_ids=$(sed -n "s/^[[:space:]]*assembly:[[:space:]]*\[\(.*\)\],*$/\1/p" "$page_dir/index.html" | tr -d "' ")
+[ -n "$assembly_ids" ] || fail "cannot read the assembly set from the page"
+pass=0
+for id in ${assembly_ids//,/ }; do
+  s=$(sed -n "s/^[[:space:]]*{ id: '$id',[[:space:]]*s: *\([0-9]*\),.*/\1/p" "$page_dir/index.html")
+  [ -n "$s" ] || fail "cannot read slide '$id' length from the page"
+  pass=$((pass + s))
+done
+[ "$ONCE_SECONDS" -ge $((pass + 10)) ] || \
+  fail "ONCE_SECONDS=$ONCE_SECONDS does not hold an assembly pass ($pass s) plus 10 s for Chromium"
 
 expect_set() {
   local cmdline=$1 want=$2 got
