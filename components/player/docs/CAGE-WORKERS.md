@@ -13,6 +13,13 @@ ordinary Cage session runs one playback host. On homelab the legacy
 | SVG, web and software artwork | Windowed CEF Views. The host authorizes the initial window after the main document loads. |
 | GLB/glTF | CEF with the bundled model-viewer and its resource policy |
 
+Raster images decode at their original dimensions. If an edge exceeds 8192
+pixels or the GPU's texture limit, the media worker uses FFmpeg to fit the
+image within a 4096-pixel square (smaller on GPUs with a lower limit) before
+upload. The worker reports the decoded dimensions in `video-params/w` and
+`video-params/h` and the filtered dimensions in `video-out-params/w` and
+`video-out-params/h`.
+
 The libmpv trial preserves PNG transparency. On homelab the auxiliary-alpha AVIF fixture renders opaque blue, so transparent AVIF parity remains open.
 
 A stable fullscreen media worker submits its own Wayland buffers to Cage. The

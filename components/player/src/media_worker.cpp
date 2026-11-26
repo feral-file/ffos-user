@@ -1,4 +1,5 @@
 #include "ff/display.hpp"
+#include "ff/raster_filter.hpp"
 #include "ff/media_ipc.hpp"
 #include "ff/presentation_feedback.hpp"
 #include <mpv/client.h>
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <future>
 #include <poll.h>
 #include <set>
 #include <sys/prctl.h>
@@ -38,6 +40,7 @@ class Worker {
   ~Worker() {
     feedback_.reset();
     if(render_)mpv_render_context_free(render_);
+    if(raster_header_.valid())raster_header_.wait();
     if(player_)mpv_terminate_destroy(player_);
     if(context_)SDL_GL_DeleteContext(context_);
     if(window_)SDL_DestroyWindow(window_);
@@ -77,11 +80,13 @@ class Worker {
         {"tls-verify","yes"},{"network-timeout","15"},{"load-unsafe-playlists","no"},{"sub-auto","no"},{"audio-file-auto","no"},
         {"demuxer-lavf-o","protocol_whitelist=[http,https,httpproxy,tcp,tls,crypto,data,file,fd]"}})option(player_,key,value);
     if(config.value("rasterImage",false)){
-      option(player_,"vd-lavc-o","max_pixels=100000000");
       option(player_,"aid","no");
+      glGetIntegerv(GL_MAX_TEXTURE_SIZE,&raster_texture_limit_);
+      ff::require(raster_texture_limit_>0,"media_graphics","Cannot read GL texture size limit");
     }
     if(auto agent=config.value("httpUserAgent","");!agent.empty())option(player_,"user-agent",agent.c_str());
     check(mpv_initialize(player_),"initialize libmpv");
+    if(raster_texture_limit_)check(mpv_hook_add(player_,0,"on_preloaded",0),"observe raster header");
     for(auto name:{"scale","dscale"}){
       char* value=mpv_get_property_string(player_,name);
       ff::require(value,"media_backend","Cannot read the configured video scaler");
@@ -89,7 +94,7 @@ class Worker {
     }
     mpv_request_log_messages(player_,"warn");
     for(auto name:{"time-pos","duration","seekable","hwdec-current","video-codec","frame-drop-count","decoder-frame-drop-count","eof-reached",
-                   "video-params/w","video-params/h","video-params/dw","video-params/dh","video-params/rotate","video-params/pixelformat","current-ao","audio-params/samplerate","audio-params/channel-count","pause","volume","mute"})
+                   "video-params/w","video-params/h","video-out-params/w","video-out-params/h","video-params/dw","video-params/dh","video-params/rotate","video-params/pixelformat","current-ao","audio-params/samplerate","audio-params/channel-count","pause","volume","mute"})
       check(mpv_observe_property(player_,0,name,MPV_FORMAT_NODE),"observe media");
     mpv_opengl_init_params init{resolve_gl,nullptr};int advanced=1;
     mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
@@ -123,7 +128,10 @@ class Worker {
     if(player_ && p.contains("seekSeconds"))command(player_,{"seek",std::to_string(p.at("seekSeconds").get<double>()),"absolute+exact"});
     if(player_ && p.contains("display")&&p.value("displayRevision",uint64_t(1))!=requested_display_){
       requested_display_=p.value("displayRevision",uint64_t(1));
-      display_=p.at("display");configure("loop-file",display_.value("loop",true)?"inf":"no");
+      const bool previous_pixelated=display_.value("imageRendering","auto")=="pixelated";
+      display_=p.at("display");
+      if(previous_pixelated!=(display_.value("imageRendering","auto")=="pixelated"))update_raster_filter();
+      configure("loop-file",display_.value("loop",true)?"inf":"no");
       auto scaling=display_.value("scaling","fit");
       configure("keepaspect",scaling=="stretch"?"no":"yes");
       configure("panscan",scaling=="fill"?"1":"0");
@@ -160,6 +168,10 @@ class Worker {
       }
       for(int i=0;player_ && i<64;++i){
         auto event=mpv_wait_event(player_,0);if(event->event_id==MPV_EVENT_NONE)break;
+        if(event->event_id==MPV_EVENT_HOOK){
+          auto* hook=static_cast<mpv_event_hook*>(event->data);
+          inspect_raster_header(hook->id);
+        }
         if(event->event_id==MPV_EVENT_LOG_MESSAGE){
           auto log=static_cast<mpv_event_log_message*>(event->data);std::string text=log->text;
           for(size_t at=text.find("http");at!=std::string::npos;at=text.find("http",at+4)){auto query=text.find('?',at),end=text.find_first_of(" \t\r\n",at);if(query!=std::string::npos&&(end==std::string::npos||query<end))text.replace(query,(end==std::string::npos?text.size():end)-query,"?<redacted>");}
@@ -179,6 +191,9 @@ class Worker {
             if(node->format==MPV_FORMAT_FLAG)v=bool(node->u.flag);
             if(v.is_number_integer()){
               std::string_view name=value->name;
+              if(name=="video-params/w")raster_width_=v.get<int64_t>();
+              if(name=="video-params/h")raster_height_=v.get<int64_t>();
+              if(name=="video-params/w" || name=="video-params/h")update_raster_filter();
               if(name=="video-params/dw")source_width_=v.get<int>();
               if(name=="video-params/dh")source_height_=v.get<int>();
               if(name=="video-params/rotate")source_rotation_=v.get<int>();
@@ -191,6 +206,10 @@ class Worker {
         if(event->event_id==MPV_EVENT_SET_PROPERTY_REPLY&&configuration_tags_.erase(event->reply_userdata)&&configuration_tags_.empty()){
           display_revision_=requested_display_;configuration_dirty_=true;
         }
+      }
+      if(raster_header_.valid() && raster_header_.wait_for(std::chrono::seconds(0))==std::future_status::ready){
+        raster_filter_=raster_header_.get();
+        update_raster_filter();
       }
       if(want_direct_ && *want_direct_!=bool(feedback_) && !in_flight){
         if(*want_direct_){
@@ -254,6 +273,33 @@ class Worker {
     }
   }
  private:
+  void inspect_raster_header(uint64_t hook) {
+    const bool pixelated=display_.value("imageRendering","auto")=="pixelated";
+    // A synchronous libmpv call can wait for GL work. Keep the render loop
+    // servicing updates while the load hook inspects and configures the decoder.
+    raster_header_=std::async(std::launch::async,[player=player_,limit=raster_texture_limit_,pixelated,hook]{
+      int64_t width=0,height=0;
+      mpv_get_property(player,"track-list/0/demux-w",MPV_FORMAT_INT64,&width);
+      mpv_get_property(player,"track-list/0/demux-h",MPV_FORMAT_INT64,&height);
+      auto filter=ff::raster_upload_filter(width,height,limit,pixelated);
+      if(!filter.empty()){
+        check(mpv_set_property_string(player,"hwdec","no"),"select software raster decode");
+        check(mpv_set_property_string(player,"vf",filter.c_str()),"configure raster upload");
+        std::cerr<<"media raster: "<<width<<"x"<<height<<" before GPU upload: "<<filter<<"\n";
+      }
+      check(mpv_hook_continue(player,hook),"resume raster load");
+      return filter;
+    });
+  }
+  void update_raster_filter() {
+    if(!raster_texture_limit_ || raster_header_.valid() || raster_width_<=0 || raster_height_<=0)return;
+    auto filter=ff::raster_upload_filter(raster_width_,raster_height_,raster_texture_limit_,
+                                        display_.value("imageRendering","auto")=="pixelated");
+    if(filter==raster_filter_)return;
+    if(raster_filter_.empty())configure("hwdec","no");
+    configure("vf",filter);
+    raster_filter_=std::move(filter);
+  }
   void configure(const char* name,const std::string& value){
     ff::require(configuration_tags_.size()<4096,"media_protocol","Too many pending media configurations");
     const auto tag=++configuration_tag_;
@@ -309,6 +355,10 @@ class Worker {
   ff::Json display_=ff::Json::object();
   std::vector<std::string> default_scalers_;
   int source_width_=0,source_height_=0,source_rotation_=0;
+  GLint raster_texture_limit_=0;
+  int64_t raster_width_=0,raster_height_=0;
+  std::string raster_filter_;
+  std::future<std::string> raster_header_;
   bool hard_edges_=false;
   std::optional<bool> want_direct_;
   bool direct_reported_=false;
