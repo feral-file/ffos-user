@@ -22,6 +22,10 @@ const EmittedDPVersion = "1.1.0"
 
 var dpVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
+// MaxPlaylistTitle is the schema's maxLength for a playlist title, for a
+// document controld writes itself.
+const MaxPlaylistTitle = 200
+
 // maxSchemaPointers bounds how many violation locations one refusal names.
 const maxSchemaPointers = 10
 

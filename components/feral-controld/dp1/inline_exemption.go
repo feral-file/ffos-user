@@ -3,6 +3,7 @@ package dp1
 import (
 	"encoding/json"
 	"regexp"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -13,12 +14,14 @@ import (
 // fixed, shipped, and made the app's required_version.
 //
 // Every released ff-app (1.9.13-1.9.35) builds inline casts that fail the
-// schema in two ways, so refusing them would stop most casting from the app:
+// schema in these ways, so refusing them would stop most casting from the app:
 //   - the playlist or an item carries an app-internal `id` that is not a UUID
 //     ("favorite", "addr:…", "source:…", a CAIP asset id);
-//   - `created` is local time with no offset.
+//   - `created` is local time with no offset;
+//   - the playlist `title`, which the app does not limit, is over 200
+//     characters. Item titles have no limit in the schema.
 //
-// Its third shape, `items: []` with `dynamicQueries`, is allowed on every path
+// Its other shape, `items: []` with `dynamicQueries`, is allowed on every path
 // already (see CheckPlayable). Nothing else is tolerated, and documents fetched
 // from a feed or catalog get none of this.
 
@@ -45,6 +48,12 @@ func relaxFFAppShapes(raw []byte) ([]byte, bool) {
 		return raw, false
 	}
 	used := dropNonUUIDID(doc)
+
+	var title string
+	if json.Unmarshal(doc["title"], &title) == nil && utf8.RuneCountInString(title) > MaxPlaylistTitle {
+		doc["title"], _ = json.Marshal(string([]rune(title)[:MaxPlaylistTitle]))
+		used = true
+	}
 
 	var created string
 	if json.Unmarshal(doc["created"], &created) == nil && offsetlessDateTime.MatchString(created) {

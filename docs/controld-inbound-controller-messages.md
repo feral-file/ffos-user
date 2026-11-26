@@ -660,6 +660,14 @@ has no conforming edition its representative item plays. Member names are
 matched exactly, so a case variant (`"Source"`) is an unknown member.
 A dpVersion of another major is logged, not refused.
 
+**Temporary, inline documents only** (a `dp1_call`, and what controld rebuilds
+or keeps from one): a playlist or item `id` that is not a UUID, a `created`
+with no timezone offset, and a playlist `title` over 200 characters are also
+accepted, because released ff-app builds send them. A `playlistUrl` document
+gets none of this. To be removed once ff-app's wire converter is fixed,
+shipped, and made the app's `required_version`
+(`components/feral-controld/dp1/inline_exemption.go`).
+
 The `signatures` block in the examples below is a placeholder that does not
 verify.
 

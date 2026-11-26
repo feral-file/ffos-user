@@ -440,9 +440,6 @@ func (h *handler) currentGeneration() uint64 {
 	return h.sessionGeneration()
 }
 
-// maxPlaylistTitle is the schema's maxLength for a playlist title.
-const maxPlaylistTitle = 200
-
 func New(
 	executor devicectl.Executor,
 	cdp cdp.CDP,
@@ -686,8 +683,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 		// The playlist title is at most 200 characters; an item's is not
 		// bounded, and this document is controld's own to write.
-		if runes := []rune(title); len(runes) > maxPlaylistTitle {
-			title = string(runes[:maxPlaylistTitle])
+		if runes := []rune(title); len(runes) > dp1.MaxPlaylistTitle {
+			title = string(runes[:dp1.MaxPlaylistTitle])
 		}
 		// Extracting one item invalidates the original full-playlist
 		// signature. Preserve only the applicable defaults, which carry
