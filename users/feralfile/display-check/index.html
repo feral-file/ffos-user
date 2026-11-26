@@ -122,10 +122,14 @@ function pacer(minFps) {
     if (gaps.length < 120) gaps.push(gap);
     const typical = gaps.slice().sort((a, b) => a - b)[gaps.length >> 1];
     if (n > 30 && gap > typical * 1.6) late++;
-    const fps = n / ((now - t0) / 1000);
+    const secs = (now - t0) / 1000, fps = n / secs;
     if (n % 15 === 0) {
       stat.textContent = `${fps.toFixed(1)} fps   late frames ${late}`;
-      stat.className = (n > 120 && (fps < minFps || late > n * 0.02)) ? 'bad' : '';
+      // Low fps is judged on time, not frame count: a software-rendered 5 fps
+      // never reaches a frame count before the slide moves on. The late-frame
+      // share needs enough frames to mean anything, so it keeps the count.
+      const slow = secs > 3 && fps < minFps, jank = n > 120 && late > n * 0.02;
+      stat.className = (slow || jank) ? 'bad' : '';
     }
     return (now - t0) / 1000;
   };
@@ -227,7 +231,10 @@ function show(slide, n, total) {
 
 const one = SLIDES.find(s => s.id === q.get('slide'));
 const list = (SETS[q.get('set')] || SETS.assembly).map(id => SLIDES.find(s => s.id === id));
-const fixed = Number(q.get('seconds')) || (q.get('set') === 'panel' ? 15 : 0);
+// Per-set slide length; ?seconds= overrides it. brightness and panel are one
+// length for every slide; assembly uses each slide's own s.
+const SET_SECONDS = { brightness: 60, panel: 15 };
+const fixed = Number(q.get('seconds')) || SET_SECONDS[q.get('set')] || 0;
 let i = 0, timer = 0, auto = true;
 function go(k) {
   i = ((k % list.length) + list.length) % list.length;
