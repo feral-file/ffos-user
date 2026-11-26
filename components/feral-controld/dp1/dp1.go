@@ -458,60 +458,36 @@ func (d *dp1) resolveDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	return nil, fmt.Errorf("playlist has no dynamic query configuration")
 }
 
-// dp1ItemValidationMarker is the prefix dp1-go puts on a hydrated item that
-// fails its schema validation, content-rating overlay included.
-//
-// Matched as a STRING deliberately. dp1-go's validation sentinel
-// (dp1go.ErrValidation) lives in the module's ROOT package, and that package
-// imports its signing path: adding it as a direct import pulls go-ethereum,
-// gnark-crypto and ~30 related packages into this daemon and grows the binary
-// by ~1.4 MB (measured: 28.4 MB -> 29.8 MB), on a device where nothing else
-// needs any of it. That is a poor trade for classifying an error.
-//
-// The fragility is bounded and fails in the safe direction: if dp1-go's wording
-// changes, a malformed item falls back to the generic error this code returned
-// before, never to a wrong classification. TestDP1_ProcessDynamicPlaylist_
-// RejectsWrongTypedResolvedRatings pins the behavior.
-const dp1ItemValidationMarker = "invalid playlist item"
-
-// classifyHydrationError marks a resolver's malformed CONTENT as
-// playlistInvalid so the transports answer the documented classification;
-// transport and query failures stay generic.
-func classifyHydrationError(err error) error {
-	if err == nil || !strings.Contains(err.Error(), dp1ItemValidationMarker) {
-		return err
-	}
-	return fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
-}
-
 // processDynamicPlaylistSpec resolves items using DP-1 playlists extension dynamicQuery and
 // github.com/display-protocol/dp1-go PlaylistItemsFromDynamicQuery. Pagination uses {{limit}} and
 // {{offset}} placeholders in dynamicQuery.query, matching MINIMAL/MAX batch sizes used by legacy.
 //
 // Replacement behavior matches legacy: playlist.Items is replaced by resolved dynamic items only (no merge with static items).
 //
-// ACCEPTED FAIL-CLOSED: dp1-go validates every hydrated item against the core
-// PlaylistItem schema plus the playlists-extension overlay, and its hydration
-// loop RETURNS on the first item that fails rather than skipping it — so one
-// malformed item fails the whole display request, and the error surfaces to the caller
-// (commandrouter returns it; the dp1_call branch has no cached fallback, only
-// the playlistUrl branch does). This is deliberate, but note it widened at
-// dp1-go v0.6.0: the single-item overlay now $refs the ref-manifest schema, so
-// an item's inlineManifest (§3.6) is checked too, where before it was an
-// undescribed key that passed unexamined. A resolver that starts emitting a
-// slightly non-conforming manifest therefore takes the whole playlist down,
-// not just its own item.
+// Invalid items: dp1-go validates every hydrated item against the core
+// PlaylistItem schema plus the playlists and content-rating overlays (an
+// item's inlineManifest included) and, since v0.9.0, DISCARDS one that fails
+// instead of failing the call (playlists extension §4.6.2). The valid items are
+// displayed; the discarded count and the first failure's JSON pointers are
+// logged, because neither the sender nor the wall is told the list is shorter.
+// Two things stay controld's job:
 //
-// Kept rather than softened, for two reasons. Skipping bad items would put a
-// silently shorter playlist on the wall — the controller asked for a playlist
-// and would be told it succeeded, with no signal that items went missing,
-// which is the worse failure for something whose whole job is showing a
-// specific set of works. And dp1-go owns the fetch/validate/decode loop, so
-// per-item recovery would mean reimplementing hydration here to get back a
-// behavior the spec does not ask for.
+//   - dp1-go's default report prints the validator's message, which quotes the
+//     offending value whole, so OnInvalidItem is always set and only pointers
+//     leave it (see ValidationPointers).
+//   - A response with items but not one valid among them is still refused as
+//     playlistInvalid: an empty playlist would be answered "ok, deferred" by
+//     the display path and leave the sender believing it was accepted.
 //
-// Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation,
-// which asserts both directions so a future change cannot quietly flip either.
+// The resolved items alone no longer say how long a page was, so paging counts
+// the discarded ones too; otherwise one bad item on a full page would drop every
+// later page. The walk also stops once MAX_PLAYLIST_ITEMS_LIMIT items have been
+// discarded in total: the uncapped callers have no other bound, and a resolver
+// that ignores {{offset}} and keeps answering a partly broken page would
+// otherwise never end.
+//
+// Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation
+// and TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging.
 //
 // The resolver is chosen by responseMapping.itemSchema. `dp1/*` (and an
 // absent schema, for documents published before anything checked it) is the
@@ -540,7 +516,11 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 
 	var accumulated []dp1playlist.PlaylistItem
 	offset := 0
+	discarded := 0
+	var firstDiscarded error
+	firstDiscardedIndex := 0
 	for {
+		discardedInPage := 0
 		params := dp1playlist.HydrationParams{
 			hydrationKeyLimit:  strconv.Itoa(limit),
 			hydrationKeyOffset: strconv.Itoa(offset),
@@ -551,23 +531,45 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			playlist.DynamicQuery,
 			params,
 			client,
-			&dp1playlist.DynamicQueryFetchOptions{AllowInsecureHTTP: d.debug})
+			&dp1playlist.DynamicQueryFetchOptions{
+				AllowInsecureHTTP: d.debug,
+				OnInvalidItem: func(index int, itemErr error) {
+					if firstDiscarded == nil {
+						firstDiscarded, firstDiscardedIndex = itemErr, offset+index
+					}
+					discardedInPage++
+				},
+			})
 		if err != nil {
-			return nil, classifyHydrationError(err)
+			return nil, err
 		}
+		discarded += discardedInPage
 		accumulated = append(accumulated, batch...)
 		if maxItems > 0 && len(accumulated) >= maxItems {
 			accumulated = accumulated[:maxItems]
 			break
 		}
 
-		if len(batch) < limit {
+		if len(batch)+discardedInPage < limit || discarded >= MAX_PLAYLIST_ITEMS_LIMIT {
 			break
 		}
 		if minimal && len(accumulated) >= MINIMAL_PLAYLIST_ITEMS_LIMIT {
 			break
 		}
 		offset += limit
+	}
+
+	if discarded > 0 {
+		pointers := ValidationPointers(firstDiscarded)
+		d.logger.Warn("Discarded invalid dynamicQuery items",
+			zap.String("playlist_id", playlist.ID),
+			zap.Int("discarded", discarded),
+			zap.Int("valid", len(accumulated)),
+			zap.Int("first_index", firstDiscardedIndex),
+			zap.Strings("first_pointers", pointers))
+		if len(accumulated) == 0 {
+			return nil, fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(pointers, ", "))
+		}
 	}
 
 	playlist.Items = accumulated

@@ -766,7 +766,9 @@ Current error cases:
   `responseMapping.itemSchema` names a vendor shape this firmware has no
   mapper for, the error names the schema (`dynamicQuery: unsupported
   itemSchema "<schema>"`) and no request is made. This includes the
-  retired Raster wallet walk, `raster/tokensOwned/1.0`.
+  retired Raster wallet walk, `raster/tokensOwned/1.0`. A `dp1/*` response in
+  which no item is a valid DP-1 item fails as `playlistInvalid`; when only
+  some are invalid they are discarded and the command succeeds with the rest.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
