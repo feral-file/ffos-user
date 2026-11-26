@@ -52,16 +52,16 @@ extern "C" int ff_host(int argc, char** argv) {
          launcher = (root / "ff-player-native").string();
     auto resources = options["--renderer-dir"];
     if (resources.empty()) resources = ff::renderer_directory(root).string();
-    std::string browser_backend = "public-chromium";
     std::ifstream engine_manifest(std::filesystem::path(resources).parent_path() /
                                   "dependencies.json");
     if (engine_manifest) {
       auto manifest = ff::Json::parse(engine_manifest);
-      if (!manifest.contains("chromium") && manifest.contains("cefViews")) browser_backend = "cef-views";
-      const auto& engine = manifest.at(browser_backend == "cef-views" ? "cefViews" : "chromium");
-      playback.packaged_engine({{"product", "Chrome/" + engine.at("version").get<std::string>()},
-                              {"userAgent", engine.at("observedUserAgent")},
-                              {"identity", "packaged"}});
+      if (manifest.contains("cefViews")) {
+        const auto& engine = manifest.at("cefViews");
+        playback.packaged_engine({{"product", "Chrome/" + engine.at("version").get<std::string>()},
+                                  {"userAgent", engine.at("observedUserAgent")},
+                                  {"identity", "packaged"}});
+      }
     }
     ff::Presentation presentation(
         false, options.contains("--diagnostic-presentation-timing"),
@@ -154,6 +154,7 @@ extern "C" int ff_host(int argc, char** argv) {
                                 {"url", occurrence.item.at("source")},
                                 {"method", "GET"},
                                 {"capsuleId", capsule_id},
+                                {"mimeType", occurrence.item.value("mimeType", "")},
                                 {"headers", ff::Json::object()}},
                                false, true))
           throw ff::Error("cache_backpressure", "Cache mode request queue is full");
@@ -232,7 +233,7 @@ extern "C" int ff_host(int argc, char** argv) {
                     playback, presentation, decoration, launcher,
                     state_path + "/browser/" + ff::uuid(),
                     bundle_root,
-                    resources, browser_backend, true));
+                    resources, true));
           } catch (const std::exception& e) {
             backdrop_id.clear();
             std::cerr << "Setup backdrop unavailable: " << e.what() << '\n';
@@ -271,7 +272,7 @@ extern "C" int ff_host(int argc, char** argv) {
           artwork_cache.stop_warming();
           auto cache_mode = resolve_source(*desired);
           const auto render_item = resolution.capture ? resolution.capture->render_item(desired->item) : desired->item;
-          if (cache_mode && !(resolution.capture && resolution.capture->capsule()) && ff::native_media(render_item))
+          if (cache_mode && ff::native_media(render_item))
             media.emplace(desired->id,
                           std::make_unique<ff::MediaClient>(playback, presentation, *desired,
                                                             worker, bundle_root, *cache_mode, &artwork_cache, resolution.capture));
@@ -282,7 +283,7 @@ extern "C" int ff_host(int argc, char** argv) {
                     playback, presentation, *desired, launcher,
                     state_path + "/browser/" + ff::uuid(),
                     bundle_root,
-                    resources, browser_backend, false, options.contains("--diagnostic-engine-debugger"),
+                    resources, false, options.contains("--diagnostic-engine-debugger"),
                     *cache_mode, options.contains("--diagnostic-browser-render-ahead"), composed_browser_id!=desired->id,
                     cache_mode->empty() ? ff::Json::object() : resolution.streams,
                     cache_mode->empty() ? nullptr : resolution.capture));

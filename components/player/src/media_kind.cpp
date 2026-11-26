@@ -26,14 +26,18 @@ bool native_raster(const Json& item) {
   // scripts and its own CSP. Never hand vector XML to a raster decoder.
   if(mime.starts_with("image/svg")||path.ends_with(".svg")||path.ends_with(".svgz"))return false;
   if(mime.starts_with("image/"))return true;
+  if(mime.starts_with("video/") || mime.starts_with("audio/") || mime.starts_with("text/") ||
+     mime.starts_with("model/") || mime.starts_with("application/xhtml+xml"))return false;
   for(auto suffix:{".png",".apng",".jpg",".jpeg",".gif",".webp",".avif",".heif",".heic",".bmp",".tif",".tiff",".ico"})if(path.ends_with(suffix))return true;
   return false;
 }
 bool native_media(const Json& item) {
-  if(native_raster(item))return true;
   if(item.value("source","").starts_with("data:video/")||item.value("source","").starts_with("data:audio/"))return true;
   auto mime=item.value("mimeType","");
   std::transform(mime.begin(),mime.end(),mime.begin(),[](unsigned char c){return std::tolower(c);});
+  if(mime.starts_with("image/svg") || mime.starts_with("text/html") || mime.starts_with("application/xhtml+xml") ||
+     mime.starts_with("model/"))return false;
+  if(native_raster(item))return true;
   if(mime.starts_with("video/")||mime.starts_with("audio/")||mime=="application/vnd.apple.mpegurl"||mime=="application/x-mpegurl"||mime=="application/dash+xml")return true;
   auto source=item.value("source","");auto path=source.substr(0,source.find_first_of("?#"));
   std::transform(path.begin(),path.end(),path.begin(),[](unsigned char c){return std::tolower(c);});

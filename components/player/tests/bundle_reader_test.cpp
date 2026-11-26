@@ -1,4 +1,5 @@
 #include "ff/cache_client.hpp"
+#include "ff/media_kind.hpp"
 #include <glib.h>
 #include <filesystem>
 #include <fstream>
@@ -96,6 +97,32 @@ int main() {
   check(!read(url,empty,false,true).error.empty());
   const std::string archive(64, 'b');
   const std::string mount = "https://" + archive.substr(0,32) + "." + archive.substr(32) + ".capsule.invalid/";
+  // A signed replay with an extensionless source uses the same MIME handoff
+  // to libmpv as an ordinary captured video.
+  auto video = clip;
+  video["url"] = url;
+  auto replay = Json{{"item",{{"source",url}}},{"entry",url},
+                     {"capsule",{{"archiveSHA256",archive}}},
+                     {"resources",Json::array({video})},{"coverage",{{"complete",true}}}};
+  std::ofstream(record_file) << replay;
+  auto video_policy = read(url,empty,false,true);
+  check(video_policy.capture && video_policy.metadata.value("replayMode","") == "isolated");
+  auto handoff = read(url,empty,false,false,"GET",video_policy.capture);
+  check(handoff.metadata.value("nativeMime","") == "video/mp4");
+  auto media_file = read(url,empty,true,false,"GET",video_policy.capture);
+  check(media_file.error.empty() && fs::exists(media_file.metadata.at("path").get<std::string>()));
+  replay["item"]["mimeType"] = "video/mp4";
+  replay["resources"][0]["contentType"] = "Application/Octet-Stream; charset=binary";
+  std::ofstream(record_file) << replay;
+  auto generic = read(url,empty,false,true);
+  check(generic.capture && ff::native_media(generic.capture->render_item(replay.at("item"))));
+  check(!ff::native_raster(generic.capture->render_item(Json{{"source","https://example.org/work.png"}})));
+  replay["resources"] = Json::array({document, clip});
+  replay["resources"][1]["contentType"] = "image/svg+xml";
+  std::ofstream(record_file) << replay;
+  auto vector_policy = read(url,empty,false,true);
+  check(vector_policy.capture && vector_policy.capture->entry_mime == "image/svg+xml");
+  check(!ff::native_media(vector_policy.capture->render_item(Json{{"source", "https://example.org/work.png"}})));
   auto named = clip;
   named["url"] = mount + "work.png";
   named["contentType"] = "image/png";
@@ -108,7 +135,7 @@ int main() {
     files["resources"][0]["contentType"] = mime;
     std::ofstream(record_file) << files;
     auto mounted = read(url,empty,false,true);
-    check(mounted.capture && mounted.capture->file_entry == mount + path && mounted.capture->file_mime == mime);
+    check(mounted.capture && mounted.capture->file_entry == mount + path && mounted.capture->entry_mime == mime);
     auto variant = read(mount + path + "?v=1",empty,true,false,"GET",mounted.capture);
     check(variant.error.empty() && fs::exists(variant.metadata.at("path").get<std::string>()));
     check(!read(url + "?v=1",empty,true,false,"GET",mounted.capture).error.empty());

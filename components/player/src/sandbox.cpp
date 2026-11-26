@@ -1,4 +1,3 @@
-#include "ff/capsule_engine.hpp"
 #include <json.hpp>
 #include <fstream>
 #include <set>
@@ -69,12 +68,10 @@ int launch_sandbox(int argc, char** argv) {
     const std::string self = fs::canonical("/proc/self/exe");
     const fs::path root = fs::path(self).parent_path();
     bool browser = std::string_view(argv[1]) == "--launch-browser";
-    if ((browser && argc != 12 && argc != 13) || (!browser && argc != 3)) return 2;
+    if ((browser && argc != 12) || (!browser && argc != 3)) return 2;
     bool online = browser ? std::string_view(argv[3]) == "online" : std::string_view(argv[2]) != "--offline";
     bool lan = browser ? std::string_view(argv[6]) == "lan" : std::string_view(argv[2]) == "--lan";
     std::string mode = browser ? argv[5] : "";
-    const bool pinned = browser && argc == 13;
-    if (pinned && (online || mode != "nested" || !ff::valid_engine_digest(argv[12]))) return 2;
     if (mode == "cage") {
       Args relay{self, "--wayland-relay", self};
       relay.insert(relay.end(), argv + 1, argv + argc);
@@ -83,26 +80,19 @@ int launch_sandbox(int argc, char** argv) {
     }
     Args args;
     if (online) append(args, {self, lan ? "host-lan" : "host"});
-    append(args, {"/usr/bin/bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--clearenv"});
-    const std::string profile_mount = pinned ? "/work" : "/profile";
-    if (pinned) {
-      append(args, {"--ro-bind", ff::capsule_engine_root(argv[12]).string(), "/",
-                    "--tmpfs", "/sys", "--setenv", "HOME", profile_mount, "--setenv", "XDG_RUNTIME_DIR", profile_mount,
-                    "--setenv", "PATH", "/usr/bin"});
-    } else {
-      append(args, {"--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64"});
-    }
-    append(args, {"--proc", "/proc", "--dev", "/dev", "--dev-bind", "/dev/dri", "/dev/dri", "--tmpfs", "/tmp"});
-    if (!pinned && !root.string().starts_with("/usr/")) bind_read_only(args, root);
+    append(args, {"/usr/bin/bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--clearenv",
+                  "--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
+                  "--proc", "/proc", "--dev", "/dev", "--dev-bind", "/dev/dri", "/dev/dri", "--tmpfs", "/tmp"});
+    if (!root.string().starts_with("/usr/")) bind_read_only(args, root);
     for (const char* path : {"/sys/devices", "/sys/dev/char", "/sys/class/drm", "/etc/ssl", "/etc/fonts",
                              "/etc/resolv.conf", "/etc/hosts", "/etc/ca-certificates"})
-      if ((!pinned || std::string_view(path).starts_with("/sys/")) && fs::exists(path)) bind_read_only(args, path);
+      if (fs::exists(path)) bind_read_only(args, path);
     append(args, {"--setenv", "LANG", "C.UTF-8"});
     Args child;
     if (online) append(child, {self, "inside"});
     int lease = -1;
     if (browser) {
-      append(args, {"--bind", argv[2], profile_mount, "--setenv", "AMD_DEBUG", "nodcc"});
+      append(args, {"--bind", argv[2], "/profile", "--setenv", "AMD_DEBUG", "nodcc"});
       auto index = fs::path(argv[2]) / "stream-index.json";
       if (fs::exists(index)) {
         // Each mount holds one immutable captured object. The store, other
@@ -122,19 +112,14 @@ int launch_sandbox(int argc, char** argv) {
         fs::path relay = fs::path(env("XDG_RUNTIME_DIR")) / env("WAYLAND_DISPLAY");
         append(args, {"--ro-bind", relay.string(), "/display/wayland", "--setenv", "WAYLAND_DISPLAY", "/display/wayland"});
       } else {
-        append(args, {"--setenv", "WAYLAND_DISPLAY", profile_mount + "/wayland"});
+        append(args, {"--setenv", "WAYLAND_DISPLAY", "/profile/wayland"});
       }
-      if (pinned) append(child, {"/usr/lib/chromium/chromium", "--start-fullscreen", "--noerrdialogs"});
-      else append(child, {self, "--cef"});
-      append(child, {"--ozone-platform=wayland", "--kiosk", "--no-first-run",
+      append(child, {self, "--cef", "--ozone-platform=wayland", "--kiosk", "--no-first-run",
                      "--no-default-browser-check", "--disable-extensions", "--disable-background-networking",
                      "--disable-dev-shm-usage", "--deny-permission-prompts", "--test-type=gpu", "--enable-gpu",
-                     "--enable-unsafe-webgpu",
-                     "--user-data-dir=" + profile_mount, "--remote-debugging-pipe"});
-      // Archive engines ship their own Mesa build and may have no Vulkan ICD.
-      if (pinned) append(child, {"--use-gl=angle", "--use-angle=gl"});
-      else append(child, {"--use-angle=vulkan", "--disable-vulkan-surface",
-                          "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks"});
+                     "--enable-unsafe-webgpu", "--use-angle=vulkan", "--disable-vulkan-surface",
+                     "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan,VaapiIgnoreDriverChecks",
+                     "--user-data-dir=/profile", "--remote-debugging-pipe"});
       if (std::string_view(argv[4]) == "debug") append(child, {"--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"});
       if (online) append(child, {"--proxy-server=http://127.0.0.1:17873", "--proxy-bypass-list=<-loopback>"});
       if (mode == "filtered") child.push_back("--ff-direct-cage");

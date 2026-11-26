@@ -1,5 +1,4 @@
 #include "ff/public_browser.hpp"
-#include "ff/capsule_engine.hpp"
 #include "ff/sketch_startup.hpp"
 
 #include <fcntl.h>
@@ -51,10 +50,9 @@ void reap_public_browsers() {
 PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                              const std::string& launcher, const std::string& profile,
                              const std::string& bundle_root, const std::string& resources,
-                             const std::string& backend, bool decoration, bool debugger, const std::string& cache_mode,
+                             bool decoration, bool debugger, const std::string& cache_mode,
                              bool render_ahead, bool allow_direct, Json streams, std::shared_ptr<const CaptureSnapshot> capture)
     : id(o.id),
-      backend_(capture && capture->capsule() ? "capsule-chromium" : backend),
       max_submissions_(render_ahead ? 2 : 1),
       playback_(p),
       presentation_(ui),
@@ -75,17 +73,6 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     std::filesystem::create_directories(profile_);
     auto source = occurrence_.item.at("source").get<std::string>();
     capture_ = std::move(capture);
-    std::string engine_digest, engine_version;
-    if (backend_ == "capsule-chromium") {
-      const auto& capsule = capture_->record.at("capsule");
-      engine_digest = capsule.value("engineSHA256", "");
-      engine_version = capsule.value("engineVersion", "");
-      require(valid_engine_digest(engine_digest) && !engine_version.empty(), "capsule_engine",
-              "Recast this signed capsule to load its engine pin");
-      require(offline_ && capture_replay_, "capsule_engine", "Pinned Chromium requires isolated replay");
-      require(std::filesystem::is_regular_file(capsule_engine_root(engine_digest) / "usr/lib/chromium/chromium"),
-              "capsule_engine", "Capsule Chromium engine is not installed: " + engine_digest);
-    }
     if (!offline_ && !capture_) {
       const auto route = artwork_route(playback_.artwork_sources(), occurrence_.item, source, true);
       routed_document_ = route.url != source;
@@ -114,7 +101,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     auto bounds = presentation_.bounds(occurrence_.display);
     // Setup decoration and inset artwork need host composition. Fullscreen
     // CEF forwards its Wayland buffers straight to Cage through the relay.
-    bool cage=allow_direct && backend_=="cef-views" && !decoration_ && !debugger && !bundled_ &&
+    bool cage=allow_direct && !decoration_ && !debugger && !bundled_ &&
               playback_.overlay().is_null() && !playback_.service_failure() &&
               (!playback_.visible() || playback_.state()["settings"].value("transitionMs",0.0)==0) &&
               bounds.width==presentation_.width() && bounds.height==presentation_.height();
@@ -167,7 +154,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
                     const_cast<char*>(permissions.at("localNetwork") == true ? "lan" : "public"),
                     const_cast<char*>(permissions.at("autoplay") == true ? "auto" : "gesture"),
                     cache_key.data(), cache_bytes.data(), cache_days.data(), const_cast<char*>((capture_ ? capture_->root : bundle_root_).c_str()),
-                    engine_digest.empty() ? nullptr : engine_digest.data(), nullptr};
+                    nullptr};
     int rc = posix_spawn(&pid_, launcher.c_str(), &actions, &attr, args, environ);
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
@@ -186,14 +173,7 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     set_permission("local-network", permissions.at("localNetwork").get<bool>());
     set_permission("loopback-network", false);
     send("Browser.getVersion", Json::object(), "",
-         [this, engine_digest, engine_version](Json value) {
-           if (!engine_digest.empty()) {
-             if (value.value("product", "") != "Chrome/" + engine_version) {
-               fail("Installed capsule Chromium version differs from signed version " + engine_version);
-               return;
-             }
-             value["imageSHA256"] = engine_digest;
-           }
+         [this](const Json& value) {
            playback_.engine_status(id, value);
            send("Target.setAutoAttach",
                 {{"autoAttach", true}, {"waitForDebuggerOnStart", true}, {"flatten", true}});
@@ -490,7 +470,7 @@ void PublicBrowser::message(const Json& m) {
     auto mime = response.value("mimeType", "");
     Json classified = capture_ ? capture_->render_item(occurrence_.item) : occurrence_.item;
     classified["mimeType"] = mime;
-    if (backend_ != "capsule-chromium" && native_media(classified)) resolved_native_mime = mime;
+    if (native_media(classified)) resolved_native_mime = mime;
   } else if (method == "Page.lifecycleEvent" && (!bundled_ || decoration_) && session == session_ &&
              p.value("name", "") == "load" && p.value("frameId", "") == main_frame_) {
     if(document_url_.empty() || document_url_=="about:blank")return;
@@ -717,7 +697,7 @@ void PublicBrowser::poll() {
       }
     }
     playback_.media_status(
-        id, {{"backend", backend_},
+        id, {{"backend", "cef-views"},
              {"browserPid", pid_},
              {"documentUrl", document_url_},
              {"inlineScriptBlocked", blocked_init_script_}, {"startupReferenceError", missing_init_binding_},
@@ -783,7 +763,7 @@ void PublicBrowser::poll() {
         // Chromium 158 drops embedded 4K H.264 frames when its buffers stay
         // locked through display. The fenced blit releases them sooner. CEF
         // Views 156 sustained the same clip with direct RGB sampling on FF1.
-        presentation_.accelerated(frames.capture, dma, std::move(producer), backend_ == "cef-views");
+        presentation_.accelerated(frames.capture, dma, std::move(producer), true);
         ff_browser_view_frame_requested(view_);
         auto b = presentation_.bounds(occurrence_.display);
         frames.capture.display_revision =

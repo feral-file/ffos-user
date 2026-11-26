@@ -17,7 +17,7 @@ class PublicBrowser {
  public:
   PublicBrowser(Playback&, Presentation&, Occurrence, const std::string& launcher,
                 const std::string& profile, const std::string& bundle_root,
-                const std::string& resources, const std::string& backend, bool decoration = false, bool debugger = false,
+                const std::string& resources, bool decoration = false, bool debugger = false,
                 const std::string& cache_mode = "", bool render_ahead = false, bool allow_direct = true, Json streams = Json::object(),
                 std::shared_ptr<const CaptureSnapshot> capture = {});
   ~PublicBrowser();
@@ -49,7 +49,6 @@ class PublicBrowser {
   const std::string id;
 
  private:
-  const std::string backend_;
   const size_t max_submissions_;
   Playback& playback_;
   Presentation& presentation_;

@@ -9,7 +9,6 @@ import (
 	"image"
 	"image/png"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -30,23 +29,15 @@ func TestImportCapsule(t *testing.T) {
 	cache.started.Store(true)
 
 	archive, signature := capsuleFixture(t, source, "<p>first</p>", signer, private)
-	engines := fstest.MapFS{}
 	tampered := append([]byte(nil), archive...)
 	tampered[len(tampered)-1] ^= 1
-	_, err = cache.importCapsule(t.Context(), tampered, signature, signer, engines)
+	_, err = cache.ImportCapsule(t.Context(), tampered, signature, signer)
 	require.Error(t, err)
 	key := SourceKey(source)
 	_, err = store.LoadItem(key)
 	require.ErrorIs(t, err, ErrItemNotFound)
 
-	_, err = cache.importCapsule(t.Context(), archive, signature, signer, engines)
-	require.ErrorContains(t, err, "engine is not installed")
-	_, err = store.LoadItem(key)
-	require.ErrorIs(t, err, ErrItemNotFound)
-	for _, body := range []string{"<p>first</p>", "<p>different</p>"} {
-		engines[capsuleDigest([]byte(body))+"/usr/lib/chromium/chromium"] = &fstest.MapFile{Mode: 0755}
-	}
-	raw, err := cache.importCapsule(t.Context(), archive, signature, signer, engines)
+	raw, err := cache.ImportCapsule(t.Context(), archive, signature, signer)
 	require.NoError(t, err)
 	require.Contains(t, string(raw), source)
 	record, err := store.LoadItem(key)
@@ -66,10 +57,10 @@ func TestImportCapsule(t *testing.T) {
 
 	at := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, store.TouchItem(key, at))
-	_, err = cache.importCapsule(t.Context(), archive, signature, signer, engines)
+	_, err = cache.ImportCapsule(t.Context(), archive, signature, signer)
 	require.NoError(t, err)
 	other, otherSignature := capsuleFixture(t, source, "<p>different</p>", signer, private)
-	_, err = cache.importCapsule(t.Context(), other, otherSignature, signer, engines)
+	_, err = cache.ImportCapsule(t.Context(), other, otherSignature, signer)
 	require.ErrorContains(t, err, "different offline capture")
 	record, err = store.LoadItem(key)
 	require.NoError(t, err)
@@ -79,7 +70,7 @@ func TestImportCapsule(t *testing.T) {
 	keys := map[string]bool{key: true}
 	_, _, err = cache.reserveForClear(keys)
 	require.NoError(t, err)
-	_, err = cache.importCapsule(t.Context(), archive, signature, signer, engines)
+	_, err = cache.ImportCapsule(t.Context(), archive, signature, signer)
 	require.ErrorIs(t, err, ErrClearedDuringDownload)
 	_, err = store.DeleteItem(key)
 	require.NoError(t, err)
@@ -129,6 +120,30 @@ func capsuleFixture(t *testing.T, source, artwork, signer string, private ed2551
 	}}})
 	require.NoError(t, err)
 	return archive.Bytes(), signature
+}
+
+func TestCapsuleReferenceWithoutEngineImage(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, public...))
+	archive, _ := capsuleFixture(t, "https://example.org/artwork", "<p>work</p>", signer, private)
+	files, err := readCapsuleFiles(archive)
+	require.NoError(t, err)
+	const manifest = "meta/engine/chromium.json"
+	var engine map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(files[manifest], &engine))
+	engine["imageRef"] = json.RawMessage("null")
+	files[manifest], err = json.Marshal(engine)
+	require.NoError(t, err)
+	_, record, _, err := capsuleReplay(capsuleDigest(archive), files)
+	require.NoError(t, err)
+	require.Empty(t, record.Capsule.EngineSHA256)
+
+	engine["imageRef"] = json.RawMessage(`{"sha256":"invalid"}`)
+	files[manifest], err = json.Marshal(engine)
+	require.NoError(t, err)
+	_, _, _, err = capsuleReplay(capsuleDigest(archive), files)
+	require.ErrorContains(t, err, "invalid capsule engine image digest")
 }
 
 func TestCapsuleNamedFiles(t *testing.T) {

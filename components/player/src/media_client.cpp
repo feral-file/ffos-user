@@ -78,8 +78,8 @@ MediaClient::MediaClient(Playback& playback, Presentation& presentation, Occurre
               virtual_cache_source(occurrence_.item.at("source"))) &&
              !occurrence_.item.at("source").get<std::string>().starts_with("data:")) {
     auto entry = source;
-    if (capture && !capture->file_entry.empty()) {
-      entry = source_override_ = capture->file_entry;
+    if (capture) {
+      if (!capture->file_entry.empty()) entry = source_override_ = capture->file_entry;
       occurrence_.item = capture->render_item(occurrence_.item);
     }
     cache_ = std::make_shared<CacheInbox>();

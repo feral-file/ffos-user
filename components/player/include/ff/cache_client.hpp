@@ -8,13 +8,11 @@
 namespace ff {
 struct CaptureSnapshot {
   Json record;
-  std::string root, file_entry, file_mime;
-  bool capsule() const { return record.contains("capsule"); }
+  std::string root, file_entry, entry_mime;
   Json render_item(const Json& signed_item) const {
-    if (file_entry.empty()) return signed_item;
     auto item = signed_item;
-    item["source"] = file_entry;
-    item["mimeType"] = file_mime;
+    if (!file_entry.empty()) item["source"] = file_entry;
+    if (!entry_mime.empty()) item["mimeType"] = entry_mime;
     return item;
   }
   ~CaptureSnapshot();

@@ -34,6 +34,15 @@ std::string base64(const std::string& bytes) {
   return result;
 }
 namespace {
+std::string redirect_url(const std::string& url, const Json& resource) {
+  char* target = g_uri_resolve_relative(url.c_str(), resource.at("redirectTo").get_ref<const std::string&>().c_str(),
+                                        G_URI_FLAGS_ENCODED, nullptr);
+  require(target, "bundle", "Invalid capture redirect");
+  std::string result(target);
+  g_free(target);
+  return result;
+}
+
 constexpr size_t body_limit = 32 * 1024 * 1024;
 // Compare named assets by decoded filename only inside this archive's origin.
 std::string named_file_path(const std::string& url, const std::string& origin) {
@@ -171,12 +180,33 @@ struct Pool {
         }
       }
       if (!entry) return;
-      auto type = entry->value("contentType", "");
-      if (type.empty()) type = entry->value("sniffedContentType", "");
-      if (loaded && !loaded->file_entry.empty()) loaded->file_mime = type;
+      auto response_mime = [&](const Json& resource) {
+        auto type = resource.value("contentType", "");
+        if (type.empty()) type = resource.value("sniffedContentType", "");
+        auto base = type.substr(0, type.find(';'));
+        g_strstrip(base.data());
+        if (base[0] == '\0' || !g_ascii_strcasecmp(base.c_str(), "application/octet-stream"))
+          return query.value("mimeType", record.at("item").value("mimeType", ""));
+        return type;
+      };
+      auto type = response_mime(*entry);
       if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
         require(record.value("automatic", false), "bundle", "Downloaded browser capture needs recapture for original response headers");
         return;
+      }
+      // The signed URL may redirect or carry a misleading file extension.
+      if (loaded && !record.value("automatic", false)) {
+        for (int hop = 0; entry->contains("redirectTo"); ++hop) {
+          require(hop < 15, "bundle", "Too many capture redirects");
+          const auto target = redirect_url(entry->at("url"), *entry);
+          const auto& resources = record.at("resources");
+          auto next = std::find_if(resources.begin(), resources.end(), [&](const auto& resource) {
+            return resource.value("url", "") == target && resource.value("method", "GET") == "GET";
+          });
+          if (next == resources.end()) break;
+          entry = &*next;
+        }
+        type = loaded->entry_mime = response_mime(*entry);
       }
       if (loaded) loaded->root = pin_blobs(root, record, job.inbox);
       root = capture->root;
@@ -256,17 +286,13 @@ struct Pool {
         require(fresh, "bundle", "Cached resource expired");
       }
       if (!job.open_file || !found->contains("redirectTo")) break;
-      char* target = g_uri_resolve_relative(url.c_str(), found->at("redirectTo").get_ref<const std::string&>().c_str(),
-                                            G_URI_FLAGS_ENCODED, nullptr);
-      require(target, "bundle", "Invalid capture redirect");
-      url = target;
-      g_free(target);
+      url = redirect_url(url, *found);
       require(hop < 15, "bundle", "Too many capture redirects");
     }
     // Controld's older manifests omit CSP and repeated response headers.
     // They can supply native media bytes, but never synthesize a browser response.
     auto mime = found->value("contentType", found->value("sniffedContentType", ""));
-    if (!capture->capsule() && !job.open_file && method == "GET" && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
+    if (!job.open_file && !found->contains("redirectTo") && method == "GET" && url == source && native_media(Json{{"source", source}, {"mimeType", mime}})) {
       reply.metadata = {{"nativeMime", mime}};
       return;
     }

@@ -179,6 +179,8 @@ First-run and offline-recovery provisioning is done over a NetworkManager Wi-Fi 
 
 ## Kiosk and Daemon Logic Ownership
 
+The FF1 native player uses CEF for web works and libmpv for standalone media across live, downloaded and signed capsule playback. A capsule supplies verified offline assets. Its engine pin describes the publisher’s reference render and does not select a device executable.
+
 The boundary between kiosk/UI code and daemon logic:
 
 - **Daemons own all state, policy, and side effects.** Daemons decide what to show, when to update, and what to do on errors.

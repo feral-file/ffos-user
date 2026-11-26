@@ -18,7 +18,6 @@ import (
 	"maps"
 	"mime"
 	"net/url"
-	"os"
 	"path"
 	"reflect"
 	"slices"
@@ -42,7 +41,7 @@ const (
 )
 
 type CapsuleRecord struct {
-	EngineSHA256  string          `json:"engineSHA256"`
+	EngineSHA256  string          `json:"engineSHA256,omitempty"`
 	EngineVersion string          `json:"engineVersion"`
 	Files         bool            `json:"files,omitempty"`
 	ArchiveSHA256 string          `json:"archiveSHA256"`
@@ -333,7 +332,7 @@ func capsuleReplay(id string, files map[string][]byte) (json.RawMessage, *ItemRe
 	}
 	var engine struct {
 		Version  string `json:"version"`
-		ImageRef struct {
+		ImageRef *struct {
 			SHA256 string `json:"sha256"`
 		} `json:"imageRef"`
 		Viewport struct {
@@ -341,8 +340,15 @@ func capsuleReplay(id string, files map[string][]byte) (json.RawMessage, *ItemRe
 			Height int `json:"height"`
 		} `json:"viewport"`
 	}
-	if err := json.Unmarshal(files["meta/engine/chromium.json"], &engine); err != nil || engine.Version == "" || !validSourceKey(engine.ImageRef.SHA256) {
+	if err := json.Unmarshal(files["meta/engine/chromium.json"], &engine); err != nil || engine.Version == "" {
 		return nil, nil, nil, errors.New("invalid capsule engine pin")
+	}
+	var engineDigest string
+	if engine.ImageRef != nil {
+		engineDigest = engine.ImageRef.SHA256
+		if !validSourceKey(engineDigest) {
+			return nil, nil, nil, errors.New("invalid capsule engine image digest")
+		}
 	}
 	if item.Repro != nil {
 		if version := item.Repro.EngineVersion["chromium"]; version != "" && version != engine.Version {
@@ -426,19 +432,14 @@ func capsuleReplay(id string, files map[string][]byte) (json.RawMessage, *ItemRe
 	if capture.CapturedAt.IsZero() {
 		capture.CapturedAt, _ = time.Parse(time.RFC3339, document.Created)
 	}
-	record := &ItemRecord{Capsule: &CapsuleRecord{ArchiveSHA256: id, EngineVersion: engine.Version, EngineSHA256: engine.ImageRef.SHA256, Files: reference.Mode == "files"}, Item: item, Entry: capture.Entry, Resources: capture.Resources,
+	record := &ItemRecord{Capsule: &CapsuleRecord{ArchiveSHA256: id, EngineVersion: engine.Version, EngineSHA256: engineDigest, Files: reference.Mode == "files"}, Item: item, Entry: capture.Entry, Resources: capture.Resources,
 		Coverage: capture.Coverage, CapturedAt: capture.CapturedAt}
 	return raw, record, blobs, nil
 }
 
 // ImportCapsule admits an owner's signed capsule into the ordinary offline
-// cache. The signed engine and frame are retained with the archive. Playback
-// selects the installed engine by its signed archive digest.
+// cache. The archive retains the publisher's engine identity and reference frame.
 func (s *service) ImportCapsule(ctx context.Context, archive []byte, sidecar json.RawMessage, signer string) (json.RawMessage, error) {
-	return s.importCapsule(ctx, archive, sidecar, signer, os.DirFS("/var/lib/ff-player-native/engines"))
-}
-
-func (s *service) importCapsule(ctx context.Context, archive []byte, sidecar json.RawMessage, signer string, engines fs.FS) (json.RawMessage, error) {
 	if !s.started.Load() {
 		return nil, ErrServiceNotStarted
 	}
@@ -457,12 +458,6 @@ func (s *service) importCapsule(ctx context.Context, archive []byte, sidecar jso
 	raw, record, blobs, err := capsuleReplay(id, files)
 	if err != nil {
 		return nil, err
-	}
-	// Reject before publishing the cache record or selecting a new artwork.
-	// The player rechecks this pin when a persisted playlist is resumed.
-	executable, err := fs.Stat(engines, path.Join(record.Capsule.EngineSHA256, "usr/lib/chromium/chromium"))
-	if err != nil || !executable.Mode().IsRegular() || executable.Mode().Perm()&0111 == 0 {
-		return nil, fmt.Errorf("capsule Chromium engine is not installed: %s", record.Capsule.EngineSHA256)
 	}
 	record.Capsule.Signature = sidecar
 	blobs[id] = archive
