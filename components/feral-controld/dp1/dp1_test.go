@@ -1292,8 +1292,9 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t 
 
 // A discarded item shortens its page, so paging has to count it: otherwise one
 // bad item on a full page ends the walk and every later page is silently lost.
-// A page with no valid item ends the walk, and a response with no valid item at
-// all is refused rather than displayed as an empty playlist.
+// The total of discarded items is bounded, so a resolver repeating a partly
+// broken page cannot page forever, and a response with no valid item at all is
+// refused rather than displayed as an empty playlist.
 func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging(t *testing.T) {
 	page := func(valid, invalid int) string {
 		items := make([]string, 0, valid+invalid)
@@ -1314,7 +1315,10 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging(t 
 		wantErr   bool
 	}{
 		{name: "bad item on a full page keeps paging", pages: []string{page(full-1, 1), page(2, 0)}, wantItems: full + 1},
-		{name: "page with no valid item ends the walk", pages: []string{page(full, 0), page(0, full)}, wantItems: full},
+		{name: "wholly invalid page ends the walk", pages: []string{page(full, 0), page(0, full)}, wantItems: full},
+		// A resolver ignoring {{offset}}: uncapped caller, so only the discard
+		// bound ends it. Times() fails the test on a third request.
+		{name: "repeating partly broken page stops at the discard bound", pages: []string{page(1, full-1), page(1, full-1)}, wantItems: 2},
 		{name: "no valid item at all is refused", pages: []string{page(0, full)}, wantErr: true},
 	}
 

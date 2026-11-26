@@ -481,8 +481,10 @@ func (d *dp1) resolveDynamicPlaylist(ctx context.Context, playlist Playlist, min
 //
 // The resolved items alone no longer say how long a page was, so paging counts
 // the discarded ones too; otherwise one bad item on a full page would drop every
-// later page. A page with no valid item ends the walk, which bounds a resolver
-// that ignores {{offset}} and keeps answering the same broken page.
+// later page. The walk also stops once MAX_PLAYLIST_ITEMS_LIMIT items have been
+// discarded in total: the uncapped callers have no other bound, and a resolver
+// that ignores {{offset}} and keeps answering a partly broken page would
+// otherwise never end.
 //
 // Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation
 // and TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging.
@@ -548,7 +550,7 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			break
 		}
 
-		if len(batch) == 0 || len(batch)+discardedInPage < limit {
+		if len(batch)+discardedInPage < limit || discarded >= MAX_PLAYLIST_ITEMS_LIMIT {
 			break
 		}
 		if minimal && len(accumulated) >= MINIMAL_PLAYLIST_ITEMS_LIMIT {
