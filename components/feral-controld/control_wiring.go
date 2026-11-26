@@ -173,15 +173,24 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		ControlReleased()
 	}); ok {
 		ex.SetControl(controlgate.ClaimQR{Auth: c.auth, LANHost: controlgate.DefaultRouteIPv4})
-		// The authority refuses first-owner enroll on v2 (§5.1); the v2 gate
-		// gets the hook anyway so the claim QR cannot outlive its invitation
-		// if that ever changes.
+		// A first owner may enroll on any route, v2 included (§5.1), so
+		// every gate takes the claim QR down.
 		for _, g := range gates {
 			g.SetOwnerEnrolledHook(ex.ControlOwnerEnrolled)
 			g.SetReleasedHook(ex.ControlReleased)
 		}
 	} else {
 		logger.Error("Executor does not accept the control claim; invitation QR and retire disabled")
+	}
+	if c.v2Gate != nil {
+		// Unwired, the v2 gate refuses the request (see SetShowCodeHook).
+		if ex, ok := executor.(interface {
+			RelayShowCode() (reply any, done func(), code string)
+		}); ok {
+			c.v2Gate.SetShowCodeHook(ex.RelayShowCode)
+		} else {
+			logger.Error("Executor has no relay show-code precheck; the request stays refused on v2")
+		}
 	}
 }
 
