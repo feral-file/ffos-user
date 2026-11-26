@@ -4194,3 +4194,37 @@ func TestService_DownloadPlaylist_RequiredRepresentativeSurvivesWhenItsSourceIsA
 
 	waitForState(t, ts.service, repSource, offlinecache.StateReady)
 }
+
+// A case variant of a modeled member is unknown to DP-1, so the cache must
+// read the same items playback does: "itemſ" folds to "items" under
+// encoding/json, and "Signatures" would fail a typed decode.
+func TestService_PlaylistRecord_MatchesMemberNamesExactly(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const shown, hidden = "https://example.com/shown.html", "https://example.com/hidden.html"
+	raw := []byte(`{"dpVersion":"1.0.0","id":"playlist-1","title":"t",` +
+		`"items":[{"source":"` + shown + `"}],"itemſ":[{"source":"` + hidden + `"}],"Signatures":{}}`)
+
+	// Only the exact "items" list is classified and captured.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), shown).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	waitForState(t, ts.service, shown, offlinecache.StateReady)
+
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, "https://feed.example.com/p", 0, nil))
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+	_, err = ts.store.LoadItem(offlinecache.SourceKey(shown))
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
+}

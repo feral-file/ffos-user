@@ -15,6 +15,7 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -1935,7 +1936,10 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
 	}
-	var playlist dp1playlist.Playlist
+	// dp1.Playlist, never the upstream type: playback decodes with it, so the
+	// cache must too. The upstream type lets a case variant ("itemſ") override
+	// the member the schema checked.
+	var playlist dp1.Playlist
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return 0, 0, fmt.Errorf("offline cache: parse playlist: %w", err)
 	}
@@ -2196,7 +2200,8 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
-	var playlist dp1playlist.Playlist
+	// Same decode as DownloadPlaylist, so both derive one record key.
+	var playlist dp1.Playlist
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return fmt.Errorf("offline cache: parse playlist: %w", err)
 	}
@@ -3017,7 +3022,8 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		return fmt.Errorf("offline cache: load playlist %s: %w", playlistID, err)
 	}
 
-	var playlist dp1playlist.Playlist
+	// Same decode as DownloadPlaylist: a record it accepted must clear.
+	var playlist dp1.Playlist
 	if err := s.json.Unmarshal(raw, &playlist); err != nil {
 		return fmt.Errorf("offline cache: parse playlist %s: %w", playlistID, err)
 	}
