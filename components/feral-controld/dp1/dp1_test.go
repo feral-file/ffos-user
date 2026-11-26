@@ -1224,19 +1224,10 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 }
 
 // TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation pins
-// the one behavior change the dp1-go v0.6.0 bump brought to a path this repo
-// already had: dynamicQuery acceptance (§4.5.1).
-//
-// v0.5.1's single-item overlay described only note/displayAt, so an
-// inlineManifest a resolver emitted was an undescribed key and passed
-// unexamined. v0.6.0 points that overlay at the unmodified ref-manifest schema,
-// so the field is now checked — and dp1-go's hydration loop returns on the
-// first invalid item rather than skipping it, which makes ONE bad manifest fail
-// the WHOLE display request. See processDynamicPlaylistSpec's doc for why that fail-closed
-// outcome is accepted rather than softened here.
-//
-// Both directions are pinned deliberately: a test that only asserted the
-// rejection would pass just as well if validation had become indiscriminate.
+// per-item acceptance of dynamicQuery results (§4.6.2): an item whose
+// inlineManifest does not conform is discarded and the valid ones are shown.
+// Both directions are pinned: a test that only asserted the discard would pass
+// just as well if validation had become indiscriminate.
 func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t *testing.T) {
 	// locale is one of the ref-manifest schema's four required fields
 	// (refVersion, id, created, locale), so dropping it is the smallest
@@ -1249,10 +1240,10 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t 
 	tests := []struct {
 		name           string
 		inlineManifest string
-		wantErr        bool
+		wantDiscard    bool
 	}{
 		{name: "valid manifest hydrates and is carried on the item", inlineManifest: validManifest},
-		{name: "malformed manifest fails the whole batch", inlineManifest: manifestMissingLocale, wantErr: true},
+		{name: "malformed manifest discards only its item", inlineManifest: manifestMissingLocale, wantDiscard: true},
 	}
 
 	for _, tt := range tests {
@@ -1286,18 +1277,82 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t 
 			}
 
 			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
-			if tt.wantErr {
-				// The second, manifest-less item is lost with the first: the
-				// batch is rejected whole, not filtered.
-				require.Error(t, err)
-				assert.Nil(t, result)
+			require.NoError(t, err)
+			if tt.wantDiscard {
+				require.Len(t, result.Items, 1)
+				assert.Equal(t, "NoManifest", result.Items[0].Title)
 				return
 			}
-
-			require.NoError(t, err)
 			require.Len(t, result.Items, 2)
 			assert.JSONEq(t, tt.inlineManifest, string(result.Items[0].InlineManifest))
 			assert.Empty(t, result.Items[1].InlineManifest)
+		})
+	}
+}
+
+// A discarded item shortens its page, so paging has to count it: otherwise one
+// bad item on a full page ends the walk and every later page is silently lost.
+// A page with no valid item ends the walk, and a response with no valid item at
+// all is refused rather than displayed as an empty playlist.
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging(t *testing.T) {
+	page := func(valid, invalid int) string {
+		items := make([]string, 0, valid+invalid)
+		for range invalid {
+			items = append(items, `{"id":"`+uuid.New().String()+`","title":"bad","source":"https://media.example/x","contentRating":123}`)
+		}
+		for range valid {
+			items = append(items, `{"id":"`+uuid.New().String()+`","title":"ok","source":"https://media.example/a"}`)
+		}
+		return `{"data":{"items":[` + strings.Join(items, ",") + `]}}`
+	}
+	const full = dp1.MAX_PLAYLIST_ITEMS_LIMIT
+
+	tests := []struct {
+		name      string
+		pages     []string
+		wantItems int
+		wantErr   bool
+	}{
+		{name: "bad item on a full page keeps paging", pages: []string{page(full-1, 1), page(2, 0)}, wantItems: full + 1},
+		{name: "page with no valid item ends the walk", pages: []string{page(full, 0), page(0, full)}, wantItems: full},
+		{name: "no valid item at all is refused", pages: []string{page(0, full)}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			calls := 0
+			ts.mockHTTP.EXPECT().
+				Do(gomock.Any()).
+				DoAndReturn(func(*http.Request) (*http.Response, error) {
+					body := tt.pages[calls]
+					calls++
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+				}).Times(len(tt.pages))
+
+			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, dp1.Playlist{
+				Playlist: dp1playlist.Playlist{
+					DynamicQuery: &playlists.DynamicQuery{
+						Profile:  dp1playlist.ProfileGraphQLV1,
+						Endpoint: "https://example.com/graphql",
+						Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+						ResponseMapping: playlists.ResponseMapping{
+							ItemsPath:  "data.items",
+							ItemSchema: "dp1/1.0",
+						},
+					},
+				},
+			}, false)
+
+			if tt.wantErr {
+				assert.ErrorIs(t, err, dp1.ErrPlaylistInvalid)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, result.Items, tt.wantItems)
 		})
 	}
 }
@@ -1322,8 +1377,9 @@ func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffs
 // A resolver's hydrated items must not smuggle a contentRating of the WRONG
 // TYPE past the policy matrix. Controld adds no second validation pass: dp1-go's
 // own hydration validates every item against the content-rating extension
-// overlay (see processDynamicPlaylistSpec's ACCEPTED FAIL-CLOSED note), and this
-// pins that the classification still reaches the transports.
+// overlay and discards a failing one (see processDynamicPlaylistSpec). Here the
+// bad item is the only one, so this pins that the refusal and its
+// classification still reach the transports.
 //
 // Note the value under test is a NUMBER, not an unknown string. An unrecognized
 // STRING is not a rejection case at all: DP-1 §3.3 (display-protocol/dp1#52)
