@@ -331,7 +331,10 @@ UIRaster render_title_card(const Occurrence& o,int width,int height) {
   Text work(canvas.cr,(artists.empty() ? "" : escape(artists)+"\n")+"<i>"+escape(*label.title)+"</i>",
             edge*.038,1.2,label_width,false);
   work.paint(canvas.cr,padding,std::max(padding,height-padding-work.css_height));
-  if (!o.playlist_title.empty() && ((o.playlist.contains("items") && o.playlist["items"].size()>1) || !o.curator.empty() || text_field(o.playlist,"note"))) {
+  // The scheduler sends only today's work, even in a multi-day exhibition.
+  const bool scheduled_exhibition = text_field(o.item, "displayAt") && o.playlist_title != *label.title;
+  if (!o.playlist_title.empty() && (scheduled_exhibition || (o.playlist.contains("items") && o.playlist.at("items").size() > 1) ||
+                                    !o.curator.empty() || text_field(o.playlist, "note"))) {
     Text exhibition(canvas.cr,escape(o.playlist_title),edge*.030,1.2,available,false);
     pango_layout_set_alignment(exhibition.layout,PANGO_ALIGN_RIGHT);
     exhibition.paint(canvas.cr,padding,padding);

@@ -49,6 +49,16 @@ int main(int argc,char** argv){
     item.playlist.erase("links");
     item.playlist_title="Another exhibition";
     check(ff::render_title_card(item,1920,1080).rgba!=landscape.rgba,"The exhibition name belongs on the card");
+    auto daily = item;
+    daily.curator.clear();
+    daily.playlist["items"] = ff::Json::array({daily.item});
+    daily.playlist_title = "Living Code";
+    const auto lone = ff::render_title_card(daily,1920,1080);
+    check(lone.rgba != landscape.rgba,"An ordinary lone work omits the exhibition header");
+    daily.item["displayAt"] = "2026-11-26T00:00:00Z";
+    check(ff::render_title_card(daily,1920,1080).rgba==landscape.rgba,"Today's work retains its scheduled exhibition header");
+    daily.playlist_title = "Transparent Grit";
+    check(ff::render_title_card(daily,1920,1080).rgba==lone.rgba,"A scheduled lone work does not repeat its title");
     ff::TitleCardClock clock;
     clock.select("playlist",100);
     check(!clock.visible(100,false,false),"Wait for metadata");
