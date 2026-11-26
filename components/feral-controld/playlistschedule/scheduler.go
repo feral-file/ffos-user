@@ -709,7 +709,15 @@ func (s *scheduler) restorePersisted() {
 	// A stored inline dynamic document is a document this device would play
 	// again, written possibly by a build that did not check it.
 	if source.DynamicPlaylist != nil {
-		raw, err := json.Marshal(source.DynamicPlaylist)
+		// What was saved is the source, not the document as cast:
+		// cloneSourcePlaylist drops the items (restore resolves them again),
+		// so the file holds `"items": null`. Judge it with an empty list,
+		// which the schema gate takes only beside a dynamic query.
+		doc := *source.DynamicPlaylist
+		if doc.HasDynamicContent() && doc.Items == nil {
+			doc.Items = []dp1playlist.PlaylistItem{}
+		}
+		raw, err := json.Marshal(&doc)
 		if err == nil {
 			// Only an inline cast is persisted as a document.
 			err = dp1.CheckInlineCast(s.logger, "persisted displayAt source", raw)
