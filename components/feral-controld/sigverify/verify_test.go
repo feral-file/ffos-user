@@ -516,3 +516,22 @@ func TestVerify_VariantBesideSignaturesIsInvalid(t *testing.T) {
 
 	assert.Equal(t, sigverify.StatusInvalid, sigverify.Verify([]byte(raw)).Status)
 }
+
+// An empty or null variant is what dp1-go would read, as "no signatures". The
+// verdict is invalid, not unsigned, in either member order.
+func TestVerify_EmptyVariantBesideSignaturesIsInvalid(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), "feed")
+	real := `"signatures":` + string(mustJSON(t, doc["signatures"]))
+
+	for _, variant := range []string{`"Signatures":[]`, `"Signatures":null`, `"SIGNATURES":7`} {
+		for _, members := range []string{real + "," + variant, variant + "," + real} {
+			raw := `{"dpVersion":"1.1.0","title":"t","items":[],` + members + `}`
+
+			v := sigverify.Verify([]byte(raw))
+
+			assert.Equal(t, sigverify.StatusInvalid, v.Status, raw)
+			assert.Equal(t, sigverify.ReasonMalformed, v.Reason, raw)
+		}
+	}
+}

@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/sign"
@@ -170,6 +171,9 @@ type signatureEnvelope struct {
 	// string is present, "" included.
 	Signature  json.RawMessage
 	Signatures json.RawMessage
+	// SignaturesVariant reports a member that differs from "signatures" only
+	// in case. dp1-go's struct decode would read it as the list.
+	SignaturesVariant bool
 }
 
 // readEnvelope reads the two members by their exact names. Struct decoding
@@ -180,7 +184,13 @@ func readEnvelope(raw []byte) (signatureEnvelope, error) {
 	if err := json.Unmarshal(raw, &members); err != nil {
 		return signatureEnvelope{}, err
 	}
-	return signatureEnvelope{Signature: members["signature"], Signatures: members["signatures"]}, nil
+	env := signatureEnvelope{Signature: members["signature"], Signatures: members["signatures"]}
+	for name := range members {
+		if name != "signatures" && strings.EqualFold(name, "signatures") {
+			env.SignaturesVariant = true
+		}
+	}
+	return env, nil
 }
 
 // legacyPresent reports whether the top-level `signature` field carried a
@@ -218,6 +228,13 @@ func Verify(raw []byte) Verdict {
 		return Verdict{Status: StatusInvalid, Reason: ReasonMalformed}
 	}
 	legacy := legacyPresent(env.Signature)
+
+	// A case variant beside the real list: invalid, whatever either holds, and
+	// before dp1-go runs. It would judge the variant, and an empty or null one
+	// would read as unsigned. A variant alone is just an unknown member.
+	if env.Signatures != nil && env.SignaturesVariant {
+		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
+	}
 
 	// Count entries BEFORE dp1-go touches the document (see MaxSignatures),
 	// and without materializing them: the decoder stops at the first entry
@@ -272,9 +289,9 @@ func Verify(raw []byte) Verdict {
 	if !slices.EqualFunc(results, entries, func(r sign.SignatureResult, e dp1playlist.Signature) bool {
 		return r.Signature == e
 	}) {
-		// Reachable only when a case variant of "signatures" sits beside it and
-		// dp1-go judged that one. Invalid, never a verdict over entries the
-		// bounds above never saw.
+		// dp1-go judged other entries than the ones read above, e.g. a repeated
+		// "signatures" member that its struct decode merged. Invalid, never a
+		// verdict over entries the bounds above never saw.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
 

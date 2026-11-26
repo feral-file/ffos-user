@@ -58,6 +58,8 @@ var placeholderItems = json.RawMessage(`[{"source":"https://example.com/"}]`)
 // that plays a document calls it, on the bytes as received or as stored,
 // before anything reshapes them.
 //
+// A document that repeats a member name is refused first (see duplicates.go).
+//
 // Two allowances, both decided by the owner:
 //   - signatures are not judged (see placeholderSignatures);
 //   - a legacy `dynamicQueries` playlist may carry an empty `items`, which the
@@ -67,6 +69,9 @@ var placeholderItems = json.RawMessage(`[{"source":"https://example.com/"}]`)
 // dp1-go's process-wide lock for the whole pass, so concurrent commands queue
 // behind a large document.
 func CheckPlayable(logger *zap.Logger, source string, raw []byte) error {
+	if err := refuseRepeatedMembers(logger, source, raw); err != nil {
+		return err
+	}
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
 		return refuse(logger, source, []string{"/"})
@@ -96,6 +101,9 @@ func CheckPlayable(logger *zap.Logger, source string, raw []byte) error {
 // checkItem reports whether one item conforms, for items controld takes from a
 // catalog or an indexer rather than from a playlist document.
 func checkItem(raw []byte) error {
+	if hasRepeatedMember(raw) {
+		return &SchemaError{Locations: []string{"/items/0"}}
+	}
 	doc, err := marshalNoEscape(map[string]any{
 		"dpVersion":  EmittedDPVersion,
 		"title":      "item",

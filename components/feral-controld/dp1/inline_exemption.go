@@ -30,6 +30,10 @@ var offsetlessDateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2
 // CheckInlineCast is CheckPlayable for a document a controller sent inline (and
 // what controld keeps or rebuilds from one), with the allowances above.
 func CheckInlineCast(logger *zap.Logger, source string, raw []byte) error {
+	// Before relaxFFAppShapes, whose re-encode would drop a repeat.
+	if err := refuseRepeatedMembers(logger, source, raw); err != nil {
+		return err
+	}
 	relaxed, used := relaxFFAppShapes(raw)
 	if err := CheckPlayable(logger, source, relaxed); err != nil {
 		return err

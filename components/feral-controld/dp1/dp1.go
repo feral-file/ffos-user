@@ -188,9 +188,14 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 	// every key that folds to "satellites" as raw bytes (never failing), and
 	// the real list is then read back by the exact key — the same approach as
 	// dp1-go's own decodePlaylist, which controld bypasses by decoding here.
+	// The signature members are shadowed the same way: a playlist needs no
+	// signature, so a wrong-typed one must not fail the decode (see
+	// decodeSignaturesLenient).
 	var decoded struct {
 		playlistJSON
 		SatellitesRaw json.RawMessage `json:"satellites,omitempty"`
+		SignatureRaw  json.RawMessage `json:"signature,omitempty"`
+		SignaturesRaw json.RawMessage `json:"signatures,omitempty"`
 	}
 	// Exact member names only: see stripCaseVariants.
 	exact := stripCaseVariants(data, reflect.TypeOf(playlistJSON{}))
@@ -199,6 +204,7 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 	}
 	*p = Playlist(decoded.playlistJSON)
 	p.Satellites = decodeSatellitesExact(data)
+	p.Signature, p.Signatures = decodeSignaturesLenient(decoded.SignatureRaw, decoded.SignaturesRaw)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
 	p.Extra = unknownPlaylistMembers(data)
 	return nil
@@ -800,6 +806,23 @@ func (d *dp1) httpClientAsHTTPClient() *http.Client {
 		Transport: httpClientTransport{d.httpClient},
 		Timeout:   wrapper.HTTPClientTimeout,
 	}
+}
+
+// decodeSignaturesLenient reads the two signature members, each absent when it
+// has the wrong shape: signatures never block playback, and CheckPlayable does
+// not judge them. The verdict is not affected, because sigverify reads the
+// bytes as received. The re-emitted document drops a malformed member.
+func decodeSignaturesLenient(legacyRaw, chainRaw json.RawMessage) (string, []dp1playlist.Signature) {
+	var legacy string
+	if json.Unmarshal(legacyRaw, &legacy) != nil {
+		legacy = ""
+	}
+	var chain []dp1playlist.Signature
+	if json.Unmarshal(chainRaw, &chain) != nil {
+		// A type error leaves the slice partly filled.
+		chain = nil
+	}
+	return legacy, chain
 }
 
 // decodeSatellitesExact reads "satellites" by its exact JSON key, leniently: a

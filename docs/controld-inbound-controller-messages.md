@@ -657,7 +657,8 @@ malformed one never blocks; see signature verification above), and a legacy
 `dynamicQueries` playlist may carry an empty `items`. A series edition or a
 legacy indexer item that fails the schema is dropped on its own; if a series
 has no conforming edition its representative item plays. Member names are
-matched exactly, so a case variant (`"Source"`) is an unknown member.
+matched exactly, so a case variant (`"Source"`) is an unknown member. A
+document that names a member twice in one object is refused.
 A dpVersion of another major is logged, not refused.
 
 **Temporary, inline documents only** (a `dp1_call`, and what controld rebuilds
