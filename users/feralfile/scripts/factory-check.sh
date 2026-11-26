@@ -10,7 +10,9 @@
 # DDC/CI, a tone on each speaker, a Bluetooth discovery) and then of
 # wifi-reading.sh, shown against reading 1, so moving the antennas between
 # readings shows as a delta on the screen. The two never run at once: Wi-Fi and
-# Bluetooth share the card's radio. The panel's brightness is stepped until it
+# Bluetooth share the card's radio. After each reading's results have stood
+# PAUSE_SECONDS for the photograph, one pass of the Display check slides
+# (display-check.sh once, about 2 min) runs, and then the next reading. The panel's brightness is stepped until it
 # has passed once, then left alone, so that pulling the power later cannot
 # leave a panel at a test level. The speakers sound on every reading, for
 # whoever is listening. The screen is the record (photograph it); the JSON also
@@ -106,6 +108,8 @@ header() {
   zh "$results_zh"
   echo "Each reading: brightness, speakers (low tone LEFT, then high tone RIGHT), Bluetooth, Wi-Fi."
   zh "每轮检测：亮度、扬声器（先左边低音，再右边高音）、蓝牙、Wi-Fi。"
+  echo "After each reading's results: about 2 min of display test slides, then the next reading."
+  zh "每轮结果之后：约 2 分钟的屏幕测试画面，然后进入下一轮。"
   echo "Readings repeat on their own; the keyboard can be unplugged and the box closed."
   zh "检测会自动重复；可以拔掉键盘、合上机箱。"
   echo "Photograph the screen for each antenna placement. Pull the power to finish."
@@ -195,4 +199,7 @@ while true; do
   echo "$checks"
   sync
   sleep "$PAUSE_SECONDS"
+  # Bounded and fail-open (display-check.sh once): a pass that cannot start
+  # costs the next reading nothing.
+  bash "$SCRIPTS/display-check.sh" once >/dev/null 2>&1 || true
 done
