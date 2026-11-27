@@ -97,7 +97,7 @@ wait_for_vt1
 # Observe the socket only after both display gates open. Watchdog owns recovery.
 signal_player_ready() {
     for attempt in $(seq 1 90); do
-        if python3 /home/feralfile/scripts/player-health.py
+        if python3 /home/feralfile/scripts/player_health.py
         then
             systemctl --user start chromium-ready.target
             return

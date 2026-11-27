@@ -6,10 +6,10 @@ user session files together with the player, controld and watchdog binaries.
 Pacman replaces the old web-player package. The new host resumes an existing
 native SQLite database in `~/.state/player`. During a legacy OTA, the candidate's post-extraction hook reads the frozen kiosk
 origin with a temporary, network-isolated Chromium storage reader. As the kiosk
-user, it imports the saved cast, index, modes, content policy and boot playlist
+user, it imports the saved cast, index, modes, content policy, display preferences, boot playlist and pending schedule
 through the native player's validators into a staged SQLite database. An import
 failure stops the update before the reboot is armed. An active import requires
-fresh presentation evidence in the post-OTA success check. The rollback root
+fresh presentation evidence for that playlist and artwork in the post-OTA success check. The rollback root
 and the original Chromium profile retain their previous data.
 
 ## Former kiosk CDP consumers

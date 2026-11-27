@@ -48,7 +48,10 @@ extern "C" int ff_host(int argc, char** argv) {
       ff::Json records;
       std::cin >> records;
       playback.import_legacy(records);
-      std::cout << (playback.desired() ? "active" : "idle") << '\n';
+      ff::Json expected = nullptr;
+      if (playback.desired())
+        expected = {{"playlist", playback.state()["playlist"]}, {"index", playback.desired()->index}};
+      std::cout << expected.dump() << '\n';
       return 0;
     }
     ff::sweep_browser_profiles(state_path + "/browser");

@@ -5,12 +5,15 @@ Only the old player's origin storage is needed. Never open a saved tab, load
 an artwork, or let Chromium rewrite the rollback profile.
 """
 import http.server
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
+
+from player_health import fingerprint
 
 PROFILE = Path.home() / ".config/chromium/Default"
 STATE = Path.home() / ".state/player"
@@ -23,7 +26,8 @@ PAGE = b"""<!doctype html><script>
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
-  const keys = ["castInfo", "boot_playlist", "contentPolicy"];
+  const keys = ["castInfo", "boot_playlist", "contentPolicy", "displaySettings",
+                "defaultItemDuration", "dp1_scheduled_tasks"];
   const store = db.objectStoreNames.contains("keyValueStore")
     ? db.transaction("keyValueStore").objectStore("keyValueStore") : null;
   const values = await Promise.all(keys.map(key => new Promise((resolve, reject) => {
@@ -33,6 +37,11 @@ PAGE = b"""<!doctype html><script>
     r.onerror = () => reject(r.error);
   })));
   const data = Object.fromEntries(keys.map((k, i) => [k, JSON.parse(values[i])]));
+  if (data.dp1_scheduled_tasks) {
+    const atMs = Date.parse(data.dp1_scheduled_tasks.scheduleTime);
+    if (!Number.isFinite(atMs)) throw Error("Invalid scheduled time");
+    data.dp1_scheduled_tasks.atMs = atMs;
+  }
   await fetch("/export", {method: "POST", body: JSON.stringify(data)});
 })().catch(() => fetch("/error", {method: "POST"}));
 </script>"""
@@ -99,9 +108,12 @@ def main():
         # closed SQLite (including its WAL). Failure leaves the old root active.
         result = subprocess.run(["/usr/bin/ff-player-native", "--import-legacy", f"--state-dir={stage}"],
                                 input=records, stdout=subprocess.PIPE, check=True, timeout=30)
-        status = result.stdout.decode().strip()
-        if status not in ("active", "idle"):
-            raise ValueError("Unexpected native import result")
+        expected = json.loads(result.stdout)
+        status = "idle"
+        if expected is not None:
+            playlist = expected["playlist"]
+            index = expected["index"]
+            status = f"{fingerprint(playlist)} {index} {fingerprint(playlist['items'][index])}"
         STATE.mkdir(mode=0o700, exist_ok=True)
         os.replace(Path(stage) / "state.sqlite", STATE / "state.sqlite")
         print(status)

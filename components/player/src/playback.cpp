@@ -348,6 +348,12 @@ void Playback::import_legacy(const Json& records) {
   for (auto key : {"contentPolicy", "castInfo", "boot_playlist"})
     require(records.contains(key), "invalid_params", "Incomplete legacy storage export");
   if (!records["contentPolicy"].is_null()) command("policy.set", records["contentPolicy"]);
+  Json settings = Json::object();
+  auto display = records.value("displaySettings", Json(nullptr));
+  for (auto key : {"scaling", "framing", "tombstone"})
+    if (display.contains(key)) settings[key] = display[key];
+  if (records.contains("defaultItemDuration")) settings["durationSeconds"] = records["defaultItemDuration"];
+  if (!settings.empty()) command("settings.set", settings);
   const auto& boot = records["boot_playlist"];
   if (!boot.is_null()) {
     bool wrapped = boot.contains("playlist");
@@ -358,14 +364,19 @@ void Playback::import_legacy(const Json& records) {
   require(cast.is_null() || cast.is_object(), "invalid_params", "Invalid legacy cast record");
   if (cast.is_null() || !cast.contains("playlist") || cast["playlist"].is_null()) {
     if (!boot.is_null()) command("playback.replace", state_["boot"]);
-    return;
-  }
-  command("playback.replace", {{"playlist", cast["playlist"]}, {"index", cast.value("index", 0)},
+  } else {
+    command("playback.replace", {{"playlist", cast["playlist"]}, {"index", cast.value("index", 0)},
                                {"context", cast.value("contentContext", "curated")},
                                {"playlistUrl", cast.value("playlistUrl", "")}});
-  if (!cast["playlist"]["items"].empty())
-    command("playback.mode", {{"loop", cast.value("loopMode", "playlist")}, {"shuffle", cast.value("shuffle", false)}});
-  if (cast.value("isPaused", false)) command("playback.pause", {{"paused", true}});
+    if (!cast["playlist"]["items"].empty())
+      command("playback.mode", {{"loop", cast.value("loopMode", "playlist")}, {"shuffle", cast.value("shuffle", false)}});
+    if (cast.value("isPaused", false)) command("playback.pause", {{"paused", true}});
+  }
+  auto schedule = records.value("dp1_scheduled_tasks", Json(nullptr));
+  if (!schedule.is_null()) {
+    command("schedule.set", {{"playlist", schedule.at("dp1CallData")}, {"atMs", schedule.at("atMs")},
+                             {"context", schedule.value("contentContext", "curated")}});
+  }
 }
 
 void Playback::system_boot(const std::string& id){

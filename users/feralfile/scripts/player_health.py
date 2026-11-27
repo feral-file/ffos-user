@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 import json, os, socket, struct, sys, time
-try:
+import hashlib
+from pathlib import Path
+
+
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def check():
     with socket.socket(socket.AF_UNIX) as s:
         s.settimeout(1)
         s.connect(os.environ.get('FF_PLAYER_SOCKET', '/run/user/1000/ff-player/player.sock'))
@@ -28,9 +36,23 @@ try:
         assert state['host'] == 'responsive' and state['generation'] > 0 and state['revision'] > 0
         if "--presented" in sys.argv:
             shown = state.get("presented") or {}
-            if state["sleeping"]:
-                sys.exit(0)
-            if not (state.get("presentedOwnsCast") and shown.get("stage") == "presented"):
-                sys.exit("Waiting for the migrated cast to present a frame")
-except Exception:
-    raise SystemExit(1)
+            playlist_hash, index, item_hash = Path(sys.argv[2]).read_text().split()
+            if not (state.get("presentedOwnsCast") and shown.get("stage") == "presented"
+                    and fingerprint(state.get("presentedPlaylist")) == playlist_hash):
+                sys.exit("Waiting for the migrated playlist to present")
+            if shown["index"] == int(index) and fingerprint(shown["item"]) == item_hash:
+                return
+            # Short slots may advance before the service's first poll. The
+            # migration creates a fresh history and only real frames enter it.
+            history = call("history.list", {})
+            if not (history["records"] and not history["incomplete"]
+                    and fingerprint(history["records"][-1]["item"]) == item_hash):
+                sys.exit("Waiting for evidence of the migrated artwork")
+
+
+
+if __name__ == "__main__":
+    try:
+        check()
+    except Exception as error:
+        sys.exit(f"Player health check failed: {error}")
