@@ -323,7 +323,7 @@ assert.strictEqual(B.uptimeAt(null, 9), null);
 assert.strictEqual(B.advanceUptime(uc, undefined, 7), uc, 'no uptime in the sample: unchanged');
 
 // QR text: readable as is, verdict first, plain ASCII, within budget in the
-// worst case, and encodable at a size the corner QR still shows.
+// worst case, and encodable at a size a phone reads from across a bench.
 const worst = JSON.parse(JSON.stringify(good)); worst.mode = 'hardware';
 worst.board = 'FF1-WWWWWWWW'; worst.version = '10.20.300-rc.12';
 worst.checks = ['Brightness', 'Speakers', 'Bluetooth', 'Wi-Fi'].map(n => ({ name: n, status: 'FAIL', detail: 'x'.repeat(200) }));

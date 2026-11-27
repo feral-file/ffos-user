@@ -10,8 +10,8 @@
                     unit has been on 10 minutes, the Panel Check: black 15 s,
                     gray 15 s, until the power is pulled, nothing else on
                     screen. During the load a dot (green / latched red) with
-                    the running time and a QR of the summary sit in one
-                    corner, a different one each segment.
+                    the running time sits in one corner, a different one
+                    each segment.
     ?mode=hardware  The unit checks as they run (what to listen for), then
                     their result and a QR, held until the power is pulled.
   Logic in burnin.js; ?fast=N divides every duration by N (bench and tests).
@@ -45,20 +45,8 @@
   #qr svg { width: 28vmin; height: 28vmin; }
   .row { display: flex; gap: 3vmin; align-items: flex-start; }
   .row > :first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
-  #dot { position: fixed; z-index: 10; display: flex; flex-direction: column; gap: .8vmin; padding: .6vmin;
-    border-radius: 1.5vmin; background: rgba(0,0,0,.55); font: 600 2.2vmin "Noto Sans Mono", monospace; }
-  #dot.top-left, #dot.bottom-left { align-items: flex-start; } #dot.top-right, #dot.bottom-right { align-items: flex-end; }
-  #dot .t { display: flex; align-items: center; gap: 1vmin; padding: 0 .6vmin; }
-  /* 18vmin: about 4 px a module for the largest code (85 modules) on a 4K
-     panel, read by a phone from a step away. The white border is the quiet
-     zone a reader needs. */
-  /* Light gray, not white: the code sits in one corner for a whole segment
-     and the Panel Check that follows the load is judged for evenness; a
-     dimmer block leaves less retention there. Phone readers decode it at
-     this contrast. */
-  #dot .q { background: #bbb; padding: 1vmin; line-height: 0; }
-  #dot .q svg rect { fill: #bbb; }
-  #dot .q svg { width: 18vmin; height: 18vmin; display: block; }
+  #dot { position: fixed; z-index: 10; display: flex; align-items: center; gap: 1vmin; padding: .6vmin 1.2vmin;
+    border-radius: 3vmin; background: rgba(0,0,0,.55); font: 600 2.2vmin "Noto Sans Mono", monospace; }
   #dot i { width: 2.2vmin; height: 2.2vmin; border-radius: 50%; background: #2c2; display: block; }
   #dot.bad i { background: #e22; }
   #dot.top-left { top: 1.5vmin; left: 1.5vmin; } #dot.top-right { top: 1.5vmin; right: 1.5vmin; }
@@ -68,7 +56,7 @@
 <body>
 <iframe id="frame" class="hidden" allow="autoplay"></iframe>
 <video id="video" class="hidden" muted loop playsinline></video>
-<div id="dot" class="hidden"><div class="t"><i></i><span></span></div><div class="q"></div></div>
+<div id="dot" class="hidden"><i></i><span></span></div>
 <div id="card" class="wait"></div>
 <script src="qrcode.js"></script>
 <script src="burnin.js"></script>
@@ -183,16 +171,7 @@ function tickDot() {
   // The title carries the verdict too, for a test driving the page headless.
   document.title = `FF1 factory ${MODE}: ${v.ok ? 'OK' : 'FAILED ' + v.reasons.join('; ')}`;
   dot.querySelector('span').textContent = B.hms(runningNow() ?? 0);
-  // The corner QR, redrawn every QR_EVERY s (not every tick: it changes
-  // slowly, and a new code each second is no easier to scan), and at once
-  // when the verdict changes or a segment starts.
-  const key = v.ok ? 'ok' : v.reasons.join(';');
-  if (!dot.classList.contains('hidden') && (mono() - qrAt >= QR_EVERY / FAST || key !== qrKey)) {
-    dot.querySelector('.q').innerHTML = qrSvg(); qrAt = mono(); qrKey = key;
-  }
 }
-const QR_EVERY = 10;
-let qrAt = -Infinity, qrKey = null;
 setInterval(tickDot, 1000);
 
 // countFrames(seconds) -> frames drawn by this document after the warm-up.
@@ -239,7 +218,7 @@ async function frameReady(seg) {
 // runSegment(seg, seconds, n): load segment n, for seconds.
 async function runSegment(seg, seconds, n) {
   card.classList.add('hidden');
-  dot.className = B.cornerFor(n); qrAt = -Infinity; tickDot();
+  dot.className = B.cornerFor(n); tickDot();
   if (seg.video) {
     frame.classList.add('hidden'); frame.src = 'about:blank';
     video.src = seg.video; video.classList.remove('hidden');

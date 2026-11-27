@@ -182,8 +182,8 @@ function hms(seconds) {
 // a text QR as text; a data: URL page is refused by both iOS and Android, so
 // an HTML report is not an option). The first line is the verdict, so a scan
 // answers "pass or fail" at a glance; the lines after it are the details
-// (checks, load, temperatures, faults). Within QR_MAX_BYTES, so the code stays one a phone reads from the
-// small corner QR too (the test checks a worst case).
+// (checks, load, temperatures, faults). Within QR_MAX_BYTES, so the code stays one a phone reads from
+// across a bench (the test checks a worst case).
 const QR_MAX_BYTES = 600;
 function qrText(status, stats, runningSeconds, staleSeconds = 0) {
   const st = status || {};
