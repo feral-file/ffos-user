@@ -34,6 +34,9 @@ def check():
         state = call('health.get', {})
         assert hello['version'] == 1 and state['instance'] == hello['instance']
         assert state['host'] == 'responsive' and state['generation'] > 0 and state['revision'] > 0
+        if "--showing" in sys.argv and not state["sleeping"]:
+            if (state.get("presented") or {}).get("stage") != "presented":
+                sys.exit("Waiting for a visible artwork")
         if "--presented" in sys.argv:
             shown = state.get("presented") or {}
             playlist_hash, index, item_hash = Path(sys.argv[2]).read_text().split()
