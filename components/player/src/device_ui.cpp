@@ -117,11 +117,11 @@ void rounded(cairo_t* cr,double x,double y,double width,double height,double rad
   cairo_arc(cr,x+radius,y+radius,radius,pi,pi*1.5);cairo_close_path(cr);
 }
 // Keep QR module boundaries sharp at fractional device scales.
-void draw_qr(cairo_t* cr, const QRcode& code, double x, double y, double size, int margin) {
+void draw_qr(cairo_t* cr, const QRcode& code, double x, double y, double size, int margin, double gray = 0) {
   const double cell = size / (code.width + 2 * margin);
   cairo_save(cr);
   cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
-  cairo_set_source_rgb(cr, 0, 0, 0);
+  cairo_set_source_rgb(cr, gray, gray, gray);
   for (int row = 0; row < code.width; ++row)
     for (int col = 0; col < code.width; ++col)
       if (code.data[row * code.width + col] & 1)
@@ -305,7 +305,11 @@ bool has_tombstone(const Occurrence& o) {
   return tombstone_label(o).title != nullptr;
 }
 UIRaster render_title_card(const Occurrence& o,int width,int height) {
-  const double edge=std::min(width,height), padding=edge*.045;
+  // The title card Sean and Casey settled on an FF1 (feral-file#3615). Sizes
+  // are the web player's design pixels on a 720-high canvas, scaled by the
+  // short edge: docs/TITLE-CARD.md.
+  const double unit=std::min(width,height)/720.0, padding=50*unit;
+  const double ink=0xED/255.0, muted=0x8A/255.0;
   const auto label = tombstone_label(o);
   if (!label.title) return {};
   std::string artists;
@@ -320,35 +324,42 @@ UIRaster render_title_card(const Occurrence& o,int width,int height) {
   Canvas canvas(width,height);
   cairo_set_source_rgb(canvas.cr,0,0,0);
   cairo_paint(canvas.cr);
-  cairo_set_source_rgb(canvas.cr,1,1,1);
   const int available=std::max(1,int(width-2*padding));
   const auto link = title_card_link(o.playlist);
   std::unique_ptr<QRcode, decltype(&QRcode_free)> code(
       link.empty() ? nullptr : QRcode_encodeString(link.c_str(),0,QR_ECLEVEL_L,QR_MODE_8,1), QRcode_free);
-  const int qr_size = std::max(1, int(edge * .17));
-  const int caption_width = int(edge * .24);
-  const int label_width = code ? std::max(1, available - caption_width - int(padding)) : available;
-  Text work(canvas.cr,(artists.empty() ? "" : escape(artists)+"\n")+"<i>"+escape(*label.title)+"</i>",
-            edge*.038,1.2,label_width,false);
-  work.paint(canvas.cr,padding,std::max(padding,height-padding-work.css_height));
+  const double qr_size = 120*unit;
+  const int label_width = std::max(1, int(std::min(560*unit, code ? available-qr_size-40*unit : double(available))));
+  Text work(canvas.cr,(artists.empty() ? "" : escape(artists)+"\n")+"<b><i>"+escape(*label.title)+"</i></b>",
+            44*unit,1.12,label_width,false);
+  const double work_top=std::max(padding,height-padding-work.css_height);
+  cairo_set_source_rgb(canvas.cr,ink,ink,ink);
+  work.paint(canvas.cr,padding,work_top);
   // The scheduler sends only today's work, even in a multi-day exhibition.
   const bool scheduled_exhibition = text_field(o.item, "displayAt") && o.playlist_title != *label.title;
   if (!o.playlist_title.empty() && (scheduled_exhibition || (o.playlist.contains("items") && o.playlist.at("items").size() > 1) ||
                                     !o.curator.empty() || text_field(o.playlist, "note"))) {
-    Text exhibition(canvas.cr,escape(o.playlist_title),edge*.030,1.2,available,false);
+    const double size=19*unit;
+    Text exhibition(canvas.cr,escape(o.playlist_title),size,1.4,available,false);
     pango_layout_set_alignment(exhibition.layout,PANGO_ALIGN_RIGHT);
+    auto attrs=pango_attr_list_copy(pango_layout_get_attributes(exhibition.layout));
+    pango_attr_list_insert(attrs,pango_attr_letter_spacing_new(int(.02*size*PANGO_SCALE)));
+    pango_layout_set_attributes(exhibition.layout,attrs);pango_attr_list_unref(attrs);
+    cairo_set_source_rgb(canvas.cr,muted,muted,muted);
     exhibition.paint(canvas.cr,padding,padding);
   }
   if (code) {
-    Text caption(canvas.cr, "About this work", edge*.022, 1.2, caption_width, true);
-    const double right = width-padding, bottom = height-padding;
-    const double x = right-caption_width*.5-qr_size*.5;
-    const double y = bottom-qr_size;
-    caption.paint(canvas.cr, right-caption_width, y-edge*.012-caption.css_height);
-    cairo_set_source_rgb(canvas.cr,1,1,1);
-    cairo_rectangle(canvas.cr,x,y,qr_size,qr_size);
-    cairo_fill(canvas.cr);
-    draw_qr(canvas.cr,*code,x,y,qr_size,4);
+    // The code's foot sits on the baseline of the last line of text; the
+    // caption hangs below it.
+    auto iter=pango_layout_get_iter(work.layout);
+    while(!pango_layout_iter_at_last_line(iter))pango_layout_iter_next_line(iter);
+    const double baseline=work_top+pango_layout_iter_get_baseline(iter)/double(PANGO_SCALE);
+    pango_layout_iter_free(iter);
+    const double x=std::round(width-padding-qr_size), y=std::round(baseline-qr_size);
+    draw_qr(canvas.cr,*code,x,y,qr_size,0,ink);
+    Text caption(canvas.cr,"About this work",13*unit,1.25,available,false);
+    cairo_set_source_rgb(canvas.cr,muted,muted,muted);
+    caption.paint(canvas.cr,x,y+qr_size+8*unit);
   }
   return canvas.pixels();
 }
