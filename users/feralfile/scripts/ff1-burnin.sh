@@ -5,37 +5,56 @@
 # entry into ff1-burnin.target, where ff1-burnin.service runs this as root on
 # tty1. The kiosk, controld, the watchdog and the updaters never start.
 #
-#   1. The unit checks, once: unit-checks.sh (brightness over DDC/CI, a tone on
-#      each speaker, a Bluetooth discovery), then wifi-reading.sh. Their result
-#      lines stay on tty1 for RESULT_SECONDS. The JSON goes to
-#      /var/log/ff1-burnin/<session>/ (the @log subvolume, outside the root
-#      rollback). When a FAT/exFAT USB stick is plugged in, the session folder
-#      is then copied to it and the stick unmounted, so pulling the power
-#      later never cuts a mounted stick.
-#   2. The display test, until the power is pulled: the display-check page's
-#      assembly set, looping full screen in cage. Chromium is started again
-#      whenever it exits (panel unplugged, GPU process lost).
+# Four processes, all ended by pulling the power:
+#   - a loopback HTTP server (127.0.0.1:BURNIN_PORT) for the burn-in page
+#     (/home/feralfile/burnin), the display-check page and /status.json. It is
+#     HTTP, not file://, because Chromium's fetch() and the WebGL works'
+#     shader loading refuse file:// URLs;
+#   - the screen: the burn-in page in cage, restarted whenever Chromium exits
+#     (each restart is counted, and turns the screen red);
+#   - the sampler: every SAMPLE_SECONDS it writes status.json from the checks'
+#     results and the system sample (temperatures, kernel errors since the
+#     session started, adapters present, Chromium restarts). Every minute it
+#     copies it to the session folder as last.json, so the next burn-in
+#     boot can say how long this one ran;
+#   - the unit checks, once: unit-checks.sh (brightness over DDC/CI, a tone on
+#     each speaker, a Bluetooth discovery), then wifi-reading.sh.
 #
-# Nothing here writes the owner state, NetworkManager's connections, or
-# anything a normal boot reads. Pull the power to end it; the next boot is a
-# normal one, because the entry is reached only through the menu.
+# The page shows the checks as they run, then the result card with a QR, then
+# loops the display and load test with a status card after every pass.
+#
+# Results always go to /var/log/ff1-burnin/<session>/ (the @log subvolume,
+# outside the root rollback). When a FAT/exFAT USB stick is plugged in, the
+# session folder is then copied to it and the stick unmounted, so pulling the
+# power later never cuts a mounted stick. Nothing here writes the owner state,
+# NetworkManager's connections, or anything a normal boot reads. The next
+# boot is a normal one, because the entry is reached only through the menu.
 set -uo pipefail
 
 SCRIPTS="${FF_SCRIPTS:-/home/feralfile/scripts}"
-PAGE="${FF_BURNIN_PAGE:-/home/feralfile/display-check/index.html}"
+HOME_DIR="${FF_HOME:-/home/feralfile}"
 LOG_ROOT="${FF_BURNIN_LOG:-/var/log/ff1-burnin}"
 RUN_DIR="${XDG_RUNTIME_DIR:-/run/ff1-burnin}"
+HWMON="${FF_HWMON:-/sys/class/hwmon}"
+NET="${FF_NET:-/sys/class/net}"
+BLUETOOTH="${FF_BLUETOOTH:-/sys/class/bluetooth}"
 MOUNT=/mnt/ff1-burnin
+BURNIN_PORT=8180     # loopback only; nothing else listens on this boot
 SCANS=10             # Wi-Fi scans in the one reading
-RESULT_SECONDS=60    # the check results stay on screen this long
+SAMPLE_SECONDS=5
 KEEP_SESSIONS=20     # older session folders in LOG_ROOT are removed
 
-say() { printf '\n%s\n' "$*"; }
+# Kernel lines that mean a hardware or driver fault: an amdgpu ring timeout
+# or GPU reset, an amdgpu VM page fault, an NVMe timeout or reset, a machine
+# check, an oops or a hung task (case-insensitive). Counted from the session
+# start only, so boot noise does not count. Keep it narrow: one match turns the
+# screen red.
+KERNEL_ERROR_RE='ring [a-z0-9_.]+ timeout|GPU reset|amdgpu.*page fault|VM_L2_PROTECTION_FAULT|nvme[0-9]+: .*(timeout|I/O error|resetting controller)|I/O error, dev nvme|Machine check events logged|\[Hardware Error\]|BUG: |Oops: |blocked for more than'
 
 wait_for_wifi() {
   local i iface
   for ((i = 0; i < 60; i++)); do
-    for iface in /sys/class/net/wl*; do
+    for iface in "$NET"/wl*; do
       [ -e "$iface" ] || continue
       iface=$(basename "$iface")
       if wpa_cli -i "$iface" status >/dev/null 2>&1; then echo "$iface"; return 0; fi
@@ -70,7 +89,7 @@ copy_to_stick() {
   mkdir -p "$MOUNT"
   mount "$stick" "$MOUNT" 2>/dev/null || return 0
   if mkdir -p "$MOUNT/ff1-burnin" && cp -r "$dir" "$MOUNT/ff1-burnin/" && sync; then
-    echo "also on USB stick $stick, folder ff1-burnin/$(basename "$dir")"
+    echo "USB stick $stick, folder ff1-burnin/$(basename "$dir")"
   fi
   umount "$MOUNT" 2>/dev/null || true
 }
@@ -84,7 +103,14 @@ prune_sessions() {
 }
 
 # result_lines <text>: the "== " English result lines of the checks.
-result_lines() { grep -E '^== ' <<<"$1" || echo "== checks did not run"; }
+result_lines() { grep -E '^== ' <<<"$1" || echo "== Checks     FAIL   did not run"; }
+
+# checks_json <lines>: result lines as [{name, status, detail}]. unit-checks.sh
+# prints "== %-10s %-6s %s".
+checks_json() {
+  gawk '/^== / { name = $2; st = $3; $1 = $2 = $3 = ""; sub(/^ +/, ""); printf "%s\t%s\t%s\n", name, st, $0 }' <<<"$1" |
+    jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {name: .[0], status: .[1], detail: (.[2] // "")})'
+}
 
 # wifi_line <reading.json>: one result line from a wifi-reading.sh record, per
 # band the access points seen and the strongest median. No access point at
@@ -92,20 +118,106 @@ result_lines() { grep -E '^== ' <<<"$1" || echo "== checks did not run"; }
 wifi_line() {
   jq -r '
     (.summary | group_by(.band) | map("\(.[0].band): \(length) APs, best \(map(.median_dbm) | max | floor) dBm") | join("; ")) as $bands
-    | if (.summary | length) == 0 then "== Wi-Fi      FAIL  no access point seen in \(.scans) scans"
-      else "== Wi-Fi      PASS  \($bands)" end' "$1" 2>/dev/null || echo "== Wi-Fi      FAIL  the reading could not be read"
+    | if (.summary | length) == 0 then "== Wi-Fi      FAIL   no access point seen in \(.scans) scans"
+      else "== Wi-Fi      PASS   \($bands)" end' "$1" 2>/dev/null || echo "== Wi-Fi      FAIL   the reading could not be read"
 }
 
-# The display-check page in cage, until Chromium exits. The flags are the
-# kiosk's decode and graphics path (start-kiosk.sh), so the video and graphics
-# slides exercise what an installed unit plays. The log holds the latest
-# Chromium run and the one before (.1, where the reason for a restart is):
-# it lives in RAM for a run of days.
+# temps -> "cpu gpu nvme" in whole °C, "null" for a sensor that is not there.
+# k10temp temp1 is Tctl, amdgpu temp1 the edge, nvme temp1 the composite.
+temps() {
+  local cpu=null gpu=null nvme=null d v
+  for d in "$HWMON"/hwmon*; do
+    [ -r "$d/name" ] && [ -r "$d/temp1_input" ] || continue
+    v=$(($(cat "$d/temp1_input") / 1000))
+    case "$(cat "$d/name")" in
+      k10temp) cpu=$v ;;
+      amdgpu) gpu=$v ;;
+      nvme) nvme=$v ;;
+    esac
+  done
+  echo "$cpu $gpu $nvme"
+}
+
+# count_kernel_errors -> "<count>\t<last matching line>" over the kernel lines
+# on stdin.
+count_kernel_errors() {
+  # The pattern through ENVIRON, not -v: -v would eat its backslashes.
+  RE="$KERNEL_ERROR_RE" gawk 'BEGIN { IGNORECASE = 1 } $0 ~ ENVIRON["RE"] { n++; last = $0 } END { printf "%d\t%s\n", n, substr(last, 1, 120) }'
+}
+
+# kernel_errors <since_epoch>: count_kernel_errors over this boot's kernel log
+# from <since_epoch>.
+kernel_errors() {
+  journalctl -k -q --no-pager -o cat --since "@$1" 2>/dev/null | count_kernel_errors
+}
+
+# previous_session <log_root> <this_session>: the newest earlier session's
+# last.json as {ran, last, kernel_errors, restarts}, or null. Power pulls and
+# crashes look the same here; what the screen showed tells them apart.
+previous_session() {
+  local f
+  f=$(find "$1" -mindepth 2 -maxdepth 2 -name last.json -not -path "*/$2/*" 2>/dev/null | sort -r | head -n 1)
+  [ -n "$f" ] || { echo null; return; }
+  jq -c '{ran: (.updated_at - .started_at), last: (.updated_at | todate), kernel_errors: .sys.kernel_errors, restarts: .sys.restarts}' "$f" 2>/dev/null || echo null
+}
+
+# max <a> <b>: the larger, where "null" means no reading.
+max() {
+  if [ "$1" = null ]; then echo "$2"
+  elif [ "$2" = null ] || [ "$1" -ge "$2" ]; then echo "$1"
+  else echo "$2"; fi
+}
+
+# status_json <cpu> <gpu> <nvme> <cpu_max> <gpu_max> <nvme_max> <kernel "n\tlast">
+# <wifi> <bt>: one status.json. The rest comes from the globals and from the
+# files in RUN_DIR the checks write: checks.json, checks_done_at, where,
+# restarts.
+status_json() {
+  jq -n \
+    --arg board "$BOARD" --arg version "$VERSION" --argjson started "$STARTED_AT" \
+    --argjson checks "$(cat "$RUN_DIR/checks.json" 2>/dev/null || echo '[]')" \
+    --argjson checks_done "$(cat "$RUN_DIR/checks_done_at" 2>/dev/null || echo null)" \
+    --arg where "$(cat "$RUN_DIR/where" 2>/dev/null)" --argjson previous "$PREVIOUS" \
+    --argjson cpu "$1" --argjson gpu "$2" --argjson nvme "$3" \
+    --argjson cpu_max "$4" --argjson gpu_max "$5" --argjson nvme_max "$6" \
+    --argjson kerr "${7%%$'\t'*}" --arg klast "${7#*$'\t'}" \
+    --argjson wifi "$8" --argjson bt "$9" \
+    --argjson restarts "$(cat "$RUN_DIR/restarts" 2>/dev/null || echo 0)" '
+    {board: $board, version: $version, started_at: $started, updated_at: (now | floor),
+     checks: $checks, checks_done_at: $checks_done, where: $where, previous: $previous,
+     sys: {cpu: $cpu, gpu: $gpu, nvme: $nvme, cpu_max: $cpu_max, gpu_max: $gpu_max, nvme_max: $nvme_max,
+           kernel_errors: $kerr, last_error: (if $klast == "" then null else $klast end),
+           wifi_present: $wifi, bt_present: $bt, restarts: $restarts}}'
+}
+
+# sample_loop: status.json every SAMPLE_SECONDS (written whole, then renamed,
+# so the page never reads half a file), last.json every minute.
+sample_loop() {
+  local tick=0 cpu gpu nvme cpu_max=null gpu_max=null nvme_max=null ke=$'0\t' wifi bt
+  while true; do
+    read -r cpu gpu nvme < <(temps)
+    cpu_max=$(max "$cpu" "$cpu_max"); gpu_max=$(max "$gpu" "$gpu_max"); nvme_max=$(max "$nvme" "$nvme_max")
+    ((tick % 6 == 0)) && ke=$(kernel_errors "$STARTED_AT")
+    wifi=false; compgen -G "$NET/wl*" >/dev/null && wifi=true
+    bt=false; compgen -G "$BLUETOOTH/hci*" >/dev/null && bt=true
+    status_json "$cpu" "$gpu" "$nvme" "$cpu_max" "$gpu_max" "$nvme_max" "$ke" "$wifi" "$bt" >"$WWW/status.json.tmp" &&
+      mv -f "$WWW/status.json.tmp" "$WWW/status.json"
+    ((tick % (60 / SAMPLE_SECONDS) == 0)) && cp -f "$WWW/status.json" "$RESULTS/last.json" 2>/dev/null
+    tick=$((tick + 1))
+    sleep "$SAMPLE_SECONDS"
+  done
+}
+
+# The burn-in page in cage, until Chromium exits. The flags are the kiosk's
+# decode and graphics path (start-kiosk.sh), so the video and WebGL segments
+# exercise what an installed unit plays. The log holds the latest Chromium run
+# and the one before (.1, where the reason for a restart is): it lives in RAM
+# for a run of days.
 FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
-slides() {
+screen_once() {
   rm -rf "$RUN_DIR/chromium"
   [ -f "$RUN_DIR/chromium.log" ] && mv -f "$RUN_DIR/chromium.log" "$RUN_DIR/chromium.log.1"
-  cage -s -- chromium "file://$PAGE" \
+  cage -s -- chromium "http://127.0.0.1:$BURNIN_PORT/burnin/index.html" \
     --no-sandbox \
     --kiosk \
     --no-first-run \
@@ -113,59 +225,79 @@ slides() {
     --disable-infobars \
     --disable-features=TranslateUI \
     --autoplay-policy=no-user-gesture-required \
-    --allow-file-access-from-files \
     --ozone-platform=wayland \
     --enable-features="$FEATURES" \
     --user-data-dir="$RUN_DIR/chromium" >"$RUN_DIR/chromium.log" 2>&1
 }
 
+screen_loop() {
+  local restarts=0
+  echo 0 >"$RUN_DIR/restarts"
+  while true; do
+    screen_once
+    restarts=$((restarts + 1))
+    echo "$restarts" >"$RUN_DIR/restarts"
+    sleep 3
+  done
+}
+
+wait_for_port() {
+  local i
+  for ((i = 0; i < 50; i++)); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 # Sourced (scripts/test-ff1-burnin.sh), only the functions load.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
-mkdir -p "$RUN_DIR"
-session=$(date '+%Y%m%d-%H%M%S')
-prune_sessions "$LOG_ROOT" "$((KEEP_SESSIONS - 1))"
-results="$LOG_ROOT/$session"
-mkdir -p "$results"
-where="Results: $results"
+STARTED_AT=$(date +%s)
+BOARD=$(cat /etc/hostname 2>/dev/null || echo FF1)
+VERSION=$(jq -r '.version // empty' "$HOME_DIR/ff1-config.json" 2>/dev/null)
+SESSION=$(date -d "@$STARTED_AT" '+%Y%m%d-%H%M%S')
+WWW="$RUN_DIR/www"
+RESULTS="$LOG_ROOT/$SESSION"
 
-clear
-echo "Feral File factory burn-in        board $(cat /etc/hostname 2>/dev/null)"
-echo "$where"
-echo "Unit checks once (brightness, speakers: low tone LEFT then high tone RIGHT, Bluetooth, Wi-Fi), then the display test until the power is pulled."
-echo "-------------------------------------------------------------------------------------"
-
-out=$(bash "$SCRIPTS/unit-checks.sh" record r1 -o "$results" 2>&1 | tee /dev/tty) || true
-checks=$(result_lines "$out")
-echo
-if iface=$(wait_for_wifi); then
-  out=$(bash "$SCRIPTS/wifi-reading.sh" record r1 -n "$SCANS" -o "$results" 2>&1 | tee /dev/tty) || true
-  saved=$(sed -n 's/^saved //p' <<<"$out")
-  if [ -n "$saved" ]; then wifi=$(wifi_line "$saved"); else wifi="== Wi-Fi      FAIL  the reading on $iface did not finish"; fi
-else
-  wifi="== Wi-Fi      FAIL  no Wi-Fi interface came up in 60 s (M.2 card, antenna leads)"
-fi
-sync
-copied=$(copy_to_stick "$results")
-[ -n "$copied" ] && where="$where; $copied"
-
-clear
-echo "Feral File factory burn-in        board $(cat /etc/hostname 2>/dev/null)"
-echo "$where"
-echo
-echo "$checks"
-echo "$wifi"
-say "Photograph this screen. The display test starts in $RESULT_SECONDS s and runs until the power is pulled."
-sleep "$RESULT_SECONDS"
-
-if [ ! -r "$PAGE" ]; then
-  say "Display test: $PAGE is not on this image."
+if [ ! -r "$HOME_DIR/burnin/index.html" ]; then
+  clear
+  printf '\nFF1 burn-in: %s is not on this image.\n' "$HOME_DIR/burnin/index.html"
   exec sleep infinity
 fi
+
+mkdir -p "$RUN_DIR" "$WWW"
+rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
+ln -sfn "$HOME_DIR/burnin" "$WWW/burnin"
+ln -sfn "$HOME_DIR/display-check" "$WWW/display-check"
+prune_sessions "$LOG_ROOT" "$((KEEP_SESSIONS - 1))"
+mkdir -p "$RESULTS"
+PREVIOUS=$(previous_session "$LOG_ROOT" "$SESSION")
+echo "$RESULTS" >"$RUN_DIR/where"
 export XDG_RUNTIME_DIR="$RUN_DIR" LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
-while true; do
-  slides
-  clear
-  say "Display test stopped; starting again in 3 s. Log: $RUN_DIR/chromium.log.1 after the restart"
-  sleep 3
-done
+
+python3 -m http.server "$BURNIN_PORT" --bind 127.0.0.1 --directory "$WWW" >/dev/null 2>&1 &
+sample_loop &
+wait_for_port "$BURNIN_PORT"
+screen_loop &
+
+out=$(bash "$SCRIPTS/unit-checks.sh" record r1 -o "$RESULTS" 2>&1) || true
+printf '%s\n' "$out" >"$RESULTS/unit-checks.log"
+lines=$(result_lines "$out")
+checks_json "$lines" >"$RUN_DIR/checks.json"
+if iface=$(wait_for_wifi); then
+  out=$(bash "$SCRIPTS/wifi-reading.sh" record r1 -n "$SCANS" -o "$RESULTS" 2>&1) || true
+  printf '%s\n' "$out" >"$RESULTS/wifi-reading.log"
+  saved=$(sed -n 's/^saved //p' <<<"$out")
+  if [ -n "$saved" ]; then wifi=$(wifi_line "$saved"); else wifi="== Wi-Fi      FAIL   the reading on $iface did not finish"; fi
+else
+  wifi="== Wi-Fi      FAIL   no Wi-Fi interface came up in 60 s (M.2 card, antenna leads)"
+fi
+checks_json "$lines"$'\n'"$wifi" >"$RUN_DIR/checks.json"
+sync
+copied=$(copy_to_stick "$RESULTS")
+[ -n "$copied" ] && echo "$RESULTS and $copied" >"$RUN_DIR/where"
+date +%s >"$RUN_DIR/checks_done_at"
+
+# The sampler, the server and the screen run until the power is pulled.
+wait

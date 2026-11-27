@@ -1,0 +1,197 @@
+<!doctype html>
+<!--
+  The factory burn-in screen (ffos-user docs/plans/factory-burnin.md), served
+  by ff1-burnin.sh's loopback server at http://127.0.0.1:8180/burnin/.
+    1. While the unit checks run: what is being checked, and what to listen for.
+    2. Result card, RESULT_SECONDS: one line per check, and a QR of the summary.
+    3. Then passes until the power is pulled: the display-check slides, two
+       WebGL works, a 4K 10-bit HEVC clip, then the status card (CARD_SECONDS):
+       green if nothing has failed this session, red once anything has.
+  During a pass a small dot (green / latched red) with the running time sits in
+  one corner, a different one each pass. A clock that stops means a hang.
+  Logic in burnin.js; ?fast=N divides every duration by N, ?preview=card shows
+  the status card alone (bench and tests).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FF1 burn-in</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+    font-family: "Noto Sans", "Noto Sans CJK SC", sans-serif; cursor: none; }
+  #frame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+  video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .hidden { display: none !important; }
+  #card { position: fixed; inset: 0; padding: 5vmin; box-sizing: border-box; display: flex; flex-direction: column;
+    gap: 2vmin; font-size: 2.6vmin; line-height: 1.35; }
+  #card.ok { background: #0b5d1e; } #card.bad { background: #8a1010; } #card.wait { background: #111; }
+  #card h1 { font-size: 6vmin; margin: 0; } #card h2 { font-size: 3.4vmin; margin: 0; font-weight: 600; }
+  #card .zh { opacity: .85; }
+  #card table { border-collapse: collapse; font-size: 3vmin; }
+  #card td { padding: .4vmin 2vmin .4vmin 0; vertical-align: top; }
+  .PASS { color: #9f9; } .FAIL { color: #ff8a8a; font-weight: 700; } .SKIP, .PLAYED { color: #ffd27a; }
+  #card.bad .FAIL { color: #fff; background: #c00; padding: 0 .6vmin; }
+  #qr { background: #fff; padding: 1.5vmin; align-self: flex-start; line-height: 0; }
+  #qr svg { width: 34vmin; height: 34vmin; }
+  .row { display: flex; flex-wrap: wrap; gap: 4vmin; align-items: flex-start; }
+  .row > :first-child { flex: 1 1 60vmin; }
+  #dot { position: fixed; z-index: 10; display: flex; align-items: center; gap: 1vmin; padding: .6vmin 1.2vmin;
+    border-radius: 3vmin; background: rgba(0,0,0,.55); font: 600 2.2vmin "Noto Sans Mono", monospace; }
+  #dot i { width: 2.2vmin; height: 2.2vmin; border-radius: 50%; background: #2c2; display: block; }
+  #dot.bad i { background: #e22; }
+  #dot.top-left { top: 1.5vmin; left: 1.5vmin; } #dot.top-right { top: 1.5vmin; right: 1.5vmin; }
+  #dot.bottom-right { bottom: 1.5vmin; right: 1.5vmin; } #dot.bottom-left { bottom: 1.5vmin; left: 1.5vmin; }
+</style>
+</head>
+<body>
+<iframe id="frame" class="hidden" allow="autoplay"></iframe>
+<video id="video" class="hidden" muted loop playsinline></video>
+<div id="dot" class="hidden"><i></i><span></span></div>
+<div id="card" class="wait"></div>
+<script src="qrcode.js"></script>
+<script src="burnin.js"></script>
+<script>
+'use strict';
+const B = window.Burnin;
+const q = new URLSearchParams(location.search);
+const FAST = Math.max(1, Number(q.get('fast')) || 1);
+const $ = id => document.getElementById(id);
+const card = $('card'), frame = $('frame'), video = $('video'), dot = $('dot');
+const now = () => Date.now() / 1000;
+const sleep = s => new Promise(r => setTimeout(r, (s / FAST) * 1000));
+let status = null, stats = B.emptyStats();
+
+// status.json: rewritten by ff1-burnin.sh every few seconds. A failed read
+// keeps the last one; the verdict turns red if it goes stale.
+async function readStatus() {
+  try {
+    const r = await fetch('/status.json?' + Date.now(), { cache: 'no-store' });
+    if (r.ok) status = await r.json();
+  } catch (e) { /* keep the last status */ }
+}
+setInterval(readStatus, 3000);
+
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function header(title, zh) {
+  const st = status || {};
+  return `<h1>${esc(title)} <span class="zh">${esc(zh)}</span></h1>
+    <h2>${esc(st.board || 'FF1')} · ${esc(st.version || '')} · running ${B.hms(st.started_at ? now() - st.started_at : 0)}</h2>`;
+}
+function checksTable() {
+  const rows = (status && status.checks || []).map(c =>
+    `<tr><td>${esc(c.name)}</td><td class="${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.detail)}</td></tr>`);
+  return `<table>${rows.join('') || '<tr><td>…</td></tr>'}</table>`;
+}
+function qrSvg() {
+  const qr = qrcode(0, 'L');
+  qr.addData(B.qrPayload(status, stats, now()), 'Byte');
+  qr.make();
+  return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+}
+function showCard(html, cls) {
+  frame.classList.add('hidden'); video.classList.add('hidden'); dot.classList.add('hidden');
+  card.className = cls; card.innerHTML = html; card.classList.remove('hidden');
+}
+
+async function checksPhase() {
+  for (;;) {
+    await readStatus();
+    if (status && status.checks_done_at) return;
+    showCard(header('Factory burn-in: unit checks', '出厂老化测试：单元检查') + `
+      <div>Brightness, speakers (listen: a low tone LEFT, then a high tone RIGHT), Bluetooth, Wi-Fi.</div>
+      <div class="zh">亮度、扬声器（请听：先左边低音，再右边高音）、蓝牙、Wi-Fi。</div>` + checksTable(), 'wait');
+    await sleep(2);
+  }
+}
+
+async function resultPhase() {
+  // A Chromium restart after the card's time goes straight to the loop.
+  const left = FAST === 1 ? B.resultCardUntil(status) - now() : B.RESULT_SECONDS;
+  if (left <= 0) return;
+  const v = B.verdict(status, stats, now());
+  showCard(header('Unit checks', '单元检查') + `<div class="row">${checksTable()}<div id="qr">${qrSvg()}</div></div>
+    <div>Scan the QR or photograph this screen. The display and load test starts in ${Math.ceil(left)} s and runs until the power is pulled.</div>
+    <div class="zh">请扫码或拍照。${Math.ceil(left)} 秒后开始屏幕与负载测试，直到拔掉电源。</div>
+    <div>Results also in ${esc(status.where || '')}</div>`, v.ok ? 'ok' : 'bad');
+  await sleep(left);
+}
+
+function tickDot() {
+  const v = B.verdict(status, stats, now());
+  dot.classList.toggle('bad', !v.ok);
+  dot.querySelector('span').textContent = B.hms(status && status.started_at ? now() - status.started_at : 0);
+}
+setInterval(tickDot, 1000);
+
+// countFrames(seconds) -> frames drawn by this document after the warm-up.
+// The compositor draws this frame too, so a GPU too busy to keep up with the
+// segment shows here.
+function countFrames(seconds) {
+  return new Promise(resolve => {
+    const start = performance.now(), warm = start + (B.WARMUP_SECONDS / FAST) * 1000, end = start + (seconds / FAST) * 1000;
+    let frames = 0;
+    const step = t => {
+      if (t >= warm) frames++;
+      if (t < end) requestAnimationFrame(step); else resolve({ frames, seconds: (end - warm) / 1000 });
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+async function runSegment(seg) {
+  card.classList.add('hidden');
+  dot.className = B.cornerFor(stats.passes); tickDot();
+  if (seg.video) {
+    frame.classList.add('hidden'); frame.src = 'about:blank';
+    video.src = seg.video; video.classList.remove('hidden');
+    try { await video.play(); } catch (e) { /* autoplay is allowed by the flags; counted below */ }
+    const q0 = video.getVideoPlaybackQuality();
+    const r = await countFrames(seg.seconds);
+    const q1 = video.getVideoPlaybackQuality();
+    video.pause(); video.removeAttribute('src'); video.load(); video.classList.add('hidden');
+    stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
+    const decoded = q1.totalVideoFrames - q0.totalVideoFrames;
+    stats = B.recordVideo(stats, q1.droppedVideoFrames - q0.droppedVideoFrames, decoded);
+  } else {
+    frame.src = seg.src; frame.classList.remove('hidden');
+    const r = await countFrames(seg.seconds);
+    frame.src = 'about:blank'; frame.classList.add('hidden');
+    stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
+  }
+}
+
+function statusCard() {
+  const v = B.verdict(status, stats, now());
+  const s = (status && status.sys) || {};
+  const fps = B.SEGMENTS.map(seg => `${seg.id} ${stats.fps[seg.id] === undefined ? '–' : stats.fps[seg.id].toFixed(1)}`).join(' · ');
+  const prev = status && status.previous;
+  showCard(header(v.ok ? 'Burn-in OK' : 'Burn-in FAILED', v.ok ? '老化测试正常' : '老化测试失败') + `
+    <div class="row"><div>
+      <div>Passes ${stats.passes} · worst fps: ${esc(fps)}</div>
+      <div>Video dropped ${stats.dropped} / ${stats.decoded} frames</div>
+      <div>Max °C: CPU ${s.cpu_max ?? '–'} · GPU ${s.gpu_max ?? '–'} · NVMe ${s.nvme_max ?? '–'}</div>
+      <div>Kernel errors ${s.kernel_errors ?? '–'}${s.last_error ? ': ' + esc(s.last_error) : ''}</div>
+      <div>Chromium restarts ${s.restarts ?? 0} · Wi-Fi ${s.wifi_present === false ? 'GONE' : 'ok'} · Bluetooth ${s.bt_present === false ? 'GONE' : 'ok'}</div>
+      ${prev ? `<div>Previous session: ran ${B.hms(prev.ran)}, last sample ${esc(prev.last)}, kernel errors ${prev.kernel_errors}, restarts ${prev.restarts}</div>` : ''}
+      ${v.ok ? '' : `<div><b>Why:</b> ${esc(v.reasons.join(' · '))}</div>`}
+      ${checksTable()}
+    </div><div id="qr">${qrSvg()}</div></div>`, v.ok ? 'ok' : 'bad');
+}
+
+(async () => {
+  // ?preview=card: the status card alone, from the current status.json (to
+  // check the layout on a panel without waiting a pass).
+  if (q.get('preview') === 'card') { await readStatus(); statusCard(); return; }
+  await checksPhase();
+  await resultPhase();
+  for (;;) {
+    for (const seg of B.SEGMENTS) await runSegment(seg);
+    stats = { ...stats, passes: stats.passes + 1 };
+    await readStatus();
+    statusCard();
+    await sleep(B.CARD_SECONDS);
+  }
+})();
+</script>
+</body>
+</html>
