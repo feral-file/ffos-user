@@ -1,34 +1,46 @@
 #!/usr/bin/env bash
-# ff1-burnin.sh: the factory burn-in of an installed FF1 (docs/plans/
-# factory-burnin.md). An engineer holds a key at power-on, picks "FF1 - Factory
-# burn-in" in the boot menu, and leaves the unit running. ffos boots that
-# entry into ff1-burnin.target, where ff1-burnin.service runs this as root on
-# tty1. The kiosk, controld, the watchdog and the updaters never start.
+# ff1-burnin.sh: the factory tests of an installed FF1 (docs/plans/
+# factory-burnin.md). An engineer holds a key at power-on and picks one of the
+# three factory entries in the boot menu. ffos boots each into
+# ff1-burnin.target, where ff1-burnin.service runs this as root on tty1; the
+# entry's ff1.factory= word picks the test. The kiosk, controld, the watchdog
+# and the updaters never start.
 #
-# Four processes, all ended by pulling the power:
-#   - a loopback HTTP server (127.0.0.1:BURNIN_PORT) for the burn-in page
+#   ff1.factory=panel     load (display-check slides, WebGL works, a 4K HEVC
+#                         clip) until the unit has been on 10 minutes, then
+#                         the Panel Check's black/gray loop until the power is
+#                         pulled. Also the long power-on run.
+#   ff1.factory=hardware  the unit checks once: unit-checks.sh (brightness
+#                         over DDC/CI, a tone on each speaker, a Bluetooth
+#                         discovery), then wifi-reading.sh; the result is held
+#                         on screen.
+#   ff1.factory=fields    the display-check page's fields set: the nine-point
+#                         chart, then white, gray, black, red, green, blue,
+#                         one per key press.
+# A boot set saved before the three entries (restored by a factory reset)
+# has one entry with no ff1.factory= word: it runs the panel test.
+#
+# Processes, all ended by pulling the power:
+#   - a loopback HTTP server (127.0.0.1:BURNIN_PORT) for the test page
 #     (/home/feralfile/burnin), the display-check page and /status.json. It is
 #     HTTP, not file://, because Chromium's fetch() and the WebGL works'
 #     shader loading refuse file:// URLs;
-#   - the screen: the burn-in page in cage, restarted whenever Chromium exits
-#     (each restart is counted, and turns the screen red);
-#   - the sampler: every SAMPLE_SECONDS it writes status.json from the checks'
-#     results and the system sample (temperatures, kernel errors since the
-#     session started, adapters present, Chromium restarts). Every minute it
-#     copies it to the session folder as last.json, so the next burn-in
-#     boot can say how long this one ran;
-#   - the unit checks, once: unit-checks.sh (brightness over DDC/CI, a tone on
-#     each speaker, a Bluetooth discovery), then wifi-reading.sh.
+#   - the screen: the page in cage, restarted whenever Chromium exits (each
+#     restart is counted, and turns the verdict red);
+#   - panel and hardware: the sampler. Every SAMPLE_SECONDS it writes
+#     status.json from the checks' results and the system sample
+#     (temperatures, kernel errors since the session started, adapters
+#     present, Chromium restarts); every minute it copies it to the session
+#     folder as last.json, the record of a run whose screen shows nothing;
+#   - hardware: the unit checks, once.
 #
-# The page shows the checks as they run, then the result card with a QR, then
-# loops the display and load test with a status card after every pass.
-#
-# Results always go to /var/log/ff1-burnin/<session>/ (the @log subvolume,
-# outside the root rollback). When a FAT/exFAT USB stick is plugged in, the
-# session folder is then copied to it and the stick unmounted, so pulling the
-# power later never cuts a mounted stick. Nothing here writes the owner state,
-# NetworkManager's connections, or anything a normal boot reads. The next
-# boot is a normal one, because the entry is reached only through the menu.
+# Results go to /var/log/ff1-burnin/<session>-<mode>/ (the @log subvolume,
+# outside the root rollback). The hardware test then copies the session
+# folder to a FAT/exFAT USB stick when one is plugged in and unmounts it, so
+# pulling the power later never cuts a mounted stick. Nothing here writes the
+# owner state, NetworkManager's connections, or anything a normal boot reads.
+# The next boot is a normal one, because the entries are reached only through
+# the menu.
 set -uo pipefail
 
 SCRIPTS="${FF_SCRIPTS:-/home/feralfile/scripts}"
@@ -39,6 +51,7 @@ HWMON="${FF_HWMON:-/sys/class/hwmon}"
 NET="${FF_NET:-/sys/class/net}"
 BLUETOOTH="${FF_BLUETOOTH:-/sys/class/bluetooth}"
 UPTIME="${FF_UPTIME:-/proc/uptime}"
+CMDLINE="${FF_CMDLINE:-/proc/cmdline}"
 MOUNT=/mnt/ff1-burnin
 BURNIN_PORT=8180     # loopback only; nothing else listens on this boot
 SCANS=10             # Wi-Fi scans in the one reading
@@ -161,20 +174,23 @@ kernel_errors() {
 # kernel_cursor -> the journal cursor of the newest kernel line now.
 kernel_cursor() { journalctl -k -q -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'; }
 
-# previous_session <log_root> <this_session>: the newest earlier session's
-# last.json as {ran, last, kernel_errors, restarts}, or null. Power pulls and
-# crashes look the same here; what the screen showed tells them apart.
-previous_session() {
-  local f p
-  f=$(find "$1" -mindepth 2 -maxdepth 2 -name last.json -not -path "*/$2/*" 2>/dev/null | sort -r | head -n 1)
-  [ -n "$f" ] || { echo null; return; }
-  # A power pull can leave the file empty or torn: jq prints nothing for an
-  # empty one and still exits 0, so check the output, not the status.
-  # ran from the monotonic uptimes when the file has them (a clock step during
-  # that session would skew the wall-clock difference), else wall clock.
-  p=$(jq -c '{ran: (if .started_uptime and .sys.uptime then .sys.uptime - .started_uptime else .updated_at - .started_at end),
-              last: (.updated_at | todate), kernel_errors: .sys.kernel_errors, restarts: .sys.restarts}' "$f" 2>/dev/null)
-  [ -n "$p" ] && echo "$p" || echo null
+# factory_mode <cmdline file> -> panel, hardware or fields, from the entry's
+# ff1.factory= word; panel when there is none (an older saved boot set).
+factory_mode() {
+  local w
+  for w in $(cat "$1" 2>/dev/null); do
+    case "$w" in ff1.factory=hardware) echo hardware; return ;; ff1.factory=fields) echo fields; return ;; esac
+  done
+  echo panel
+}
+
+# page_url <mode> -> what the screen shows.
+page_url() {
+  case "$1" in
+    hardware) echo "http://127.0.0.1:$BURNIN_PORT/burnin/index.html?mode=hardware" ;;
+    fields) echo "http://127.0.0.1:$BURNIN_PORT/display-check/index.html?set=fields" ;;
+    *) echo "http://127.0.0.1:$BURNIN_PORT/burnin/index.html?mode=panel" ;;
+  esac
 }
 
 # max <a> <b>: the larger, where "null" means no reading.
@@ -187,26 +203,25 @@ max() {
 # status_json <cpu> <gpu> <nvme> <cpu_max> <gpu_max> <nvme_max> <kernel "n\tlast">
 # <wifi> <bt> (adapter_state): one status.json. The rest comes from the globals and from the
 # files in RUN_DIR the checks write: checks.json, checks_done_at, where,
-# restarts, checks_done_uptime. uptime is seconds since boot (monotonic): the
-# page times the session, the result card and the Panel Check's 10 minutes of
-# power-on with it, never with the wall clock, which timesyncd may step.
+# restarts. uptime is seconds since boot (monotonic): the page times the
+# session and the Panel Check's 10 minutes of power-on with it, never with the
+# wall clock, which timesyncd may step.
 status_json() {
   jq -n \
     --arg board "$BOARD" --arg version "$VERSION" --argjson started "$STARTED_AT" \
     --argjson checks "$(cat "$RUN_DIR/checks.json" 2>/dev/null || echo '[]')" \
     --argjson checks_done "$(cat "$RUN_DIR/checks_done_at" 2>/dev/null || echo null)" \
     --argjson started_up "${STARTED_UPTIME:-null}" \
-    --argjson checks_done_up "$(cat "$RUN_DIR/checks_done_uptime" 2>/dev/null || echo null)" \
-    --arg where "$(cat "$RUN_DIR/where" 2>/dev/null)" --argjson previous "$PREVIOUS" \
+    --arg mode "${MODE:-}" --arg where "$(cat "$RUN_DIR/where" 2>/dev/null)" \
     --argjson cpu "$1" --argjson gpu "$2" --argjson nvme "$3" \
     --argjson cpu_max "$4" --argjson gpu_max "$5" --argjson nvme_max "$6" \
     --argjson kerr "${7%%$'\t'*}" --arg klast "${7#*$'\t'}" \
     --arg wifi "$8" --arg bt "$9" \
     --argjson restarts "$(cat "$RUN_DIR/restarts" 2>/dev/null || echo 0)" \
     --argjson uptime "$(cut -d. -f1 "$UPTIME" 2>/dev/null || echo null)" '
-    {board: $board, version: $version, started_at: $started, updated_at: (now | floor),
-     started_uptime: $started_up, checks_done_uptime: $checks_done_up,
-     checks: $checks, checks_done_at: $checks_done, where: $where, previous: $previous,
+    {board: $board, version: $version, mode: $mode, started_at: $started, updated_at: (now | floor),
+     started_uptime: $started_up,
+     checks: $checks, checks_done_at: $checks_done, where: $where,
      sys: {cpu: $cpu, gpu: $gpu, nvme: $nvme, cpu_max: $cpu_max, gpu_max: $gpu_max, nvme_max: $nvme_max,
            kernel_errors: $kerr, last_error: (if $klast == "" then null else $klast end),
            wifi: $wifi, bt: $bt, restarts: $restarts, uptime: $uptime}}'
@@ -215,7 +230,7 @@ status_json() {
 # adapter_state <state> <glob> -> the next state of one adapter: unseen until
 # it first appears (the Wi-Fi interface can take up to a minute at boot),
 # then present, then lost for good once it has gone. A card that drops off
-# the bus and comes back between two status cards still counts.
+# the bus and comes back between two samples still counts.
 adapter_state() {
   if compgen -G "$2" >/dev/null; then
     case "$1" in lost) echo lost ;; *) echo present ;; esac
@@ -244,7 +259,7 @@ sample_loop() {
   done
 }
 
-# The burn-in page in cage, until Chromium exits. The flags are the kiosk's
+# The page in cage, until Chromium exits. The flags are the kiosk's
 # decode and graphics path (start-kiosk.sh), so the video and WebGL segments
 # exercise what an installed unit plays. The log holds the latest Chromium run
 # and the one before (.1, where the reason for a restart is): it lives in RAM
@@ -253,7 +268,7 @@ FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,Defa
 screen_once() {
   rm -rf "$RUN_DIR/chromium"
   [ -f "$RUN_DIR/chromium.log" ] && mv -f "$RUN_DIR/chromium.log" "$RUN_DIR/chromium.log.1"
-  cage -s -- chromium "http://127.0.0.1:$BURNIN_PORT/burnin/index.html" \
+  cage -s -- chromium "$(page_url "$MODE")" \
     --no-sandbox \
     --kiosk \
     --no-first-run \
@@ -289,60 +304,66 @@ wait_for_port() {
 # Sourced (scripts/test-ff1-burnin.sh), only the functions load.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
+MODE=$(factory_mode "$CMDLINE")
 STARTED_AT=$(date +%s)
 STARTED_UPTIME=$(cut -d. -f1 "$UPTIME" 2>/dev/null)
 KERNEL_CURSOR=$(kernel_cursor)
 BOARD=$(cat /etc/hostname 2>/dev/null || echo FF1)
 VERSION=$(jq -r '.version // empty' "$HOME_DIR/ff1-config.json" 2>/dev/null)
-SESSION=$(date -d "@$STARTED_AT" '+%Y%m%d-%H%M%S')
+SESSION=$(date -d "@$STARTED_AT" '+%Y%m%d-%H%M%S')-$MODE
 WWW="$RUN_DIR/www"
 RESULTS="$LOG_ROOT/$SESSION"
 
 if [ ! -r "$HOME_DIR/burnin/index.html" ]; then
   clear
-  printf '\nFF1 burn-in: %s is not on this image.\n' "$HOME_DIR/burnin/index.html"
+  printf '\nFF1 factory test: %s is not on this image.\n' "$HOME_DIR/burnin/index.html"
   exec sleep infinity
 fi
 
 mkdir -p "$RUN_DIR" "$WWW"
-rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at" "$RUN_DIR/checks_done_uptime"
+rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
 ln -sfn "$HOME_DIR/burnin" "$WWW/burnin"
 ln -sfn "$HOME_DIR/display-check" "$WWW/display-check"
-prune_sessions "$LOG_ROOT" "$((KEEP_SESSIONS - 1))"
-mkdir -p "$RESULTS"
-PREVIOUS=$(previous_session "$LOG_ROOT" "$SESSION")
-echo "$RESULTS" >"$RUN_DIR/where"
 export XDG_RUNTIME_DIR="$RUN_DIR" LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
 
 python3 -m http.server "$BURNIN_PORT" --bind 127.0.0.1 --directory "$WWW" >/dev/null 2>&1 &
-sample_loop &
+# The fields are a chart and plain colors stepped by hand: nothing to sample
+# or record.
+if [ "$MODE" != fields ]; then
+  prune_sessions "$LOG_ROOT" "$((KEEP_SESSIONS - 1))"
+  mkdir -p "$RESULTS"
+  echo "$RESULTS" >"$RUN_DIR/where"
+  sample_loop &
+fi
 wait_for_port "$BURNIN_PORT"
 screen_loop &
 
-# Give cage its modeset first: the brightness check talks to the panel over
-# the HDMI cable, and the tones play through its HDMI audio.
-sleep "$CHECKS_DELAY"
-# Each result line reaches the page as it is printed, not at the end.
-bash "$SCRIPTS/unit-checks.sh" record r1 -o "$RESULTS" 2>&1 | tee "$RESULTS/unit-checks.log" |
-  while IFS= read -r line; do
-    case "$line" in "== "*) progress+="$line"$'\n'; checks_json "$progress" >"$RUN_DIR/checks.json" ;; esac
-  done
-lines=$(result_lines "$(cat "$RESULTS/unit-checks.log")")
-checks_json "$lines" >"$RUN_DIR/checks.json"
-if iface=$(wait_for_wifi); then
-  out=$(bash "$SCRIPTS/wifi-reading.sh" record r1 -n "$SCANS" -o "$RESULTS" 2>&1) || true
-  printf '%s\n' "$out" >"$RESULTS/wifi-reading.log"
-  saved=$(sed -n 's/^saved //p' <<<"$out")
-  if [ -n "$saved" ]; then wifi=$(wifi_line "$saved"); else wifi="== Wi-Fi      FAIL   the reading on $iface did not finish"; fi
-else
-  wifi="== Wi-Fi      FAIL   no Wi-Fi interface came up in 60 s (M.2 card, antenna leads)"
+if [ "$MODE" = hardware ]; then
+  # Give cage its modeset first: the brightness check talks to the panel over
+  # the HDMI cable, and the tones play through its HDMI audio.
+  sleep "$CHECKS_DELAY"
+  # Each result line reaches the page as it is printed, not at the end.
+  bash "$SCRIPTS/unit-checks.sh" record r1 -o "$RESULTS" 2>&1 | tee "$RESULTS/unit-checks.log" |
+    while IFS= read -r line; do
+      case "$line" in "== "*) progress+="$line"$'\n'; checks_json "$progress" >"$RUN_DIR/checks.json" ;; esac
+    done
+  lines=$(result_lines "$(cat "$RESULTS/unit-checks.log")")
+  checks_json "$lines" >"$RUN_DIR/checks.json"
+  if iface=$(wait_for_wifi); then
+    out=$(bash "$SCRIPTS/wifi-reading.sh" record r1 -n "$SCANS" -o "$RESULTS" 2>&1) || true
+    printf '%s\n' "$out" >"$RESULTS/wifi-reading.log"
+    saved=$(sed -n 's/^saved //p' <<<"$out")
+    if [ -n "$saved" ]; then wifi=$(wifi_line "$saved"); else wifi="== Wi-Fi      FAIL   the reading on $iface did not finish"; fi
+  else
+    wifi="== Wi-Fi      FAIL   no Wi-Fi interface came up in 60 s (M.2 card, antenna leads)"
+  fi
+  checks_json "$lines"$'\n'"$wifi" >"$RUN_DIR/checks.json"
+  sync
+  copied=$(copy_to_stick "$RESULTS")
+  [ -n "$copied" ] && echo "$RESULTS and $copied" >"$RUN_DIR/where"
+  date +%s >"$RUN_DIR/checks_done_at"
 fi
-checks_json "$lines"$'\n'"$wifi" >"$RUN_DIR/checks.json"
-sync
-copied=$(copy_to_stick "$RESULTS")
-[ -n "$copied" ] && echo "$RESULTS and $copied" >"$RUN_DIR/where"
-cut -d. -f1 "$UPTIME" >"$RUN_DIR/checks_done_uptime" 2>/dev/null
-date +%s >"$RUN_DIR/checks_done_at"
 
-# The sampler, the server and the screen run until the power is pulled.
+# The server, the screen and (panel, hardware) the sampler run until the
+# power is pulled.
 wait

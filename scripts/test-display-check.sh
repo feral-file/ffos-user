@@ -19,7 +19,7 @@ grep -Fq "'motion.mp4'" "$page_dir/index.html" || fail "the page no longer loads
 
 # Every set a caller can name (?set=) exists in the page. brightness and panel
 # also serve the copy of the page hosted outside the device.
-for set in brightness panel assembly; do
+for set in brightness panel assembly fields; do
   grep -Eq "^[[:space:]]*$set:" "$page_dir/index.html" || fail "the page has no '$set' set"
 done
 
