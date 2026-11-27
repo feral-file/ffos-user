@@ -316,7 +316,8 @@ assert.strictEqual(B.uptimeAt(uc, 6), 1010, 'a newer sample moves it forward');
 assert.strictEqual(B.uptimeAt(null, 9), null);
 assert.strictEqual(B.advanceUptime(uc, undefined, 7), uc, 'no uptime in the sample: unchanged');
 
-// QR payload: parseable, within budget in the worst case, and encodable.
+// QR text: readable as is, verdict first, plain ASCII, within budget in the
+// worst case, and encodable at a size the corner QR still shows.
 const worst = JSON.parse(JSON.stringify(good));
 worst.board = 'FF1-WWWWWWWW'; worst.version = '10.20.300-rc.12';
 worst.checks = ['Brightness', 'Speakers', 'Bluetooth', 'Wi-Fi'].map(n => ({ name: n, status: 'FAIL', detail: 'x'.repeat(200) }));
@@ -325,19 +326,23 @@ worst.updated_at = 0;
 let ws = B.emptyStats();
 for (const seg of B.SEGMENTS) ws = B.recordSegment(ws, seg.id, 1, 99, true);
 ws = B.recordVideo(ws, 999999, 999999);
+ws = B.fail(ws, 'slides: VIDEO DID NOT PLAY ' + 'y'.repeat(100));
 ws.passes = 99999;
 for (const [st, stats] of [[good, B.emptyStats()], [worst, ws], [null, B.emptyStats()]]) {
-  const p = B.qrPayload(st, stats, st === worst ? 9e9 : 3600, st === worst ? 1000 : 0);
-  assert.ok(Buffer.byteLength(p) <= B.QR_MAX_BYTES, `payload ${Buffer.byteLength(p)} bytes`);
-  const j = JSON.parse(p);
-  assert.strictEqual(j.ff1, 'burnin/1');
+  const p = B.qrText(st, stats, st === worst ? 9e9 : 3600, st === worst ? 1000 : 0);
+  assert.ok(Buffer.byteLength(p) <= B.QR_MAX_BYTES, `text ${Buffer.byteLength(p)} bytes`);
+  assert.ok(/^[\x20-\x7e\n]*$/.test(p), 'plain ASCII');
+  assert.ok(/^FF1 burn-in (OK|FAILED)\n/.test(p), 'verdict first');
   const qr = qrcode(0, 'L'); qr.addData(p, 'Byte'); qr.make();
-  assert.ok(qr.getModuleCount() <= 73, `QR version too large: ${qr.getModuleCount()} modules`);
+  assert.ok(qr.getModuleCount() <= 85, `QR version too large: ${qr.getModuleCount()} modules`);
 }
-const pg = JSON.parse(B.qrPayload(good, B.emptyStats(), 3600));
-assert.deepStrictEqual([pg.b, pg.t, pg.ok, pg.c.Brig, pg.c['Wi-F']], ['FF1-ABCDEFGH', 3600, 1, 'PASS', 'PASS']);
-assert.ok(Array.isArray(JSON.parse(B.qrPayload(worst, ws, 9e9)).why), 'the reasons go in while they fit');
-assert.strictEqual(JSON.parse(B.qrPayload(good, B.emptyStats(), null)).t, null);
+const pg = B.qrText(good, B.emptyStats(), 3600).split('\n');
+assert.deepStrictEqual(pg.slice(0, 4), ['FF1 burn-in OK', 'FF1-ABCDEFGH 3.1.0', 'Ran 1:00:00, passes 0', 'Brightness PASS, Speakers PLAYED, Wi-Fi PASS']);
+const pw = B.qrText(worst, ws, 9e9, 1000);
+assert.ok(pw.startsWith('FF1 burn-in FAILED') && /\n- Brightness FAIL/.test(pw), 'the reasons go in while they fit');
+assert.ok(/Max C: CPU 105, GPU 110, NVMe 90/.test(pw));
+assert.ok(B.qrText(good, B.fail(B.emptyStats(), 'CPU 96 °C'), 60).includes('- CPU 96 C'), 'degree sign dropped');
+assert.ok(B.qrText(good, B.emptyStats(), null).includes('Ran -,'), 'unknown running time');
 NODE
 
 echo "test-ff1-burnin: ok"
