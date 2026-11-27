@@ -931,7 +931,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 		"contentContext": string(contentContext),
 	}
 	if retireBlockedCurrent {
-		args["retireBlockedCurrent"] = true
+		commands.MarkRetirement(args)
 	}
 	r.attachMediaHealthHints(args, playlist)
 	command := commands.Command{
@@ -1015,7 +1015,7 @@ func (r *refresher) processPlayingPlaylist(forceCast bool) (err error) {
 				"contentContext": string(contentContext),
 			}
 			if retireBlockedCurrent {
-				command.Arguments["retireBlockedCurrent"] = true
+				commands.MarkRetirement(command.Arguments)
 			}
 			if schedulerSource.PlaylistURL != "" {
 				command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
@@ -1173,7 +1173,7 @@ func (r *refresher) refreshStaticInline(playlist *dp1.Playlist, rawContext strin
 		},
 	}
 	if retire {
-		command.Arguments["retireBlockedCurrent"] = true
+		commands.MarkRetirement(command.Arguments)
 	}
 	r.attachMediaHealthHints(command.Arguments, &out)
 
@@ -1274,13 +1274,19 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 		command := commands.Command{
 			Type: commands.CMD_DISPLAY_PLAYLIST,
 			Arguments: map[string]interface{}{
-				"intent":               map[string]interface{}{"action": "now_display"},
-				"dp1_call":             retireSignalDocument(),
-				"contentContext":       string(origin),
-				"retireBlockedCurrent": true,
+				"intent":         map[string]interface{}{"action": "now_display"},
+				"dp1_call":       retireSignalDocument(),
+				"contentContext": string(origin),
 			},
 		}
-		if _, sendErr := r.sendCDPRequest(command); sendErr != nil {
+		commands.MarkRetirement(command.Arguments)
+		// A refused retirement leaves the blocked work on the wall, so it is
+		// worth the same warning as a failed send. The next pass retries.
+		result, sendErr := r.sendCDPRequest(command)
+		if sendErr == nil && !playerresponse.OK(result) {
+			sendErr = errPlayerRejectedRefresh
+		}
+		if sendErr != nil {
 			r.logger.Warn("Failed to retire the blocked on-screen item", zap.Error(sendErr))
 		}
 	}
@@ -1291,7 +1297,7 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 	}
 }
 
-// retireSignalDocument is the empty list retireBlockedCurrent travels with.
+// retireSignalDocument is the empty list a sourceless retirement travels with.
 // The player reads an empty list as "clear playback". It is a signal rather
 // than a playlist (the schema requires at least one item), but it still names
 // the DP-1 version and a title instead of sending both empty and items null.

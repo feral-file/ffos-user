@@ -3649,7 +3649,9 @@ refresh is left unprojected, rather than reclassified as `curated`. Guessing
 `personal`. Such a player has no policy mirror of its own either
 (`setContentPolicy` answers `unsupported`).
 
-`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag.
+`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag. The
+player reads it only beside `refresh:true`, so the daemon sends the two together
+on every retirement, including ones whose `intent.action` is `now_display`.
 Controllers do not send it.
 
 ## Response Shape Recommendation for New Inbound Commands

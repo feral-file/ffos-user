@@ -881,9 +881,10 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	// left the blocked frame on screen — the owner disables mature content,
 	// setContentPolicy reports success, and the work keeps playing because the
 	// only cohort that could replace it is the one the policy just emptied.
-	// The empty list therefore goes out WITH retireBlockedCurrent, which is the
-	// player's documented signal to retire the current item and black the
-	// display rather than an ordinary display request it would reject.
+	// The empty list therefore goes out marked as a retirement
+	// (commands.MarkRetirement), the player's signal to retire the current item
+	// and black the display rather than an ordinary display request it would
+	// reject.
 	retireBlockedCurrent := false
 	s.mu.Lock()
 	projector := s.projector
@@ -899,10 +900,12 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 		}
 	}
 
-	// Force-display via now_display — never refresh:true. Player refreshPlaylist
+	// Force-display via now_display, not a refresh. Player refreshPlaylist
 	// defers when the current item is absent from the new list (typical
 	// displayAt day/slot swap), which would miss the wall-clock threshold.
-	// URL/dynamic playlist-refresher keeps refresh:true on its own path.
+	// URL/dynamic playlist-refresher keeps refresh:true on its own path. The
+	// one exception is a retirement below: it needs refresh:true and never
+	// defers.
 	command := commands.Command{
 		Type: commands.CMD_DISPLAY_PLAYLIST,
 		Arguments: map[string]interface{}{
@@ -918,7 +921,7 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	// "": an upgraded device would otherwise push an invalid value on its first
 	// cutover and the timer's whole wall-clock swap would be rejected.
 	if retireBlockedCurrent {
-		command.Arguments["retireBlockedCurrent"] = true
+		commands.MarkRetirement(command.Arguments)
 	}
 	if source.ContentContext != "" {
 		command.Arguments["contentContext"] = source.ContentContext

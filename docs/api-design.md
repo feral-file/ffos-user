@@ -420,7 +420,9 @@ Unsupported or unsynchronized players return `ok:false` with `unsupported` or
 refresh and display-at scheduling. `retireBlockedCurrent:true` is a narrow
 daemon-to-player, refresh-only flag: it tells the player to retire a current
 item whose newly refreshed label is blocked, selecting an allowed replacement
-or blacking the display if the projection is empty. Controllers do not send it.
+or blacking the display if the projection is empty. The player reads it only
+beside `refresh:true`, so the daemon always sends the two together, on every
+retirement. Controllers do not send it.
 
 An optional `startItem` on `displayPlaylist` names the work the display request opens on:
 
