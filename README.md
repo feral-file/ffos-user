@@ -25,7 +25,7 @@ FFOS-USER provides components and user data to the FFOS build system. Build orch
 │  │                  │    │                 │              │
 │  │ ┌──────────────┐ │    │ ┌─────────────┐ │              │
 │  │ │feral-controld│ │    │ │  feralfile  │ │              │
-│  │ │feral-sys-    │ │    │ │  soaktest   │ │              │
+│  │ │feral-sys-    │ │    │ │             │ │              │
 │  │ │  monitord    │ │    │ │             │ │              │
 │  │ │feral-watchdog│ │    │ │ Configs     │ │              │
 │  │ │player-wrapper│ │    │ │ Scripts     │ │              │
@@ -54,25 +54,20 @@ ffos-user/
 │   ├── feral-watchdog/           # System watchdog
 │   └── player-wrapper-ui/        # Player wrapper UI
 └── users/                        # User data and configurations
-    ├── feralfile/                # feralfile user data
-    │   ├── scripts/              # User scripts
-    │   │   ├── start-kiosk.sh
-    │   │   ├── feral-updater.sh
-    │   │   └── ...
-    │   ├── .config/              # User configurations
-    │   │   │   ├── systemd/user/
-    │   │   │   │   ├── feral-sys-monitord.service
-    │   │   │   │   ├── feral-controld.service
-    │   │   │   │   ├── chromium-kiosk.service
-    │   │   │   │   └── ...
-    │   │   ├── controld.json
-    │   │   └── watchdog.json
-    │   ├── .bash_profile         # Shell configuration
-    │   └── ...
-    └── soaktest/                 # soaktest user data
-        ├── scripts/              # Test scripts
-        ├── logs/                 # Test logs
-        ├── files/                # Test files
+    └── feralfile/                # feralfile user data
+        ├── scripts/              # User scripts
+        │   ├── start-kiosk.sh
+        │   ├── feral-updater.sh
+        │   └── ...
+        ├── .config/              # User configurations
+        │   │   ├── systemd/user/
+        │   │   │   ├── feral-sys-monitord.service
+        │   │   │   ├── feral-controld.service
+        │   │   │   ├── chromium-kiosk.service
+        │   │   │   └── ...
+        │   ├── controld.json
+        │   └── watchdog.json
+        ├── .bash_profile         # Shell configuration
         └── ...
 ```
 
@@ -120,17 +115,6 @@ users/feralfile/
 └── .bash_profile                # Shell environment
 ```
 
-#### soaktest User
-
-```
-users/soaktest/
-├── scripts/                      # Test automation
-│   └── soak-test.sh            # Soak testing
-├── logs/                        # Test output
-├── files/                       # Test assets
-└── .bash_profile               # Test environment
-```
-
 ## Data Flow Architecture
 
 ### Component Development Flow
@@ -143,7 +127,6 @@ Developer → ffos-user/components/ → ffos build process → R2 Storage
 
 ```
 ffos-user/users/feralfile/ → ISO /home/feralfile/
-ffos-user/users/soaktest/ → ISO /home/soaktest/ (conditional)
 ```
 
 ### Configuration Propagation
