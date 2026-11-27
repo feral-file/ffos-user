@@ -676,9 +676,10 @@ DP-1 playlist schema (core with the playlists and content-rating extensions):
 an inline `dp1_call`, a fetched `playlistUrl`, a replay or series re-display
 controld builds, an offline cached copy, and a persisted inline `displayAt`
 source. One that does not is refused as `playlistInvalid`, naming JSON
-pointers only. Two allowances: signatures are not judged (a missing or
-malformed one never blocks; see signature verification above), and a legacy
-`dynamicQueries` playlist may carry an empty `items`. A series edition or a
+pointers only. One allowance: signatures are not judged (a missing or
+malformed one never blocks; see signature verification above). `items` may be
+empty only beside `dynamicQuery`, never beside the legacy `dynamicQueries`
+(inline documents aside, below). A series edition or a
 legacy indexer item that fails the schema is dropped on its own; if a series
 has no conforming edition its representative item plays. Member names are
 matched exactly, so a case variant (`"Source"`) is an unknown member. A
@@ -687,8 +688,8 @@ A dpVersion of another major is logged, not refused.
 
 **Temporary, inline documents only** (a `dp1_call`, and what controld rebuilds
 or keeps from one): a playlist or item `id` that is not a UUID, a `created`
-with no timezone offset, and a playlist `title` over 200 characters are also
-accepted, because released ff-app builds send them. A `playlistUrl` document
+with no timezone offset, a playlist `title` over 200 characters, and an empty
+`items` beside the legacy `dynamicQueries` are also accepted, because released ff-app builds send them. A `playlistUrl` document
 gets none of this. To be removed once ff-app's wire converter is fixed,
 shipped, and made the app's `required_version`
 (`components/feral-controld/dp1/inline_exemption.go`).

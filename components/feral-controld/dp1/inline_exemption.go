@@ -19,11 +19,12 @@ import (
 //     ("favorite", "addr:…", "source:…", a CAIP asset id);
 //   - `created` is local time with no offset;
 //   - the playlist `title`, which the app does not limit, is over 200
-//     characters. Item titles have no limit in the schema.
+//     characters. Item titles have no limit in the schema;
+//   - an address playlist is `items: []` with the legacy `dynamicQueries`,
+//     where the schema allows an empty list only beside `dynamicQuery`.
 //
-// Its other shape, `items: []` with `dynamicQueries`, is allowed on every path
-// already (see CheckPlayable). Nothing else is tolerated, and documents fetched
-// from a feed or catalog get none of this.
+// Nothing else is tolerated, and documents fetched from a feed or catalog get
+// none of this.
 
 var offsetlessDateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$`)
 
@@ -84,6 +85,10 @@ func relaxFFAppShapes(raw []byte) ([]byte, bool) {
 		}
 	}
 
+	if isEmptyLegacyDynamic(doc) {
+		doc["items"], used = placeholderItems, true
+	}
+
 	if !used {
 		return raw, false
 	}
@@ -92,6 +97,21 @@ func relaxFFAppShapes(raw []byte) ([]byte, bool) {
 		return raw, false
 	}
 	return out, true
+}
+
+// placeholderItems stands in, for the check only, for the empty list of a
+// legacy dynamicQueries playlist.
+var placeholderItems = json.RawMessage(`[{"source":"https://example.com/"}]`)
+
+func isEmptyLegacyDynamic(doc map[string]json.RawMessage) bool {
+	if _, spec := doc["dynamicQuery"]; spec {
+		return false
+	}
+	var queries, items []json.RawMessage
+	if json.Unmarshal(doc["dynamicQueries"], &queries) != nil || len(queries) == 0 {
+		return false
+	}
+	return json.Unmarshal(doc["items"], &items) == nil && items != nil && len(items) == 0
 }
 
 // dropNonUUIDID removes an `id` that is a string but not a UUID. An id of

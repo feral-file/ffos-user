@@ -22,6 +22,9 @@ func TestCheckInlineCast(t *testing.T) {
 		{"item id", doc(`"title":"t","items":[{"id":"eip155:1:erc721:0xabc:1",` + src + `}]`), true},
 		{"created without offset", doc(one + `,"created":"2026-11-26T16:00:00.123456"`), true},
 		{"empty items with dynamicQueries and app id", doc(`"title":"t","id":"addr:ethereum:0xabc","items":[],"dynamicQueries":[{"endpoint":"https://example.com/q"}]`), true},
+		{"empty items with dynamicQueries", doc(`"title":"t","items":[],"dynamicQueries":[{"endpoint":"https://example.com/q"}]`), true},
+		{"empty dynamicQueries list", doc(`"title":"t","items":[],"dynamicQueries":[]`), false},
+		{"empty items with dynamicQueries and no title", doc(`"items":[],"dynamicQueries":[{"endpoint":"https://example.com/q"}]`), false},
 		{"title over 200", doc(`"title":"` + string(make200()) + `x","items":[{` + src + `}]`), true},
 		{"empty title", doc(`"title":"","items":[{` + src + `}]`), false},
 		{"id of another type", doc(one + `,"id":7`), false},
@@ -34,7 +37,7 @@ func TestCheckInlineCast(t *testing.T) {
 			if got := CheckInlineCast(zap.NewNop(), "test", tt.doc) == nil; got != tt.inline {
 				t.Errorf("inline accepted = %v, want %v", got, tt.inline)
 			}
-			// Empty legacy lists aside, none of these passes the strict check.
+			// None of these passes the strict check.
 			if CheckPlayable(zap.NewNop(), "test", tt.doc) == nil {
 				t.Error("strict check accepted it")
 			}

@@ -49,10 +49,6 @@ var placeholderSignatures = json.RawMessage(`[{"alg":"ed25519","kid":"did:key:z6
 	`"ts":"2025-01-01T00:00:00Z","payload_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000",` +
 	`"role":"feed","sig":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]`)
 
-// placeholderItems stands in for the empty list of a legacy dynamicQueries
-// playlist, see CheckPlayable.
-var placeholderItems = json.RawMessage(`[{"source":"https://example.com/"}]`)
-
 // CheckPlayable refuses a playlist document that does not conform to the DP-1
 // schema (core with the playlists and content-rating extensions). Every path
 // that plays a document calls it, on the bytes as received or as stored,
@@ -60,10 +56,10 @@ var placeholderItems = json.RawMessage(`[{"source":"https://example.com/"}]`)
 //
 // A document that repeats a member name is refused first (see duplicates.go).
 //
-// Two allowances, both decided by the owner:
-//   - signatures are not judged (see placeholderSignatures);
-//   - a legacy `dynamicQueries` playlist may carry an empty `items`, which the
-//     schema allows only next to the spec's `dynamicQuery`.
+// One allowance, decided by the owner: signatures are not judged (see
+// placeholderSignatures). Otherwise the spec is followed as written: `items`
+// may be empty only beside `dynamicQuery`, never beside the legacy
+// `dynamicQueries` (owner ruling 2026-11-27).
 //
 // A dpVersion of another major is only logged (§12). The validator holds
 // dp1-go's process-wide lock for the whole pass, so concurrent commands queue
@@ -81,9 +77,6 @@ func CheckPlayable(logger *zap.Logger, source string, raw []byte) error {
 	}
 	delete(doc, "signature")
 	doc["signatures"] = placeholderSignatures
-	if isEmptyLegacyDynamic(doc) {
-		doc["items"] = placeholderItems
-	}
 	checked, err := marshalNoEscape(doc)
 	if err != nil {
 		return refuse(logger, source, []string{"/"})
@@ -117,17 +110,6 @@ func checkItem(raw []byte) error {
 		return &SchemaError{Locations: ValidationPointers(err)}
 	}
 	return nil
-}
-
-func isEmptyLegacyDynamic(doc map[string]json.RawMessage) bool {
-	if _, spec := doc["dynamicQuery"]; spec {
-		return false
-	}
-	var queries, items []json.RawMessage
-	if json.Unmarshal(doc["dynamicQueries"], &queries) != nil || len(queries) == 0 {
-		return false
-	}
-	return json.Unmarshal(doc["items"], &items) == nil && items != nil && len(items) == 0
 }
 
 func refuse(logger *zap.Logger, source string, pointers []string) error {
