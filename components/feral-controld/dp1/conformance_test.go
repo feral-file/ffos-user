@@ -46,8 +46,8 @@ func TestCheckPlayable(t *testing.T) {
 		{"no id, unknown member", head + `"items":[` + item + `],"futureMember":1}`, ""},
 		{"other major", `{"dpVersion":"2.0.0","title":"t","items":[` + item + `]}`, ""},
 		{"dynamicQuery with empty items", head + `"items":[],"dynamicQuery":{"profile":"graphql-v1","endpoint":"https://example.com/q","query":"query { items { source } }","responseMapping":{"itemsPath":"data.items","itemSchema":"dp1/1.1"}}}`, ""},
-		{"legacy dynamicQueries with empty items", head + `"items":[],"dynamicQueries":[{"endpoint":"https://example.com/q","params":{}}]}`, ""},
-		{"legacy dynamicQueries still needs a title", `{"dpVersion":"1.1.0","items":[],"dynamicQueries":[{"endpoint":"https://example.com/q"}]}`, "/"},
+		{"legacy dynamicQueries with empty items", head + `"items":[],"dynamicQueries":[{"endpoint":"https://example.com/q","params":{}}]}`, "/"},
+		{"legacy dynamicQueries with static items", head + `"items":[` + item + `],"dynamicQueries":[{"endpoint":"https://example.com/q","params":{}}]}`, ""},
 		// The schema reports it as the dynamicQuery that would have allowed it.
 		{"empty items", head + `"items":[]}`, "/"},
 		{"short version", `{"dpVersion":"1.0","title":"t","items":[` + item + `]}`, "/dpVersion"},
