@@ -1,25 +1,25 @@
 <!doctype html>
 <!--
-  The factory burn-in screen (ffos-user docs/plans/factory-burnin.md), served
-  by ff1-burnin.sh's loopback server at http://127.0.0.1:8180/burnin/.
-    1. While the unit checks run: what is being checked, and what to listen for.
-    2. Result card, RESULT_SECONDS: one line per check, and a QR of the summary.
-    3. Then passes until the power is pulled: the Panel Check (black/gray, a
-       clean screen for the phone capture of the acceptance spec; once the
-       unit has been on 10 minutes), the display-check slides, two WebGL
-       works, a 4K 10-bit HEVC clip, then the status card (CARD_SECONDS):
-       green if nothing has failed this session, red once anything has.
-  During a pass a small dot (green / latched red) with the running time, and
-  under it the same QR as the status card, sit in one corner, a different one
-  each pass: a scan at any time gives the verdict so far, without waiting for
-  the card. A clock that stops means a hang. Neither shows in the Panel Check.
-  Logic in burnin.js; ?fast=N divides every duration by N, ?preview=card shows
-  the status card alone (bench and tests).
+  The factory test screen (ffos-user docs/plans/factory-burnin.md), served by
+  ff1-burnin.sh's loopback server at http://127.0.0.1:8180/burnin/. Two of the
+  three factory boot entries open it (the third, the nine-point fields, opens
+  the display-check page's fields set alone):
+    ?mode=panel     A start card (the panel's rate is measured on it), then
+                    load in a new random order each round: the display-check
+                    slides, two WebGL works, a 4K 10-bit HEVC clip. Once the
+                    unit has been on 10 minutes, the Panel Check: black 15 s,
+                    gray 15 s, until the power is pulled, nothing else on
+                    screen. During the load a dot (green / latched red) with
+                    the running time and a QR of the summary sit in one
+                    corner, a different one each segment.
+    ?mode=hardware  The unit checks as they run (what to listen for), then
+                    their result and a QR, held until the power is pulled.
+  Logic in burnin.js; ?fast=N divides every duration by N (bench and tests).
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>FF1 burn-in</title>
+<title>FF1 factory test</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
     font-family: "Noto Sans", "Noto Sans CJK SC", sans-serif; cursor: none; }
@@ -52,10 +52,10 @@
   /* 18vmin: about 4 px a module for the largest code (85 modules) on a 4K
      panel, read by a phone from a step away. The white border is the quiet
      zone a reader needs. */
-  /* Light gray, not white: the code sits in one corner for a whole pass and
-     the next pass opens with the Panel Check, whose gray and black fields are
-     judged for evenness; a dimmer block leaves less retention there. Phone
-     readers decode it at this contrast. */
+  /* Light gray, not white: the code sits in one corner for a whole segment
+     and the Panel Check that follows the load is judged for evenness; a
+     dimmer block leaves less retention there. Phone readers decode it at
+     this contrast. */
   #dot .q { background: #bbb; padding: 1vmin; line-height: 0; }
   #dot .q svg rect { fill: #bbb; }
   #dot .q svg { width: 18vmin; height: 18vmin; display: block; }
@@ -77,6 +77,7 @@
 const B = window.Burnin;
 const q = new URLSearchParams(location.search);
 const FAST = Math.max(1, Number(q.get('fast')) || 1);
+const MODE = q.get('mode') === 'hardware' ? 'hardware' : 'panel';
 const $ = id => document.getElementById(id);
 const card = $('card'), frame = $('frame'), video = $('video'), dot = $('dot');
 const sleep = s => new Promise(r => setTimeout(r, (s / FAST) * 1000));
@@ -146,32 +147,33 @@ async function checksPhase() {
     // No status at all, or one that stopped updating: the script's sampler is
     // not running. Say so in red rather than wait on a still screen.
     if ((!status && stale() > 30 / FAST) || (status && stale() > B.LIMITS.staleSeconds)) {
-      showCard(header('No status from the burn-in script', '老化测试脚本没有状态') +
-        '<div>/status.json is missing or has stopped updating. Power-cycle and pick the burn-in again.</div>', 'bad');
+      showCard(header('No status from the factory test script', '出厂测试脚本没有状态') +
+        '<div>/status.json is missing or has stopped updating. Power-cycle and pick the entry again.</div>', 'bad');
       await sleep(2);
       continue;
     }
-    showCard(header('Factory burn-in: unit checks', '出厂老化测试：单元检查') + `
+    showCard(header('Hardware test: unit checks', '硬件测试：单元检查') + `
       <div>Brightness, speakers (listen: a low tone LEFT, then a high tone RIGHT), Bluetooth, Wi-Fi.</div>
       <div class="zh">亮度、扬声器（请听：先左边低音，再右边高音）、蓝牙、Wi-Fi。</div>` + checksTable(), 'wait');
     await sleep(2);
   }
 }
 
-async function resultPhase() {
-  // A Chromium restart after the card's time goes straight to the loop.
-  const left = FAST === 1 ? B.resultCardLeft(status, uptimeNow()) : B.RESULT_SECONDS;
-  if (left <= 0) return;
-  // The panel's own rate, measured on this still card, is what the slides
-  // and the video are judged against.
-  const v = B.verdict(status, stats, stale());
-  showCard(header('Unit checks', '单元检查') + `<div class="row">${checksTable()}<div id="qr">${qrSvg()}</div></div>
-    <div>Scan the QR or photograph this screen. The display and load test starts in ${Math.ceil(left)} s and runs until the power is pulled.</div>
-    <div class="zh">请扫码或拍照。${Math.ceil(left)} 秒后开始屏幕与负载测试，直到拔掉电源。</div>
-    <div>Results also in ${esc(status.where || '')}</div>`, v.ok ? 'ok' : 'bad');
-  const r = await countFrames(Math.min(left, 8 + B.WARMUP_SECONDS));
-  stats = B.withRefresh(stats, r.frames / r.seconds);
-  await sleep(Math.max(0, left - (8 + B.WARMUP_SECONDS)));
+// The hardware result, held until the power is pulled; redrawn every few
+// seconds so the running time, the temperatures and the QR stay current.
+async function hardwareResult() {
+  for (;;) {
+    stats = B.latchStatus(stats, stale());
+    const v = B.verdict(status, stats, stale());
+    showCard(header(v.ok ? 'Hardware test PASSED' : 'Hardware test FAILED', v.ok ? '硬件测试通过' : '硬件测试失败') +
+      `<div class="row"><div>
+        ${v.ok ? '' : `<div><b>Why:</b> ${esc(clip(v.reasons.join(' · '), 160))}</div>`}
+        ${checksTable()}
+        <div>Scan the QR or photograph this screen, then pull the power. 请扫码或拍照，然后拔掉电源。</div>
+        <div>Results also in ${esc(status && status.where || '')}</div>
+      </div><div id="qr">${qrSvg()}</div></div>`, v.ok ? 'ok' : 'bad');
+    await sleep(5);
+  }
 }
 
 function tickDot() {
@@ -179,7 +181,7 @@ function tickDot() {
   const v = B.verdict(status, stats, stale());
   dot.classList.toggle('bad', !v.ok);
   // The title carries the verdict too, for a test driving the page headless.
-  document.title = `FF1 burn-in: ${v.ok ? 'OK' : 'FAILED ' + v.reasons.join('; ')} (passes ${stats.passes})`;
+  document.title = `FF1 factory ${MODE}: ${v.ok ? 'OK' : 'FAILED ' + v.reasons.join('; ')}`;
   dot.querySelector('span').textContent = B.hms(runningNow() ?? 0);
   // The corner QR, redrawn every QR_EVERY s (not every tick: it changes
   // slowly, and a new code each second is no easier to scan), and at once
@@ -197,7 +199,7 @@ setInterval(tickDot, 1000);
 // The compositor draws this frame too, so a GPU too busy to keep up with the
 // segment shows here. The segment ends on a timer, not on a frame: a
 // compositor that stops drawing (a GPU hang) must end it with few frames,
-// which is red, not stall the pass behind a moving running-time dot.
+// which is red, not stall the load behind a moving running-time dot.
 function countFrames(seconds) {
   return new Promise(resolve => {
     const start = performance.now(), warm = start + (B.WARMUP_SECONDS / FAST) * 1000, end = start + (seconds / FAST) * 1000;
@@ -212,9 +214,6 @@ function countFrames(seconds) {
   });
 }
 
-// frameReady(seg) -> true once seg.ready matches in the frame's document (same
-// origin: everything comes from the loopback server), false after
-// START_SECONDS.
 // srcFor(seg): the frame's URL. ?fast= also speeds the display-check page's
 // own slides (its ?seconds=), so a fast run reaches every slide.
 function srcFor(seg) {
@@ -222,6 +221,9 @@ function srcFor(seg) {
   return seg.src + (seg.src.includes('?') ? '&' : '?') + 'seconds=' + Math.max(1, Math.floor(10 / FAST));
 }
 
+// frameReady(seg) -> true once seg.ready matches in the frame's document (same
+// origin: everything comes from the loopback server), false after
+// START_SECONDS.
 async function frameReady(seg) {
   const end = mono() + B.START_SECONDS / FAST;
   while (mono() < end) {
@@ -234,16 +236,15 @@ async function frameReady(seg) {
   return false;
 }
 
-async function runSegment(seg) {
+// runSegment(seg, seconds, n): load segment n, for seconds.
+async function runSegment(seg, seconds, n) {
   card.classList.add('hidden');
-  dot.className = B.cornerFor(stats.passes); qrAt = -Infinity; tickDot();
-  // The Panel Check is captured on a phone and scored: nothing on screen.
-  if (seg.clean) dot.classList.add('hidden');
+  dot.className = B.cornerFor(n); qrAt = -Infinity; tickDot();
   if (seg.video) {
     frame.classList.add('hidden'); frame.src = 'about:blank';
     video.src = seg.video; video.classList.remove('hidden');
     // play() can stay pending forever on a stalled request: bound it, latch
-    // the failure and go on with the pass.
+    // the failure and go on with the load.
     const started = await Promise.race([
       video.play().then(() => true, () => false),
       new Promise(r => setTimeout(() => r(false), (B.START_SECONDS / FAST) * 1000)),
@@ -263,7 +264,7 @@ async function runSegment(seg) {
       if (video.currentTime === last) { if (++still >= 3) stalled = true; } else { still = 0; last = video.currentTime; }
     }, 1000 / FAST);
     const q0 = video.getVideoPlaybackQuality();
-    const r = await countFrames(seg.seconds);
+    const r = await countFrames(seconds);
     const q1 = video.getVideoPlaybackQuality();
     clearInterval(watch); video.removeEventListener('error', onError);
     if (stalled) stats = B.fail(stats, 'video stalled');
@@ -305,7 +306,7 @@ async function runSegment(seg) {
         }
       } catch (e) { /* frame gone */ }
     }, 1000 / FAST);
-    const r = await countFrames(seg.seconds);
+    const r = await countFrames(seconds);
     clearInterval(collect);
     for (const f of pageFails) stats = B.fail(stats, `${seg.id}: ${f}`);
     frame.src = 'about:blank'; frame.classList.add('hidden');
@@ -313,56 +314,51 @@ async function runSegment(seg) {
   }
 }
 
-// statusCard(next): next is the segment list of the pass after the card,
-// decided before the card is drawn, so the notice and the pass agree.
-function statusCard(next) {
-  const v = B.verdict(status, stats, stale());
-  // Tell whoever is there to get a phone when the next pass opens with the
-  // Panel Check.
-  const panelNext = !!next && next[0].id === 'panel';
-  const s = (status && status.sys) || {};
-  const fps = B.SEGMENTS.map(seg => `${seg.id} ${stats.fps[seg.id] === undefined ? '–' : stats.fps[seg.id].toFixed(1)}`).join(' · ');
-  const prev = status && status.previous;
-  showCard(header(v.ok ? 'Burn-in OK' : 'Burn-in FAILED', v.ok ? '老化测试正常' : '老化测试失败') +
-    (panelNext ? `<h2>Next: Panel Check, 2 min of black and gray. Brightness at the factory default. Start the phone capture, record about 60 s, pull the power while still recording, keep recording 10 s more, then stop.</h2>
-      <h2 class="zh">下一段：Panel Check，黑灰画面 2 分钟。亮度须为出厂默认值。开始用手机录像，约 60 秒后在录像中拔掉电源，再继续录 10 秒后停止。</h2>` : '') + `
-    <div class="row"><div>
-      ${v.ok ? '' : `<div><b>Why:</b> ${esc(clip(v.reasons.join(' · '), 160))}</div>`}
-      ${checksTable()}
-      <div>Passes ${stats.passes} · worst fps: ${esc(fps)}</div>
-      <div>Video dropped ${stats.dropped} / ${stats.decoded} · panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '–'}</div>
-      <div>Max °C: CPU ${s.cpu_max ?? '–'} · GPU ${s.gpu_max ?? '–'} · NVMe ${s.nvme_max ?? '–'}</div>
-      <div>Kernel errors ${s.kernel_errors ?? '–'}${s.last_error ? ': ' + esc(clip(s.last_error, 90)) : ''}</div>
-      <div>Chromium restarts ${s.restarts ?? 0} · Wi-Fi ${esc(s.wifi ?? '–')} · Bluetooth ${esc(s.bt ?? '–')}</div>
-      ${prev ? `<div>Previous session: ran ${B.hms(prev.ran)}, until ${esc(prev.last)}, kernel errors ${prev.kernel_errors}, restarts ${prev.restarts}</div>` : ''}
-      <div class="zh">A running time that stops moving means a hang. 运行时间停止跳动表示机器卡死。</div>
-    </div><div id="qr">${qrSvg()}</div></div>`, v.ok ? 'ok' : 'bad');
+// The panel mode's clock: the unit's uptime (?fast= runs it FAST times as
+// fast from the page's start, so a bench run reaches the Panel Check). Until
+// the first status read, the page's own time: less than the uptime, so the
+// Panel Check is never early.
+let up0 = null;
+function panelClock() {
+  const up = uptimeNow() ?? mono();
+  if (up0 === null) up0 = up;
+  return up0 + (up - up0) * FAST;
+}
+
+async function panelMode() {
+  await readStatus();
+  if (panelClock() < B.PANEL_MIN_UPTIME) {
+    showCard(header('Factory panel check', '出厂面板检查') + `
+      <div>Load until the unit has been on 10 minutes, then black and gray until the power is pulled: record the Panel Check then.</div>
+      <div class="zh">先运行负载，开机满 10 分钟后进入黑灰画面，直到拔掉电源：届时进行 Panel Check 录像。</div>`, 'wait');
+    // The panel's own rate, measured on this still card, is what the slides
+    // and the video are judged against.
+    const r = await countFrames(B.START_CARD_SECONDS);
+    stats = B.withRefresh(stats, r.frames / r.seconds);
+    card.classList.add('hidden');
+    let n = 0;
+    load: for (;;) {
+      for (const seg of B.shuffled(B.SEGMENTS)) {
+        const s = B.loadSeconds(seg, panelClock());
+        if (s === 0) break load;
+        await runSegment(seg, s, n++);
+      }
+    }
+    // What is left of the 10 minutes, on black.
+    await sleep(Math.max(0, B.PANEL_MIN_UPTIME - panelClock()));
+  }
+  // The Panel Check until the power is pulled: nothing else on screen. A
+  // Chromium restart after the 10 minutes comes straight here.
+  card.classList.add('hidden'); video.classList.add('hidden'); dot.classList.add('hidden');
+  frame.src = B.PANEL.src; frame.classList.remove('hidden');
 }
 
 (async () => {
-  // ?preview=card: the status card alone, from the current status.json (to
-  // check the layout on a panel without waiting a pass).
-  if (q.get('preview') === 'card') {
-    await readStatus();
-    const up = status && status.sys ? status.sys.uptime : null;
-    statusCard(B.passSegments(up === null || up === undefined ? null : up + B.CARD_SECONDS));
-    return;
-  }
-  await checksPhase();
-  await resultPhase();
-  // The first pass is announced by no card (after a Chromium restart it can
-  // open with the Panel Check unannounced; that run is already red).
-  let segs = B.passSegments(status && status.sys ? status.sys.uptime : null);
-  for (;;) {
-    for (const seg of segs) await runSegment(seg);
-    stats = { ...stats, passes: stats.passes + 1 };
-    await readStatus();
-    // The card ends CARD_SECONDS from now: decide the next pass on the uptime
-    // it will have then, and show the notice from the same list.
-    const up = status && status.sys ? status.sys.uptime : null;
-    segs = B.passSegments(up === null || up === undefined ? null : up + B.CARD_SECONDS);
-    statusCard(segs);
-    await sleep(B.CARD_SECONDS);
+  if (MODE === 'hardware') {
+    await checksPhase();
+    await hardwareResult();
+  } else {
+    await panelMode();
   }
 })();
 </script>

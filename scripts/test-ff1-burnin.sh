@@ -42,8 +42,8 @@ size=$(du -sb "$page_dir" | cut -f1)
 [ "$size" -le "$budget" ] || fail "burnin/ is $size bytes, over the 12 MB budget"
 [ -s "$display_page" ] || fail "the display-check page the slides segment shows is missing"
 
-# A segment's frame counts as its own only with the query too: the Panel Check
-# is the display-check page with ?set=panel.
+# A segment's frame counts as its own only with the query too: the
+# display-check page is served with more than one ?set=.
 grep -Fq 'doc.location.pathname + doc.location.search === srcFor(seg)' "$page_dir/index.html" || \
   fail "index.html's frameReady must compare the path and the query"
 
@@ -55,9 +55,6 @@ grep -Fq 'fitCard();' "$page_dir/index.html" || fail "index.html no longer fits 
 grep -Fq "DID NOT PLAY|NO WEBGL" "$page_dir/index.html" || fail "index.html no longer collects display-check's playback failures"
 grep -Fq "'VIDEO DID NOT PLAY'" "$display_page" || fail "display-check no longer reports a clip that did not play the way burnin collects it"
 grep -Fq "pageFails.add('video stalled')" "$page_dir/index.html" || fail "index.html no longer watches a clip inside the frame"
-# Acceptance spec §1.4: the capture needs 10 s of powered-off recording.
-{ grep -Fq 'keep recording 10 s more' "$page_dir/index.html" && grep -Fq '再继续录 10 秒' "$page_dir/index.html"; } || \
-  fail "the Panel Check notice must ask for 10 s of recording after the power pull, in both languages"
 # Session time and deadlines never come from the wall clock.
 if grep -nE 'Date\.now\(\) */ *1000|now\(\) *- *(status|st)\.(started_at|checks_done_at)' "$page_dir/index.html"; then
   fail "index.html times the session with the wall clock"
@@ -116,20 +113,18 @@ LOG
 [ "${got%%$'\t'*}" = 5 ] || fail "count_kernel_errors counted '${got%%$'\t'*}', want 5 (ring timeout, GPU reset, two NVMe, the machine check line)"
 [ "$(count_kernel_errors </dev/null)" = $'0\t' ] || fail "count_kernel_errors on nothing"
 
-# previous_session: the newest earlier last.json; this session's is ignored.
-mkdir -p "$tmp_dir/log/20260101-000000" "$tmp_dir/log/20260102-000000" "$tmp_dir/log/20260103-000000"
-echo '{"started_at":1000,"updated_at":4600,"sys":{"kernel_errors":0,"restarts":1}}' >"$tmp_dir/log/20260101-000000/last.json"
-echo '{"started_at":5000,"updated_at":27200,"started_uptime":100,"sys":{"uptime":22300,"kernel_errors":2,"restarts":0}}' >"$tmp_dir/log/20260102-000000/last.json"
-echo '{"started_at":9,"updated_at":9,"sys":{}}' >"$tmp_dir/log/20260103-000000/last.json"
-got=$(previous_session "$tmp_dir/log" 20260103-000000)
-[ "$got" = '{"ran":22200,"last":"1970-01-01T07:33:20Z","kernel_errors":2,"restarts":0}' ] || fail "previous_session: $got"
-[ "$(previous_session "$tmp_dir/empty" x)" = null ] || fail "previous_session with no sessions"
-# An empty last.json (a power pull, a full disk) reads as no previous session,
-# not as an empty string that would break every status.json after it.
-mkdir -p "$tmp_dir/log2/20260101-000000"; : >"$tmp_dir/log2/20260101-000000/last.json"
-[ "$(previous_session "$tmp_dir/log2" x)" = null ] || fail "previous_session with an empty last.json"
-echo '{"started_at":1' >"$tmp_dir/log2/20260101-000000/last.json"
-[ "$(previous_session "$tmp_dir/log2" x)" = null ] || fail "previous_session with a torn last.json"
+# factory_mode / page_url: the entry's ff1.factory= word picks the test; an
+# entry without one (a boot set saved before the three) runs the panel test.
+echo "root=x ff1.burnin ff1.factory=hardware quiet" >"$tmp_dir/cmd"
+[ "$(factory_mode "$tmp_dir/cmd")" = hardware ] || fail "factory_mode hardware"
+echo "root=x ff1.burnin ff1.factory=fields" >"$tmp_dir/cmd"
+[ "$(factory_mode "$tmp_dir/cmd")" = fields ] || fail "factory_mode fields"
+echo "root=x ff1.burnin quiet" >"$tmp_dir/cmd"
+[ "$(factory_mode "$tmp_dir/cmd")" = panel ] || fail "factory_mode with no word"
+[ "$(factory_mode "$tmp_dir/none")" = panel ] || fail "factory_mode with no cmdline"
+[ "$(page_url panel)" = "http://127.0.0.1:8180/burnin/index.html?mode=panel" ] || fail "page_url panel"
+[ "$(page_url hardware)" = "http://127.0.0.1:8180/burnin/index.html?mode=hardware" ] || fail "page_url hardware"
+[ "$(page_url fields)" = "http://127.0.0.1:8180/display-check/index.html?set=fields" ] || fail "page_url fields"
 
 # adapter_state: unseen until it appears, lost for good once it has gone.
 mkdir -p "$tmp_dir/net"
@@ -142,23 +137,24 @@ st=$(adapter_state "$st" "$tmp_dir/net/wl*"); [ "$st" = lost ] || fail "adapter_
 mkdir "$tmp_dir/net/wlan0"
 st=$(adapter_state "$st" "$tmp_dir/net/wl*"); [ "$st" = lost ] || fail "adapter_state must stay lost when it comes back: $st"
 
-# prune_sessions keeps the newest N folders.
+# prune_sessions keeps the newest N folders, whatever their mode.
+mkdir -p "$tmp_dir/log/20260101-000000-panel" "$tmp_dir/log/20260102-000000-hardware" "$tmp_dir/log/20260103-000000-panel"
 prune_sessions "$tmp_dir/log" 2
-[ "$(find "$tmp_dir/log" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "20260102-000000 20260103-000000 " ] || \
+[ "$(find "$tmp_dir/log" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "20260102-000000-hardware 20260103-000000-panel " ] || \
   fail "prune_sessions did not keep the newest two"
 
 # status_json: the shape burnin.js reads.
 RUN_DIR="$tmp_dir/run"; mkdir -p "$RUN_DIR"
 # shellcheck disable=SC2034 # read by status_json
-BOARD=FF1-TEST VERSION=3.1.0 STARTED_AT=1000 STARTED_UPTIME=300 PREVIOUS=null
+BOARD=FF1-TEST VERSION=3.1.0 STARTED_AT=1000 STARTED_UPTIME=300 MODE=hardware
 echo '[{"name":"Brightness","status":"PASS","detail":""}]' >"$RUN_DIR/checks.json"
-echo 1100 >"$RUN_DIR/checks_done_at"; echo 450 >"$RUN_DIR/checks_done_uptime"; echo /var/log/ff1-burnin/x >"$RUN_DIR/where"; echo 2 >"$RUN_DIR/restarts"
+echo 1100 >"$RUN_DIR/checks_done_at"; echo /var/log/ff1-burnin/x >"$RUN_DIR/where"; echo 2 >"$RUN_DIR/restarts"
 echo "612.34 1000.00" >"$tmp_dir/uptime"
 # shellcheck disable=SC2034 # read by status_json
 UPTIME="$tmp_dir/uptime"
-got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, .sys.uptime, .started_uptime, .checks_done_uptime, (.updated_at > 0)]')
-[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,612,300,450,true]' ] || fail "status_json: $got"
-rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at" "$RUN_DIR/checks_done_uptime"
+got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, .sys.uptime, .started_uptime, .mode, (.updated_at > 0)]')
+[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,612,300,"hardware",true]' ] || fail "status_json: $got"
+rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
 got=$(status_json null null null null null null $'0\t' unseen unseen | jq -c '[.checks, .checks_done_at, .sys.last_error]')
 [ "$got" = '[[],null,null]' ] || fail "status_json before the checks: $got"
 
@@ -278,28 +274,38 @@ sf = B.recordSegment(sf, 'slides', 31 * 99, 99, true);
 assert.deepStrictEqual(sf.bad, ['slides did not load', 'slides 30.0 fps']);
 assert.ok(B.SEGMENTS.every(seg => seg.video || seg.ready), 'every frame segment has a ready selector');
 
-// The Panel Check (acceptance spec §1): black/gray only, a clean screen,
-// opening a pass, and only after 10 minutes of power-on.
-const panel = B.SEGMENTS[0];
-assert.deepStrictEqual([panel.id, panel.src, panel.clean, panel.judged], ['panel', '/display-check/index.html?set=panel', true, false]);
-assert.ok(panel.seconds >= 60 + 30, 'room for a 60 s capture, the reaction time and the power pull');
-assert.ok(B.passSegments(null).every(seg => seg.id !== 'panel'), 'no uptime yet: no Panel Check');
-assert.ok(B.passSegments(599).every(seg => seg.id !== 'panel'), 'before 10 minutes: no Panel Check');
-assert.strictEqual(B.passSegments(600)[0].id, 'panel');
-assert.strictEqual(B.passSegments(600).length, B.SEGMENTS.length);
+// The Panel Check (acceptance spec §1): black/gray only, after 10 minutes of
+// power-on; the load before it is cut so it starts on time, and a stub too
+// short to judge is not run.
+assert.deepStrictEqual([B.PANEL.id, B.PANEL.src], ['panel', '/display-check/index.html?set=panel']);
+assert.ok(B.SEGMENTS.every(seg => seg.id !== 'panel'), 'the Panel Check is not a load segment');
 assert.ok(/panel:\s*\['black','gray'\]/.test(page) && /panel: 15/.test(page), 'the display-check panel set is black/gray 15 s');
+const slides = B.SEGMENTS.find(seg => seg.id === 'slides');
+assert.strictEqual(B.loadSeconds(slides, 0), slides.seconds);
+assert.strictEqual(B.loadSeconds(slides, 550), 50, 'cut at 10 minutes');
+assert.strictEqual(B.loadSeconds(slides, 590), 0, 'too short to judge');
+assert.strictEqual(B.loadSeconds(slides, 700), 0, 'past 10 minutes');
+// Each round is every load segment once, in an order that changes.
+const order = B.shuffled(B.SEGMENTS, () => 0).map(seg => seg.id);
+assert.deepStrictEqual([...order].sort(), B.SEGMENTS.map(seg => seg.id).sort());
+assert.notDeepStrictEqual(order, B.SEGMENTS.map(seg => seg.id), 'rand 0 reorders');
+assert.deepStrictEqual(B.shuffled([], Math.random), []);
+// The panel mode ends on the Panel Check with nothing else on screen: the
+// card, the clip and the corner dot are hidden on the line before it shows.
+const indexHtml = fs.readFileSync(process.env.PAGE_DIR + '/index.html', 'utf8');
+assert.ok(/card\.classList\.add\('hidden'\); video\.classList\.add\('hidden'\); dot\.classList\.add\('hidden'\);\s*\n\s*frame\.src = B\.PANEL\.src;/.test(indexHtml),
+  'the Panel Check must hide the card, the clip and the dot before it shows');
+// The fields set: the chart, then the measured fields, stepped by hand.
+assert.ok(/fields:\s*\['points','white','gray','black','red','green','blue'\]/.test(page), 'the display-check fields set');
+assert.ok(/auto = !MANUAL/.test(page) && /if \(e\.repeat\) return;/.test(page), 'fields never advance on a timer or a held key');
 
 // Running time and corners.
 assert.strictEqual(B.hms(0), '0:00:00');
 assert.strictEqual(B.hms(3 * 86400 + 3661), '73:01:01');
 assert.deepStrictEqual([0, 1, 2, 3, 4].map(B.cornerFor), ['top-left', 'top-right', 'bottom-right', 'bottom-left', 'top-left']);
-// Session time and the result card run on the monotonic uptime: a wall
-// clock stepped back by two hours changes neither.
-const mg = { ...good, started_uptime: 100, checks_done_uptime: 400 };
-assert.strictEqual(B.resultCardLeft(null, 500), 0);
-assert.strictEqual(B.resultCardLeft(mg, null), 0);
-assert.strictEqual(B.resultCardLeft(mg, 430), B.RESULT_SECONDS - 30);
-assert.ok(B.resultCardLeft({ ...mg, updated_at: mg.updated_at - 7200, checks_done_at: 1 }, 700) <= 0, 'expired card stays expired');
+// Session time runs on the monotonic uptime: a wall clock stepped back by
+// two hours does not change it.
+const mg = { ...good, started_uptime: 100 };
 assert.strictEqual(B.running(mg, 3700), 3600);
 assert.strictEqual(B.running({ ...mg, started_at: now + 7200 }, 3700), 3600, 'wall clock ignored');
 assert.strictEqual(B.running({ ...good, started_uptime: undefined }, 3700), null, 'no started_uptime: unknown');
@@ -318,7 +324,7 @@ assert.strictEqual(B.advanceUptime(uc, undefined, 7), uc, 'no uptime in the samp
 
 // QR text: readable as is, verdict first, plain ASCII, within budget in the
 // worst case, and encodable at a size the corner QR still shows.
-const worst = JSON.parse(JSON.stringify(good));
+const worst = JSON.parse(JSON.stringify(good)); worst.mode = 'hardware';
 worst.board = 'FF1-WWWWWWWW'; worst.version = '10.20.300-rc.12';
 worst.checks = ['Brightness', 'Speakers', 'Bluetooth', 'Wi-Fi'].map(n => ({ name: n, status: 'FAIL', detail: 'x'.repeat(200) }));
 Object.assign(worst.sys, { cpu_max: 105, gpu_max: 110, nvme_max: 90, kernel_errors: 123456, restarts: 9999, wifi: 'lost', bt: 'lost' });
@@ -327,22 +333,23 @@ let ws = B.emptyStats();
 for (const seg of B.SEGMENTS) ws = B.recordSegment(ws, seg.id, 1, 99, true);
 ws = B.recordVideo(ws, 999999, 999999);
 ws = B.fail(ws, 'slides: VIDEO DID NOT PLAY ' + 'y'.repeat(100));
-ws.passes = 99999;
 for (const [st, stats] of [[good, B.emptyStats()], [worst, ws], [null, B.emptyStats()]]) {
   const p = B.qrText(st, stats, st === worst ? 9e9 : 3600, st === worst ? 1000 : 0);
   assert.ok(Buffer.byteLength(p) <= B.QR_MAX_BYTES, `text ${Buffer.byteLength(p)} bytes`);
   assert.ok(/^[\x20-\x7e\n]*$/.test(p), 'plain ASCII');
-  assert.ok(/^FF1 burn-in (OK|FAILED)\n/.test(p), 'verdict first');
+  assert.ok(/^FF1 [a-z]+ test (OK|FAILED)\n/.test(p), 'verdict first');
   const qr = qrcode(0, 'L'); qr.addData(p, 'Byte'); qr.make();
   assert.ok(qr.getModuleCount() <= 85, `QR version too large: ${qr.getModuleCount()} modules`);
 }
 const pg = B.qrText(good, B.emptyStats(), 3600).split('\n');
-assert.deepStrictEqual(pg.slice(0, 4), ['FF1 burn-in OK', 'FF1-ABCDEFGH 3.1.0', 'Ran 1:00:00, passes 0', 'Brightness PASS, Speakers PLAYED, Wi-Fi PASS']);
+assert.deepStrictEqual(pg.slice(0, 4), ['FF1 factory test OK', 'FF1-ABCDEFGH 3.1.0', 'Ran 1:00:00', 'Brightness PASS, Speakers PLAYED, Wi-Fi PASS']);
+assert.ok(!/Worst fps/.test(B.qrText(good, B.emptyStats(), 60)), 'no load lines before any load ran (hardware mode)');
+assert.ok(/Worst fps: slides 30.0/.test(B.qrText(null, B.recordSegment(B.emptyStats(), 'slides', 300, 10, false), 60)), 'load lines once it ran');
 const pw = B.qrText(worst, ws, 9e9, 1000);
-assert.ok(pw.startsWith('FF1 burn-in FAILED') && /\n- Brightness FAIL/.test(pw), 'the reasons go in while they fit');
+assert.ok(pw.startsWith('FF1 hardware test FAILED') && /\n- Brightness FAIL/.test(pw), 'the reasons go in while they fit');
 assert.ok(/Max C: CPU 105, GPU 110, NVMe 90/.test(pw));
 assert.ok(B.qrText(good, B.fail(B.emptyStats(), 'CPU 96 °C'), 60).includes('- CPU 96 C'), 'degree sign dropped');
-assert.ok(B.qrText(good, B.emptyStats(), null).includes('Ran -,'), 'unknown running time');
+assert.ok(B.qrText(good, B.emptyStats(), null).includes('\nRan -\n'), 'unknown running time');
 NODE
 
 echo "test-ff1-burnin: ok"

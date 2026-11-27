@@ -1,6 +1,35 @@
 # Factory burn-in: a hidden boot entry on the installed FF1
 
-Status: plan rev 2, accepted 2026-11-27 (rev 1 adversarial review: revise, fixed here). Stages 1–4 implemented together (owner's call: one bench at the end): ffos-user feat/factory-burnin, ffos feat/factory-burnin-entry. Spans ffos-user and ffos.
+Status: rev 3 (2026-11-27): the single burn-in entry is split into three factory entries, see §0; §4.2 and §4.3 below describe rev 2 and are superseded where §0 differs. Rev 2, accepted 2026-11-27 (rev 1 adversarial review: revise, fixed here). Stages 1–4 implemented together (owner's call: one bench at the end): ffos-user feat/factory-burnin, ffos feat/factory-burnin-entry. Spans ffos-user and ffos.
+
+## 0. Rev 3: three factory entries
+
+The product owner split the one burn-in into three tests, each its own entry
+in the installed boot menu (ffos `ff1_write_boot_set`), all booting
+`ff1-burnin.target` with `ff1.burnin ff1.factory=<test>`. `ff1-burnin.sh`
+reads the word; an entry without one (the rev 2 `ff1_burnin.conf`, which a
+factory reset can bring back) runs the panel test.
+
+| Entry | `ff1.factory=` | What runs |
+|---|---|---|
+| FF1 - Factory: panel check, black/gray | `panel` | A start card (the panel's refresh rate is measured on it). Load in a new random order each round (display-check slides, evolved, uneasy-dream, the 4K HEVC clip), judged as in rev 2, with the corner dot and QR. At 10 minutes of uptime the running segment is cut and the Panel Check (black 15 s, gray 15 s) loops until the power is pulled, nothing else on screen. Also the long power-on run: record the Panel Check after hours, not minutes. |
+| FF1 - Factory: hardware test | `hardware` | The unit checks once (brightness, speakers, Bluetooth, Wi-Fi), then the result card with the QR, held and refreshed until the power is pulled. Results copied to a USB stick. |
+| FF1 - Factory: nine-point and color fields | `fields` | The display-check page's `fields` set: the nine-point chart (crosses at 1/6, 1/2, 5/6 of each axis, to be matched to Senda's report), then white, gray, black, red, green, blue. One slide per key press (any key next, Left previous, held keys ignored), never on a timer; a measured field shows only "n/7" for a second. A USB keyboard is attached at the factory. |
+
+Removed with rev 3: the status card between passes, the timed result card,
+the previous-session line, and the Panel Check notice; the Panel Check is
+no longer a segment of a pass but the end state of the panel test.
+
+Kept: the loopback server, the sampler (panel and hardware only; the fields
+need no record) and its `last.json` per session folder
+(`<time>-<test>`), the latched verdict, the corner dot and QR during load.
+During the Panel Check the verdict is not on screen: the session's
+`last.json` holds the system part of it (kernel faults, restarts,
+temperatures, adapters).
+
+Bench additions: the keyboard reaches the page under cage with no click;
+the nine-point positions match Senda's report; the Panel Check starts at
+10 minutes and stays clean for hours.
 
 ## Goal and decisions already made
 

@@ -1,5 +1,9 @@
-// burnin.js: the logic of the factory burn-in page (index.html), kept free of
-// the DOM so scripts/test-ff1-burnin.sh can run it in node.
+// burnin.js: the logic of the factory test page (index.html), kept free of
+// the DOM so scripts/test-ff1-burnin.sh can run it in node. The page serves
+// two of the three factory boot entries: ?mode=panel (load until the unit has
+// been on PANEL_MIN_UPTIME, then the Panel Check's black/gray loop until the
+// power is pulled) and ?mode=hardware (the unit checks, then their result,
+// held). The third, the nine-point fields, is the display-check page alone.
 //
 // The page is served by ff1-burnin.sh's loopback HTTP server, next to
 // /status.json, which the script rewrites every few seconds: the unit-check
@@ -9,22 +13,21 @@
 // of those two inputs.
 'use strict';
 
-// One pass, in order. slides is the display-check page's assembly set, whose
-// slide lengths sum to SLIDES_SECONDS (the test pins the sum). Each pass ends
-// with the status card.
+// The load shown before the Panel Check, in a new random order each round.
+// slides is the display-check page's assembly set, whose slide lengths sum to
+// SLIDES_SECONDS (the test pins the sum).
 const SLIDES_SECONDS = 102;
 // ready is a selector that matches in the segment's document only once its
 // test content runs: the display-check page has put a slide on its stage,
 // evolved has compiled its shaders and written the formula, p5 has made its
 // canvas. An error page or a work that failed to start matches nothing.
-// panel is the Panel Check of FF-Acceptance-Packing-Spec §1: black 15 s,
-// gray 15 s, nothing else on screen (clean: no status dot), long enough for a
-// 60 s phone capture plus the power pull while still recording. It opens a
-// pass, so the status card before it can announce it, and only once the unit
-// has been on PANEL_MIN_UPTIME (the spec's 10 minutes, counted from boot).
+// PANEL is the Panel Check of FF-Acceptance-Packing-Spec §1: black 15 s, gray
+// 15 s, looping until the power is pulled, nothing else on screen. It starts
+// once the unit has been on PANEL_MIN_UPTIME (the spec's 10 minutes, counted
+// from boot), cutting the load segment that is running then.
 const PANEL_MIN_UPTIME = 600;
+const PANEL = { id: 'panel', src: '/display-check/index.html?set=panel', ready: '#stage > *' };
 const SEGMENTS = [
-  { id: 'panel', seconds: 120, src: '/display-check/index.html?set=panel', ready: '#stage > *', judged: false, clean: true },
   { id: 'slides', seconds: SLIDES_SECONDS, src: '/display-check/index.html', ready: '#stage > *', judged: true },
   { id: 'evolved', seconds: 60, src: '/burnin/load/evolved/index.html', ready: '#overlay:not(:empty)', judged: false },
   { id: 'uneasy', seconds: 60, src: '/burnin/load/uneasy-dream/index.html', ready: 'canvas', judged: false },
@@ -34,8 +37,7 @@ const SEGMENTS = [
 // this long is a failure; the pass moves on to the next segment.
 const START_SECONDS = 15;
 const CLIP_FPS = 60;          // the clip's frame rate
-const CARD_SECONDS = 8;       // the status card between passes
-const RESULT_SECONDS = 60;    // the result card after the unit checks
+const START_CARD_SECONDS = 8; // the card that opens the panel mode; the panel rate is measured on it
 const WARMUP_SECONDS = 3;     // frames of a segment's first seconds are not judged
 
 // Red, once any of these is crossed, until the power is pulled. The WebGL
@@ -52,7 +54,7 @@ const LIMITS = {
 };
 
 function emptyStats() {
-  return { passes: 0, fps: {}, dropped: 0, decoded: 0, bad: [], refresh: null };
+  return { fps: {}, dropped: 0, decoded: 0, bad: [], refresh: null };
 }
 
 // withRefresh(stats, fps) -> stats judged against the panel's own rate,
@@ -95,11 +97,24 @@ function recordVideo(stats, dropped, decoded) {
   return out;
 }
 
-// passSegments(uptimeSeconds) -> the segments of a pass starting now: the
-// Panel Check only once the unit has been on long enough (null: not known
-// yet, so not yet).
-function passSegments(uptimeSeconds) {
-  return SEGMENTS.filter(seg => seg.id !== 'panel' || (uptimeSeconds ?? 0) >= PANEL_MIN_UPTIME);
+// shuffled(list, rand) -> a copy of list in random order (rand: () -> [0, 1)).
+function shuffled(list, rand = Math.random) {
+  const out = list.slice();
+  for (let k = out.length - 1; k > 0; k--) {
+    const m = Math.floor(rand() * (k + 1));
+    [out[k], out[m]] = [out[m], out[k]];
+  }
+  return out;
+}
+
+// loadSeconds(seg, uptimeSeconds) -> how long seg runs when it starts now: its
+// own length, cut at PANEL_MIN_UPTIME, so the Panel Check starts on time. 0
+// when less than MIN_LOAD_SECONDS is left: a segment that short has too few
+// frames after the warm-up to judge, and the page waits out the rest.
+const MIN_LOAD_SECONDS = 15;
+function loadSeconds(seg, uptimeSeconds) {
+  const left = Math.min(seg.seconds, PANEL_MIN_UPTIME - uptimeSeconds);
+  return left < MIN_LOAD_SECONDS ? 0 : left;
 }
 
 // fail(stats, reason) -> stats with reason latched for the rest of the session.
@@ -166,8 +181,8 @@ function hms(seconds) {
 // when it scans the QR: plain text a person reads as is (a phone camera shows
 // a text QR as text; a data: URL page is refused by both iOS and Android, so
 // an HTML report is not an option). The first line is the verdict, so a scan
-// answers "pass or fail" at a glance; the lines after it are the status
-// card's. Within QR_MAX_BYTES, so the code stays one a phone reads from the
+// answers "pass or fail" at a glance; the lines after it are the details
+// (checks, load, temperatures, faults). Within QR_MAX_BYTES, so the code stays one a phone reads from the
 // small corner QR too (the test checks a worst case).
 const QR_MAX_BYTES = 600;
 function qrText(status, stats, runningSeconds, staleSeconds = 0) {
@@ -177,18 +192,21 @@ function qrText(status, stats, runningSeconds, staleSeconds = 0) {
   const n = x => (x === null || x === undefined ? '-' : x);
   const fps = id => (stats.fps[id] === undefined ? '-' : stats.fps[id].toFixed(1));
   const lines = [
-    `FF1 burn-in ${v.ok ? 'OK' : 'FAILED'}`,
+    `FF1 ${ascii(st.mode || 'factory')} test ${v.ok ? 'OK' : 'FAILED'}`,
     `${n(st.board)} ${n(st.version)}`,
-    `Ran ${runningSeconds === null || runningSeconds === undefined ? '-' : hms(runningSeconds)}, passes ${stats.passes}`,
-    (st.checks || []).map(c => `${c.name} ${c.status}`).join(', ') || 'Checks -',
-    'Worst fps: ' + SEGMENTS.filter(seg => seg.id !== 'panel').map(seg => `${seg.id} ${fps(seg.id)}`).join(', '),
-    `Video dropped ${stats.dropped}/${stats.decoded}, panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '-'}`,
+    `Ran ${runningSeconds === null || runningSeconds === undefined ? '-' : hms(runningSeconds)}`,
+    ...((st.checks || []).length ? [st.checks.map(c => `${c.name} ${c.status}`).join(', ')] : []),
+    // The load lines only once a load segment has run (the panel mode).
+    ...(Object.keys(stats.fps).length ? [
+      'Worst fps: ' + SEGMENTS.map(seg => `${seg.id} ${fps(seg.id)}`).join(', '),
+      `Video dropped ${stats.dropped}/${stats.decoded}, panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '-'}`,
+    ] : []),
     `Max C: CPU ${n(s.cpu_max)}, GPU ${n(s.gpu_max)}, NVMe ${n(s.nvme_max)}`,
     `Kernel errors ${n(s.kernel_errors)}, Chromium restarts ${n(s.restarts)}`,
     `Wi-Fi ${n(s.wifi)}, Bluetooth ${n(s.bt)}`,
   ].map(l => ascii(l).slice(0, 80));
   // The reasons go in one by one while the text stays within budget; the
-  // status card on screen always lists them all.
+  // rest are cut (the page title carries them all).
   let out = lines.join('\n');
   for (const r of v.reasons) {
     const next = `${out}\n- ${ascii(r).slice(0, 60)}`;
@@ -209,19 +227,11 @@ function byteLength(s) {
   return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : s.length;
 }
 
-// The corner the status dot sits in for pass n: it moves every pass, so no
-// pixel holds the same content for days.
+// The corner the status dot sits in for load segment n: it moves every
+// segment, so no pixel holds the same content for long.
 const CORNERS = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
 function cornerFor(pass) {
   return CORNERS[pass % CORNERS.length];
-}
-
-// resultCardLeft(status, uptimeNow) -> seconds the result card has left, on
-// the monotonic uptime; 0 or less once over (a Chromium restart after that goes
-// straight to the loop) or while unknown.
-function resultCardLeft(status, uptimeNow) {
-  if (!status || status.checks_done_uptime === null || status.checks_done_uptime === undefined || uptimeNow === null) return 0;
-  return status.checks_done_uptime + RESULT_SECONDS - uptimeNow;
 }
 
 // The page's estimate of the unit's uptime: the sampled /proc/uptime plus
@@ -248,8 +258,8 @@ function running(status, uptimeNow) {
 }
 
 const api = {
-  SLIDES_SECONDS, SEGMENTS, PANEL_MIN_UPTIME, passSegments, START_SECONDS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
-  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrText, cornerFor, resultCardLeft, running, advanceUptime, uptimeAt,
+  SLIDES_SECONDS, SEGMENTS, PANEL, PANEL_MIN_UPTIME, shuffled, loadSeconds, START_SECONDS, START_CARD_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
+  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrText, cornerFor, running, advanceUptime, uptimeAt,
 };
 if (typeof module !== 'undefined') module.exports = api;
 else window.Burnin = api;
