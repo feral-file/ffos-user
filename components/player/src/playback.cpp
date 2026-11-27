@@ -15,7 +15,7 @@ Json occurrence_json(const std::optional<Occurrence>& occurrence) {
   if (!occurrence) return nullptr;
   const auto& o = *occurrence;
   return {{"id", o.id}, {"generation", o.generation}, {"index", o.index}, {"item", o.item},
-          {"display", o.display}, {"displayRevision",o.display_revision}, {"stage", o.stage}, {"error", o.error}, {"navigationCommitted", o.navigation_committed},
+          {"castId", o.cast_id}, {"display", o.display}, {"displayRevision",o.display_revision}, {"stage", o.stage}, {"error", o.error}, {"navigationCommitted", o.navigation_committed},
           {"context",o.context},{"exhibition",o.playlist_title},{"curator",o.curator}};
 }
 bool boolean(const Json& p, const char* field) {
@@ -744,7 +744,7 @@ void Playback::presented(const std::string& id) {
   auto next = state_;
   Json record = {{"recordId", id}, {"playedAtMs", wall_ms()}, {"item", selected_->item}, {"context", selected_->context}, {"defaults", selected_->defaults}};
   record["index"] = selected_->index;
-  record["playlistId"] = selected_->playlist.value("id", "");
+  record["castId"] = selected_->cast_id;
   next["history"].insert(next["history"].begin(), record);
   while (next["history"].size() > 100 || next["history"].dump().size()>1024*1024) next["history"].erase(next["history"].end() - 1);
   try { persist(std::move(next)); } catch (const Error&) { state_["historyIncomplete"] = true; }

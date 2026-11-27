@@ -46,8 +46,8 @@ def check():
             # migration creates a fresh history and only real frames enter it.
             history = call("history.list", {})
             first = history["records"][-1] if history["records"] else {}
-            playlist_id = state["presentedPlaylist"].get("id")
-            if not (not history["incomplete"] and playlist_id and first.get("playlistId") == playlist_id
+            cast_id = shown.get("castId")
+            if not (not history["incomplete"] and cast_id and first.get("castId") == cast_id
                     and first.get("index") == int(index) and fingerprint(first.get("item")) == item_hash):
                 sys.exit("Waiting for evidence of the migrated artwork")
 
