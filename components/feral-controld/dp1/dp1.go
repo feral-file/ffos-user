@@ -8,8 +8,10 @@ import (
 	goio "io"
 	"maps"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"github.com/display-protocol/dp1-go/extension/playlists"
@@ -28,10 +30,19 @@ import (
 // Deliberately an allow-list of one shape — the pointer after "at '" — rather
 // than a redaction of known-bad substrings: anything the extractor does not
 // recognize is dropped, so a future validator message cannot leak by wording
-// this does not anticipate. A pointer is structural (indices and field names
-// from the schema), never document content, which matters because dp1-go's
-// format assertions print the offending VALUE whole and these errors are
-// returned verbatim to senders on both transports.
+// this does not anticipate. A pointer is structural (indices and member
+// names), never a document VALUE, which matters because dp1-go's format
+// assertions print the offending value whole and these errors are returned
+// verbatim to senders on both transports.
+//
+// A member name is sender-chosen, though: under a schema with
+// additionalProperties a pointer can carry a key of any length (a 4 MiB body
+// can make one pointer about 4 MiB), and every refusal is both replied and
+// logged. So each pointer is cut to maxPointerBytes, on a rune boundary,
+// with a trailing "…" marking the cut, and at most maxSchemaPointers distinct
+// pointers are returned (a body with many failing items or keys names only
+// the first ones): every sink, the reply included, stays about 10 × 259
+// bytes whatever the body.
 func ValidationPointers(err error) []string {
 	if err == nil {
 		return nil
@@ -59,12 +70,31 @@ func ValidationPointers(err error) []string {
 		if pointer == "" {
 			pointer = "/"
 		}
+		pointer = capPointer(pointer)
 		if !seen[pointer] {
 			seen[pointer] = true
 			out = append(out, pointer)
+			if len(out) == maxSchemaPointers {
+				break
+			}
 		}
 	}
 	return out
+}
+
+// maxPointerBytes bounds one reported pointer (see ValidationPointers). Real
+// DP-1 locations are a few dozen bytes; 256 keeps any of them whole.
+const maxPointerBytes = 256
+
+func capPointer(pointer string) string {
+	if len(pointer) <= maxPointerBytes {
+		return pointer
+	}
+	cut := maxPointerBytes
+	for cut > 0 && !utf8.RuneStart(pointer[cut]) {
+		cut--
+	}
+	return pointer[:cut] + "…"
 }
 
 // ErrPlaylistInvalid marks a fetched DP-1 document whose content-rating
@@ -187,15 +217,23 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 	// every key that folds to "satellites" as raw bytes (never failing), and
 	// the real list is then read back by the exact key — the same approach as
 	// dp1-go's own decodePlaylist, which controld bypasses by decoding here.
+	// The signature members are shadowed the same way: a playlist needs no
+	// signature, so a wrong-typed one must not fail the decode (see
+	// decodeSignaturesLenient).
 	var decoded struct {
 		playlistJSON
 		SatellitesRaw json.RawMessage `json:"satellites,omitempty"`
+		SignatureRaw  json.RawMessage `json:"signature,omitempty"`
+		SignaturesRaw json.RawMessage `json:"signatures,omitempty"`
 	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	// Exact member names only: see stripCaseVariants.
+	exact := stripCaseVariants(data, reflect.TypeOf(playlistJSON{}))
+	if err := json.Unmarshal(exact, &decoded); err != nil {
 		return err
 	}
 	*p = Playlist(decoded.playlistJSON)
 	p.Satellites = decodeSatellitesExact(data)
+	p.Signature, p.Signatures = decodeSignaturesLenient(decoded.SignatureRaw, decoded.SignaturesRaw)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
 	p.Extra = unknownPlaylistMembers(data)
 	return nil
@@ -622,13 +660,33 @@ func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlis
 	}
 
 	duration := defaultDurationSeconds(playlist)
-	newItems := buildPlaylistItems(duration, ffTokens)
+	newItems := d.conformingItems(playlist.ID, buildPlaylistItems(duration, ffTokens))
 
 	// Always replace the new items to keep the playlist up to date.
 	// FIXME: This line will ignore the case that playlist has both curated and dynamic items.
 	playlist.Items = newItems
 
 	return &playlist, nil
+}
+
+// conformingItems drops the items built from indexer tokens that fail the
+// schema (a token with no preview URL has no `source`). Only the item goes:
+// the rest of the playlist plays.
+func (d *dp1) conformingItems(playlistID string, items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	kept := make([]dp1playlist.PlaylistItem, 0, len(items))
+	for _, item := range items {
+		raw, err := json.Marshal(item)
+		if err == nil {
+			err = checkItem(raw)
+		}
+		if err != nil {
+			d.logger.Warn("dropping an indexer item that does not conform to the schema",
+				zap.String("playlist_id", playlistID), zap.String("item_id", item.ID), zap.Error(err))
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 func defaultDurationSeconds(playlist Playlist) float64 {
@@ -684,7 +742,9 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
-	AuditDocumentAsync(d.logger, "playlistUrl", bytes)
+	if err := CheckPlayable(d.logger, "playlistUrl", bytes); err != nil {
+		return Playlist{}, nil, err
+	}
 
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)
@@ -775,6 +835,23 @@ func (d *dp1) httpClientAsHTTPClient() *http.Client {
 		Transport: httpClientTransport{d.httpClient},
 		Timeout:   wrapper.HTTPClientTimeout,
 	}
+}
+
+// decodeSignaturesLenient reads the two signature members, each absent when it
+// has the wrong shape: signatures never block playback, and CheckPlayable does
+// not judge them. The verdict is not affected, because sigverify reads the
+// bytes as received. The re-emitted document drops a malformed member.
+func decodeSignaturesLenient(legacyRaw, chainRaw json.RawMessage) (string, []dp1playlist.Signature) {
+	var legacy string
+	if json.Unmarshal(legacyRaw, &legacy) != nil {
+		legacy = ""
+	}
+	var chain []dp1playlist.Signature
+	if json.Unmarshal(chainRaw, &chain) != nil {
+		// A type error leaves the slice partly filled.
+		chain = nil
+	}
+	return legacy, chain
 }
 
 // decodeSatellitesExact reads "satellites" by its exact JSON key, leniently: a

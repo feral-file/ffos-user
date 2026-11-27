@@ -19,6 +19,263 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.1.0 — full-image (cross-rail; paired with the ffos release)
+
+Everything on `develop` since `v3.0.1`: what #496 promoted (develop
+`1c635ae0`), then #495, #498 and the pointer cap (#499), promoted by a second
+`develop -> staging` PR together with this entry; ffos `staging` `e615792`
+(develop `22d41de`, ffos#188). The ffos-user diff touches both `components/**` and `users/**`,
+so `check-release-rail.sh` requires this entry; the release is also the
+rollout lever for off-LAN first-owner setup (`min_runtime_version`, below),
+and ff-player#347 must ride in the same image as #493.
+
+ffos-user, package rail (`components/**`):
+
+- **Off-LAN first owner (#493, feral-file#3649).** A two-slot first-owner
+  invitation with a 120 s life, rotated with 60 s left and voided on use or
+  takedown, admitted on every route (LAN and both relay v2 channels); the
+  claim QR carries the invitation expiry, the device keys and, on a private
+  or link-local IPv4, the LAN host. One plaintext "show your code" request
+  is admitted on relay v2 for a claimed, ownerless (`legacy`) device, at
+  most 3 gate runs per controld process, the QR down after 10 minutes. The
+  device dials a keyed relay channel next to the device-ID channel, which it
+  keeps dialing in every state (old ff-app, ff-cli and Play keep working).
+  No `.state/control` format change. Spec §13 (`docs/ff1-control-v1.md`)
+  holds the accepted residuals.
+- **Pairing.** Scanning the code on screen is the only path to a first
+  owner (#473); mint pairing follows the broker's expiry (#470) and asks the
+  owner from the site's announced request (#375).
+- **DP-1.** dp1-go v0.9.0 (#488, #494); the conformance work that stops
+  dropping or inventing document members (#490), then a refusal (#495):
+  `dp1.CheckPlayable` refuses, as `playlistInvalid` with JSON pointers only,
+  a document that fails the DP-1 schema on every path that plays one
+  (inline `dp1_call`, fetched `playlistUrl`, replay, offline cached copy,
+  persisted inline `displayAt` source); a repeated member name in any object
+  is refused; empty `items` only beside `dynamicQuery` (#498); inline
+  documents keep a temporary ff-app allowance (a non-UUID `id`, a `created`
+  with no offset, a title over 200 characters, empty `items` beside the
+  legacy `dynamicQueries`);
+  series editions and indexer items that fail are dropped one by one;
+  `signatureStatus` is `valid` only with a feed or curator signature; each
+  refusal pointer is cut to 256 bytes and at most 10 are named (#499); the signature role
+  held to the §7.1 enum, report-only (#489); a display request carries the
+  whole resolved dynamic list (#491), paging bounded by discarded items.
+  The device-side Raster wallet walk is removed (#479): a
+  `raster/tokensOwned` dynamicQuery now answers unsupported (it already
+  failed since #457 removed the key).
+- **Offline cache.** The replay scope is restored at boot with no internet
+  and dropped when it returns (#469); keep what is displayed,
+  `downloadPlaylistItem {displayed}` (#483, feral-file#3633); a bare-CID
+  work requested slashed replays offline (#485); an onchfs `startItem`
+  opens on its work (#482).
+- **Other.** Setup narration carries the installed version (#471, #472,
+  one `ff1config` reader shared with the OTA gate); relay v2 requests
+  dropped before dispatch are logged, rate-limited (#480); portal pages
+  embed their styles (#377); "cast" wording swept to "display" (#442: log
+  and error text only, no wire, config, metric or state key renamed).
+
+ffos-user, image rail (`users/**`), live ISO only (nothing runs on an
+installed FF1; the files arrive with the rsync and stay inert):
+
+- Factory check (#476): DDC/CI brightness, a tone on each speaker,
+  Bluetooth discovery (`unit-checks.sh`), lines in English and Simplified
+  Chinese under kmscon; `.file_permissions.sh` marks the new scripts.
+- Display check (#492): `display-check.sh` and `display-check/`, from the
+  factory ISO's entries; and one bounded, fail-open pass after each Factory
+  check reading (#497, ffos#189).
+
+`ffos`, image rail only:
+
+- `build-image-to-cf.yml` input `factory_check` (ffos#184, #186), refused on
+  every device channel by `factory-branch-guard`; this release sets it
+  `false`. The normal ISO's Factory check entry is retitled; the Display
+  check entries live on the factory ISO only.
+- `resolve-container.yaml` pins `2026/07/13` to
+  `archlinux:base-20260712.0.555161` (ffos#187). 3.0.1 was built on
+  `archlinux:latest`, which no longer builds this snapshot (OpenSSL 4). The
+  ISO's packages and build tools still come from the snapshot.
+- `python` listed directly, `reflector` dropped (nothing calls it); the Arch
+  package Actions cache (Development builds only) and the three-attempt
+  build-dependency install retry (every build) (ffos#184); Tailscale key-expiry copy (ffos#176).
+
+Player: ff-player `main` `150071e7` (since 3.0.1's `73a1fe9b`): the claim
+panel without the same-Wi-Fi line (#347, required with #493), the pairing
+panel's scan-the-code copy (#342, the player half of #473), text artworks
+no longer blank and IPFS artwork seeds kept (#333), the setup
+version label (#340), repeat kept across displays (#339), the saved work
+shown with no network and the join code cleared after a minute (#338), DP-1
+conformance (#345, #348, and the signed playlist kept unchanged while
+shuffled, `2a62676d`), title cards (#343), the HEAD-and-GET source check
+(#337, already in 3.0.1).
+
+### Before dispatch
+
+- **Recorded after the first promotion.** #496 merged into `staging` with
+  "Full-image rail evidence" failing (no entry yet), and S1 (run
+  45861014876, 2026-11-26) was built from it, without #495. The owner then
+  added #495 to 3.1.0. This entry, #495, #498 and #499 reach `staging` by
+  the ordinary `develop -> staging` PR, opened only after #499 and this
+  entry are merged into `develop`, and right after: anything else that
+  lands on `develop` first is added to this entry before the promotion. S2
+  rebuilds 3.1.0 from it.
+- **S2 is a rebuild of the same version.** `feral-updater.sh` only OTAs to
+  a different version, so a Staging device that already took S1 never
+  receives S2. Before S2: confirm which Staging devices run S1, and reflash
+  every bench device from the S2 ISO (or move it with a manual update);
+  bench only on S2. Dispatch S2 outside the nightly update window (03:00
+  updater, 05:30 recovery): it overwrites the ISO, its signature, every
+  component package at the same pkgver and the staging repo db.
+- **Player.** S1 used `ff_player_ref=main`, which resolved to
+  `150071e7cc1d191240b657b2ccece889e1f70e67`. S2 and Production pin that
+  SHA, not `main`. (3.0.1's runs used `main` too, resolved to `73a1fe9b`,
+  not the `978266e` that entry pinned.)
+- **Client order (plan §5).** No client release precedes this image: the
+  released ff-app (1.9.35), ff-cli (4.3.0) and `@feralfile/display` (0.6.2)
+  keep working against it over the LAN and the device-ID channel; their
+  cost is the 120 s code (§13). The client releases follow it (After the
+  Production run).
+- **Bench a Staging image on an FF1**, with a release-mode app:
+  - 3.0.1 → 3.1.0 OTA of an `enrolled` device: the owner is kept, the
+    journal shows `v2_channel=keyed` and `v2_channel=device`,
+    `relay_v2_connected=1`, `getMediaHealth` answers, the setup screen shows
+    `3.1.0`.
+  - First owner with the phone on mobile data (an ff-app build with #1371):
+    enroll over the keyed channel, the QR comes down; a second phone with
+    the same code is refused; a code older than 120 s is refused; a code
+    scanned just before a repaint still enrolls.
+  - Released ff-app 1.9.35: first owner on the LAN, then control off it.
+  - Claimed, ownerless device off the LAN: "show your code" paints the QR;
+    a repeat while it shows answers `{"ok":true}`; the QR comes down after
+    10 minutes; the 4th gate run answers `rate_limited`; an `enrolled`
+    device answers `envelope_required`.
+  - Scan distance of the denser claim QR on a real panel; no "same Wi-Fi"
+    line.
+  - A kept work on screen: reboot with the WAN unplugged, the kept copy
+    plays; bring the WAN back, it keeps playing. A bare-CID IPFS work too.
+  - A large series document by URL (8.9 MiB) plays; a dynamicQuery
+    playlist over 50 items arrives whole; a signed playlist reports
+    `signatureStatus: valid`; an onchfs `startItem` deep in a wallet list
+    opens on it.
+  - Captive portal styled on iOS and Android.
+  - A text artwork renders (not blank); an IPFS work that takes a seed
+    keeps it (ff-player#333).
+  - #495 with the released ff-app 1.9.35: display an address playlist,
+    Favorites, a user playlist with a title over 200 characters, a single
+    work from search and a series from its page; the journal shows no
+    `refusing it`. ff-cli `play` of an agent-signed playlist is accepted
+    with `signatureStatus` `invalid` (`no feed or curator signature`).
+  - #495 cost on the FF1: display the largest Feral File series by URL
+    (about 9 MB) and time it against S1; send a 4 MiB non-conforming inline
+    document over the hub and a 16 MiB `playlistUrl` while art plays:
+    controld RSS, playback, `/api/status` and SoftAP stay responsive; a
+    legitimate display sent while 3-4 of those are in flight lands within a
+    few seconds; a refusal's reply and journal line stay short.
+  - A 3.0.1 device with offline-downloaded URL playlists and History
+    records: OTA, go offline, the cached playlist plays by URL and History
+    items replay; reboot with a persisted inline dynamic `displayAt`
+    schedule, it restores and boot time is unchanged.
+  - Normal ISO: Auto Install onto a test unit boots to the kiosk with no
+    tty1 autologin; its Factory check entry runs English-only, writes
+    nothing to the NVMe, and its readings go on after each Display check
+    pass.
+- **Factory ISO** (not part of this release's dispatches): built with
+  `factory_check=true` on a branch no device follows, `ffos_user_ref` at or
+  after this release. Its own bench: brightness returns to the original
+  level, L/R tones on the right sides, Bluetooth, the Display check
+  entries, and the pass after each reading returns to the kmscon reading
+  screen within about 130 s. Pull power only after the Brightness line shows (a panel keeps
+  a test level in its NVRAM).
+
+| Input | S1 Staging (dispatched, superseded) | S2 Staging (rebuild) | Production |
+|---|---|---|---|
+| `version` | `3.1.0` | `3.1.0` | `3.1.0` |
+| `soak-test` | `false` | `false` | `false` |
+| `factory_check` | `false` | `false` | `false` |
+| `environment` | `Staging` | `Staging` | `Production` |
+| `pacman_snapshot` | `2026/07/13` | `2026/07/13` | `2026/07/13` |
+| `ffos_user_ref` | `staging` (`4445b424`) | `staging` (with #495) | `release` |
+| `ff_player_ref` | `main` (resolved `150071e7cc1d191240b657b2ccece889e1f70e67`) | `150071e7cc1d191240b657b2ccece889e1f70e67` | same |
+| `dev_iso` | `false` | `false` | `false` |
+| `update_min_version` | `true` | `true` | `true` (plan §5: raises `min_runtime_version` to 3.1.0) |
+| `update_required_version` | `false` | `false` | `false` |
+| `update_recovery_version` | `false` | `false` | `false` |
+
+- `update_min_version` on Production moves `min_runtime_version` to
+  3.1.0, so every claimed device takes 3.1.0 at boot or overnight; that is
+  the gate for the ff-app and ff-cli releases below. Uncheck it only if the
+  operator wants a watch period first; raising it later then takes a
+  rebuild dispatch.
+- `recovery_version` stays 3.0.0 (Production, G3). A factory-reset device
+  boots 3.0.0 and its pre-claim gate updates it to 3.1.0 before any claim
+  QR paints. Moving it to 3.1.0 is a separate decision that needs the S2
+  reset bench (3.0.0 entry).
+- S1 was the first normal ISO built on the pinned container; its log
+  shows `archlinux:base-20260712.0.555161`. S2 and the Production run must
+  show the same.
+
+Agents never dispatch a Production run, and dispatch a Staging one only
+after explicit in-session confirmation (`scripts/agent-iso-build-guard.sh`).
+After the Production run, tag `v3.1.0` on the ffos-user
+`staging -> release` merge commit.
+
+### After the Production run (human, in this order)
+
+1. Watch the fleet version panel until devices below 3.1.0 are at or near
+   zero.
+2. ff-app force-updated release with #1371 (off-LAN setup starts working
+   here) and #1342; raise `app_update.ios.required_version` and
+   `app_update.android.required_version` to it; set
+   `features.offline_cache.displayed_min_ffos_version` = `"3.1.0"`.
+3. ff-cli release with #173 and remote config `cli_update.required_version`.
+4. `@feralfile/display` release with ff-send#42 (keyed channel first; gates
+   nothing).
+5. Close feral-file#3649 and #3633.
+
+### Known risks (accepted)
+
+- Sight of the screen is the whole first-owner credential: a photo of the
+  code works from anywhere for up to 120 s (spec §13).
+- Anyone with a device ID can make a claimed, ownerless device show its
+  code (3 runs × 10 minutes per controld process); whoever sees the screen
+  then takes owner tier. A stranger can spend the budget, blocking off-LAN
+  Secure until controld restarts (spec §13).
+- A device on the released app's 120 s code ends up claimed without an
+  owner more often until the ff-app release.
+- `relay_v2_connected` (gauge and LAN status) now means either channel is
+  up.
+- #495 runs the DP-1 schema synchronously on the display path inside
+  dp1-go's process-wide validation lock: about 3x the CPU per hostile
+  document of S1 (M3: 1.3 s for 4 MiB inline, 4.7 s for a 16 MiB
+  `playlistUrl`; FF1 2-3x slower), peak memory per document unchanged, and a
+  display may wait behind up to about four such passes. Bounded by the
+  command gate (1/s, burst 3 per command type, 4 heavy at once); hub and
+  SoftAP do not take the lock.
+- `playlistInvalid` is not mapped to a message in ff-app 1.9.35: a refused
+  display shows the generic failure; a schema-refused inline download
+  answers `resolve_failed`, `retryable:true`.
+- A History record written by 3.0.1 for a non-conforming item no longer
+  replays (`playlistInvalid`); every feed document sampled conforms.
+- An inline download with a forged `id` of `noid-<sha256>` can overwrite
+  an id-less `playlistUrl`'s offline record, breaking its offline fallback
+  (no content injection: the strict check refuses the forged record).
+- An agent-only signature (ff-cli's default role) reports `invalid`;
+  nothing acts on it today, a future badge would mislabel ff-cli displays.
+- `provenance.contract.seriesId` at most 2^53-1 is re-emitted as a JSON
+  number (ff-player and ff-app accept both).
+- A dynamicQuery resolver that ignores `{{offset}}` and keeps returning
+  valid pages is walked without bound on the refresher path (as in 3.0.1).
+- Up to one refresher pass (5 minutes) with no replay after internet
+  returns on an offline boot that ran no sync.
+- A device-created mint pairing has no absolute lifetime while a joined
+  browser keeps the broker channel busy.
+
+### Release notes (must say)
+
+- Set up an Art Computer from the code on its screen, on or off its Wi-Fi
+  (with the next Feral File app).
+- Keep the work on screen for offline play, even when another phone sent
+  it; a kept work plays after a reboot with no internet.
+
 ## 3.0.1 — full-image (paired with the ffos release)
 
 Everything on `develop` since `v3.0.0`. The ffos-user diff touches only

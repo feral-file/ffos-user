@@ -3,7 +3,6 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unit_checks="$repo_root/users/feralfile/scripts/unit-checks.sh"
-factory_check="$repo_root/users/feralfile/scripts/factory-check.sh"
 file_permissions="$repo_root/users/feralfile/.file_permissions.sh"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -34,7 +33,7 @@ for tool in bash env cat cut date gawk grep head jq mkdir mktemp od rm sed tail 
 done
 # No check may wait on the clock here.
 printf '#!/bin/sh\nexit 0\n' > "$base_bin/sleep"
-# FF_TEST_UID=0 is the live ISO: root, with a feralfile user to play sound as.
+# FF_TEST_UID=0 is the burn-in: root, with a feralfile user to play sound as.
 cat > "$base_bin/id" <<'EOF'
 #!/bin/sh
 case "$*" in
@@ -144,7 +143,7 @@ od -An -v -tu1 -w4 | gawk '
 EOF
 }
 
-# The live ISO's side of it: runuser hands the command to feralfile, systemctl
+# The burn-in's side of it: runuser hands the command to feralfile, systemctl
 # starts what is asked (FF_TEST_SYSTEMCTL=fails: it does not).
 root_stubs() {
   stub runuser <<'EOF'
@@ -194,7 +193,7 @@ expect "volume not restored" '^== Speakers +FAIL +the tones played, but the volu
 [ "$(grep -c '^set-sink-volume alsa_output.hdmi-stereo 26241 13107 ' "$tmp_dir/pactl.log")" = 6 ] || \
   fail "a volume that did not go back was not asked again: $(cat "$tmp_dir/pactl.log")"
 
-# As root on the live ISO: feralfile's PulseAudio, started when it is not up.
+# As root under the burn-in: feralfile's PulseAudio, started when it is not up.
 root_stubs
 : > "$tmp_dir/pactl.log"; : > "$tmp_dir/systemctl.log"; rm -f "$tmp_dir/user-manager"
 out=$(FF_TEST_UID=0 FF_TEST_PULSE=needs-start FF_TEST_SINK=alsa_output.hdmi-stereo check speakers) || \
@@ -279,7 +278,7 @@ expect "no adapter" '^== Bluetooth +FAIL +no Bluetooth adapter \(bluetoothd runs
 out=$(FF_TEST_BLUEZ=down FF_TEST_DISCOVERY=heard check bluetooth 2>&1) && fail "no bluetoothd passed"
 expect "no bluetoothd" '^== Bluetooth +FAIL +no Bluetooth adapter \(bluetoothd is not running\)' "$out"
 
-# As root on the live ISO, bluetoothd is started when it is not up.
+# As root under the burn-in, bluetoothd is started when it is not up.
 root_stubs
 : > "$tmp_dir/systemctl.log"; rm -f "$tmp_dir/bluetoothd"
 out=$(FF_TEST_UID=0 FF_TEST_BLUEZ=needs-start FF_TEST_DISCOVERY=heard check bluetooth) || fail "bluetooth did not pass as root:
@@ -331,40 +330,13 @@ $out"
 saved=$(sed -n 's/^saved //p' <<<"$out")
 jq -e '[.checks[].status] == ["SKIP", "SKIP", "SKIP"]' "$saved" >/dev/null || fail "skips were not recorded: $(cat "$saved")"
 
-# --- factory-check: the checks' lines reach the loop; brightness is stepped
-# until it has passed once, then left alone.
-
-ddcutil_stub; pulse_stubs; bluez_stubs
-: > "$tmp_dir/ddcutil.log"
-# shellcheck disable=SC2016
-out=$(TERM=xterm-256color FF_TEST_DDC=follow FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_BLUEZ=adapter FF_TEST_DISCOVERY=heard \
-  FF_SCRIPTS="$(dirname "$unit_checks")" FF_SCREEN=/dev/null run -c '
-    source "$1"; RESULTS="$2"
-    unit_checks 1; echo "$checks"; sets=$(grep -c setvcp "$FF_TEST_DIR/ddcutil.log")
-    unit_checks 2; echo "--"; echo "$checks"
-    [ "$sets" = "$(grep -c setvcp "$FF_TEST_DIR/ddcutil.log")" ] || echo "STEPPED AGAIN"' _ "$factory_check" "$tmp_dir/out")
-[ "$(sed -n '/^--$/q;p' <<<"$out" | grep -c '^== ')" = 3 ] || fail "the factory check did not collect three result lines:
-$out"
-second=$(sed '1,/^--$/d' <<<"$out")
-expect "brightness line kept from reading 1" '^== Brightness +PASS .*\(reading 1\)$' "$second"
-[ "$(grep -c '^== ' <<<"$second")" = 3 ] || fail "reading 2 does not show three result lines:
-$second"
-grep -q 'STEPPED AGAIN' <<<"$out" && fail "the factory check stepped the brightness again after it passed"
-[ "$(grep -c '^-- ' <<<"$second")" = 3 ] || fail "reading 2 does not show the three Chinese result lines:
-$second"
-expect "Chinese brightness line kept from reading 1" '^-- 亮度 通过：.*（第 1 轮）$' "$second"
-
 # The Linux text console cannot draw Chinese: there the lines are English only.
+ddcutil_stub; pulse_stubs; bluez_stubs
 out=$(TERM=linux FF_TEST_DDC=follow FF_TEST_SINK=alsa_output.hdmi-stereo FF_TEST_BLUEZ=adapter FF_TEST_DISCOVERY=heard \
   check record r1 -o "$tmp_dir/out") || fail "record failed on the Linux text console"
 grep -q '^-- ' <<<"$out" && fail "Chinese lines were printed on the Linux text console:
 $out"
 out=$(TERM=xterm-256color FF_TEST_DDC=follow check brightness)
 expect "Chinese brightness line" '^-- 亮度 通过：屏幕亮度跟随设置值' "$out"
-
-# shellcheck disable=SC2016
-out=$(FF_SCRIPTS="$tmp_dir/nowhere" FF_SCREEN=/dev/null run -c '
-  source "$1"; RESULTS="$2"; unit_checks 1; echo "$checks"' _ "$factory_check" "$tmp_dir/out")
-expect "missing unit-checks.sh" '^== unit checks did not run$' "$out"
 
 echo "test-unit-checks: OK"

@@ -146,7 +146,7 @@ func TestResolveSeriesCastPlan_MapsOnchfsEditionsInThePlan(t *testing.T) {
 	a, b := editionItem("a"), editionItem("b")
 	a.Source = "onchfs://" + caseyReasRoot + "/?fxhash=1"
 	b.Source = "onchfs://" + caseyReasRoot + "/?fxhash=2"
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(2, a, b))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(2, a, b))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) })
 

@@ -49,6 +49,14 @@ func setup(t *testing.T) *testSetup {
 
 	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false, true)
 
+	// Catalog editions are decoded one at a time through the JSON wrapper;
+	// decode those for real. Matched on the target type, so it never takes a
+	// call a test expects for a whole document.
+	mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.AssignableToTypeOf(&dp1playlist.PlaylistItem{})).
+		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) }).
+		AnyTimes()
+
 	return &testSetup{
 		ctrl:          ctrl,
 		ctx:           ctx,
@@ -73,11 +81,15 @@ func createMockResponse(statusCode int, body string) *http.Response {
 }
 
 // Helper function to create a mock playlist JSON
+const item1ID = "44444444-4444-4444-8444-444444444444"
+
 func createPlaylistJSON() string {
 	return `{
+		"dpVersion": "1.1.0",
+		"title": "Test Playlist",
 		"items": [
 			{
-				"id": "item1",
+				"id": "` + item1ID + `",
 				"title": "Test Item 1",
 				"source": "http://example.com/video1.mp4",
 				"duration": 300,
@@ -93,9 +105,11 @@ func createPlaylistJSON() string {
 // Helper function to create a mock dynamic playlist JSON
 func createDynamicPlaylistJSON() string {
 	return `{
+		"dpVersion": "1.1.0",
+		"title": "Test Playlist",
 		"items": [
 			{
-				"id": "item1",
+				"id": "` + item1ID + `",
 				"title": "Test Item 1",
 				"source": "http://example.com/video1.mp4",
 				"duration": 300,
@@ -127,7 +141,7 @@ func createMockTokens() []ffindexer.Token {
 	return []ffindexer.Token{
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1234567890abcdef",
 			TokenNumber:     "1",
 			Display: &ffindexer.Display{
@@ -137,7 +151,7 @@ func createMockTokens() []ffindexer.Token {
 		},
 		{
 			Chain:           "tezos",
-			Standard:        "FA2",
+			Standard:        "fa2",
 			ContractAddress: "0xabcdef1234567890",
 			TokenNumber:     "2",
 			Display: &ffindexer.Display{
@@ -162,7 +176,7 @@ func createSimpleToken(tokenID, chain string, ownerAddr string, quantity int) ff
 
 	token := ffindexer.Token{
 		Chain:           chain,
-		Standard:        "ERC721",
+		Standard:        "erc721",
 		ContractAddress: "0x1234567890abcdef",
 		TokenNumber:     tokenNumber,
 		Display: &ffindexer.Display{
@@ -199,7 +213,7 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 			playlist := v.(*dp1.Playlist)
 			playlist.Items = []dp1playlist.PlaylistItem{
 				{
-					ID:       "item1",
+					ID:       item1ID,
 					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
 					Duration: float64Ptr(300),
@@ -215,7 +229,7 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 1)
-	assert.Equal(t, "item1", result.Items[0].ID)
+	assert.Equal(t, item1ID, result.Items[0].ID)
 	assert.Equal(t, "Test Item 1", result.Items[0].Title)
 	assert.Equal(t, 300.0, *result.Items[0].Duration)
 	assert.Equal(t, "open", result.Items[0].License)
@@ -246,7 +260,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 			playlist := v.(*dp1.Playlist)
 			playlist.Items = []dp1playlist.PlaylistItem{
 				{
-					ID:       "item1",
+					ID:       item1ID,
 					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
 					Duration: float64Ptr(300),
@@ -909,7 +923,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 
 			token := ffindexer.Token{
 				Chain:           tt.input,
-				Standard:        "ERC721",
+				Standard:        "erc721",
 				ContractAddress: "0x123",
 				TokenNumber:     "1",
 				Display: &ffindexer.Display{
@@ -1091,7 +1105,7 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 	mockTokens := []ffindexer.Token{
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1111111111111111",
 			TokenNumber:     "100",
 			Display: &ffindexer.Display{
@@ -1101,7 +1115,7 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 		},
 		{
 			Chain:           "tezos",
-			Standard:        "FA2",
+			Standard:        "fa2",
 			ContractAddress: "0x2222222222222222",
 			TokenNumber:     "200",
 			Display: &ffindexer.Display{
@@ -1161,7 +1175,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 	mockTokens := []ffindexer.Token{
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1111111111111111",
 			TokenNumber:     "100",
 			Display: &ffindexer.Display{
@@ -1171,7 +1185,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 		},
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x2222222222222222",
 			TokenNumber:     "200",
 			Display: &ffindexer.Display{
@@ -1183,7 +1197,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 		// This will generate the same ID as token 1
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1111111111111111", // Same as token 1
 			TokenNumber:     "100",                // Same as token 1
 			Display: &ffindexer.Display{

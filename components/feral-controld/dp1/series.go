@@ -2,8 +2,10 @@ package dp1
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"time"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
@@ -206,8 +208,10 @@ func (m SeriesArtworkModel) HasDistinctEditions() bool {
 // ff-player group the run — and its grouping default is what makes that
 // harmful; see the note on seriesEditions.
 type catalogEditions struct {
-	Total  int                        `json:"total"`
-	Items  []dp1playlist.PlaylistItem `json:"items"`
+	Total int `json:"total"`
+	// Raw, so each edition is judged by the schema as the catalog sent it and
+	// one that fails does not take the others with it.
+	Items  []json.RawMessage `json:"items"`
 	Series struct {
 		ArtworkModel SeriesArtworkModel `json:"artworkModel"`
 	} `json:"series"`
@@ -516,11 +520,14 @@ func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1pla
 	// its items go straight into the playlist. Only the cap is applied here:
 	// one request asks for seriesPageLimit, and a series larger than that is
 	// played in part rather than not at all.
-	editions := answer.Items
-	if len(editions) > seriesPageLimit {
-		editions = editions[:seriesPageLimit]
+	raws := answer.Items
+	if len(raws) > seriesPageLimit {
+		raws = raws[:seriesPageLimit]
 	}
-	if answer.Total > len(editions) {
+	// Dropping every edition leaves the series item's representative playing,
+	// the same shape as a catalog that answered with none.
+	editions := d.conformingEditions(playlistID, item, raws)
+	if answer.Total > len(raws) {
 		d.logger.Info("series expanded in part",
 			zap.String("playlist_id", playlistID),
 			zap.String("item_slug", item.Slug),
@@ -528,6 +535,26 @@ func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1pla
 			zap.Int("total", answer.Total))
 	}
 	return editions, answer.Series.ArtworkModel, nil
+}
+
+// conformingEditions decodes the editions that conform to the schema.
+func (d *dp1) conformingEditions(playlistID string, series dp1playlist.PlaylistItem, raws []json.RawMessage) []dp1playlist.PlaylistItem {
+	editions := make([]dp1playlist.PlaylistItem, 0, len(raws))
+	for i, raw := range raws {
+		var edition dp1playlist.PlaylistItem
+		err := checkItem(raw)
+		if err == nil {
+			err = d.json.Unmarshal(stripCaseVariants(raw, reflect.TypeOf(edition)), &edition)
+		}
+		if err != nil {
+			d.logger.Warn("dropping a series edition that does not conform to the schema",
+				zap.String("playlist_id", playlistID), zap.String("item_slug", series.Slug),
+				zap.Int("edition_index", i), zap.Error(err))
+			continue
+		}
+		editions = append(editions, edition)
+	}
+	return editions
 }
 
 // buildCatalogEditionsURL is the catalog's editions route for one series

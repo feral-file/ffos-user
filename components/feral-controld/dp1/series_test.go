@@ -11,6 +11,7 @@ import (
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,7 +33,7 @@ import (
 func seriesItem() dp1playlist.PlaylistItem {
 	seriesID := dp1playlist.SeriesID("387")
 	return dp1playlist.PlaylistItem{
-		ID:     "item-series",
+		ID:     itemSeriesID,
 		Slug:   "scrampled-auw",
 		Title:  "Scrampled",
 		Source: "https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4",
@@ -46,9 +47,16 @@ func seriesItem() dp1playlist.PlaylistItem {
 	}
 }
 
-func editionItem(id string) dp1playlist.PlaylistItem {
+// uid is the UUID a fixture item named `name` carries: the DP-1 schema takes
+// no other id shape.
+func uid(name string) string { return uuid.NewSHA1(uuid.Nil, []byte(name)).String() }
+
+var itemSeriesID = uid("item-series")
+
+func editionItem(name string) dp1playlist.PlaylistItem {
+	id := name
 	return dp1playlist.PlaylistItem{
-		ID:     id,
+		ID:     uid(name),
 		Source: "https://example.com/" + id + ".mp4",
 		Provenance: &dp1playlist.ProvenanceBlock{
 			Type: dp1playlist.ProvenanceOnChain,
@@ -63,7 +71,7 @@ func editionItem(id string) dp1playlist.PlaylistItem {
 
 // servePlaylist wires the HTTP/IO/JSON mocks to hand back one playlist.
 func servePlaylist(ts *testSetup, url string, items []dp1playlist.PlaylistItem) {
-	body := `{"dpVersion":"1.0.0"}`
+	body := `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://example.com/stub.mp4"}]}`
 	ts.mockHTTP.EXPECT().Get(url).
 		Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
@@ -129,7 +137,7 @@ func editionsBodyWithModel(total int, artworkModel dp1.SeriesArtworkModel, items
 	envelope := map[string]any{
 		"revisionId": "editions_e4c3a49b8bf7f92c7b2697b58234f03c47c51868199d359e1bb7fd94ca8a0ba8",
 		"playlistId": "playlist-1",
-		"itemId":     "item-series",
+		"itemId":     itemSeriesID,
 		"series":     series,
 		"total":      total,
 		"limit":      255,
@@ -149,7 +157,7 @@ func TestDP1_ExpandsASeriesIntoItsEditionsFromTheCatalog(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, editionItem("a"), editionItem("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -169,7 +177,7 @@ func TestDP1_KeepsASeriesWhenTheCatalogIsUnreachable(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(nil, errors.New("catalog unreachable"))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -178,7 +186,7 @@ func TestDP1_KeepsASeriesWhenTheCatalogIsUnreachable(t *testing.T) {
 	// catalog was down is the one outcome this must not produce.
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, itemSeriesID, result.Items[0].ID)
 	assert.Equal(t, dp1playlist.ProvenanceSeriesRegistry, result.Items[0].Provenance.Type)
 }
 
@@ -190,14 +198,14 @@ func TestDP1_KeepsASeriesThePlaylistTheCatalogDoesNotHold(t *testing.T) {
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
 	// A display request of something never published, or an older channel revision:
 	// the catalog 404s and the body is never read.
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(createMockResponse(http.StatusNotFound, `{"status":404}`), nil)
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, itemSeriesID, result.Items[0].ID)
 }
 
 func TestDP1_KeepsASeriesTheCatalogReturnsNoEditionsFor(t *testing.T) {
@@ -206,13 +214,13 @@ func TestDP1_KeepsASeriesTheCatalogReturnsNoEditionsFor(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(0))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(0))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
 
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, itemSeriesID, result.Items[0].ID)
 }
 
 func TestDP1_LeavesEditionItemsAlone(t *testing.T) {
@@ -230,7 +238,7 @@ func TestDP1_LeavesEditionItemsAlone(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, result.Items, 2)
-	assert.Equal(t, []string{"a", "b"}, []string{result.Items[0].ID, result.Items[1].ID})
+	assert.Equal(t, []string{uid("a"), uid("b")}, []string{result.Items[0].ID, result.Items[1].ID})
 }
 
 func TestDP1_ExpandsOnlyTheSeriesInAMixedPlaylist(t *testing.T) {
@@ -243,7 +251,7 @@ func TestDP1_ExpandsOnlyTheSeriesInAMixedPlaylist(t *testing.T) {
 		seriesItem(),
 		editionItem("after"),
 	})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, editionItem("a"), editionItem("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -251,8 +259,8 @@ func TestDP1_ExpandsOnlyTheSeriesInAMixedPlaylist(t *testing.T) {
 	require.NoError(t, err)
 	// The curated items keep their places around the editions.
 	require.Len(t, result.Items, 4)
-	assert.Equal(t, "before", result.Items[0].ID)
-	assert.Equal(t, "after", result.Items[3].ID)
+	assert.Equal(t, uid("before"), result.Items[0].ID)
+	assert.Equal(t, uid("after"), result.Items[3].ID)
 }
 
 func TestDP1_SeriesWithNoItemIDStaysAsItIs(t *testing.T) {
@@ -288,7 +296,7 @@ func TestDP1_SeriesStaysUnexpandedWhenThePlaylistHasNoID(t *testing.T) {
 	defer ts.teardown()
 
 	url := "http://example.com/exhibition.json"
-	body := `{"dpVersion":"1.0.0"}`
+	body := `{"dpVersion":"1.0.0","title":"t","items":[{"source":"https://example.com/stub.mp4"}]}`
 	ts.mockHTTP.EXPECT().Get(url).Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
 	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
@@ -325,11 +333,11 @@ func TestDP1_A256BitSeriesIDOnAnEditionExpands(t *testing.T) {
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
 
 	const bigSeriesID = "8520038953287439433536834341059117372268365319568716555346026339118809853347"
-	body := fmt.Sprintf(`{"total":1,"items":[{"id":"a","source":"https://example.com/a.mp4",`+
+	body := fmt.Sprintf(`{"total":1,"items":[{"id":"`+uid("a")+`","source":"https://example.com/a.mp4",`+
 		`"provenance":{"type":"onChain","contract":{"chain":"evm","standard":"erc721",`+
 		`"address":"0xe59B7D60d7d7183E09d8ABb6DF8B20EB4CF66632","tokenId":%[1]q,"seriesId":%[1]q}}}]}`,
 		bigSeriesID)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(createMockResponse(http.StatusOK, body), nil)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(body), nil)
 	ts.mockJSON.EXPECT().Unmarshal([]byte(body), gomock.Any()).
@@ -339,7 +347,7 @@ func TestDP1_A256BitSeriesIDOnAnEditionExpands(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "a", result.Items[0].ID)
+	assert.Equal(t, uid("a"), result.Items[0].ID)
 	require.NotNil(t, result.Items[0].Provenance.Contract.SeriesID)
 	assert.Equal(t, dp1playlist.SeriesID(bigSeriesID), *result.Items[0].Provenance.Contract.SeriesID)
 }
@@ -363,7 +371,7 @@ func TestDP1_CastCapHoldsAcrossPlainAndExpandedAppends(t *testing.T) {
 		items = append(items, editionItem(fmt.Sprintf("plain-%d", i)))
 	}
 	servePlaylist(ts, url, items)
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, editionItem("a"), editionItem("b")))
 
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
@@ -386,7 +394,7 @@ func TestDP1_CastCapHoldsWhenASeriesKeepsItsRepresentative(t *testing.T) {
 		items = append(items, editionItem(fmt.Sprintf("plain-%d", i)))
 	}
 	servePlaylist(ts, url, items)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(nil, errors.New("catalog unreachable"))
 
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
@@ -472,7 +480,7 @@ func TestDP1_ExpandedEditionsInheritTheSeriesItemsInstanceFields(t *testing.T) {
 
 			url := "http://example.com/exhibition.json"
 			servePlaylist(ts, url, []dp1playlist.PlaylistItem{tt.series()})
-			serveEditions(ts, "playlist-1", "item-series",
+			serveEditions(ts, "playlist-1", itemSeriesID,
 				editionsBody(2, editionItem("a"), editionItem("b")))
 
 			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -500,7 +508,7 @@ func TestDP1_EachExpandedEditionOwnsItsCopyOfTheInstanceFields(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, editionItem("a"), editionItem("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -545,7 +553,7 @@ func TestDP1_AnEditionsOwnSeriesIDSurvivesExpansion(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, labeledEditionItem("a", seriesID), labeledEditionItem("b", seriesID)))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -613,7 +621,7 @@ func TestDP1_OnlyTheWholeSeriesFormIsExpanded(t *testing.T) {
 
 			require.NoError(t, err)
 			require.Len(t, result.Items, 1)
-			assert.Equal(t, "item-series", result.Items[0].ID)
+			assert.Equal(t, itemSeriesID, result.Items[0].ID)
 		})
 	}
 }
@@ -663,11 +671,11 @@ func TestDP1_PlaybackSettingsStandAsTheCatalogMergedThem(t *testing.T) {
 	catalogCopy := func(id string) dp1playlist.PlaylistItem {
 		edition := editionWithDuration(id, 5)
 		edition.License = "token"
-		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "cover"}
+		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "fill"}
 		edition.Override = encjson.RawMessage(`{"ff":{"hint":"catalog"}}`)
 		return edition
 	}
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, catalogCopy("a"), catalogCopy("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -679,7 +687,7 @@ func TestDP1_PlaybackSettingsStandAsTheCatalogMergedThem(t *testing.T) {
 		assert.Equal(t, float64(5), *edition.Duration)
 		assert.Equal(t, "token", edition.License)
 		require.NotNil(t, edition.Display)
-		assert.Equal(t, "cover", edition.Display.Scaling)
+		assert.Equal(t, "fill", edition.Display.Scaling)
 		assert.JSONEq(t, `{"ff":{"hint":"catalog"}}`, string(edition.Override))
 	}
 	// Still per edition, not shared: DisplayPrefs is a struct of pointers, so
@@ -703,7 +711,7 @@ func TestDP1_AnEditionsOwnPlaybackSettingSurvivesExpansion(t *testing.T) {
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, editionWithDuration("a", 5), editionWithDuration("b", 7)))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -726,7 +734,7 @@ func TestDP1_ASeriesItemStatingNoPlaybackSettingsLeavesTheEditionsAlone(t *testi
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, editionWithDuration("a", 5), editionWithDuration("b", 5)))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -760,7 +768,7 @@ func TestDP1_EditionsThatDifferAreLeftAsTheyArrived(t *testing.T) {
 	// Two editions carry 5 and one carries 7. Which of those the catalog
 	// supplied and which an edition stated is exactly what the answer does
 	// not say.
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(3,
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(3,
 		editionWithDuration("a", 5),
 		editionWithDuration("b", 7),
 		editionWithDuration("c", 5)))
@@ -799,7 +807,7 @@ func TestDP1_EditionsThatShareAnOverrideKeepIt(t *testing.T) {
 	item := seriesItem()
 	item.Duration = durationOf(5)
 	item.License = "token"
-	item.Display = &dp1playlist.DisplayPrefs{Scaling: "cover"}
+	item.Display = &dp1playlist.DisplayPrefs{Scaling: "fill"}
 	item.Override = encjson.RawMessage(`{"ff":{"hint":"series"}}`)
 
 	stated := func(id string) dp1playlist.PlaylistItem {
@@ -812,14 +820,14 @@ func TestDP1_EditionsThatShareAnOverrideKeepIt(t *testing.T) {
 	inherited := func(id string) dp1playlist.PlaylistItem {
 		edition := editionWithDuration(id, 5)
 		edition.License = "token"
-		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "cover"}
+		edition.Display = &dp1playlist.DisplayPrefs{Scaling: "fill"}
 		edition.Override = encjson.RawMessage(`{"ff":{"hint":"series"}}`)
 		return edition
 	}
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(3, stated("a"), stated("b"), inherited("c")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -834,7 +842,7 @@ func TestDP1_EditionsThatShareAnOverrideKeepIt(t *testing.T) {
 			hint     string
 		}{
 			true:  {20, "open", "fit", "edition"},
-			false: {5, "token", "cover", "series"},
+			false: {5, "token", "fill", "series"},
 		}[i < 2]
 		require.NotNil(t, edition.Duration)
 		assert.Equal(t, want.duration, *edition.Duration)
@@ -869,7 +877,7 @@ func TestDP1_AStaleCatalogScheduleDoesNotSurviveExpansion(t *testing.T) {
 	url := "http://example.com/exhibition.json"
 	// The series item in hand states no schedule at all.
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, staleSchedule("a"), staleSchedule("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -898,7 +906,7 @@ func TestDP1_ACatalogContentRatingSurvivesASeriesItemThatStatesNone(t *testing.T
 
 	url := "http://example.com/exhibition.json"
 	servePlaylist(ts, url, []dp1playlist.PlaylistItem{seriesItem()})
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBody(2, rated("a"), rated("b")))
 
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -938,7 +946,7 @@ func TestDP1_TheExpansionWalkSpendsABoundedNumberOfCatalogCalls(t *testing.T) {
 	// Every permitted call answers "no editions", so each series keeps its
 	// representative and the result length is not what bounds the walk.
 	empty := editionsBody(0)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(createMockResponse(http.StatusOK, empty), nil).Times(255)
 	ts.mockIO.EXPECT().ReadAll(gomock.Any()).Return([]byte(empty), nil).Times(255)
 	ts.mockJSON.EXPECT().Unmarshal([]byte(empty), gomock.Any()).
@@ -973,7 +981,7 @@ func TestDP1_ADoneContextStopsTheExpansionWalk(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	assert.Equal(t, "item-series", result.Items[0].ID)
+	assert.Equal(t, itemSeriesID, result.Items[0].ID)
 }
 
 // Expansion may tighten an edition's rating, never loosen it. A `general`
@@ -1061,7 +1069,7 @@ func TestDP1_ExpansionNeverLoosensAnEditionsContentRating(t *testing.T) {
 
 			url := "http://example.com/exhibition.json"
 			servePlaylist(ts, url, []dp1playlist.PlaylistItem{item})
-			serveEditions(ts, "playlist-1", "item-series",
+			serveEditions(ts, "playlist-1", itemSeriesID,
 				editionsBody(2, edition("a"), edition("b")))
 
 			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -1146,7 +1154,7 @@ func TestDP1_ExpandedEditionReasonsFollowTheRatingThatWasApplied(t *testing.T) {
 
 			url := "http://example.com/exhibition.json"
 			servePlaylist(ts, url, []dp1playlist.PlaylistItem{tt.series(seriesItem())})
-			serveEditions(ts, "playlist-1", "item-series",
+			serveEditions(ts, "playlist-1", itemSeriesID,
 				editionsBody(2, tt.edition(editionItem("a")), tt.edition(editionItem("b"))))
 
 			result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)

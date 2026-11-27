@@ -66,7 +66,7 @@ func TestDP1_ProcessPlaylistURLForCast_AttachesVerdict(t *testing.T) {
 	defer ts.teardown()
 
 	url := "https://feed.example/p.json"
-	expectFetch(ts, url, []byte(`{"dpVersion":"1.1.0","title":"t","items":[]}`), func(p *dp1.Playlist) { p.ID = "pl-1" })
+	expectFetch(ts, url, []byte(`{"dpVersion":"1.1.0","title":"t","items":[{"source":"https://example.com/a.html"}]}`), func(p *dp1.Playlist) { p.ID = "pl-1" })
 
 	result, _, err := ts.client.ProcessPlaylistURLForCast(ts.ctx, url, nil)
 
@@ -148,10 +148,11 @@ func TestDP1_ProcessPlaylistURLForCast_FormattedSizeNearRealResponse_Admitted(t 
 	url := "https://feed.example/crystalline-work-sdk.json"
 	// contentrating.ValidatePlaylistFragment runs on the raw bytes ahead of
 	// the (mocked) decode, so the body must still be valid JSON — padded
-	// inside the title string to reach the real fetched size without
-	// touching the schema it validates.
-	const prefix = `{"dpVersion":"1.1.0","title":"`
-	const suffix = `","items":[]}`
+	// inside a string member to reach the real fetched size without
+	// breaking the schema: an unknown member takes it, the title being capped at
+	// 200 characters.
+	const prefix = `{"dpVersion":"1.1.0","title":"t","items":[{"source":"https://example.com/a.html"}],"padding":"`
+	const suffix = `"}`
 	padding := strings.Repeat("x", crystallineWorkSDKFetchedBytes-len(prefix)-len(suffix))
 	body := []byte(prefix + padding + suffix)
 	require.Len(t, body, crystallineWorkSDKFetchedBytes)
