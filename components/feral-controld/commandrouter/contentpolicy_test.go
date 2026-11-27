@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1540,6 +1541,17 @@ func TestValidationPointersCapsASenderChosenMemberName(t *testing.T) {
 	multi := "/" + strings.Repeat("é", 200) // 2-byte runes: 256 falls mid-rune
 	got = dp1.ValidationPointers(errors.New("x\n- at '" + multi + "': bad"))
 	require.True(t, utf8.ValidString(got[0]))
+
+	// Many failing items (a content-rating fragment error, a checkItem error)
+	// name only the first few locations.
+	var many strings.Builder
+	many.WriteString("validation failed")
+	for i := 0; i < 100000; i++ {
+		fmt.Fprintf(&many, "\n- at '/items/%d/contentRating': got number, want object", i)
+	}
+	got = dp1.ValidationPointers(errors.New(many.String()))
+	require.Len(t, got, 10)
+	require.Equal(t, "/items/0/contentRating", got[0])
 
 	short := "/items/3/source"
 	require.Equal(t, []string{short}, dp1.ValidationPointers(errors.New("x\n- at '"+short+"': bad")))

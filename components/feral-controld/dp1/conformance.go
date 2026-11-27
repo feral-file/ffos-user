@@ -26,7 +26,8 @@ var dpVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 // document controld writes itself.
 const MaxPlaylistTitle = 200
 
-// maxSchemaPointers bounds how many violation locations one refusal names.
+// maxSchemaPointers bounds how many violation locations ValidationPointers
+// returns, so every refusal and log built from it names at most this many.
 const maxSchemaPointers = 10
 
 // SchemaError is the refusal of a document that does not conform to the DP-1
@@ -82,11 +83,7 @@ func CheckPlayable(logger *zap.Logger, source string, raw []byte) error {
 		return refuse(logger, source, []string{"/"})
 	}
 	if err := dp1sdk.PlaylistWithPlaylistsAndContentRatingExtensionsSchemaValidate(checked); err != nil {
-		pointers := ValidationPointers(err)
-		if len(pointers) > maxSchemaPointers {
-			pointers = pointers[:maxSchemaPointers]
-		}
-		return refuse(logger, source, pointers)
+		return refuse(logger, source, ValidationPointers(err))
 	}
 	return nil
 }

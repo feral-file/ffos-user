@@ -39,8 +39,10 @@ import (
 // additionalProperties a pointer can carry a key of any length (a 4 MiB body
 // can make one pointer about 4 MiB), and every refusal is both replied and
 // logged. So each pointer is cut to maxPointerBytes, on a rune boundary,
-// with a trailing "…" marking the cut; the location stays readable, the
-// reply and the log stay small.
+// with a trailing "…" marking the cut, and at most maxSchemaPointers distinct
+// pointers are returned (a body with many failing items or keys names only
+// the first ones): every sink, the reply included, stays about 10 × 259
+// bytes whatever the body.
 func ValidationPointers(err error) []string {
 	if err == nil {
 		return nil
@@ -72,6 +74,9 @@ func ValidationPointers(err error) []string {
 		if !seen[pointer] {
 			seen[pointer] = true
 			out = append(out, pointer)
+			if len(out) == maxSchemaPointers {
+				break
+			}
 		}
 	}
 	return out
