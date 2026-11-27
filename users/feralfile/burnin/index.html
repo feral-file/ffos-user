@@ -65,20 +65,28 @@ const q = new URLSearchParams(location.search);
 const FAST = Math.max(1, Number(q.get('fast')) || 1);
 const $ = id => document.getElementById(id);
 const card = $('card'), frame = $('frame'), video = $('video'), dot = $('dot');
-const now = () => Date.now() / 1000;
 const sleep = s => new Promise(r => setTimeout(r, (s / FAST) * 1000));
 let status = null, stats = B.emptyStats();
 // The page's monotonic clock, for staleness (burnin.js trackFreshness).
 const mono = () => performance.now() / 1000;
 let fresh = { seen: undefined, at: mono() };
 const stale = () => B.staleFor(fresh, mono());
+// The unit's uptime now: the last sampled /proc/uptime plus the page's own
+// monotonic time since that read. Session time and deadlines use this, never
+// Date.now(): timesyncd may step the wall clock on this boot.
+let upClock = null;
+const uptimeNow = () => B.uptimeAt(upClock, mono());
+const runningNow = () => B.running(status, uptimeNow());
 
 // status.json: rewritten by ff1-burnin.sh every few seconds. A failed read
 // keeps the last one; the verdict turns red if it goes stale.
 async function readStatus() {
   try {
     const r = await fetch('/status.json?' + Date.now(), { cache: 'no-store' });
-    if (r.ok) { status = await r.json(); fresh = B.trackFreshness(fresh, status.updated_at, mono()); }
+    if (r.ok) {
+      status = await r.json(); fresh = B.trackFreshness(fresh, status.updated_at, mono());
+      upClock = B.advanceUptime(upClock, status.sys && status.sys.uptime, mono());
+    }
   } catch (e) { /* keep the last status */ }
 }
 setInterval(readStatus, 3000);
@@ -87,7 +95,7 @@ const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&
 function header(title, zh) {
   const st = status || {};
   return `<h1>${esc(title)} <span class="zh">${esc(zh)}</span></h1>
-    <h2>${esc(st.board || 'FF1')} · ${esc(st.version || '')} · running ${B.hms(st.started_at ? now() - st.started_at : 0)}</h2>`;
+    <h2>${esc(st.board || 'FF1')} · ${esc(st.version || '')} · running ${B.hms(runningNow() ?? 0)}</h2>`;
 }
 // clip(s, n): one card line's worth of a detail string (the JSON keeps it all).
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -98,7 +106,7 @@ function checksTable() {
 }
 function qrSvg() {
   const qr = qrcode(0, 'L');
-  qr.addData(B.qrPayload(status, stats, now(), stale()), 'Byte');
+  qr.addData(B.qrPayload(status, stats, runningNow(), stale()), 'Byte');
   qr.make();
   return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
 }
@@ -138,7 +146,7 @@ async function checksPhase() {
 
 async function resultPhase() {
   // A Chromium restart after the card's time goes straight to the loop.
-  const left = FAST === 1 ? B.resultCardUntil(status) - now() : B.RESULT_SECONDS;
+  const left = FAST === 1 ? B.resultCardLeft(status, uptimeNow()) : B.RESULT_SECONDS;
   if (left <= 0) return;
   // The panel's own rate, measured on this still card, is what the slides
   // and the video are judged against.
@@ -158,7 +166,7 @@ function tickDot() {
   dot.classList.toggle('bad', !v.ok);
   // The title carries the verdict too, for a test driving the page headless.
   document.title = `FF1 burn-in: ${v.ok ? 'OK' : 'FAILED ' + v.reasons.join('; ')} (passes ${stats.passes})`;
-  dot.querySelector('span').textContent = B.hms(status && status.started_at ? now() - status.started_at : 0);
+  dot.querySelector('span').textContent = B.hms(runningNow() ?? 0);
 }
 setInterval(tickDot, 1000);
 
@@ -184,12 +192,19 @@ function countFrames(seconds) {
 // frameReady(seg) -> true once seg.ready matches in the frame's document (same
 // origin: everything comes from the loopback server), false after
 // START_SECONDS.
+// srcFor(seg): the frame's URL. ?fast= also speeds the display-check page's
+// own slides (its ?seconds=), so a fast run reaches every slide.
+function srcFor(seg) {
+  if (FAST === 1 || !seg.src.startsWith('/display-check/')) return seg.src;
+  return seg.src + (seg.src.includes('?') ? '&' : '?') + 'seconds=' + Math.max(1, Math.floor(10 / FAST));
+}
+
 async function frameReady(seg) {
-  const end = now() + B.START_SECONDS / FAST;
-  while (now() < end) {
+  const end = mono() + B.START_SECONDS / FAST;
+  while (mono() < end) {
     try {
       const doc = frame.contentDocument;
-      if (doc && doc.location.pathname + doc.location.search === seg.src && doc.querySelector(seg.ready)) return true;
+      if (doc && doc.location.pathname + doc.location.search === srcFor(seg) && doc.querySelector(seg.ready)) return true;
     } catch (e) { /* not readable yet */ }
     await new Promise(r => setTimeout(r, 250));
   }
@@ -235,7 +250,7 @@ async function runSegment(seg) {
     const decoded = q1.totalVideoFrames - q0.totalVideoFrames;
     stats = B.recordVideo(stats, q1.droppedVideoFrames - q0.droppedVideoFrames, decoded);
   } else {
-    frame.src = seg.src; frame.classList.remove('hidden');
+    frame.src = srcFor(seg); frame.classList.remove('hidden');
     // Frames drawn by this document prove nothing about the frame's content:
     // wait for the segment's own ready signal, or latch it as not loaded.
     if (!(await frameReady(seg))) {
@@ -243,7 +258,20 @@ async function runSegment(seg) {
       stats = B.fail(stats, `${seg.id} did not load`);
       return;
     }
+    // The display-check page reports its own explicit failures in #stat
+    // (a clip that did not play, no WebGL); latch them before the frame goes.
+    // Its pacing verdicts are not taken: this page judges frame rate itself,
+    // against the panel's measured rate.
+    const pageFails = new Set();
+    const collect = setInterval(() => {
+      try {
+        const st = frame.contentDocument.getElementById('stat');
+        if (st && st.classList.contains('bad') && /DID NOT PLAY|NO WEBGL/.test(st.textContent)) pageFails.add(st.textContent.trim());
+      } catch (e) { /* frame gone */ }
+    }, 1000 / FAST);
     const r = await countFrames(seg.seconds);
+    clearInterval(collect);
+    for (const f of pageFails) stats = B.fail(stats, `${seg.id}: ${f}`);
     frame.src = 'about:blank'; frame.classList.add('hidden');
     stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
   }

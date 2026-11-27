@@ -44,13 +44,20 @@ size=$(du -sb "$page_dir" | cut -f1)
 
 # A segment's frame counts as its own only with the query too: the Panel Check
 # is the display-check page with ?set=panel.
-grep -Fq 'doc.location.pathname + doc.location.search === seg.src' "$page_dir/index.html" || \
+grep -Fq 'doc.location.pathname + doc.location.search === srcFor(seg)' "$page_dir/index.html" || \
   fail "index.html's frameReady must compare the path and the query"
 
 # The clip must keep playing for the whole segment (a freeze after it started
 # is a failure), and a card too full for the panel shrinks rather than cuts.
 grep -Fq "B.fail(stats, 'video stalled')" "$page_dir/index.html" || fail "index.html no longer watches the clip's progress"
 grep -Fq 'fitCard();' "$page_dir/index.html" || fail "index.html no longer fits the card to the panel"
+# The display-check page's own playback failures latch (it reports them in #stat).
+grep -Fq "DID NOT PLAY|NO WEBGL" "$page_dir/index.html" || fail "index.html no longer collects display-check's playback failures"
+grep -Fq "'VIDEO DID NOT PLAY'" "$display_page" || fail "display-check no longer reports a clip that did not play the way burnin collects it"
+# Session time and deadlines never come from the wall clock.
+if grep -nE 'Date\.now\(\) */ *1000|now\(\) *- *(status|st)\.(started_at|checks_done_at)' "$page_dir/index.html"; then
+  fail "index.html times the session with the wall clock"
+fi
 
 # --- ff1-burnin.sh helpers ----------------------------------------------------
 # shellcheck source=/dev/null
@@ -108,7 +115,7 @@ LOG
 # previous_session: the newest earlier last.json; this session's is ignored.
 mkdir -p "$tmp_dir/log/20260101-000000" "$tmp_dir/log/20260102-000000" "$tmp_dir/log/20260103-000000"
 echo '{"started_at":1000,"updated_at":4600,"sys":{"kernel_errors":0,"restarts":1}}' >"$tmp_dir/log/20260101-000000/last.json"
-echo '{"started_at":5000,"updated_at":27200,"sys":{"kernel_errors":2,"restarts":0}}' >"$tmp_dir/log/20260102-000000/last.json"
+echo '{"started_at":5000,"updated_at":27200,"started_uptime":100,"sys":{"uptime":22300,"kernel_errors":2,"restarts":0}}' >"$tmp_dir/log/20260102-000000/last.json"
 echo '{"started_at":9,"updated_at":9,"sys":{}}' >"$tmp_dir/log/20260103-000000/last.json"
 got=$(previous_session "$tmp_dir/log" 20260103-000000)
 [ "$got" = '{"ran":22200,"last":"1970-01-01T07:33:20Z","kernel_errors":2,"restarts":0}' ] || fail "previous_session: $got"
@@ -139,15 +146,15 @@ prune_sessions "$tmp_dir/log" 2
 # status_json: the shape burnin.js reads.
 RUN_DIR="$tmp_dir/run"; mkdir -p "$RUN_DIR"
 # shellcheck disable=SC2034 # read by status_json
-BOARD=FF1-TEST VERSION=3.1.0 STARTED_AT=1000 PREVIOUS=null
+BOARD=FF1-TEST VERSION=3.1.0 STARTED_AT=1000 STARTED_UPTIME=300 PREVIOUS=null
 echo '[{"name":"Brightness","status":"PASS","detail":""}]' >"$RUN_DIR/checks.json"
-echo 1100 >"$RUN_DIR/checks_done_at"; echo /var/log/ff1-burnin/x >"$RUN_DIR/where"; echo 2 >"$RUN_DIR/restarts"
+echo 1100 >"$RUN_DIR/checks_done_at"; echo 450 >"$RUN_DIR/checks_done_uptime"; echo /var/log/ff1-burnin/x >"$RUN_DIR/where"; echo 2 >"$RUN_DIR/restarts"
 echo "612.34 1000.00" >"$tmp_dir/uptime"
 # shellcheck disable=SC2034 # read by status_json
 UPTIME="$tmp_dir/uptime"
-got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, .sys.uptime, (.updated_at > 0)]')
-[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,612,true]' ] || fail "status_json: $got"
-rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
+got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, .sys.uptime, .started_uptime, .checks_done_uptime, (.updated_at > 0)]')
+[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,612,300,450,true]' ] || fail "status_json: $got"
+rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at" "$RUN_DIR/checks_done_uptime"
 got=$(status_json null null null null null null $'0\t' unseen unseen | jq -c '[.checks, .checks_done_at, .sys.last_error]')
 [ "$got" = '[[],null,null]' ] || fail "status_json before the checks: $got"
 
@@ -180,7 +187,7 @@ const sum = ids.reduce((a, id) => a + Number(page.match(new RegExp(`\\{ id: '${i
 assert.strictEqual(B.SLIDES_SECONDS, sum, `SLIDES_SECONDS ${B.SLIDES_SECONDS} != assembly pass ${sum}`);
 
 const now = 10000;
-const good = { board: 'FF1-ABCDEFGH', version: '3.1.0', started_at: now - 3600, updated_at: now - 4, checks_done_at: now - 3000,
+const good = { board: 'FF1-ABCDEFGH', version: '3.1.0', started_at: now - 3600, updated_at: now - 4, checks_done_at: now - 3000, started_uptime: 100,
   checks: [{ name: 'Brightness', status: 'PASS' }, { name: 'Speakers', status: 'PLAYED' }, { name: 'Wi-Fi', status: 'PASS' }],
   sys: { cpu_max: 80, gpu_max: 70, nvme_max: 50, kernel_errors: 0, restarts: 0, wifi: 'present', bt: 'present' } };
 
@@ -282,8 +289,28 @@ assert.ok(/panel:\s*\['black','gray'\]/.test(page) && /panel: 15/.test(page), 't
 assert.strictEqual(B.hms(0), '0:00:00');
 assert.strictEqual(B.hms(3 * 86400 + 3661), '73:01:01');
 assert.deepStrictEqual([0, 1, 2, 3, 4].map(B.cornerFor), ['top-left', 'top-right', 'bottom-right', 'bottom-left', 'top-left']);
-assert.strictEqual(B.resultCardUntil(null), 0);
-assert.strictEqual(B.resultCardUntil(good), good.checks_done_at + B.RESULT_SECONDS);
+// Session time and the result card run on the monotonic uptime: a wall
+// clock stepped back by two hours changes neither.
+const mg = { ...good, started_uptime: 100, checks_done_uptime: 400 };
+assert.strictEqual(B.resultCardLeft(null, 500), 0);
+assert.strictEqual(B.resultCardLeft(mg, null), 0);
+assert.strictEqual(B.resultCardLeft(mg, 430), B.RESULT_SECONDS - 30);
+assert.ok(B.resultCardLeft({ ...mg, updated_at: mg.updated_at - 7200, checks_done_at: 1 }, 700) <= 0, 'expired card stays expired');
+assert.strictEqual(B.running(mg, 3700), 3600);
+assert.strictEqual(B.running({ ...mg, started_at: now + 7200 }, 3700), 3600, 'wall clock ignored');
+assert.strictEqual(B.running({ ...good, started_uptime: undefined }, 3700), null, 'no started_uptime: unknown');
+// The uptime estimate never goes back: the same sample read again 3 s later
+// leaves it running; a new sample that lags the estimate does not pull it back.
+let uc = B.advanceUptime(null, 1000, 0);
+assert.strictEqual(B.uptimeAt(uc, 1), 1001);
+uc = B.advanceUptime(uc, 1000, 3);
+assert.strictEqual(B.uptimeAt(uc, 3.5), 1003.5, 'a repeated sample does not reset the clock');
+uc = B.advanceUptime(uc, 1004, 5);
+assert.strictEqual(B.uptimeAt(uc, 5), 1005, 'a lagging new sample does not move it back');
+uc = B.advanceUptime(uc, 1010, 6);
+assert.strictEqual(B.uptimeAt(uc, 6), 1010, 'a newer sample moves it forward');
+assert.strictEqual(B.uptimeAt(null, 9), null);
+assert.strictEqual(B.advanceUptime(uc, undefined, 7), uc, 'no uptime in the sample: unchanged');
 
 // QR payload: parseable, within budget in the worst case, and encodable.
 const worst = JSON.parse(JSON.stringify(good));
@@ -296,16 +323,17 @@ for (const seg of B.SEGMENTS) ws = B.recordSegment(ws, seg.id, 1, 99, true);
 ws = B.recordVideo(ws, 999999, 999999);
 ws.passes = 99999;
 for (const [st, stats] of [[good, B.emptyStats()], [worst, ws], [null, B.emptyStats()]]) {
-  const p = B.qrPayload(st, stats, now, st === worst ? 1000 : 0);
+  const p = B.qrPayload(st, stats, st === worst ? 9e9 : 3600, st === worst ? 1000 : 0);
   assert.ok(Buffer.byteLength(p) <= B.QR_MAX_BYTES, `payload ${Buffer.byteLength(p)} bytes`);
   const j = JSON.parse(p);
   assert.strictEqual(j.ff1, 'burnin/1');
   const qr = qrcode(0, 'L'); qr.addData(p, 'Byte'); qr.make();
   assert.ok(qr.getModuleCount() <= 73, `QR version too large: ${qr.getModuleCount()} modules`);
 }
-const pg = JSON.parse(B.qrPayload(good, B.emptyStats(), now));
+const pg = JSON.parse(B.qrPayload(good, B.emptyStats(), 3600));
 assert.deepStrictEqual([pg.b, pg.t, pg.ok, pg.c.Brig, pg.c['Wi-F']], ['FF1-ABCDEFGH', 3600, 1, 'PASS', 'PASS']);
-assert.ok(Array.isArray(JSON.parse(B.qrPayload(worst, ws, now)).why), 'the reasons go in while they fit');
+assert.ok(Array.isArray(JSON.parse(B.qrPayload(worst, ws, 9e9)).why), 'the reasons go in while they fit');
+assert.strictEqual(JSON.parse(B.qrPayload(good, B.emptyStats(), null)).t, null);
 NODE
 
 echo "test-ff1-burnin: ok"

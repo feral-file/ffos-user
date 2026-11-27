@@ -166,7 +166,7 @@ function hms(seconds) {
 // place of a photograph. Short keys keep it within a QR code a phone reads
 // from across a bench (QR_MAX_BYTES; the test checks a worst case).
 const QR_MAX_BYTES = 400;
-function qrPayload(status, stats, nowSeconds, staleSeconds = 0) {
+function qrPayload(status, stats, runningSeconds, staleSeconds = 0) {
   const st = status || {};
   const s = st.sys || {};
   const v = verdict(status, stats, staleSeconds);
@@ -175,7 +175,7 @@ function qrPayload(status, stats, nowSeconds, staleSeconds = 0) {
     ff1: 'burnin/1',
     b: st.board || null,
     v: st.version || null,
-    t: st.started_at ? Math.max(0, Math.floor(nowSeconds - st.started_at)) : null,
+    t: runningSeconds === null || runningSeconds === undefined ? null : Math.max(0, Math.floor(runningSeconds)),
     n: stats.passes,
     ok: v.ok ? 1 : 0,
     c: Object.fromEntries((st.checks || []).map(c => [c.name.slice(0, 4), c.status])),
@@ -208,16 +208,40 @@ function cornerFor(pass) {
   return CORNERS[pass % CORNERS.length];
 }
 
-// resultCardUntil(status) -> epoch seconds the result card shows until, or 0
-// while the checks run. A Chromium restart after that time goes straight to
-// the loop.
-function resultCardUntil(status) {
-  return status && status.checks_done_at ? status.checks_done_at + RESULT_SECONDS : 0;
+// resultCardLeft(status, uptimeNow) -> seconds the result card has left, on
+// the monotonic uptime; 0 or less once over (a Chromium restart after that goes
+// straight to the loop) or while unknown.
+function resultCardLeft(status, uptimeNow) {
+  if (!status || status.checks_done_uptime === null || status.checks_done_uptime === undefined || uptimeNow === null) return 0;
+  return status.checks_done_uptime + RESULT_SECONDS - uptimeNow;
+}
+
+// The page's estimate of the unit's uptime: the sampled /proc/uptime plus
+// the page's monotonic time since. advanceUptime(clock, sampled, mono) moves
+// it on a read: only when the sampled value changed (the same file is read
+// more than once between samples), and never backwards, so the running time
+// on screen never repeats or reverses a second. uptimeAt(clock, mono) reads
+// it (null while no sample has arrived).
+function advanceUptime(clock, sampled, mono) {
+  if (typeof sampled !== 'number') return clock;
+  if (clock && clock.sampled === sampled) return clock;
+  const est = uptimeAt(clock, mono);
+  return { sampled, up: est === null ? sampled : Math.max(sampled, est), mono };
+}
+function uptimeAt(clock, mono) {
+  return clock ? clock.up + (mono - clock.mono) : null;
+}
+
+// running(status, uptimeNow) -> seconds this session has run, on the monotonic
+// uptime (null while unknown).
+function running(status, uptimeNow) {
+  if (!status || status.started_uptime === null || status.started_uptime === undefined || uptimeNow === null) return null;
+  return Math.max(0, uptimeNow - status.started_uptime);
 }
 
 const api = {
   SLIDES_SECONDS, SEGMENTS, PANEL_MIN_UPTIME, passSegments, START_SECONDS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
-  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardUntil,
+  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardLeft, running, advanceUptime, uptimeAt,
 };
 if (typeof module !== 'undefined') module.exports = api;
 else window.Burnin = api;

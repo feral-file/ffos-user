@@ -170,7 +170,10 @@ previous_session() {
   [ -n "$f" ] || { echo null; return; }
   # A power pull can leave the file empty or torn: jq prints nothing for an
   # empty one and still exits 0, so check the output, not the status.
-  p=$(jq -c '{ran: (.updated_at - .started_at), last: (.updated_at | todate), kernel_errors: .sys.kernel_errors, restarts: .sys.restarts}' "$f" 2>/dev/null)
+  # ran from the monotonic uptimes when the file has them (a clock step during
+  # that session would skew the wall-clock difference), else wall clock.
+  p=$(jq -c '{ran: (if .started_uptime and .sys.uptime then .sys.uptime - .started_uptime else .updated_at - .started_at end),
+              last: (.updated_at | todate), kernel_errors: .sys.kernel_errors, restarts: .sys.restarts}' "$f" 2>/dev/null)
   [ -n "$p" ] && echo "$p" || echo null
 }
 
@@ -184,13 +187,16 @@ max() {
 # status_json <cpu> <gpu> <nvme> <cpu_max> <gpu_max> <nvme_max> <kernel "n\tlast">
 # <wifi> <bt> (adapter_state): one status.json. The rest comes from the globals and from the
 # files in RUN_DIR the checks write: checks.json, checks_done_at, where,
-# restarts. uptime is seconds since boot (monotonic), what the page times the
-# Panel Check's 10 minutes of power-on with.
+# restarts, checks_done_uptime. uptime is seconds since boot (monotonic): the
+# page times the session, the result card and the Panel Check's 10 minutes of
+# power-on with it, never with the wall clock, which timesyncd may step.
 status_json() {
   jq -n \
     --arg board "$BOARD" --arg version "$VERSION" --argjson started "$STARTED_AT" \
     --argjson checks "$(cat "$RUN_DIR/checks.json" 2>/dev/null || echo '[]')" \
     --argjson checks_done "$(cat "$RUN_DIR/checks_done_at" 2>/dev/null || echo null)" \
+    --argjson started_up "${STARTED_UPTIME:-null}" \
+    --argjson checks_done_up "$(cat "$RUN_DIR/checks_done_uptime" 2>/dev/null || echo null)" \
     --arg where "$(cat "$RUN_DIR/where" 2>/dev/null)" --argjson previous "$PREVIOUS" \
     --argjson cpu "$1" --argjson gpu "$2" --argjson nvme "$3" \
     --argjson cpu_max "$4" --argjson gpu_max "$5" --argjson nvme_max "$6" \
@@ -199,6 +205,7 @@ status_json() {
     --argjson restarts "$(cat "$RUN_DIR/restarts" 2>/dev/null || echo 0)" \
     --argjson uptime "$(cut -d. -f1 "$UPTIME" 2>/dev/null || echo null)" '
     {board: $board, version: $version, started_at: $started, updated_at: (now | floor),
+     started_uptime: $started_up, checks_done_uptime: $checks_done_up,
      checks: $checks, checks_done_at: $checks_done, where: $where, previous: $previous,
      sys: {cpu: $cpu, gpu: $gpu, nvme: $nvme, cpu_max: $cpu_max, gpu_max: $gpu_max, nvme_max: $nvme_max,
            kernel_errors: $kerr, last_error: (if $klast == "" then null else $klast end),
@@ -283,6 +290,7 @@ wait_for_port() {
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 STARTED_AT=$(date +%s)
+STARTED_UPTIME=$(cut -d. -f1 "$UPTIME" 2>/dev/null)
 KERNEL_CURSOR=$(kernel_cursor)
 BOARD=$(cat /etc/hostname 2>/dev/null || echo FF1)
 VERSION=$(jq -r '.version // empty' "$HOME_DIR/ff1-config.json" 2>/dev/null)
@@ -297,7 +305,7 @@ if [ ! -r "$HOME_DIR/burnin/index.html" ]; then
 fi
 
 mkdir -p "$RUN_DIR" "$WWW"
-rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
+rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at" "$RUN_DIR/checks_done_uptime"
 ln -sfn "$HOME_DIR/burnin" "$WWW/burnin"
 ln -sfn "$HOME_DIR/display-check" "$WWW/display-check"
 prune_sessions "$LOG_ROOT" "$((KEEP_SESSIONS - 1))"
@@ -333,6 +341,7 @@ checks_json "$lines"$'\n'"$wifi" >"$RUN_DIR/checks.json"
 sync
 copied=$(copy_to_stick "$RESULTS")
 [ -n "$copied" ] && echo "$RESULTS and $copied" >"$RUN_DIR/where"
+cut -d. -f1 "$UPTIME" >"$RUN_DIR/checks_done_uptime" 2>/dev/null
 date +%s >"$RUN_DIR/checks_done_at"
 
 # The sampler, the server and the screen run until the power is pulled.
