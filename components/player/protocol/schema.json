@@ -1673,6 +1673,12 @@
           "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
           "minLength": 1
         },
+        "castId": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
         "generation": {
           "type": "integer",
           "minimum": 0,
@@ -2173,6 +2179,17 @@
           "maxLength": 64,
           "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
           "minLength": 1
+        },
+        "castId": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Wire limit is 64 UTF-8 bytes, additionally enforced by peers.",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
         },
         "playedAtMs": {
           "type": "integer"

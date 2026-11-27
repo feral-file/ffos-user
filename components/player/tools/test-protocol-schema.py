@@ -57,6 +57,7 @@ with tempfile.TemporaryDirectory(prefix='ff-schema-') as directory:
             calls = [
                 ('state.get', {}, 'snapshot'), ('health.get', {}, 'snapshot'),
                 ('playback.replace', {'playlist': playlist}, 'receipt'),
+                ('state.get', {}, 'snapshot'), ('health.get', {}, 'snapshot'),
                 ('playback.update', {'items': playlist['items']}, 'receipt'),
                 ('playback.pause', {'paused': True}, 'receipt'),
                 ('playback.pause', {'paused': False}, 'receipt'),

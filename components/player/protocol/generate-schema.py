@@ -96,7 +96,7 @@ request['allOf']=[
 request['oneOf']=[{'properties':{'method':{'const':name},'params':params},
                   'required':['params'] if params.get('required') or name in ('input.dispatch','policy.set','schedule.set','boot.set') else []}
                  for name,params in methods.items()]
-occurrence=obj({'id':identifier,'generation':uint,'index':number(0,4095,True),'item':ref('item'),'display':ref('display'),'displayRevision':uint,
+occurrence=obj({'id':identifier,'castId':identifier,'generation':uint,'index':number(0,4095,True),'item':ref('item'),'display':ref('display'),'displayRevision':uint,
     'stage':enum('loading','committed','presented','failed'),'error':{'type':'string'},'navigationCommitted':boolean,
     'context':context,'exhibition':text(),'curator':text()},('id','generation','index','item','display','stage','navigationCommitted'))
 snapshot=obj({'instance':identifier,'generation':uint,'revision':uint,'host':enum('responsive'),
@@ -122,7 +122,7 @@ hello=obj({'version':{'const':1},'instance':identifier,'maxFrameBytes':{'const':
     'capabilities':{'type':'array','items':{'type':'string'}},'snapshot':ref('snapshot')},
     ('version','instance','maxFrameBytes','receiptWindow','capabilities','snapshot'))
 subscription=obj({'snapshot':ref('snapshot'),'cursor':uint},('snapshot','cursor'))
-record={'type':'object','properties':{'recordId':identifier,'playedAtMs':{'type':'integer'},'item':ref('item'),'context':context,'defaults':{'type':'object'}},
+record={'type':'object','properties':{'recordId':identifier,'castId':identifier,'index':number(0,4095,True),'playedAtMs':{'type':'integer'},'item':ref('item'),'context':context,'defaults':{'type':'object'}},
     'required':['recordId','playedAtMs','item','context'],'additionalProperties':True}
 history=obj({'records':{'type':'array','maxItems':100,'items':ref('record')},'incomplete':boolean,'activeOccurrence':nullable(identifier)},
     ('records','incomplete','activeOccurrence'))
