@@ -4,11 +4,11 @@ The kiosk unit starts Cage and a single project executable at
 `/usr/lib/ff-player-native/ff-player-native`. A live change requires the image's
 user session files together with the player, controld and watchdog binaries.
 Pacman replaces the old web-player package. The new host resumes an existing
-native SQLite database in `~/.state/player`. During a legacy OTA, the candidate's post-extraction hook reads the frozen kiosk
+native SQLite database in `~/.state/player`. During a legacy OTA, candidate promotion reads the shut-down production root's kiosk
 origin with a temporary, network-isolated Chromium storage reader. As the kiosk
 user, it imports the saved cast, index, modes, content policy, display preferences, boot playlist and pending schedule
 through the native player's validators into a staged SQLite database. An import
-failure stops the update before the reboot is armed. An active import requires
+failure reboots into the previous root before boot files or the default root change. An active import requires
 fresh presentation evidence for that playlist and artwork in the post-OTA success check. The rollback root
 and the original Chromium profile retain their previous data.
 

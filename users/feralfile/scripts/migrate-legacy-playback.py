@@ -1,6 +1,6 @@
 """Read the frozen 3.0.1 kiosk profile through Chromium's own storage API.
 
-post-extraction runs this as feralfile in a loopback-only network namespace.
+Candidate promotion runs this as feralfile in a loopback-only network namespace.
 Only the old player's origin storage is needed. Never open a saved tab, load
 an artwork, or let Chromium rewrite the rollback profile.
 """
@@ -10,12 +10,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
 from player_health import fingerprint
 
-PROFILE = Path.home() / ".config/chromium/Default"
 STATE = Path.home() / ".state/player"
 INDEX = Path("IndexedDB/http_127.0.0.1_8080.indexeddb.leveldb")
 LOCAL = Path("Local Storage/leveldb")
@@ -70,10 +70,10 @@ class StorageReader(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def read_profile(directory):
+def read_profile(source, directory):
     for relative in (INDEX, INDEX.with_suffix(".blob"), LOCAL):
-        if (PROFILE / relative).is_dir():
-            shutil.copytree(PROFILE / relative, directory / "Default" / relative)
+        if (source / relative).is_dir():
+            shutil.copytree(source / relative, directory / "Default" / relative)
     with http.server.HTTPServer(("127.0.0.1", 8080), StorageReader) as server:
         server.timeout = 1
         server.export = None
@@ -99,13 +99,14 @@ def read_profile(directory):
 
 
 def main():
-    if (STATE / "state.sqlite").exists() or not any((PROFILE / path).is_dir() for path in (INDEX, LOCAL)):
+    source = Path(sys.argv[1])
+    if not any((source / path).is_dir() for path in (INDEX, LOCAL)):
         print("skip")
         return
     with tempfile.TemporaryDirectory() as profile, tempfile.TemporaryDirectory(dir=STATE.parent) as stage:
-        records = read_profile(Path(profile))
+        records = read_profile(source, Path(profile))
         # Publish only after the native host has validated every record and
-        # closed SQLite (including its WAL). Failure leaves the old root active.
+        # closed SQLite (including its WAL). Failure leaves the old root available for fallback.
         result = subprocess.run(["/usr/bin/ff-player-native", "--import-legacy", f"--state-dir={stage}"],
                                 input=records, stdout=subprocess.PIPE, check=True, timeout=30)
         expected = json.loads(result.stdout)
@@ -114,7 +115,12 @@ def main():
             playlist = expected["playlist"]
             index = expected["index"]
             status = f"{fingerprint(playlist)} {index} {fingerprint(playlist['items'][index])}"
-        STATE.mkdir(mode=0o700, exist_ok=True)
+        if STATE.exists():
+            # A previously downgraded device can have a stale native DB with
+            # its own WAL. Keep that directory together for recovery.
+            backup = Path(tempfile.mkdtemp(prefix="prior-native-", dir=STATE.parent))
+            os.rename(STATE, backup / "player")
+        STATE.mkdir(mode=0o700)
         os.replace(Path(stage) / "state.sqlite", STATE / "state.sqlite")
         print(status)
 

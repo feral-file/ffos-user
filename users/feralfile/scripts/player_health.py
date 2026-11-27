@@ -45,8 +45,10 @@ def check():
             # Short slots may advance before the service's first poll. The
             # migration creates a fresh history and only real frames enter it.
             history = call("history.list", {})
-            if not (history["records"] and not history["incomplete"]
-                    and fingerprint(history["records"][-1]["item"]) == item_hash):
+            first = history["records"][-1] if history["records"] else {}
+            playlist_id = state["presentedPlaylist"].get("id")
+            if not (not history["incomplete"] and playlist_id and first.get("playlistId") == playlist_id
+                    and first.get("index") == int(index) and fingerprint(first.get("item")) == item_hash):
                 sys.exit("Waiting for evidence of the migrated artwork")
 
 
