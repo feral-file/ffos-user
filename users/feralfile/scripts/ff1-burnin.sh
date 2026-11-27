@@ -42,6 +42,7 @@ MOUNT=/mnt/ff1-burnin
 BURNIN_PORT=8180     # loopback only; nothing else listens on this boot
 SCANS=10             # Wi-Fi scans in the one reading
 SAMPLE_SECONDS=5
+CHECKS_DELAY=10      # seconds between the screen starting and the checks
 KEEP_SESSIONS=20     # older session folders in LOG_ROOT are removed
 
 # Kernel lines that mean a hardware or driver fault: an amdgpu ring timeout
@@ -145,20 +146,31 @@ count_kernel_errors() {
   RE="$KERNEL_ERROR_RE" gawk 'BEGIN { IGNORECASE = 1 } $0 ~ ENVIRON["RE"] { n++; last = $0 } END { printf "%d\t%s\n", n, substr(last, 1, 120) }'
 }
 
-# kernel_errors <since_epoch>: count_kernel_errors over this boot's kernel log
-# from <since_epoch>.
+# kernel_errors <cursor>: count_kernel_errors over the kernel log after the
+# journal cursor taken at the session start. A cursor, not a time: a clock
+# stepped back after the start would hide lines from --since.
 kernel_errors() {
-  journalctl -k -q --no-pager -o cat --since "@$1" 2>/dev/null | count_kernel_errors
+  if [ -n "$1" ]; then
+    journalctl -k -q --no-pager -o cat --after-cursor "$1" 2>/dev/null | count_kernel_errors
+  else
+    journalctl -k -q --no-pager -o cat -b 2>/dev/null | count_kernel_errors
+  fi
 }
+
+# kernel_cursor -> the journal cursor of the newest kernel line now.
+kernel_cursor() { journalctl -k -q -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'; }
 
 # previous_session <log_root> <this_session>: the newest earlier session's
 # last.json as {ran, last, kernel_errors, restarts}, or null. Power pulls and
 # crashes look the same here; what the screen showed tells them apart.
 previous_session() {
-  local f
+  local f p
   f=$(find "$1" -mindepth 2 -maxdepth 2 -name last.json -not -path "*/$2/*" 2>/dev/null | sort -r | head -n 1)
   [ -n "$f" ] || { echo null; return; }
-  jq -c '{ran: (.updated_at - .started_at), last: (.updated_at | todate), kernel_errors: .sys.kernel_errors, restarts: .sys.restarts}' "$f" 2>/dev/null || echo null
+  # A power pull can leave the file empty or torn: jq prints nothing for an
+  # empty one and still exits 0, so check the output, not the status.
+  p=$(jq -c '{ran: (.updated_at - .started_at), last: (.updated_at | todate), kernel_errors: .sys.kernel_errors, restarts: .sys.restarts}' "$f" 2>/dev/null)
+  [ -n "$p" ] && echo "$p" || echo null
 }
 
 # max <a> <b>: the larger, where "null" means no reading.
@@ -169,7 +181,7 @@ max() {
 }
 
 # status_json <cpu> <gpu> <nvme> <cpu_max> <gpu_max> <nvme_max> <kernel "n\tlast">
-# <wifi> <bt>: one status.json. The rest comes from the globals and from the
+# <wifi> <bt> (adapter_state): one status.json. The rest comes from the globals and from the
 # files in RUN_DIR the checks write: checks.json, checks_done_at, where,
 # restarts.
 status_json() {
@@ -181,28 +193,42 @@ status_json() {
     --argjson cpu "$1" --argjson gpu "$2" --argjson nvme "$3" \
     --argjson cpu_max "$4" --argjson gpu_max "$5" --argjson nvme_max "$6" \
     --argjson kerr "${7%%$'\t'*}" --arg klast "${7#*$'\t'}" \
-    --argjson wifi "$8" --argjson bt "$9" \
+    --arg wifi "$8" --arg bt "$9" \
     --argjson restarts "$(cat "$RUN_DIR/restarts" 2>/dev/null || echo 0)" '
     {board: $board, version: $version, started_at: $started, updated_at: (now | floor),
      checks: $checks, checks_done_at: $checks_done, where: $where, previous: $previous,
      sys: {cpu: $cpu, gpu: $gpu, nvme: $nvme, cpu_max: $cpu_max, gpu_max: $gpu_max, nvme_max: $nvme_max,
            kernel_errors: $kerr, last_error: (if $klast == "" then null else $klast end),
-           wifi_present: $wifi, bt_present: $bt, restarts: $restarts}}'
+           wifi: $wifi, bt: $bt, restarts: $restarts}}'
+}
+
+# adapter_state <state> <glob> -> the next state of one adapter: unseen until
+# it first appears (the Wi-Fi interface can take up to a minute at boot),
+# then present, then lost for good once it has gone. A card that drops off
+# the bus and comes back between two status cards still counts.
+adapter_state() {
+  if compgen -G "$2" >/dev/null; then
+    case "$1" in lost) echo lost ;; *) echo present ;; esac
+  else
+    case "$1" in unseen) echo unseen ;; *) echo lost ;; esac
+  fi
 }
 
 # sample_loop: status.json every SAMPLE_SECONDS (written whole, then renamed,
 # so the page never reads half a file), last.json every minute.
 sample_loop() {
-  local tick=0 cpu gpu nvme cpu_max=null gpu_max=null nvme_max=null ke=$'0\t' wifi bt
+  local tick=0 cpu gpu nvme cpu_max=null gpu_max=null nvme_max=null ke=$'0\t' wifi=unseen bt=unseen
   while true; do
     read -r cpu gpu nvme < <(temps)
     cpu_max=$(max "$cpu" "$cpu_max"); gpu_max=$(max "$gpu" "$gpu_max"); nvme_max=$(max "$nvme" "$nvme_max")
-    ((tick % 6 == 0)) && ke=$(kernel_errors "$STARTED_AT")
-    wifi=false; compgen -G "$NET/wl*" >/dev/null && wifi=true
-    bt=false; compgen -G "$BLUETOOTH/hci*" >/dev/null && bt=true
+    ((tick % 6 == 0)) && ke=$(kernel_errors "$KERNEL_CURSOR")
+    wifi=$(adapter_state "$wifi" "$NET/wl*"); bt=$(adapter_state "$bt" "$BLUETOOTH/hci*")
     status_json "$cpu" "$gpu" "$nvme" "$cpu_max" "$gpu_max" "$nvme_max" "$ke" "$wifi" "$bt" >"$WWW/status.json.tmp" &&
       mv -f "$WWW/status.json.tmp" "$WWW/status.json"
-    ((tick % (60 / SAMPLE_SECONDS) == 0)) && cp -f "$WWW/status.json" "$RESULTS/last.json" 2>/dev/null
+    # Copied and renamed, as status.json is: cp -f would truncate last.json in
+    # place, and a power pull or a full disk could leave it empty.
+    ((tick % (60 / SAMPLE_SECONDS) == 0)) && cp -f "$WWW/status.json" "$RESULTS/last.json.tmp" 2>/dev/null &&
+      mv -f "$RESULTS/last.json.tmp" "$RESULTS/last.json"
     tick=$((tick + 1))
     sleep "$SAMPLE_SECONDS"
   done
@@ -254,6 +280,7 @@ wait_for_port() {
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 STARTED_AT=$(date +%s)
+KERNEL_CURSOR=$(kernel_cursor)
 BOARD=$(cat /etc/hostname 2>/dev/null || echo FF1)
 VERSION=$(jq -r '.version // empty' "$HOME_DIR/ff1-config.json" 2>/dev/null)
 SESSION=$(date -d "@$STARTED_AT" '+%Y%m%d-%H%M%S')
@@ -281,9 +308,15 @@ sample_loop &
 wait_for_port "$BURNIN_PORT"
 screen_loop &
 
-out=$(bash "$SCRIPTS/unit-checks.sh" record r1 -o "$RESULTS" 2>&1) || true
-printf '%s\n' "$out" >"$RESULTS/unit-checks.log"
-lines=$(result_lines "$out")
+# Give cage its modeset first: the brightness check talks to the panel over
+# the HDMI cable, and the tones play through its HDMI audio.
+sleep "$CHECKS_DELAY"
+# Each result line reaches the page as it is printed, not at the end.
+bash "$SCRIPTS/unit-checks.sh" record r1 -o "$RESULTS" 2>&1 | tee "$RESULTS/unit-checks.log" |
+  while IFS= read -r line; do
+    case "$line" in "== "*) progress+="$line"$'\n'; checks_json "$progress" >"$RUN_DIR/checks.json" ;; esac
+  done
+lines=$(result_lines "$(cat "$RESULTS/unit-checks.log")")
 checks_json "$lines" >"$RUN_DIR/checks.json"
 if iface=$(wait_for_wifi); then
   out=$(bash "$SCRIPTS/wifi-reading.sh" record r1 -n "$SCANS" -o "$RESULTS" 2>&1) || true

@@ -94,9 +94,19 @@ function showCard(html, cls) {
 }
 
 async function checksPhase() {
+  const since = now();
   for (;;) {
     await readStatus();
     if (status && status.checks_done_at) return;
+    // No status at all, or one that stopped updating: the script's sampler is
+    // not running. Say so in red rather than wait on a still screen.
+    if ((!status && now() - since > 30 / FAST) ||
+        (status && status.updated_at && now() - status.updated_at > B.LIMITS.staleSeconds)) {
+      showCard(header('No status from the burn-in script', '老化测试脚本没有状态') +
+        '<div>/status.json is missing or has stopped updating. Power-cycle and pick the burn-in again.</div>', 'bad');
+      await sleep(2);
+      continue;
+    }
     showCard(header('Factory burn-in: unit checks', '出厂老化测试：单元检查') + `
       <div>Brightness, speakers (listen: a low tone LEFT, then a high tone RIGHT), Bluetooth, Wi-Fi.</div>
       <div class="zh">亮度、扬声器（请听：先左边低音，再右边高音）、蓝牙、Wi-Fi。</div>` + checksTable(), 'wait');
@@ -108,12 +118,16 @@ async function resultPhase() {
   // A Chromium restart after the card's time goes straight to the loop.
   const left = FAST === 1 ? B.resultCardUntil(status) - now() : B.RESULT_SECONDS;
   if (left <= 0) return;
+  // The panel's own rate, measured on this still card, is what the slides
+  // and the video are judged against.
   const v = B.verdict(status, stats, now());
   showCard(header('Unit checks', '单元检查') + `<div class="row">${checksTable()}<div id="qr">${qrSvg()}</div></div>
     <div>Scan the QR or photograph this screen. The display and load test starts in ${Math.ceil(left)} s and runs until the power is pulled.</div>
     <div class="zh">请扫码或拍照。${Math.ceil(left)} 秒后开始屏幕与负载测试，直到拔掉电源。</div>
     <div>Results also in ${esc(status.where || '')}</div>`, v.ok ? 'ok' : 'bad');
-  await sleep(left);
+  const r = await countFrames(Math.min(left, 8 + B.WARMUP_SECONDS));
+  stats = B.withRefresh(stats, r.frames / r.seconds);
+  await sleep(Math.max(0, left - (8 + B.WARMUP_SECONDS)));
 }
 
 function tickDot() {
@@ -171,7 +185,8 @@ function statusCard() {
       <div>Video dropped ${stats.dropped} / ${stats.decoded} frames</div>
       <div>Max °C: CPU ${s.cpu_max ?? '–'} · GPU ${s.gpu_max ?? '–'} · NVMe ${s.nvme_max ?? '–'}</div>
       <div>Kernel errors ${s.kernel_errors ?? '–'}${s.last_error ? ': ' + esc(s.last_error) : ''}</div>
-      <div>Chromium restarts ${s.restarts ?? 0} · Wi-Fi ${s.wifi_present === false ? 'GONE' : 'ok'} · Bluetooth ${s.bt_present === false ? 'GONE' : 'ok'}</div>
+      <div>Chromium restarts ${s.restarts ?? 0} · Wi-Fi ${esc(s.wifi ?? '–')} · Bluetooth ${esc(s.bt ?? '–')} · panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '–'}</div>
+      <div>A running time that stops moving means the unit hung. 运行时间停止跳动表示机器卡死。</div>
       ${prev ? `<div>Previous session: ran ${B.hms(prev.ran)}, last sample ${esc(prev.last)}, kernel errors ${prev.kernel_errors}, restarts ${prev.restarts}</div>` : ''}
       ${v.ok ? '' : `<div><b>Why:</b> ${esc(v.reasons.join(' · '))}</div>`}
       ${checksTable()}

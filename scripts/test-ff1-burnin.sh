@@ -103,6 +103,23 @@ echo '{"started_at":9,"updated_at":9,"sys":{}}' >"$tmp_dir/log/20260103-000000/l
 got=$(previous_session "$tmp_dir/log" 20260103-000000)
 [ "$got" = '{"ran":22200,"last":"1970-01-01T07:33:20Z","kernel_errors":2,"restarts":0}' ] || fail "previous_session: $got"
 [ "$(previous_session "$tmp_dir/empty" x)" = null ] || fail "previous_session with no sessions"
+# An empty last.json (a power pull, a full disk) reads as no previous session,
+# not as an empty string that would break every status.json after it.
+mkdir -p "$tmp_dir/log2/20260101-000000"; : >"$tmp_dir/log2/20260101-000000/last.json"
+[ "$(previous_session "$tmp_dir/log2" x)" = null ] || fail "previous_session with an empty last.json"
+echo '{"started_at":1' >"$tmp_dir/log2/20260101-000000/last.json"
+[ "$(previous_session "$tmp_dir/log2" x)" = null ] || fail "previous_session with a torn last.json"
+
+# adapter_state: unseen until it appears, lost for good once it has gone.
+mkdir -p "$tmp_dir/net"
+st=unseen
+st=$(adapter_state "$st" "$tmp_dir/net/wl*"); [ "$st" = unseen ] || fail "adapter_state before the adapter appears: $st"
+mkdir "$tmp_dir/net/wlan0"
+st=$(adapter_state "$st" "$tmp_dir/net/wl*"); [ "$st" = present ] || fail "adapter_state once present: $st"
+rmdir "$tmp_dir/net/wlan0"
+st=$(adapter_state "$st" "$tmp_dir/net/wl*"); [ "$st" = lost ] || fail "adapter_state once gone: $st"
+mkdir "$tmp_dir/net/wlan0"
+st=$(adapter_state "$st" "$tmp_dir/net/wl*"); [ "$st" = lost ] || fail "adapter_state must stay lost when it comes back: $st"
 
 # prune_sessions keeps the newest N folders.
 prune_sessions "$tmp_dir/log" 2
@@ -115,10 +132,10 @@ RUN_DIR="$tmp_dir/run"; mkdir -p "$RUN_DIR"
 BOARD=FF1-TEST VERSION=3.1.0 STARTED_AT=1000 PREVIOUS=null
 echo '[{"name":"Brightness","status":"PASS","detail":""}]' >"$RUN_DIR/checks.json"
 echo 1100 >"$RUN_DIR/checks_done_at"; echo /var/log/ff1-burnin/x >"$RUN_DIR/where"; echo 2 >"$RUN_DIR/restarts"
-got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' true false | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi_present, .sys.bt_present, .sys.restarts, (.updated_at > 0)]')
-[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!",true,false,2,true]' ] || fail "status_json: $got"
+got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, (.updated_at > 0)]')
+[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,true]' ] || fail "status_json: $got"
 rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
-got=$(status_json null null null null null null $'0\t' false false | jq -c '[.checks, .checks_done_at, .sys.last_error]')
+got=$(status_json null null null null null null $'0\t' unseen unseen | jq -c '[.checks, .checks_done_at, .sys.last_error]')
 [ "$got" = '[[],null,null]' ] || fail "status_json before the checks: $got"
 
 # results_stick: removable, unmounted, FAT/exFAT partitions, never on a disk
@@ -152,7 +169,7 @@ assert.strictEqual(B.SLIDES_SECONDS, sum, `SLIDES_SECONDS ${B.SLIDES_SECONDS} !=
 const now = 10000;
 const good = { board: 'FF1-ABCDEFGH', version: '3.1.0', started_at: now - 3600, updated_at: now - 4, checks_done_at: now - 3000,
   checks: [{ name: 'Brightness', status: 'PASS' }, { name: 'Speakers', status: 'PLAYED' }, { name: 'Wi-Fi', status: 'PASS' }],
-  sys: { cpu_max: 80, gpu_max: 70, nvme_max: 50, kernel_errors: 0, restarts: 0, wifi_present: true, bt_present: true } };
+  sys: { cpu_max: 80, gpu_max: 70, nvme_max: 50, kernel_errors: 0, restarts: 0, wifi: 'present', bt: 'present' } };
 
 // Green when nothing failed; each fault turns it red with its reason.
 let s = B.emptyStats();
@@ -166,7 +183,10 @@ const red = (patch, want) => {
 red(st => { st.checks[2].status = 'FAIL'; }, 'Wi-Fi FAIL');
 red(st => { st.sys.kernel_errors = 1; }, 'kernel errors');
 red(st => { st.sys.restarts = 1; }, 'Chromium restarts');
-red(st => { st.sys.bt_present = false; }, 'Bluetooth adapter gone');
+red(st => { st.sys.bt = 'lost'; }, 'Bluetooth adapter gone');
+// Not seen yet (the interface can take a minute at boot) is not a failure.
+const unseen = JSON.parse(JSON.stringify(good)); unseen.sys.wifi = 'unseen';
+assert.strictEqual(B.verdict(unseen, s, now).ok, true);
 red(st => { st.sys.cpu_max = 95; }, 'CPU');
 red(st => { st.sys.nvme_max = 80; }, 'NVMe');
 red(st => { st.updated_at = now - 91; }, 'status sampler stopped');
@@ -185,6 +205,22 @@ assert.strictEqual(B.verdict(good, s, now).ok, false);
 s = B.recordSegment(s, 'slides', 60 * 99, 99, true);
 assert.strictEqual(B.verdict(good, s, now).ok, false, 'red stays red');
 assert.strictEqual(s.bad.length, 1, 'the same fault does not grow the list');
+
+// Judged against the panel's measured rate: 28 fps on a 30 Hz station is fine.
+let r30 = B.withRefresh(B.emptyStats(), 30);
+assert.strictEqual(B.minFps(r30), 30 * B.LIMITS.minShare);
+r30 = B.recordSegment(r30, 'slides', 28 * 99, 99, true);
+assert.strictEqual(B.verdict(good, r30, now).ok, true, '28 fps on a 30 Hz panel');
+r30 = B.recordSegment(r30, 'slides', 20 * 99, 99, true);
+assert.strictEqual(B.verdict(good, r30, now).ok, false, '20 fps on a 30 Hz panel');
+assert.strictEqual(B.withRefresh(B.emptyStats(), 0).refresh, null, 'a failed measurement keeps the default');
+// The 60 fps clip on a 30 Hz panel: half its frames are never shown and count
+// as dropped; that is not a fault. Beyond that allowance it is.
+let v30 = B.recordVideo(B.withRefresh(B.emptyStats(), 30), 1800, 3600);
+assert.strictEqual(B.verdict(good, v30, now).ok, true, '60 fps clip on a 30 Hz panel');
+v30 = B.recordVideo(B.withRefresh(B.emptyStats(), 30), 2400, 3600);
+assert.strictEqual(B.verdict(good, v30, now).ok, false, 'too many drops even for 30 Hz');
+assert.strictEqual(B.dropAllowance(B.withRefresh(B.emptyStats(), 75)), B.LIMITS.maxDropShare, 'a faster panel gets no extra allowance');
 
 // Video: more than 1 % dropped, or nothing decoded, is red.
 let v = B.recordVideo(B.emptyStats(), 30, 3600);
@@ -205,7 +241,7 @@ assert.strictEqual(B.resultCardUntil(good), good.checks_done_at + B.RESULT_SECON
 const worst = JSON.parse(JSON.stringify(good));
 worst.board = 'FF1-WWWWWWWW'; worst.version = '10.20.300-rc.12';
 worst.checks = ['Brightness', 'Speakers', 'Bluetooth', 'Wi-Fi'].map(n => ({ name: n, status: 'FAIL', detail: 'x'.repeat(200) }));
-Object.assign(worst.sys, { cpu_max: 105, gpu_max: 110, nvme_max: 90, kernel_errors: 123456, restarts: 9999, wifi_present: false, bt_present: false });
+Object.assign(worst.sys, { cpu_max: 105, gpu_max: 110, nvme_max: 90, kernel_errors: 123456, restarts: 9999, wifi: 'lost', bt: 'lost' });
 worst.updated_at = 0;
 let ws = B.emptyStats();
 for (const seg of B.SEGMENTS) ws = B.recordSegment(ws, seg.id, 1, 99, true);

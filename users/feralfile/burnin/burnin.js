@@ -19,6 +19,7 @@ const SEGMENTS = [
   { id: 'uneasy', seconds: 60, src: '/burnin/load/uneasy-dream/index.html', judged: false },
   { id: 'video', seconds: 60, video: '/burnin/load/clip-4k60-hevc10.mp4', judged: true },
 ];
+const CLIP_FPS = 60;          // the clip's frame rate
 const CARD_SECONDS = 8;       // the status card between passes
 const RESULT_SECONDS = 60;    // the result card after the unit checks
 const WARMUP_SECONDS = 3;     // frames of a segment's first seconds are not judged
@@ -27,7 +28,8 @@ const WARMUP_SECONDS = 3;     // frames of a segment's first seconds are not jud
 // works are GPU-bound at 4K and may run below the panel rate on a healthy
 // unit, so their frame rate is shown but never judged (judged: false above).
 const LIMITS = {
-  minFps: 50,            // slides and video: average frame rate per segment
+  minFps: 50,            // slides and video, until the panel rate is measured
+  minShare: 0.83,        // slides and video: share of the panel rate (50 of 60, 25 of 30)
   maxDropShare: 0.01,    // video: dropped / decoded frames, per pass
   cpuC: 95,              // k10temp Tctl
   gpuC: 100,             // amdgpu edge
@@ -36,7 +38,18 @@ const LIMITS = {
 };
 
 function emptyStats() {
-  return { passes: 0, fps: {}, dropped: 0, decoded: 0, bad: [] };
+  return { passes: 0, fps: {}, dropped: 0, decoded: 0, bad: [], refresh: null };
+}
+
+// withRefresh(stats, fps) -> stats judged against the panel's own rate,
+// measured on a still card (a station at 4K@30 or 50 Hz would otherwise read
+// red on every healthy unit).
+function withRefresh(stats, fps) {
+  return fps > 0 ? { ...stats, refresh: fps } : stats;
+}
+
+function minFps(stats) {
+  return stats.refresh ? stats.refresh * LIMITS.minShare : LIMITS.minFps;
 }
 
 // recordSegment(stats, id, frames, seconds, judged) -> stats with the
@@ -45,8 +58,16 @@ function recordSegment(stats, id, frames, seconds, judged) {
   const fps = seconds > 0 ? frames / seconds : 0;
   const prev = stats.fps[id];
   const out = { ...stats, fps: { ...stats.fps, [id]: prev === undefined ? fps : Math.min(prev, fps) } };
-  if (judged && fps < LIMITS.minFps) out.bad = addBad(out.bad, `${id} ${fps.toFixed(1)} fps`);
+  if (judged && fps < minFps(stats)) out.bad = addBad(out.bad, `${id} ${fps.toFixed(1)} fps`);
   return out;
+}
+
+// dropAllowance(stats) -> the share of the clip's frames that may drop. A
+// panel slower than the clip cannot show every frame, and Chromium counts the
+// ones it never showed as dropped (half of them at 30 Hz, one in six at 50).
+function dropAllowance(stats) {
+  const r = stats.refresh;
+  return LIMITS.maxDropShare + (r && r < CLIP_FPS ? 1 - r / CLIP_FPS : 0);
 }
 
 // recordVideo(stats, dropped, decoded) -> stats with one pass of the clip.
@@ -54,7 +75,7 @@ function recordVideo(stats, dropped, decoded) {
   const out = { ...stats, dropped: stats.dropped + dropped, decoded: stats.decoded + decoded };
   // Nothing decoded in a whole segment: the clip did not play at all.
   if (decoded === 0) out.bad = addBad(out.bad, 'video decoded 0 frames');
-  else if (dropped / decoded > LIMITS.maxDropShare) {
+  else if (dropped / decoded > dropAllowance(stats)) {
     out.bad = addBad(out.bad, `video dropped ${dropped}/${decoded}`);
   }
   return out;
@@ -77,8 +98,8 @@ function verdict(status, stats, nowSeconds) {
   const s = status.sys || {};
   if (s.kernel_errors > 0) reasons.push(`kernel errors ${s.kernel_errors}`);
   if (s.restarts > 0) reasons.push(`Chromium restarts ${s.restarts}`);
-  if (s.wifi_present === false) reasons.push('Wi-Fi adapter gone');
-  if (s.bt_present === false) reasons.push('Bluetooth adapter gone');
+  if (s.wifi === 'lost') reasons.push('Wi-Fi adapter gone');
+  if (s.bt === 'lost') reasons.push('Bluetooth adapter gone');
   if (s.cpu_max >= LIMITS.cpuC) reasons.push(`CPU ${s.cpu_max} °C`);
   if (s.gpu_max >= LIMITS.gpuC) reasons.push(`GPU ${s.gpu_max} °C`);
   if (s.nvme_max >= LIMITS.nvmeC) reasons.push(`NVMe ${s.nvme_max} °C`);
@@ -148,7 +169,7 @@ function resultCardUntil(status) {
 
 const api = {
   SLIDES_SECONDS, SEGMENTS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
-  emptyStats, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardUntil,
+  emptyStats, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardUntil,
 };
 if (typeof module !== 'undefined') module.exports = api;
 else window.Burnin = api;
