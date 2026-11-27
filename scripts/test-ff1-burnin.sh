@@ -173,11 +173,11 @@ const good = { board: 'FF1-ABCDEFGH', version: '3.1.0', started_at: now - 3600, 
 
 // Green when nothing failed; each fault turns it red with its reason.
 let s = B.emptyStats();
-assert.deepStrictEqual(B.verdict(good, s, now), { ok: true, reasons: [] });
-assert.deepStrictEqual(B.verdict(null, s, now), { ok: true, reasons: [] });
+assert.deepStrictEqual(B.verdict(good, s), { ok: true, reasons: [] });
+assert.deepStrictEqual(B.verdict(null, s), { ok: true, reasons: [] });
 const red = (patch, want) => {
   const st = JSON.parse(JSON.stringify(good)); patch(st);
-  const v = B.verdict(st, s, now);
+  const v = B.verdict(st, s);
   assert.strictEqual(v.ok, false, want); assert.ok(v.reasons.some(r => r.startsWith(want)), `${want}: ${v.reasons}`);
 };
 red(st => { st.checks[2].status = 'FAIL'; }, 'Wi-Fi FAIL');
@@ -186,49 +186,73 @@ red(st => { st.sys.restarts = 1; }, 'Chromium restarts');
 red(st => { st.sys.bt = 'lost'; }, 'Bluetooth adapter gone');
 // Not seen yet (the interface can take a minute at boot) is not a failure.
 const unseen = JSON.parse(JSON.stringify(good)); unseen.sys.wifi = 'unseen';
-assert.strictEqual(B.verdict(unseen, s, now).ok, true);
+assert.strictEqual(B.verdict(unseen, s).ok, true);
 red(st => { st.sys.cpu_max = 95; }, 'CPU');
 red(st => { st.sys.nvme_max = 80; }, 'NVMe');
-red(st => { st.updated_at = now - 91; }, 'status sampler stopped');
+
 // SKIP and PLAYED are not failures.
 const skip = JSON.parse(JSON.stringify(good)); skip.checks[0].status = 'SKIP';
-assert.strictEqual(B.verdict(skip, s, now).ok, true);
+assert.strictEqual(B.verdict(skip, s).ok, true);
 
 // Frame rate: judged segments latch red below the limit, the WebGL works never.
 s = B.recordSegment(s, 'evolved', 20 * 57, 57, false);
-assert.strictEqual(B.verdict(good, s, now).ok, true, 'a slow WebGL work is not a failure');
+assert.strictEqual(B.verdict(good, s).ok, true, 'a slow WebGL work is not a failure');
 s = B.recordSegment(s, 'slides', 60 * 99, 99, true);
-assert.strictEqual(B.verdict(good, s, now).ok, true);
+assert.strictEqual(B.verdict(good, s).ok, true);
 s = B.recordSegment(s, 'slides', 30 * 99, 99, true);
 assert.strictEqual(s.fps.slides, 30, 'the worst pass is kept');
-assert.strictEqual(B.verdict(good, s, now).ok, false);
+assert.strictEqual(B.verdict(good, s).ok, false);
 s = B.recordSegment(s, 'slides', 60 * 99, 99, true);
-assert.strictEqual(B.verdict(good, s, now).ok, false, 'red stays red');
+assert.strictEqual(B.verdict(good, s).ok, false, 'red stays red');
 assert.strictEqual(s.bad.length, 1, 'the same fault does not grow the list');
 
 // Judged against the panel's measured rate: 28 fps on a 30 Hz station is fine.
 let r30 = B.withRefresh(B.emptyStats(), 30);
 assert.strictEqual(B.minFps(r30), 30 * B.LIMITS.minShare);
 r30 = B.recordSegment(r30, 'slides', 28 * 99, 99, true);
-assert.strictEqual(B.verdict(good, r30, now).ok, true, '28 fps on a 30 Hz panel');
+assert.strictEqual(B.verdict(good, r30).ok, true, '28 fps on a 30 Hz panel');
 r30 = B.recordSegment(r30, 'slides', 20 * 99, 99, true);
-assert.strictEqual(B.verdict(good, r30, now).ok, false, '20 fps on a 30 Hz panel');
+assert.strictEqual(B.verdict(good, r30).ok, false, '20 fps on a 30 Hz panel');
 assert.strictEqual(B.withRefresh(B.emptyStats(), 0).refresh, null, 'a failed measurement keeps the default');
 // The 60 fps clip on a 30 Hz panel: half its frames are never shown and count
 // as dropped; that is not a fault. Beyond that allowance it is.
 let v30 = B.recordVideo(B.withRefresh(B.emptyStats(), 30), 1800, 3600);
-assert.strictEqual(B.verdict(good, v30, now).ok, true, '60 fps clip on a 30 Hz panel');
+assert.strictEqual(B.verdict(good, v30).ok, true, '60 fps clip on a 30 Hz panel');
 v30 = B.recordVideo(B.withRefresh(B.emptyStats(), 30), 2400, 3600);
-assert.strictEqual(B.verdict(good, v30, now).ok, false, 'too many drops even for 30 Hz');
+assert.strictEqual(B.verdict(good, v30).ok, false, 'too many drops even for 30 Hz');
 assert.strictEqual(B.dropAllowance(B.withRefresh(B.emptyStats(), 75)), B.LIMITS.maxDropShare, 'a faster panel gets no extra allowance');
 
 // Video: more than 1 % dropped, or nothing decoded, is red.
 let v = B.recordVideo(B.emptyStats(), 30, 3600);
-assert.strictEqual(B.verdict(good, v, now).ok, true);
+assert.strictEqual(B.verdict(good, v).ok, true);
 v = B.recordVideo(v, 50, 3600);
-assert.strictEqual(B.verdict(good, v, now).ok, false);
+assert.strictEqual(B.verdict(good, v).ok, false);
 assert.deepStrictEqual([v.dropped, v.decoded], [80, 7200]);
-assert.strictEqual(B.verdict(good, B.recordVideo(B.emptyStats(), 0, 0), now).ok, false);
+assert.strictEqual(B.verdict(good, B.recordVideo(B.emptyStats(), 0, 0)).ok, false);
+
+// A stale status latches: a fresh one afterwards does not clear it.
+// Staleness is the page's monotonic time since updated_at last changed.
+let fr = B.trackFreshness({ seen: undefined, at: 0 }, 1000, 0);
+fr = B.trackFreshness(fr, 1000, 80);
+assert.strictEqual(B.staleFor(fr, 80), 80, 'the same updated_at does not refresh');
+fr = B.trackFreshness(fr, 1005, 85);
+assert.strictEqual(B.staleFor(fr, 86), 1, 'a new updated_at refreshes');
+// A wall clock stepped forward by hours, with samples still arriving: green.
+fr = B.trackFreshness(fr, 1005 + 8 * 3600, 90);
+assert.strictEqual(B.verdict(good, B.latchStatus(B.emptyStats(), B.staleFor(fr, 91)), B.staleFor(fr, 91)).ok, true, 'a clock step is not a stopped sampler');
+assert.strictEqual(B.verdict(good, B.emptyStats(), 91).ok, false, 'no new sample for 91 s is');
+let ls = B.latchStatus(B.emptyStats(), 100);
+assert.strictEqual(B.verdict(good, ls, 0).ok, false, 'stale latched');
+ls = B.latchStatus(ls, 0);
+assert.strictEqual(B.verdict(good, ls, 0).ok, false, 'still red after the sampler came back');
+assert.strictEqual(B.verdict(good, ls, 100).reasons.length, 1, 'latched and live stale count once');
+
+// Segment failures latch; different faults of one segment are both kept.
+let sf = B.fail(B.emptyStats(), 'slides did not load');
+sf = B.recordSegment(sf, 'slides', 30 * 99, 99, true);
+sf = B.recordSegment(sf, 'slides', 31 * 99, 99, true);
+assert.deepStrictEqual(sf.bad, ['slides did not load', 'slides 30.0 fps']);
+assert.ok(B.SEGMENTS.every(seg => seg.video || seg.ready), 'every frame segment has a ready selector');
 
 // Running time and corners.
 assert.strictEqual(B.hms(0), '0:00:00');
@@ -248,7 +272,7 @@ for (const seg of B.SEGMENTS) ws = B.recordSegment(ws, seg.id, 1, 99, true);
 ws = B.recordVideo(ws, 999999, 999999);
 ws.passes = 99999;
 for (const [st, stats] of [[good, B.emptyStats()], [worst, ws], [null, B.emptyStats()]]) {
-  const p = B.qrPayload(st, stats, now);
+  const p = B.qrPayload(st, stats, now, st === worst ? 1000 : 0);
   assert.ok(Buffer.byteLength(p) <= B.QR_MAX_BYTES, `payload ${Buffer.byteLength(p)} bytes`);
   const j = JSON.parse(p);
   assert.strictEqual(j.ff1, 'burnin/1');

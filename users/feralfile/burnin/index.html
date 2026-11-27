@@ -60,13 +60,17 @@ const card = $('card'), frame = $('frame'), video = $('video'), dot = $('dot');
 const now = () => Date.now() / 1000;
 const sleep = s => new Promise(r => setTimeout(r, (s / FAST) * 1000));
 let status = null, stats = B.emptyStats();
+// The page's monotonic clock, for staleness (burnin.js trackFreshness).
+const mono = () => performance.now() / 1000;
+let fresh = { seen: undefined, at: mono() };
+const stale = () => B.staleFor(fresh, mono());
 
 // status.json: rewritten by ff1-burnin.sh every few seconds. A failed read
 // keeps the last one; the verdict turns red if it goes stale.
 async function readStatus() {
   try {
     const r = await fetch('/status.json?' + Date.now(), { cache: 'no-store' });
-    if (r.ok) status = await r.json();
+    if (r.ok) { status = await r.json(); fresh = B.trackFreshness(fresh, status.updated_at, mono()); }
   } catch (e) { /* keep the last status */ }
 }
 setInterval(readStatus, 3000);
@@ -84,7 +88,7 @@ function checksTable() {
 }
 function qrSvg() {
   const qr = qrcode(0, 'L');
-  qr.addData(B.qrPayload(status, stats, now()), 'Byte');
+  qr.addData(B.qrPayload(status, stats, now(), stale()), 'Byte');
   qr.make();
   return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
 }
@@ -94,14 +98,12 @@ function showCard(html, cls) {
 }
 
 async function checksPhase() {
-  const since = now();
   for (;;) {
     await readStatus();
     if (status && status.checks_done_at) return;
     // No status at all, or one that stopped updating: the script's sampler is
     // not running. Say so in red rather than wait on a still screen.
-    if ((!status && now() - since > 30 / FAST) ||
-        (status && status.updated_at && now() - status.updated_at > B.LIMITS.staleSeconds)) {
+    if ((!status && stale() > 30 / FAST) || (status && stale() > B.LIMITS.staleSeconds)) {
       showCard(header('No status from the burn-in script', '老化测试脚本没有状态') +
         '<div>/status.json is missing or has stopped updating. Power-cycle and pick the burn-in again.</div>', 'bad');
       await sleep(2);
@@ -120,7 +122,7 @@ async function resultPhase() {
   if (left <= 0) return;
   // The panel's own rate, measured on this still card, is what the slides
   // and the video are judged against.
-  const v = B.verdict(status, stats, now());
+  const v = B.verdict(status, stats, stale());
   showCard(header('Unit checks', '单元检查') + `<div class="row">${checksTable()}<div id="qr">${qrSvg()}</div></div>
     <div>Scan the QR or photograph this screen. The display and load test starts in ${Math.ceil(left)} s and runs until the power is pulled.</div>
     <div class="zh">请扫码或拍照。${Math.ceil(left)} 秒后开始屏幕与负载测试，直到拔掉电源。</div>
@@ -131,25 +133,47 @@ async function resultPhase() {
 }
 
 function tickDot() {
-  const v = B.verdict(status, stats, now());
+  stats = B.latchStatus(stats, stale());
+  const v = B.verdict(status, stats, stale());
   dot.classList.toggle('bad', !v.ok);
+  // The title carries the verdict too, for a test driving the page headless.
+  document.title = `FF1 burn-in: ${v.ok ? 'OK' : 'FAILED ' + v.reasons.join('; ')} (passes ${stats.passes})`;
   dot.querySelector('span').textContent = B.hms(status && status.started_at ? now() - status.started_at : 0);
 }
 setInterval(tickDot, 1000);
 
 // countFrames(seconds) -> frames drawn by this document after the warm-up.
 // The compositor draws this frame too, so a GPU too busy to keep up with the
-// segment shows here.
+// segment shows here. The segment ends on a timer, not on a frame: a
+// compositor that stops drawing (a GPU hang) must end it with few frames,
+// which is red, not stall the pass behind a moving running-time dot.
 function countFrames(seconds) {
   return new Promise(resolve => {
     const start = performance.now(), warm = start + (B.WARMUP_SECONDS / FAST) * 1000, end = start + (seconds / FAST) * 1000;
-    let frames = 0;
+    let frames = 0, done = false;
     const step = t => {
-      if (t >= warm) frames++;
-      if (t < end) requestAnimationFrame(step); else resolve({ frames, seconds: (end - warm) / 1000 });
+      if (done) return;
+      if (t >= warm && t < end) frames++;
+      requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
+    setTimeout(() => { done = true; resolve({ frames, seconds: Math.max(0, end - warm) / 1000 }); }, end - start);
   });
+}
+
+// frameReady(seg) -> true once seg.ready matches in the frame's document (same
+// origin: everything comes from the loopback server), false after
+// START_SECONDS.
+async function frameReady(seg) {
+  const end = now() + B.START_SECONDS / FAST;
+  while (now() < end) {
+    try {
+      const doc = frame.contentDocument;
+      if (doc && doc.location.pathname === seg.src && doc.querySelector(seg.ready)) return true;
+    } catch (e) { /* not readable yet */ }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
 }
 
 async function runSegment(seg) {
@@ -158,7 +182,17 @@ async function runSegment(seg) {
   if (seg.video) {
     frame.classList.add('hidden'); frame.src = 'about:blank';
     video.src = seg.video; video.classList.remove('hidden');
-    try { await video.play(); } catch (e) { /* autoplay is allowed by the flags; counted below */ }
+    // play() can stay pending forever on a stalled request: bound it, latch
+    // the failure and go on with the pass.
+    const started = await Promise.race([
+      video.play().then(() => true, () => false),
+      new Promise(r => setTimeout(() => r(false), (B.START_SECONDS / FAST) * 1000)),
+    ]);
+    if (!started) {
+      video.pause(); video.removeAttribute('src'); video.load(); video.classList.add('hidden');
+      stats = B.fail(stats, 'video did not start');
+      return;
+    }
     const q0 = video.getVideoPlaybackQuality();
     const r = await countFrames(seg.seconds);
     const q1 = video.getVideoPlaybackQuality();
@@ -168,6 +202,13 @@ async function runSegment(seg) {
     stats = B.recordVideo(stats, q1.droppedVideoFrames - q0.droppedVideoFrames, decoded);
   } else {
     frame.src = seg.src; frame.classList.remove('hidden');
+    // Frames drawn by this document prove nothing about the frame's content:
+    // wait for the segment's own ready signal, or latch it as not loaded.
+    if (!(await frameReady(seg))) {
+      frame.src = 'about:blank'; frame.classList.add('hidden');
+      stats = B.fail(stats, `${seg.id} did not load`);
+      return;
+    }
     const r = await countFrames(seg.seconds);
     frame.src = 'about:blank'; frame.classList.add('hidden');
     stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
@@ -175,7 +216,7 @@ async function runSegment(seg) {
 }
 
 function statusCard() {
-  const v = B.verdict(status, stats, now());
+  const v = B.verdict(status, stats, stale());
   const s = (status && status.sys) || {};
   const fps = B.SEGMENTS.map(seg => `${seg.id} ${stats.fps[seg.id] === undefined ? '–' : stats.fps[seg.id].toFixed(1)}`).join(' · ');
   const prev = status && status.previous;

@@ -13,12 +13,19 @@
 // slide lengths sum to SLIDES_SECONDS (the test pins the sum). Each pass ends
 // with the status card.
 const SLIDES_SECONDS = 102;
+// ready is a selector that matches in the segment's document only once its
+// test content runs: the display-check page has put a slide on its stage,
+// evolved has compiled its shaders and written the formula, p5 has made its
+// canvas. An error page or a work that failed to start matches nothing.
 const SEGMENTS = [
-  { id: 'slides', seconds: SLIDES_SECONDS, src: '/display-check/index.html', judged: true },
-  { id: 'evolved', seconds: 60, src: '/burnin/load/evolved/index.html', judged: false },
-  { id: 'uneasy', seconds: 60, src: '/burnin/load/uneasy-dream/index.html', judged: false },
+  { id: 'slides', seconds: SLIDES_SECONDS, src: '/display-check/index.html', ready: '#stage > *', judged: true },
+  { id: 'evolved', seconds: 60, src: '/burnin/load/evolved/index.html', ready: '#overlay:not(:empty)', judged: false },
+  { id: 'uneasy', seconds: 60, src: '/burnin/load/uneasy-dream/index.html', ready: 'canvas', judged: false },
   { id: 'video', seconds: 60, video: '/burnin/load/clip-4k60-hevc10.mp4', judged: true },
 ];
+// A segment that is not ready, or a clip that has not started playing, within
+// this long is a failure; the pass moves on to the next segment.
+const START_SECONDS = 15;
 const CLIP_FPS = 60;          // the clip's frame rate
 const CARD_SECONDS = 8;       // the status card between passes
 const RESULT_SECONDS = 60;    // the result card after the unit checks
@@ -81,15 +88,41 @@ function recordVideo(stats, dropped, decoded) {
   return out;
 }
 
-// The latched reasons are a set: the same fault again does not grow the list.
-function addBad(bad, reason) {
-  const key = reason.split(' ')[0];
-  return bad.some(r => r.split(' ')[0] === key) ? bad : bad.concat(reason);
+// fail(stats, reason) -> stats with reason latched for the rest of the session.
+function fail(stats, reason) {
+  return { ...stats, bad: addBad(stats.bad, reason) };
 }
 
-// verdict(status, stats, nowSeconds) -> { ok, reasons }: red if anything has
-// failed this session. status may be null (not read yet).
-function verdict(status, stats, nowSeconds) {
+// Staleness is measured on the page's monotonic clock: how long since a read
+// last brought a new updated_at. Not wall time minus updated_at: timesyncd
+// steps the clock on this boot, and a step of minutes or hours (an RTC kept
+// in local time) would read as a stopped sampler on a healthy unit.
+// trackFreshness(fresh, updatedAt, monoSeconds) -> fresh, restarted when
+// updatedAt changed; staleFor(fresh, monoSeconds) -> seconds without change.
+function trackFreshness(fresh, updatedAt, monoSeconds) {
+  return updatedAt !== fresh.seen ? { seen: updatedAt, at: monoSeconds } : fresh;
+}
+function staleFor(fresh, monoSeconds) {
+  return monoSeconds - fresh.at;
+}
+
+// latchStatus(stats, staleSeconds) -> stats with a stale status latched: a
+// sampler that stopped and came back must stay on the record.
+function latchStatus(stats, staleSeconds) {
+  return staleSeconds > LIMITS.staleSeconds ? fail(stats, 'status sampler stopped') : stats;
+}
+
+// The latched reasons are a set: the same fault again (with other numbers)
+// does not grow the list, and the first occurrence is kept.
+function addBad(bad, reason) {
+  const key = r => r.replace(/[0-9.\/]+/g, '#');
+  return bad.some(r => key(r) === key(reason)) ? bad : bad.concat(reason);
+}
+
+// verdict(status, stats, staleSeconds) -> { ok, reasons }: red if anything has
+// failed this session. status may be null (not read yet); staleSeconds is
+// staleFor() of the reads so far (0 when unknown).
+function verdict(status, stats, staleSeconds = 0) {
   const reasons = [...stats.bad];
   if (!status) return { ok: reasons.length === 0, reasons };
   for (const c of status.checks || []) {
@@ -103,8 +136,9 @@ function verdict(status, stats, nowSeconds) {
   if (s.cpu_max >= LIMITS.cpuC) reasons.push(`CPU ${s.cpu_max} °C`);
   if (s.gpu_max >= LIMITS.gpuC) reasons.push(`GPU ${s.gpu_max} °C`);
   if (s.nvme_max >= LIMITS.nvmeC) reasons.push(`NVMe ${s.nvme_max} °C`);
-  if (status.updated_at && nowSeconds - status.updated_at > LIMITS.staleSeconds) reasons.push('status sampler stopped');
-  return { ok: reasons.length === 0, reasons };
+  if (staleSeconds > LIMITS.staleSeconds) reasons.push('status sampler stopped');
+  const unique = [...new Set(reasons)];
+  return { ok: unique.length === 0, reasons: unique };
 }
 
 // hms(seconds) -> "h:mm:ss" (hours not capped: a run can last days).
@@ -118,10 +152,10 @@ function hms(seconds) {
 // place of a photograph. Short keys keep it within a QR code a phone reads
 // from across a bench (QR_MAX_BYTES; the test checks a worst case).
 const QR_MAX_BYTES = 400;
-function qrPayload(status, stats, nowSeconds) {
+function qrPayload(status, stats, nowSeconds, staleSeconds = 0) {
   const st = status || {};
   const s = st.sys || {};
-  const v = verdict(status, stats, nowSeconds);
+  const v = verdict(status, stats, staleSeconds);
   const fps = id => (stats.fps[id] === undefined ? null : Math.round(stats.fps[id] * 10) / 10);
   const p = {
     ff1: 'burnin/1',
@@ -168,8 +202,8 @@ function resultCardUntil(status) {
 }
 
 const api = {
-  SLIDES_SECONDS, SEGMENTS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
-  emptyStats, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardUntil,
+  SLIDES_SECONDS, SEGMENTS, START_SECONDS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
+  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardUntil,
 };
 if (typeof module !== 'undefined') module.exports = api;
 else window.Burnin = api;
