@@ -315,7 +315,7 @@ func TestCheckStatusOverlayEgress_SetupOwner(t *testing.T) {
 	}
 }
 
-// lanCheckStatusRequest is a hub cast from a LAN peer: the hub serves local
+// lanCheckStatusRequest is a hub display from a LAN peer: the hub serves local
 // sources only (feral-file#3551), and httptest's default source (192.0.2.1)
 // is a public address.
 func lanCheckStatusRequest() *http.Request {
@@ -326,7 +326,7 @@ func lanCheckStatusRequest() *http.Request {
 
 // TestCheckStatusOutcomesEgress (PR #438 review, round 4, F16): the player's
 // raw `outcomes` ring carries item sources — presigned CDN URLs included —
-// and play history across casts. The poller's notification mapper drops it;
+// and play history across display requests. The poller's notification mapper drops it;
 // the direct checkStatus reply (LAN /api/cast or relayer) bypasses that
 // mapper, so sendCDPRequest must strip it too, on BOTH reply shapes, a
 // spoofed top-level copy beside a real "message" sub-map included.

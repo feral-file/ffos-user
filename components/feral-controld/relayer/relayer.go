@@ -219,9 +219,13 @@ type relayer struct {
 	json       wrapper.JSON
 
 	// Internal state
-	endpoint         string
+	endpoint string
+	// deviceID is the v2 channel this carrier dials (NewV2): the device ID
+	// or thumb(devSig). Empty on the legacy relayer, which is how the two
+	// kinds are told apart throughout this file.
 	deviceID         string
 	session          *deviceSession
+	drops            *dropLog
 	peerDisconnected func(Peer)
 	apiKey           string
 	conn             wrapper.WebSocketConn
@@ -480,8 +484,8 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return ErrAlreadyConnected
 	}
 
-	// The v2 carrier is addressed by the device ID and never reads the claim:
-	// no topic goes into its URL or its logs.
+	// A v2 carrier is addressed by its channel and never reads the claim: no
+	// topic goes into its URL or its logs.
 	var connectURL, topicID string
 	var headers http.Header
 	if r.deviceID != "" {
@@ -552,6 +556,13 @@ func (r *relayer) Connect(ctx context.Context) error {
 		conn.SetReadLimit(relaywire.MaxFrameBytes)
 		r.session = newDeviceSession(conn)
 		r.session.onDisconnect = r.peerDisconnected
+		if r.drops == nil {
+			r.drops = newDropLog(r.logger, time.Now)
+		}
+		drops := r.drops
+		r.session.onDrop = func(reason, peer string) {
+			drops.note(reason, zap.String("peer", peer))
+		}
 		r.v2ConnectedAt = r.clock.Now()
 	}
 	// Stage-0/1 observability (docs/wan-outage-observability.md): connection
@@ -754,8 +765,8 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					}
 					continue
 				}
+				var source string
 				if session != nil {
-					var source string
 					msg, source, err = session.receive(kind, msg)
 					if err != nil || msg == nil {
 						continue
@@ -775,6 +786,7 @@ func (r *relayer) background(ctx context.Context, done chan struct{}) {
 					logInvalid := r.logger.Error
 					if session != nil {
 						logInvalid = r.logger.Debug // any stranger on the channel can send this
+						session.dropped(dropNotJSON, source)
 					}
 					logInvalid("Invalid JSON received",
 						zap.ByteString("message", logMsg),

@@ -146,7 +146,7 @@ func (s *Service) matchWallSource(rawURL string) (string, bool) {
 		return "", false
 	}
 	// The wall first, from the item on screen; then the playlist last
-	// pushed (Service.pushed): a cast's first item loads before the next
+	// pushed (Service.pushed): a display request's first item loads before the next
 	// poll reports the new wall.
 	if src, ok := matchSource(s.wall, s.wallIndex, want, rawURL, s.store.gateways); ok {
 		return src, true

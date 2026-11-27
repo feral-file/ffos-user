@@ -3,7 +3,7 @@
 // the daemon needs to report it (feral-file/ffos-user#307).
 //
 // The package is deliberately narrow: Verify is a pure function over bytes,
-// and the mode/policy that decides what a verdict MEANS for a cast lives in
+// and the mode/policy that decides what a verdict MEANS for a display request lives in
 // the caller (commandrouter) so this package never grows into a second
 // command router. It imports dp1-go's sign package and nothing of ours.
 //
@@ -30,6 +30,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/display-protocol/dp1-go/sign"
@@ -39,11 +41,13 @@ import (
 type Status string
 
 const (
-	// StatusValid: signatures[] is present and every entry verifies.
+	// StatusValid: signatures[] is present, every entry verifies, and at least
+	// one is a feed or curator signature.
 	StatusValid Status = "valid"
 	// StatusInvalid: signatures[] is present and at least one entry does
 	// not verify — tampered content (payload_hash mismatch), a placeholder or
-	// wrong-key signature, an algorithm dp1-go does not implement, or a
+	// wrong-key signature, a role outside the DP-1 §7.1 set, an algorithm dp1-go
+	// does not implement, or a
 	// malformed entry. The only status meaning "a claim was made and it is
 	// false"; the mode policy treats it like unsigned, the reason string
 	// tells them apart.
@@ -57,7 +61,7 @@ const (
 
 // Signer is one signatures[] entry's identity plus its own verification
 // outcome. Kid is a DID (did:key / did:pkh), safe to log and to return to
-// casters: it names a public key, never a URL or a credential.
+// senders: it names a public key, never a URL or a credential.
 type Signer struct {
 	Alg  string `json:"alg"`
 	Kid  string `json:"kid"`
@@ -77,7 +81,7 @@ type Verdict struct {
 	// LegacyPresent reports a v1.0.x top-level `signature` string was found.
 	// Informational only (see StatusUnsigned).
 	LegacyPresent bool
-	// Reason is a short, caster-safe explanation for a non-valid status:
+	// Reason is a short, sender-safe explanation for a non-valid status:
 	// "unsigned", "unsigned; legacy signature ignored", or the first failed
 	// signer's "<role> signature invalid: <reason>". Empty when valid.
 	// Never contains a URL or a kid.
@@ -85,7 +89,7 @@ type Verdict struct {
 }
 
 // Reason vocabulary for a failed signer. Stable strings returned in diagnostic
-// cast replies and asserted by tests. No signer reason interpolates document
+// display request replies and asserted by tests. No signer reason interpolates document
 // text; the unsupported algorithm's name lives in Signer.Alg instead.
 const (
 	ReasonPayloadHashMismatch = "payload_hash mismatch"
@@ -94,6 +98,9 @@ const (
 	ReasonMalformed           = "malformed signature"
 	ReasonTooManySignatures   = "too many signatures"
 	ReasonDocumentTooLarge    = "document too large"
+	// ReasonNoFeedOrCurator marks a document whose entries all verify while
+	// none is a feed or curator signature (§7.1.1).
+	ReasonNoFeedOrCurator = "no feed or curator signature"
 	// ReasonUnverified marks an in-bounds entry that was never checked
 	// because a sibling entry tripped a bound and the document was refused
 	// before any cryptography ran.
@@ -104,12 +111,13 @@ const (
 )
 
 // Signer field bounds. alg, kid, and role are copied from an untrusted
-// document into the cast reply and the log line, so their length must not
-// be the caster's choice: an entry past any of these is reported as
+// document into the display reply and the log line, so their length must not
+// be the sender's choice: an entry past any of these is reported as
 // malformed with the oversized field blanked, verified by nothing, and the
 // document is invalid regardless of what dp1-go says about the other
 // entries (dp1-go does not look at role at all, so a valid signature with a
-// megabyte role would otherwise come back "valid"). A did:key is ~56 chars
+// megabyte role would otherwise come back "valid"; Verify also holds the
+// role to the DP-1 §7.1 enum for the same reason). A did:key is ~56 chars
 // and a did:pkh ~60; the DP-1 role and alg vocabularies are single words.
 const (
 	MaxAlgLen  = 32
@@ -142,13 +150,13 @@ const MaxDocumentBytes = 16 << 20
 // resulting 32 bytes — microseconds, independent of document size. Before
 // that, every entry cost two whole-document canonicalizations (payload_hash
 // check + signing digest), which made an unbounded array hours of CPU per
-// hostile cast on an unauthenticated 4 MiB body. That per-entry cost is
+// hostile display request on an unauthenticated 4 MiB body. That per-entry cost is
 // what sized this cap, and what sized the 4 MiB ingress figures.
 //
 // The cap stays because what remains is still attacker-chosen: N ECDSA
-// recoveries for eip191, and N alg/kid/role strings copied into the cast
-// reply and the log line. DP-1 defines six roles (curator, feed, agent,
-// institution, licensor, publisher); 16 is comfortably above any honest
+// recoveries for eip191, and N alg/kid/role strings copied into the display request
+// reply and the log line. DP-1 defines five playlist roles (curator, feed, agent,
+// institution, licensor); 16 is comfortably above any honest
 // chain. Past it the document is invalid with ReasonTooManySignatures and
 // NO cryptography runs, so the cost of a hostile document is one envelope
 // decode.
@@ -161,8 +169,28 @@ type signatureEnvelope struct {
 	// Signature is raw so PRESENCE can be told apart from an empty string:
 	// the wire contract flags legacySignature whenever a v1.0 `signature`
 	// string is present, "" included.
-	Signature  json.RawMessage `json:"signature"`
-	Signatures json.RawMessage `json:"signatures"`
+	Signature  json.RawMessage
+	Signatures json.RawMessage
+	// SignaturesVariant reports a member that differs from "signatures" only
+	// in case. dp1-go's struct decode would read it as the list.
+	SignaturesVariant bool
+}
+
+// readEnvelope reads the two members by their exact names. Struct decoding
+// matches case-insensitively, so a "Signatures" member the signer did not
+// call signatures would be judged as the document's signature list.
+func readEnvelope(raw []byte) (signatureEnvelope, error) {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return signatureEnvelope{}, err
+	}
+	env := signatureEnvelope{Signature: members["signature"], Signatures: members["signatures"]}
+	for name := range members {
+		if name != "signatures" && strings.EqualFold(name, "signatures") {
+			env.SignaturesVariant = true
+		}
+	}
+	return env, nil
 }
 
 // legacyPresent reports whether the top-level `signature` field carried a
@@ -193,13 +221,20 @@ func Verify(raw []byte) Verdict {
 	if len(raw) > MaxDocumentBytes {
 		return Verdict{Status: StatusInvalid, Reason: ReasonDocumentTooLarge}
 	}
-	var env signatureEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
+	env, err := readEnvelope(raw)
+	if err != nil {
 		// Not a JSON object at all. Reported as invalid rather than unsigned
 		// so a garbage document is never mistaken for an honest unsigned one.
 		return Verdict{Status: StatusInvalid, Reason: ReasonMalformed}
 	}
 	legacy := legacyPresent(env.Signature)
+
+	// A case variant beside the real list: invalid, whatever either holds, and
+	// before dp1-go runs. It would judge the variant, and an empty or null one
+	// would read as unsigned. A variant alone is just an unknown member.
+	if env.Signatures != nil && env.SignaturesVariant {
+		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
+	}
 
 	// Count entries BEFORE dp1-go touches the document (see MaxSignatures),
 	// and without materializing them: the decoder stops at the first entry
@@ -233,7 +268,13 @@ func Verify(raw []byte) Verdict {
 	// each one here — another whole-document canonicalization apiece, on the
 	// failure path, which is the path a hostile document chooses
 	// (display-protocol/dp1-go#16).
-	results, err := sign.VerifyMultiSignaturesJSONDetailed(raw)
+	// dp1-go reads the member case-insensitively, so it is asked only about a
+	// document that has the exact one.
+	var results []sign.SignatureResult
+	err = sign.ErrNoSignatures
+	if env.Signatures != nil {
+		results, err = sign.VerifyMultiSignaturesJSONDetailed(raw)
+	}
 	switch {
 	case errors.Is(err, sign.ErrNoSignatures):
 		reason := ReasonUnsigned
@@ -245,11 +286,12 @@ func Verify(raw []byte) Verdict {
 		// signatures is present but not an array of signature objects.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
-	if len(results) != len(entries) {
-		// Cannot happen: dp1-go decoded the same array from the same bytes
-		// this function just counted and field-bounded. Guarded so a library
-		// change surfaces as invalid, never as a silently valid verdict over
-		// entries the bounds above never saw.
+	if !slices.EqualFunc(results, entries, func(r sign.SignatureResult, e dp1playlist.Signature) bool {
+		return r.Signature == e
+	}) {
+		// dp1-go judged other entries than the ones read above, e.g. a repeated
+		// "signatures" member that its struct decode merged. Invalid, never a
+		// verdict over entries the bounds above never saw.
 		return Verdict{Status: StatusInvalid, LegacyPresent: legacy, Reason: ReasonMalformed}
 	}
 
@@ -262,6 +304,15 @@ func Verify(raw []byte) Verdict {
 	for _, r := range results {
 		e := r.Signature
 		s := Signer{Alg: e.Alg, Kid: e.Kid, Role: e.Role, OK: r.OK()}
+		// dp1-go checks the signature bytes and never looks at role, but
+		// §7.1 makes role REQUIRED and one of a closed set. A cryptographically
+		// good entry with a role outside it is a malformed entry, not a valid
+		// one; reported with the existing "malformed signature" reason so the
+		// reply vocabulary does not grow.
+		if s.OK && !knownRole(e.Role) {
+			s.OK = false
+			r.Err = errBadRole
+		}
 		if !s.OK {
 			s.Reason = classify(r.Err)
 			if firstFailure == "" {
@@ -269,6 +320,12 @@ func Verify(raw []byte) Verdict {
 			}
 		}
 		signers = append(signers, s)
+	}
+	// §7.1.1: the document needs at least one feed or curator signature. Every
+	// entry verifying is not enough when none of them has either role. Reported
+	// only, like every other verdict.
+	if firstFailure == "" && !slices.ContainsFunc(signers, isPublishingSigner) {
+		firstFailure = ReasonNoFeedOrCurator
 	}
 	if firstFailure == "" {
 		return Verdict{Status: StatusValid, Signers: signers, LegacyPresent: legacy}
@@ -278,7 +335,7 @@ func Verify(raw []byte) Verdict {
 
 // refuseOversized reports the invalid verdict for a document in which any
 // entry exceeds a signer field bound, or (nil, false) when every entry is in
-// bounds. The oversized fields are blanked so nothing caster-sized is echoed;
+// bounds. The oversized fields are blanked so nothing sender-sized is echoed;
 // in-bounds sibling entries are listed as unverified, because the document
 // is refused before any of them is checked.
 func refuseOversized(entries []dp1playlist.Signature, legacy bool) (Verdict, bool) {
@@ -356,6 +413,26 @@ func classify(err error) string {
 		return ReasonMalformed
 	}
 }
+
+func isPublishingSigner(s Signer) bool {
+	return s.OK && (s.Role == dp1playlist.RoleFeed || s.Role == dp1playlist.RoleCurator)
+}
+
+// errBadRole classifies as ReasonMalformed (see classify's default arm).
+var errBadRole = errors.New("signature role is not a DP-1 role")
+
+// knownRoles is the closed role set of the DP-1 playlist schema (§7.1): the
+// five core roles. `publisher` is deliberately absent: it belongs to the
+// Channels extension's own schema, and Verify only ever sees playlists.
+var knownRoles = map[string]bool{
+	dp1playlist.RoleCurator:     true,
+	dp1playlist.RoleFeed:        true,
+	dp1playlist.RoleAgent:       true,
+	dp1playlist.RoleInstitution: true,
+	dp1playlist.RoleLicensor:    true,
+}
+
+func knownRole(role string) bool { return knownRoles[role] }
 
 func roleOrUnknown(role string) string {
 	if role == "" {

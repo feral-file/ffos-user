@@ -1,0 +1,345 @@
+<!doctype html>
+<!--
+  The factory test screen (ffos-user docs/plans/factory-burnin.md), served by
+  ff1-burnin.sh's loopback server at http://127.0.0.1:8180/burnin/. Two of the
+  three factory boot entries open it (the third, the nine-point fields, opens
+  the display-check page's fields set alone):
+    ?mode=panel     A start card (the panel's rate is measured on it), then
+                    load in a new random order each round: the display-check
+                    slides, two WebGL works, a 4K 10-bit HEVC clip. Once the
+                    unit has been on 10 minutes, the Panel Check: black 15 s,
+                    gray 15 s, until the power is pulled, nothing else on
+                    screen. During the load a dot (green / latched red) with
+                    the running time sits in one corner, a different one
+                    each segment.
+    ?mode=hardware  The unit checks as they run (what to listen for), then
+                    their result and a QR, held until the power is pulled.
+  Logic in burnin.js; ?fast=N divides every duration by N (bench and tests).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FF1 factory test</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+    font-family: "Noto Sans", "Noto Sans CJK SC", sans-serif; cursor: none; }
+  #frame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+  video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .hidden { display: none !important; }
+  #card { position: fixed; inset: 0; padding: 5vmin; box-sizing: border-box; display: flex; flex-direction: column;
+    gap: 1.4vmin; font-size: 2.1vmin; line-height: 1.3; }
+  #card.ok { background: #0b5d1e; } #card.bad { background: #8a1010; } #card.wait { background: #111; }
+  /* Sizes are relative to the card's font size, which fitCard() lowers until
+     everything shows (a worst-case card on a square panel). */
+  #card h1 { font-size: 2.3em; margin: 0; } #card h2 { font-size: 1.3em; margin: 0; font-weight: 600; }
+  #card .zh { opacity: .85; }
+  #card table { border-collapse: collapse; font-size: 1.15em; margin-bottom: .5em; }
+  #card td.k { white-space: nowrap; }
+  #card td { padding: .4vmin 2vmin .4vmin 0; vertical-align: top; }
+  .PASS { color: #9f9; } .FAIL { color: #ff8a8a; font-weight: 700; } .SKIP, .PLAYED { color: #ffd27a; }
+  #card.bad .FAIL { color: #fff; background: #c00; padding: 0 .6vmin; }
+  #qr { background: #fff; padding: 1.5vmin; align-self: flex-start; line-height: 0; }
+  /* Results and QR side by side on any panel, the square 1920×1920 one
+     included: 90vmin inside the padding = text + 3vmin gap + 31vmin QR. */
+  #qr { flex: 0 0 auto; }
+  #qr svg { width: 28vmin; height: 28vmin; }
+  .row { display: flex; gap: 3vmin; align-items: flex-start; }
+  .row > :first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
+  #dot { position: fixed; z-index: 10; display: flex; align-items: center; gap: 1vmin; padding: .6vmin 1.2vmin;
+    border-radius: 3vmin; background: rgba(0,0,0,.55); font: 600 2.2vmin "Noto Sans Mono", monospace; }
+  #dot i { width: 2.2vmin; height: 2.2vmin; border-radius: 50%; background: #2c2; display: block; }
+  #dot.bad i { background: #e22; }
+  #dot.top-left { top: 1.5vmin; left: 1.5vmin; } #dot.top-right { top: 1.5vmin; right: 1.5vmin; }
+  #dot.bottom-right { bottom: 1.5vmin; right: 1.5vmin; } #dot.bottom-left { bottom: 1.5vmin; left: 1.5vmin; }
+</style>
+</head>
+<body>
+<iframe id="frame" class="hidden" allow="autoplay"></iframe>
+<video id="video" class="hidden" muted loop playsinline></video>
+<div id="dot" class="hidden"><i></i><span></span></div>
+<div id="card" class="wait"></div>
+<script src="qrcode.js"></script>
+<script src="burnin.js"></script>
+<script>
+'use strict';
+const B = window.Burnin;
+const q = new URLSearchParams(location.search);
+const FAST = Math.max(1, Number(q.get('fast')) || 1);
+const MODE = q.get('mode') === 'hardware' ? 'hardware' : 'panel';
+const $ = id => document.getElementById(id);
+const card = $('card'), frame = $('frame'), video = $('video'), dot = $('dot');
+const sleep = s => new Promise(r => setTimeout(r, (s / FAST) * 1000));
+let status = null, stats = B.emptyStats();
+// The page's monotonic clock, for staleness (burnin.js trackFreshness).
+const mono = () => performance.now() / 1000;
+let fresh = { seen: undefined, at: mono() };
+const stale = () => B.staleFor(fresh, mono());
+// The unit's uptime now: the last sampled /proc/uptime plus the page's own
+// monotonic time since that read. Session time and deadlines use this, never
+// Date.now(): timesyncd may step the wall clock on this boot.
+let upClock = null;
+const uptimeNow = () => B.uptimeAt(upClock, mono());
+const runningNow = () => B.running(status, uptimeNow());
+
+// status.json: rewritten by ff1-burnin.sh every few seconds. A failed read
+// keeps the last one; the verdict turns red if it goes stale.
+async function readStatus() {
+  try {
+    const r = await fetch('/status.json?' + Date.now(), { cache: 'no-store' });
+    if (r.ok) {
+      status = await r.json(); fresh = B.trackFreshness(fresh, status.updated_at, mono());
+      upClock = B.advanceUptime(upClock, status.sys && status.sys.uptime, mono());
+    }
+  } catch (e) { /* keep the last status */ }
+}
+setInterval(readStatus, 3000);
+
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function header(title, zh) {
+  const st = status || {};
+  return `<h1>${esc(title)} <span class="zh">${esc(zh)}</span></h1>
+    <h2>${esc(st.board || 'FF1')} · ${esc(st.version || '')} · running ${B.hms(runningNow() ?? 0)}</h2>`;
+}
+// clip(s, n): one card line's worth of a detail string (the JSON keeps it all).
+const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+function checksTable() {
+  const rows = (status && status.checks || []).map(c =>
+    `<tr><td class="k">${esc(c.name)}</td><td class="k ${esc(c.status)}">${esc(c.status)}</td><td>${esc(clip(c.detail, 72))}</td></tr>`);
+  return `<table>${rows.join('') || '<tr><td>…</td></tr>'}</table>`;
+}
+function qrSvg() {
+  const qr = qrcode(0, 'L');
+  qr.addData(B.qrText(status, stats, runningNow(), stale()), 'Byte');
+  qr.make();
+  return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+}
+function showCard(html, cls) {
+  frame.classList.add('hidden'); video.classList.add('hidden'); dot.classList.add('hidden');
+  card.className = cls; card.innerHTML = html; card.classList.remove('hidden');
+  fitCard();
+}
+
+// fitCard: the card fills the panel at 2.1vmin when it can, and shrinks its
+// text, a step at a time, until nothing is cut off (down to 1.2vmin).
+function fitCard() {
+  for (let t = 21; t >= 12; t--) {   // tenths: no floating-point drift
+    card.style.fontSize = (t / 10) + 'vmin';
+    if (card.scrollHeight <= card.clientHeight) return;
+  }
+}
+
+async function checksPhase() {
+  for (;;) {
+    await readStatus();
+    if (status && status.checks_done_at) return;
+    // No status at all, or one that stopped updating: the script's sampler is
+    // not running. Say so in red rather than wait on a still screen.
+    if ((!status && stale() > 30 / FAST) || (status && stale() > B.LIMITS.staleSeconds)) {
+      showCard(header('No status from the factory test script', '出厂测试脚本没有状态') +
+        '<div>/status.json is missing or has stopped updating. Power-cycle and pick the entry again.</div>', 'bad');
+      await sleep(2);
+      continue;
+    }
+    showCard(header('Hardware test: unit checks', '硬件测试：单元检查') + `
+      <div>Brightness, speakers (listen: a low tone LEFT, then a high tone RIGHT), Bluetooth, Wi-Fi.</div>
+      <div class="zh">亮度、扬声器（请听：先左边低音，再右边高音）、蓝牙、Wi-Fi。</div>` + checksTable(), 'wait');
+    await sleep(2);
+  }
+}
+
+// The hardware result, held until the power is pulled; redrawn every few
+// seconds so the running time, the temperatures and the QR stay current.
+async function hardwareResult() {
+  for (;;) {
+    stats = B.latchStatus(stats, stale());
+    const v = B.verdict(status, stats, stale());
+    showCard(header(v.ok ? 'Hardware test PASSED' : 'Hardware test FAILED', v.ok ? '硬件测试通过' : '硬件测试失败') +
+      `<div class="row"><div>
+        ${v.ok ? '' : `<div><b>Why:</b> ${esc(clip(v.reasons.join(' · '), 160))}</div>`}
+        ${checksTable()}
+        <div>Scan the QR or photograph this screen, then pull the power. 请扫码或拍照，然后拔掉电源。</div>
+        <div>Results also in ${esc(status && status.where || '')}</div>
+      </div><div id="qr">${qrSvg()}</div></div>`, v.ok ? 'ok' : 'bad');
+    await sleep(5);
+  }
+}
+
+function tickDot() {
+  stats = B.latchStatus(stats, stale());
+  const v = B.verdict(status, stats, stale());
+  dot.classList.toggle('bad', !v.ok);
+  // The title carries the verdict too, for a test driving the page headless.
+  document.title = `FF1 factory ${MODE}: ${v.ok ? 'OK' : 'FAILED ' + v.reasons.join('; ')}`;
+  dot.querySelector('span').textContent = B.hms(runningNow() ?? 0);
+}
+setInterval(tickDot, 1000);
+
+// countFrames(seconds) -> frames drawn by this document after the warm-up.
+// The compositor draws this frame too, so a GPU too busy to keep up with the
+// segment shows here. The segment ends on a timer, not on a frame: a
+// compositor that stops drawing (a GPU hang) must end it with few frames,
+// which is red, not stall the load behind a moving running-time dot.
+function countFrames(seconds) {
+  return new Promise(resolve => {
+    const start = performance.now(), warm = start + (B.WARMUP_SECONDS / FAST) * 1000, end = start + (seconds / FAST) * 1000;
+    let frames = 0, done = false;
+    const step = t => {
+      if (done) return;
+      if (t >= warm && t < end) frames++;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    setTimeout(() => { done = true; resolve({ frames, seconds: Math.max(0, end - warm) / 1000 }); }, end - start);
+  });
+}
+
+// srcFor(seg): the frame's URL. ?fast= also speeds the display-check page's
+// own slides (its ?seconds=), so a fast run reaches every slide.
+function srcFor(seg) {
+  if (FAST === 1 || !seg.src.startsWith('/display-check/')) return seg.src;
+  return seg.src + (seg.src.includes('?') ? '&' : '?') + 'seconds=' + Math.max(1, Math.floor(10 / FAST));
+}
+
+// frameReady(seg) -> true once seg.ready matches in the frame's document (same
+// origin: everything comes from the loopback server), false after
+// START_SECONDS.
+async function frameReady(seg) {
+  const end = mono() + B.START_SECONDS / FAST;
+  while (mono() < end) {
+    try {
+      const doc = frame.contentDocument;
+      if (doc && doc.location.pathname + doc.location.search === srcFor(seg) && doc.querySelector(seg.ready)) return true;
+    } catch (e) { /* not readable yet */ }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
+}
+
+// runSegment(seg, seconds, n): load segment n, for seconds.
+async function runSegment(seg, seconds, n) {
+  card.classList.add('hidden');
+  dot.className = B.cornerFor(n); tickDot();
+  if (seg.video) {
+    frame.classList.add('hidden'); frame.src = 'about:blank';
+    video.src = seg.video; video.classList.remove('hidden');
+    // play() can stay pending forever on a stalled request: bound it, latch
+    // the failure and go on with the load.
+    const started = await Promise.race([
+      video.play().then(() => true, () => false),
+      new Promise(r => setTimeout(() => r(false), (B.START_SECONDS / FAST) * 1000)),
+    ]);
+    if (!started) {
+      video.pause(); video.removeAttribute('src'); video.load(); video.classList.add('hidden');
+      stats = B.fail(stats, 'video did not start');
+      return;
+    }
+    // Playback must keep going for the whole segment: a clip that started and
+    // then froze (a stalled request, a decoder hang) or raised a media error
+    // is a failure, whatever the page's own frame count says.
+    let last = video.currentTime, still = 0, stalled = false, errored = false;
+    const onError = () => { errored = true; };
+    video.addEventListener('error', onError);
+    const watch = setInterval(() => {
+      if (video.currentTime === last) { if (++still >= 3) stalled = true; } else { still = 0; last = video.currentTime; }
+    }, 1000 / FAST);
+    const q0 = video.getVideoPlaybackQuality();
+    const r = await countFrames(seconds);
+    const q1 = video.getVideoPlaybackQuality();
+    clearInterval(watch); video.removeEventListener('error', onError);
+    if (stalled) stats = B.fail(stats, 'video stalled');
+    if (errored || video.error) stats = B.fail(stats, 'video error');
+    video.pause(); video.removeAttribute('src'); video.load(); video.classList.add('hidden');
+    stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
+    const decoded = q1.totalVideoFrames - q0.totalVideoFrames;
+    stats = B.recordVideo(stats, q1.droppedVideoFrames - q0.droppedVideoFrames, decoded);
+  } else {
+    frame.src = srcFor(seg); frame.classList.remove('hidden');
+    // Frames drawn by this document prove nothing about the frame's content:
+    // wait for the segment's own ready signal, or latch it as not loaded.
+    if (!(await frameReady(seg))) {
+      frame.src = 'about:blank'; frame.classList.add('hidden');
+      stats = B.fail(stats, `${seg.id} did not load`);
+      return;
+    }
+    // The display-check page reports its own explicit failures in #stat
+    // (a clip that did not play, no WebGL); latch them before the frame goes.
+    // Its pacing verdicts are not taken: this page judges frame rate itself,
+    // against the panel's measured rate.
+    // A clip inside the frame (display-check's video slide) must also keep
+    // playing while it is shown: 3 checks without progress latch a stall,
+    // as the HEVC segment does.
+    const pageFails = new Set();
+    let clip = null, last = -1, still = 0, moved = false;
+    const collect = setInterval(() => {
+      try {
+        const doc = frame.contentDocument;
+        const st = doc.getElementById('stat');
+        if (st && st.classList.contains('bad') && /DID NOT PLAY|NO WEBGL/.test(st.textContent)) pageFails.add(st.textContent.trim());
+        const v = doc.querySelector('video');
+        if (v !== clip) { clip = v; last = -1; still = 0; moved = false; }
+        // Counted only once the clip has been seen moving: one still starting
+        // is not a stall (one that never starts, display-check reports).
+        if (v && !v.paused && !v.ended) {
+          if (v.currentTime === last) { if (moved && ++still >= 3) pageFails.add('video stalled'); }
+          else { if (last >= 0) moved = true; still = 0; last = v.currentTime; }
+        }
+      } catch (e) { /* frame gone */ }
+    }, 1000 / FAST);
+    const r = await countFrames(seconds);
+    clearInterval(collect);
+    for (const f of pageFails) stats = B.fail(stats, `${seg.id}: ${f}`);
+    frame.src = 'about:blank'; frame.classList.add('hidden');
+    stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
+  }
+}
+
+// The panel mode's clock: the unit's uptime (?fast= runs it FAST times as
+// fast from the page's start, so a bench run reaches the Panel Check). Until
+// the first status read, the page's own time: less than the uptime, so the
+// Panel Check is never early.
+let up0 = null;
+function panelClock() {
+  const up = uptimeNow() ?? mono();
+  if (up0 === null) up0 = up;
+  return up0 + (up - up0) * FAST;
+}
+
+async function panelMode() {
+  await readStatus();
+  if (panelClock() < B.PANEL_MIN_UPTIME) {
+    showCard(header('Factory panel check', '出厂面板检查') + `
+      <div>Load until the unit has been on 10 minutes, then black and gray until the power is pulled: record the Panel Check then.</div>
+      <div class="zh">先运行负载，开机满 10 分钟后进入黑灰画面，直到拔掉电源：届时进行 Panel Check 录像。</div>`, 'wait');
+    // The panel's own rate, measured on this still card, is what the slides
+    // and the video are judged against.
+    const r = await countFrames(B.START_CARD_SECONDS);
+    stats = B.withRefresh(stats, r.frames / r.seconds);
+    card.classList.add('hidden');
+    let n = 0;
+    load: for (;;) {
+      for (const seg of B.shuffled(B.SEGMENTS)) {
+        const s = B.loadSeconds(seg, panelClock());
+        if (s === 0) break load;
+        await runSegment(seg, s, n++);
+      }
+    }
+    // What is left of the 10 minutes, on black.
+    await sleep(Math.max(0, B.PANEL_MIN_UPTIME - panelClock()));
+  }
+  // The Panel Check until the power is pulled: nothing else on screen. A
+  // Chromium restart after the 10 minutes comes straight here.
+  card.classList.add('hidden'); video.classList.add('hidden'); dot.classList.add('hidden');
+  frame.src = B.PANEL.src; frame.classList.remove('hidden');
+}
+
+(async () => {
+  if (MODE === 'hardware') {
+    await checksPhase();
+    await hardwareResult();
+  } else {
+    await panelMode();
+  }
+})();
+</script>
+</body>
+</html>

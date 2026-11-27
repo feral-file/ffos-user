@@ -63,10 +63,10 @@ func TestHintPusher_SendsAVerdictReachedBetweenPushes(t *testing.T) {
 	p := newTestPusher(clock, f, &want)
 	wall := []string{"https://o/a", "https://o/b"}
 
-	// The cast's push carried no hints, then the poll sees its castSeq.
+	// The display request's push carried no hints, then the poll sees its castSeq.
 	p.Attached(nil)
 	p.Observe(wall, 7, true)
-	assert.False(t, p.step(context.Background()), "inside the settle after a new cast nothing is sent")
+	assert.False(t, p.step(context.Background()), "inside the settle after a new display request nothing is sent")
 	clock.Advance(16 * time.Second)
 	assert.False(t, p.step(context.Background()), "nothing changed since the push: no chatter")
 
@@ -126,13 +126,13 @@ func TestHintPusher_NewCastResetsTheSettleAndTheBaseline(t *testing.T) {
 	clock.Advance(16 * time.Second)
 	require.True(t, p.step(context.Background()))
 
-	// A re-cast of the same wall opens castSeq 2 with a push carrying the map.
+	// A re-display of the same wall opens castSeq 2 with a push carrying the map.
 	p.Attached(map[string]Hint{"https://o/a": brokenHint})
 	clock.Advance(time.Second)
 	p.Observe([]string{"https://o/a"}, 2, true)
-	assert.False(t, p.step(context.Background()), "settling after the new cast")
+	assert.False(t, p.step(context.Background()), "settling after the new display request")
 	clock.Advance(16 * time.Second)
-	assert.False(t, p.step(context.Background()), "the new cast's push carried the same map")
+	assert.False(t, p.step(context.Background()), "the new display request's push carried the same map")
 	assert.Equal(t, 1, f.count())
 }
 
@@ -147,7 +147,7 @@ func TestHintPusher_ReplyBranches(t *testing.T) {
 		return p, f
 	}
 
-	t.Run("stale cast keeps no belief and retries on the next cast", func(t *testing.T) {
+	t.Run("stale display request keeps no belief and retries on the next display request", func(t *testing.T) {
 		p, f := setup(ErrStaleCast)
 		assert.True(t, p.step(context.Background()))
 		f.err = nil
@@ -164,7 +164,7 @@ func TestHintPusher_ReplyBranches(t *testing.T) {
 		assert.Equal(t, 2, f.count())
 		assert.False(t, p.step(context.Background()))
 	})
-	t.Run("a refusal parks the pusher until the next cast", func(t *testing.T) {
+	t.Run("a refusal parks the pusher until the next display request", func(t *testing.T) {
 		p, f := setup(ErrHintPushRefused)
 		assert.True(t, p.step(context.Background()))
 		assert.False(t, p.step(context.Background()), "never a retry loop against a refusing player")
@@ -172,7 +172,7 @@ func TestHintPusher_ReplyBranches(t *testing.T) {
 		f.err = nil
 		p.Observe([]string{"https://o/a"}, 6, true)
 		clock.Advance(16 * time.Second)
-		assert.True(t, p.step(context.Background()), "a new cast un-parks it")
+		assert.True(t, p.step(context.Background()), "a new display request un-parks it")
 	})
 }
 
@@ -213,7 +213,7 @@ func TestHintPusher_RunStopsOnContext(t *testing.T) {
 }
 
 // The Service wiring: every map a push path attaches is the pusher's
-// baseline, and the poll feeds it the wall and the cast generation.
+// baseline, and the poll feeds it the wall and the display request generation.
 func TestService_FeedsThePusher(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	s := newTestService(t, newTableFetcher(), clock, manifestWithContract)
@@ -228,7 +228,7 @@ func TestService_FeedsThePusher(t *testing.T) {
 	require.NotNil(t, s.HintArgument(list))
 	s.ObservePlayback(list, 0, nil, &Outcomes{CastSeq: 4})
 	clock.Advance(16 * time.Second)
-	assert.False(t, p.step(context.Background()), "the cast's own push carried b")
+	assert.False(t, p.step(context.Background()), "the display request's own push carried b")
 
 	_, err = s.Store().ApplyProbe("https://o/a", ProbeResult{Verdict: VerdictDead, Status: 410, Reason: ReasonHTTPStatus})
 	require.NoError(t, err)

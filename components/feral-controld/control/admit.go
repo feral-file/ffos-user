@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,7 +59,12 @@ const (
 
 // Ceremony limits (§5).
 const (
-	invitationTTL = 10 * 60
+	// invitationTTL is short because sight of the claim QR is the whole
+	// first-owner credential on every route, the relay included (§5.1, §13).
+	// The painter rotates at half of it and the replaced invitation stays
+	// redeemable (see Authority.prev), so a code read off the screen always
+	// has at least invitationTTL/2 left.
+	invitationTTL = 2 * 60
 	pendingTTL    = 5 * 60
 	// pendingMaxLife caps a pending request's whole life, refreshes
 	// included, so one entry cannot hold a slot forever (review N3).
@@ -283,7 +289,12 @@ type Authority struct {
 	randMu sync.Mutex
 	rand   io.Reader
 
+	// inv is the invitation on the claim QR. prev is the one it replaced,
+	// redeemable until its own expiry: the QR is repainted while a phone may
+	// still be sending the code it just read. prev is never newer than inv,
+	// so "inv is live" also answers "is any invitation live".
 	inv    *invitation
+	prev   *invitation
 	invGen uint64
 
 	// openSem bounds unauthenticated opens (review M1); openHook is a test
@@ -439,6 +450,12 @@ func (a *Authority) SetTransports(ts []string) {
 	a.transports.Store(&ts)
 }
 
+// DialsRelayV2 reports whether this daemon run carries relay v2.
+func (a *Authority) DialsRelayV2() bool {
+	ts := a.transports.Load()
+	return ts != nil && slices.Contains(*ts, TransportRelayV2)
+}
+
 // Status returns the public status block. A locked device has no profile it
 // can vouch for, so it omits it.
 func (a *Authority) Status() Status {
@@ -466,15 +483,29 @@ type Invitation struct {
 	ExpiresAt int64
 	Pins      Pins
 	Gen       string
+	// Sig and Enc are the device keys the pins are thumbprints of.
+	Sig, Enc PublicJWK
 }
 
-// IssueInvitation creates a fresh invitation, replacing any current one. It
-// is refused unless the device is in StateLegacy: once an owner exists,
-// later controllers go through requestAccess.
+// KeyFields returns claim-QR fields 10-13 (§11): the invitation's expiry on
+// the device clock, the device keys as compressed points, and host, the
+// device's LAN IPv4 literal or "". With them the QR is the whole profile, so
+// a controller that cannot reach the LAN status can still seal an enroll.
+func (i Invitation) KeyFields(host string) []string {
+	return []string{strconv.FormatInt(i.ExpiresAt, 10), i.Sig.Compressed(), i.Enc.Compressed(), host}
+}
+
+// IssueInvitation creates a fresh invitation. The one it replaces stays
+// redeemable until its own expiry (see Authority.prev). It is refused unless
+// the device is in StateLegacy: once an owner exists, later controllers go
+// through requestAccess.
 func (a *Authority) IssueInvitation() (Invitation, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	now := a.now().Unix()
+	return a.issueInvitationLocked(a.now().Unix())
+}
+
+func (a *Authority) issueInvitationLocked(now int64) (Invitation, error) {
 	if st := a.stateLocked(now); st != StateLegacy {
 		return Invitation{}, fmt.Errorf("control: invitation refused in state %s", st)
 	}
@@ -482,7 +513,11 @@ func (a *Authority) IssueInvitation() (Invitation, error) {
 	if err != nil {
 		return Invitation{}, err
 	}
+	replaced := a.inv
 	a.setInvLocked(&invitation{value: b64u(b), expiresAt: now + invitationTTL})
+	if replaced != nil && now < replaced.expiresAt {
+		a.prev = replaced
+	}
 	return a.invitationLocked(), nil
 }
 
@@ -498,25 +533,25 @@ func (a *Authority) CurrentInvitation() (Invitation, bool) {
 
 func (a *Authority) invitationLocked() Invitation {
 	id := a.store.Identity()
-	return Invitation{Value: a.inv.value, ExpiresAt: a.inv.expiresAt, Pins: id.Pins(), Gen: id.gen}
+	return Invitation{Value: a.inv.value, ExpiresAt: a.inv.expiresAt, Pins: id.Pins(), Gen: id.gen,
+		Sig: id.sigPub, Enc: id.encPub}
 }
 
 // EnsureInvitation returns the live invitation, issuing a fresh one when there
 // is none or the current one has less than minRemaining left. The claim-QR
 // painter calls it on every paint so the QR never carries a nearly spent
-// invitation. Refused unless StateLegacy, like IssueInvitation.
+// invitation. Refused unless StateLegacy, like IssueInvitation. The check
+// and the rotation share one lock hold: two painters racing here must not
+// rotate twice, or the invitation the first one painted would fall out of
+// prev while it is still on screen.
 func (a *Authority) EnsureInvitation(minRemaining time.Duration) (Invitation, error) {
 	a.mu.Lock()
-	live := a.inv != nil && a.now().Add(minRemaining).Unix() < a.inv.expiresAt
-	var cur Invitation
-	if live {
-		cur = a.invitationLocked()
+	defer a.mu.Unlock()
+	now := a.now()
+	if a.inv != nil && now.Add(minRemaining).Unix() < a.inv.expiresAt && a.stateLocked(now.Unix()) == StateLegacy {
+		return a.invitationLocked(), nil
 	}
-	a.mu.Unlock()
-	if live && a.State() == StateLegacy {
-		return cur, nil
-	}
-	return a.IssueInvitation()
+	return a.issueInvitationLocked(now.Unix())
 }
 
 // Retire deletes the control directory and voids every grant, invitation and
@@ -534,7 +569,7 @@ func (a *Authority) Retire() error {
 	return err
 }
 
-// ClearInvitation voids the current invitation (QR dismissed, claim taken).
+// ClearInvitation voids both invitations (QR dismissed, claim taken).
 func (a *Authority) ClearInvitation() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -542,12 +577,14 @@ func (a *Authority) ClearInvitation() {
 }
 
 // setInvLocked replaces the invitation and bumps invGen when the value on
-// offer actually changes (issued, cleared, consumed).
+// offer actually changes (issued, cleared, consumed). It always drops prev:
+// clearing and consuming void both, and the issuer puts prev back itself.
 func (a *Authority) setInvLocked(inv *invitation) {
 	if a.inv == nil && inv == nil {
 		return
 	}
 	a.inv = inv
+	a.prev = nil
 	a.invGen++
 }
 
@@ -637,7 +674,7 @@ func (a *Authority) OpenFrom(compact string, origin Origin) (*Admission, error) 
 		return a.admitCmd(pre.adm, c, grant, now)
 	case OpEnroll:
 		if c.Enroll.Inv != "" {
-			return a.enrollWithInvitation(pre.adm, c, grant, known, now, origin)
+			return a.enrollWithInvitation(pre.adm, c, grant, known, now)
 		}
 		return a.enrollApproved(pre.adm, c, grant, known, now)
 	default:
@@ -1461,7 +1498,7 @@ type enrollResult struct {
 }
 
 // enrollWithInvitation is §5.1: the first owner.
-func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Grant, known bool, now int64, origin Origin) (*Admission, error) {
+func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Grant, known bool, now int64) (*Admission, error) {
 	window := Window{}
 	p, pending := a.pending[c.Ctl]
 	switch {
@@ -1488,20 +1525,23 @@ func (a *Authority) enrollWithInvitation(adm *Admission, c RequestClaims, g Gran
 		}
 		return a.fail(adm, CodeInvitationInvalid, nil)
 	}
-	if a.stateLocked(now) != StateLegacy || origin.Route == RouteRelayV2 {
-		// The device-ID relay is open to anyone who knows the public ID
-		// and has no plaintext profile read, so a first owner never
-		// enrolls over it. The legacy relayer is still admitted here, but
-		// only as the accepted §13 residual: clients enroll a first owner
-		// on the LAN only (§14 rule 11). Refused before the invitation is
-		// compared, so v2 is no oracle for it.
+	if a.stateLocked(now) != StateLegacy {
+		// Every route is admitted, the relay included: the invitation is
+		// sealed to the device key the controller read off the same QR, so
+		// sight of the screen is the whole credential and the carrier adds
+		// nothing (§5.1, §13).
 		return invalid()
 	}
 	if a.inv == nil || now >= a.inv.expiresAt {
 		a.setInvLocked(nil)
 		return invalid()
 	}
-	if subtle.ConstantTimeCompare([]byte(c.Enroll.Inv), []byte(a.inv.value)) != 1 {
+	// Both slots are compared, each in constant time, with no early exit.
+	match := subtle.ConstantTimeCompare([]byte(c.Enroll.Inv), []byte(a.inv.value))
+	if a.prev != nil && now < a.prev.expiresAt {
+		match |= subtle.ConstantTimeCompare([]byte(c.Enroll.Inv), []byte(a.prev.value))
+	}
+	if match != 1 {
 		return invalid()
 	}
 	nk, err := a.randBytes(32)

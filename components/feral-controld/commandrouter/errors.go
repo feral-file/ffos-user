@@ -39,7 +39,7 @@ func IsRateLimited(err error) bool {
 }
 
 // SourceUnreachableError is returned by the displayPlaylist path when the
-// cast-time L0 media probe pass got a DEFINITIVE dead verdict for every item
+// accept-time L0 media probe pass got a DEFINITIVE dead verdict for every item
 // (see the pass call in handler.go for the fail-open rules that make
 // "every" the only rejectable shape). The name deliberately matches DP-1
 // core spec §14's player error code for this scenario, `sourceUnreachable`,
@@ -50,7 +50,7 @@ type SourceUnreachableError struct {
 	// Results holds every item's probe outcome, in playlist order.
 	// Sources inside are log-redacted AND log-only (see
 	// mediahealth.ProbeResult's sanitization rule): Error() below must
-	// never render them, because it is returned verbatim to casters.
+	// never render them, because it is returned verbatim to senders.
 	Results []mediahealth.ProbeResult
 }
 
@@ -58,7 +58,7 @@ type SourceUnreachableError struct {
 // refresher re-resolves a playlist with no item limit, so the wall holds
 // everything the query returns and must be judged whole. The pass probes
 // only its first items (mediahealth.Prober.Items) and its per-item
-// bookkeeping is bytes per item, so a 4 MiB hostile cast costs megabytes
+// bookkeeping is bytes per item, so a 4 MiB hostile display request costs megabytes
 // briefly, not a probe storm (#392, large walls).
 
 // maxProbeLogDetailItems caps how many dead items the displayPlaylist
@@ -69,7 +69,7 @@ const maxProbeLogDetailItems = 5
 
 // maxErrorDetailItems caps how many per-item entries Error() renders.
 // The unauthenticated hub accepts a 4 MiB playlist with no item cap, so
-// an uncapped join would let one hostile all-dead cast mint an error
+// an uncapped join would let one hostile all-dead display request mint an error
 // response proportional to its own size; past the cap a single
 // omitted-count entry stands in for the rest.
 const maxErrorDetailItems = 10
@@ -79,7 +79,7 @@ const maxErrorDetailItems = 10
 // playlistUrl or dynamic-playlist caller never supplied, and signed CDN
 // URLs carry credentials in their query strings; the controller contract
 // requires sanitized error messages, and both ingress paths return this
-// string verbatim. The caster holds the playlist, so an index is enough to
+// string verbatim. The sender holds the playlist, so an index is enough to
 // name the item. Probe error details (r.Err, r.Detail) are excluded for the
 // same reason: they can quote what they were probing.
 func (e *SourceUnreachableError) Error() string {
@@ -125,7 +125,7 @@ func IsContentBlocked(err error) bool {
 	return errors.As(err, &target)
 }
 
-// PlaylistInvalidError marks a cast rejected because the DP-1 document itself is
+// PlaylistInvalidError marks a display request rejected because the DP-1 document itself is
 // malformed — today, content-rating extension fields that are present but not
 // valid. Typed rather than a formatted string so the LAN hub and the relayer can
 // answer the documented invalid-input classification instead of a generic
@@ -136,9 +136,9 @@ type PlaylistInvalidError struct {
 	//
 	// dp1-go's format assertions print the value whole ("'https://x?token=…'
 	// is not valid 'uri'"), and this text is returned verbatim to LAN and
-	// relayer callers, so carrying its message through would hand a caster
-	// another caster's signed source. The path says which field is wrong,
-	// which is all a caster needs to fix its own document.
+	// relayer callers, so carrying its message through would hand a sender
+	// another sender's signed source. The path says which field is wrong,
+	// which is all a sender needs to fix its own document.
 	Locations []string
 }
 
@@ -147,6 +147,15 @@ func (e *PlaylistInvalidError) Error() string {
 		return "playlistInvalid"
 	}
 	return "playlistInvalid: at " + strings.Join(e.Locations, ", ")
+}
+
+// playlistInvalid carries a dp1 schema refusal as the router's typed error.
+func playlistInvalid(err error) error {
+	var schema *dp1.SchemaError
+	if errors.As(err, &schema) {
+		return &PlaylistInvalidError{Locations: schema.Locations}
+	}
+	return err
 }
 
 func IsPlaylistInvalid(err error) bool {

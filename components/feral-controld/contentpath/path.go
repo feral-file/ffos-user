@@ -8,7 +8,10 @@
 // (office FF1, fixture item 36). Stdlib only, so both can import it.
 package contentpath
 
-import "net/url"
+import (
+	"net/url"
+	"strings"
+)
 
 // IPFS parses an escaped URL path as `/ipfs/<cid>` with an optional
 // remainder. Slash runs and repeated `ipfs` segments before the id are
@@ -69,6 +72,36 @@ func SlashBeforeQuery(rawURL string) (string, bool) {
 	u.Path = "/ipfs/" + cid + "/"
 	u.RawPath = ""
 	return u.String(), true
+}
+
+// UnslashBeforeQuery is the inverse of SlashBeforeQuery for a lookup: it
+// turns `…/ipfs/<cid>/?q` back into `…/ipfs/<cid>?q`, removing only that one
+// slash and keeping every other byte (host, query, fragment) as it came. ok
+// is false for any other shape: no query, a file under the CID, not an IPFS
+// path.
+//
+// Why: the kiosk heals every bare CID with a query into the slashed form
+// before the offline cache sees the request (uarewrite), while capture
+// navigates to the bare source and stores it under the bare key. The
+// player's own params make every such request carry a query — the
+// content-type probe's `?v=…&x-request=xhr`, the iframe's `display_mode` —
+// so a kept bare-CID work missed replay and failed closed offline
+// (ffos-user#484). Replay uses this only as a second lookup after the exact
+// one misses, and only when the player's params were the whole query, so it
+// can only find a key the capture stored for the work the player asked for.
+func UnslashBeforeQuery(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || (u.RawQuery == "" && !u.ForceQuery) {
+		return "", false
+	}
+	if _, rest, ok := IPFS(u.EscapedPath()); !ok || rest != "/" {
+		return "", false
+	}
+	before, after, ok := strings.Cut(rawURL, "?")
+	if !ok || !strings.HasSuffix(before, "/") {
+		return "", false
+	}
+	return strings.TrimSuffix(before, "/") + "?" + after, true
 }
 
 // Arweave parses an escaped URL path as `/<tx>` with an optional remainder,

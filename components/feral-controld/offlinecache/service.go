@@ -15,6 +15,7 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -556,7 +557,7 @@ type Service interface {
 	// group worth tracking. A caller with non-nil segments can reconstruct
 	// a dp1.CastPlan{Segments: ...} and call its existing
 	// Narrow(deviceMode) to decide what to display, exactly like a live
-	// cast already does, instead of using the raw playlist's flat Items
+	// display already does, instead of using the raw playlist's flat Items
 	// unnarrowed.
 	CachedPlaylistForURL(sourceURL string) (json.RawMessage, []SeriesSegment, error)
 	// HasReplayableItem reports whether at least one of sources has a
@@ -564,14 +565,14 @@ type Service interface {
 	// partial capture may still render; StateBrokenOnline is excluded
 	// because it means the artwork fails even online). It exists for the
 	// displayPlaylist source preflight's all-dead decision (#304 review
-	// F4): a definitively dead ORIGIN is not a dead CAST when replay can
+	// F4): a definitively dead ORIGIN is not a dead REQUEST when replay can
 	// serve the item from cache — origin rot is exactly the case the
 	// offline cache exists for — so the preflight asks this before
 	// rejecting. ONE cached item out of N is the INTENDED rescue
-	// threshold, not an oversight: a 20-item cast with 19 proven-dead
+	// threshold, not an oversight: a 20-item display request with 19 proven-dead
 	// origins and 1 cached capture is accepted (and reported ok), so 1
 	// artwork replays while 19 render as failures. That is strictly
-	// better than rejecting the whole cast — the alternative discards
+	// better than rejecting the whole display request — the alternative discards
 	// the one item that CAN play — but any future edit tightening this
 	// to "a quorum of items" or loosening it further changes the
 	// controller-visible accept/reject contract and must update the
@@ -1667,7 +1668,7 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	if class == ClassStreaming {
 		return ErrUnsupportedMediaClass
 	}
-	// An onchfs work is read from chain when it is cast
+	// An onchfs work is read from chain when it is display
 	// (OnchfsMaterializer); there is nothing for capture to fetch, so it is
 	// reported the way an inline item is: already handled, not queued.
 	if class == ClassInline || class == ClassOnchfs {
@@ -1794,9 +1795,9 @@ const maxLoggedSourceBytes = 256
 // The marker matters: a silently shortened URL would send an operator
 // hunting for a source that never existed in that form.
 //
-// This truncates; it does NOT redact. The cast preflight logs through
+// This truncates; it does NOT redact. The display request preflight logs through
 // redactSourceForLog (mediahealth_fetcher.go) instead, which strips query/userinfo
-// credentials first, because the preflight fires on EVERY cast with a
+// credentials first, because the preflight fires on EVERY display with a
 // dead item. The download-path call sites in this file keep logging the
 // full (truncated) URL by accepted scope: they fire only on explicit
 // download/cache commands on a cache-enabled device, and the intact
@@ -1935,19 +1936,20 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
 	}
-	var playlist dp1playlist.Playlist
+	// dp1.Playlist, never the upstream type: playback decodes with it, so the
+	// cache must too. The upstream type lets a case variant ("itemſ") override
+	// the member the schema checked.
+	var playlist dp1.Playlist
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return 0, 0, fmt.Errorf("offline cache: parse playlist: %w", err)
 	}
-	if playlist.ID == "" {
-		return 0, 0, errors.New("offline cache: playlist has no id")
-	}
+	key := PlaylistRecordKey(playlist.ID, sourceURL, playlist.Items)
 
 	// Sample the playlist's clear-epoch before the classify loop so a
 	// ClearPlaylist landing during classification is detected before the
 	// save below and cannot resurrect the cleared playlist record — see
 	// playlistClearEpoch's doc.
-	plEpoch := s.currentPlaylistEpoch(playlist.ID)
+	plEpoch := s.currentPlaylistEpoch(key)
 
 	// Classification only decides WHICH items are eligible — it must
 	// never itself start any work. Enqueuing is deliberately deferred
@@ -2013,7 +2015,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// nothing has been enqueued yet and the per-item epoch checks in the
 	// enqueue loop below would abort every item anyway, so it is reported
 	// as a clean 0-queued/no-error outcome.
-	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, plEpoch, segments)
+	saved, err := s.savePlaylistAndURLIndex(key, playlistRaw, sourceURL, plEpoch, segments)
 	if err != nil {
 		// Nothing has been enqueued yet at this point — a save failure
 		// here starts no background work at all, matching this error
@@ -2198,12 +2200,10 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
-	var playlist dp1playlist.Playlist
+	// Same decode as DownloadPlaylist, so both derive one record key.
+	var playlist dp1.Playlist
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return fmt.Errorf("offline cache: parse playlist: %w", err)
-	}
-	if playlist.ID == "" {
-		return errors.New("offline cache: playlist has no id")
 	}
 	// saved==false means a ClearPlaylist won the race and the write was
 	// skipped. That is reported as ErrPlaylistSaveClearedRace rather than
@@ -2213,7 +2213,8 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	// playlist body that was never written. Callers using this purely for
 	// the best-effort by-URL index treat the sentinel as the benign no-op
 	// it is for them.
-	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch, segments)
+	key := PlaylistRecordKey(playlist.ID, sourceURL, playlist.Items)
+	saved, err := s.savePlaylistAndURLIndex(key, playlistRaw, sourceURL, sampledEpoch, segments)
 	if err != nil {
 		return err
 	}
@@ -3021,7 +3022,8 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		return fmt.Errorf("offline cache: load playlist %s: %w", playlistID, err)
 	}
 
-	var playlist dp1playlist.Playlist
+	// Same decode as DownloadPlaylist: a record it accepted must clear.
+	var playlist dp1.Playlist
 	if err := s.json.Unmarshal(raw, &playlist); err != nil {
 		return fmt.Errorf("offline cache: parse playlist %s: %w", playlistID, err)
 	}
@@ -3202,7 +3204,7 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, []Ser
 }
 
 // maxRescueLookups bounds how many UNIQUE sources HasReplayableItem will
-// read records for. The input is the unauthenticated caster's own item
+// read records for. The input is the unauthenticated sender's own item
 // list, and each lookup is a serial filesystem read with no deadline of
 // its own — a 4 MiB body packed with distinct tiny URLs could otherwise
 // demand ~10^5 reads on the rejection path, holding a heavy command slot
@@ -3211,7 +3213,7 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, []Ser
 // all-dead rejection and needs positive evidence — an earlier revision
 // failed open here, and the granted-but-unproven rescue went on to
 // mutate replay scope (disabling the on-screen playlist's replay) before
-// its empty sync finally rejected the cast anyway (#308 review round 5).
+// its empty sync finally rejected the display request anyway (#308 review round 5).
 // The cost is that a playlist whose 513th-or-later UNIQUE source holds
 // the only cached capture is rejected rather than replayed. That
 // includes fragment variants: the store keys on the RAW string (see
@@ -3548,7 +3550,7 @@ func (s *service) itemStatus(key, sourceHint string, withBytes, hideAutomatic bo
 	// caller, because replay passes it through to the network.
 	// HasReplayableItem passes hideAutomatic=false: a fresh automatic
 	// capture is exactly what its offline rescue can replay, and hiding it
-	// there would reject casts the cache can serve. An explicit job in
+	// there would reject display requests the cache can serve. An explicit job in
 	// flight still shows as queued/downloading (speculative work was masked
 	// above), because someone has now asked. Its success leaves an explicit
 	// record (a fresh capture, or process clearing the flag on a capture

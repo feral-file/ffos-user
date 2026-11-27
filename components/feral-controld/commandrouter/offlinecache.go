@@ -2,6 +2,7 @@ package commandrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -37,16 +38,23 @@ func isOfflineCacheCommand(t commands.Type) bool {
 // the explicit RPC ok/error shape docs/controld-inbound-controller-messages.md
 // mandates for new commands (ok, error.code, retryable, echoed by the
 // mediator via messageID).
-func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType commands.Type, args map[string]any) (interface{}, error) {
+func (h *handler) handleOfflineCacheCommand(ctx context.Context, command commands.Command) (interface{}, error) {
 	if h.offlineCache == nil {
 		return disabledResponse("offline caching is not enabled"), nil
 	}
 
+	commandType, args := command.Type, command.Arguments
+	// The wire bytes of an inline playlist, when the request carried one.
+	rawInline, _ := command.RawArgument("dp1_call")
+
 	switch commandType {
 	case commands.CMD_DOWNLOAD_PLAYLIST_ITEM:
-		return h.handleDownloadPlaylistItem(ctx, args)
+		if _, displayed := args[displayedSelectorArg]; displayed {
+			return h.handleDownloadDisplayedItem(ctx, args)
+		}
+		return h.handleDownloadPlaylistItem(ctx, args, rawInline)
 	case commands.CMD_DOWNLOAD_PLAYLIST:
-		return h.handleDownloadPlaylist(ctx, args)
+		return h.handleDownloadPlaylist(ctx, args, rawInline)
 	case commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE:
 		return h.handleClearPlaylistItemCache(ctx, args)
 	case commands.CMD_CLEAR_PLAYLIST_CACHE:
@@ -60,7 +68,7 @@ func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType com
 	}
 }
 
-func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[string]any) (interface{}, error) {
+func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[string]any, rawInline json.RawMessage) (interface{}, error) {
 	// The item is selected by its source URL — the cache identity (see
 	// offlinecache.SourceKey) — never by the DP-1 item id, which the DP-1
 	// core schema makes optional and defines as a random UUID v4, so a
@@ -89,7 +97,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// resolve also decides what the save below persists, and ClearPlaylist
 	// enumerates the member sources to clear FROM that record, so a truncated
 	// resolve here would orphan every item past the cut.
-	playlist, segments, err := h.resolveOfflineCachePlaylist(ctx, args)
+	playlist, segments, err := h.resolveOfflineCachePlaylist(ctx, args, rawInline)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
@@ -100,7 +108,9 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// resurrecting exactly what that clear removed. Retryable: re-issuing
 	// after the clear has settled behaves normally, which is how the
 	// enqueue-window twin (ErrClearedDuringDownload) is already reported.
-	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, source) {
+	sourceURL, _ := stringArg(args["playlistUrl"])
+	key := offlinecache.PlaylistRecordKey(playlist.ID, sourceURL, playlist.Items)
+	if h.offlineCache.ClearedSinceBarrier(key, barrier, source) {
 		return errorResponse("busy",
 			"a clear for this playlist or item landed while it was being resolved, so nothing was queued", true), nil
 	}
@@ -134,8 +144,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// Sampled here (just after resolve, before DownloadItem) for the same
 	// reason DownloadPlaylist samples right after it has the playlist
 	// body: it is the earliest point the playlist ID is known.
-	sourceURL, _ := stringArg(args["playlistUrl"])
-	clearGen := h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
+	clearGen := h.offlineCache.CurrentPlaylistClearGeneration(key)
 
 	// ErrItemInlineNotQueued is an OUTCOME, not a failure: the item's
 	// bytes are inline in the playlist body, so it is already offline and
@@ -211,7 +220,7 @@ func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist,
 	return nil
 }
 
-func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]any) (interface{}, error) {
+func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]any, rawInline json.RawMessage) (interface{}, error) {
 	// Sampled before the resolve, for the reason spelled out in
 	// handleDownloadPlaylistItem: DownloadPlaylist samples its own clear
 	// epochs once it HAS the body, which is necessarily after this
@@ -219,7 +228,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// already folded into those samples and cannot be detected by them.
 	barrier := h.offlineCache.ClearBarrier()
 
-	playlist, segments, err := h.resolveOfflineCachePlaylist(ctx, args)
+	playlist, segments, err := h.resolveOfflineCachePlaylist(ctx, args, rawInline)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
@@ -238,7 +247,9 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	for _, item := range playlist.Items {
 		sources = append(sources, item.Source)
 	}
-	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, sources...) {
+	downloadURL, _ := stringArg(args["playlistUrl"])
+	key := offlinecache.PlaylistRecordKey(playlist.ID, downloadURL, playlist.Items)
+	if h.offlineCache.ClearedSinceBarrier(key, barrier, sources...) {
 		return errorResponse("busy",
 			"a clear for this playlist or one of its items landed while it was being resolved, so nothing was queued", true), nil
 	}
@@ -257,7 +268,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	// Service.CachedPlaylistForURL. "" (inline download) means no such
 	// fallback is possible for this playlist, same as before this field
 	// existed.
-	sourceURL, _ := stringArg(args["playlistUrl"])
+	sourceURL := downloadURL
 
 	// The item ceiling is passed as the QUEUEING bound, not applied to raw
 	// above: raw is the membership record ClearPlaylist later enumerates, and
@@ -453,9 +464,9 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 // Interception is keyed on the URLs the kiosk actually fetches, so the scope
 // has to describe what the PLAYER holds — not what the daemon would resolve
 // the same status to now. Whenever player status carries a concrete item list
-// (a static inline playlist: the filtered active set the player was cast),
+// (a static inline playlist: the filtered active set the player was sent),
 // that list IS what it holds, and re-resolving it can only diverge from the
-// screen: a seriesRegistry item cast while the catalog was unreachable keeps
+// screen: a seriesRegistry item display request while the catalog was unreachable keeps
 // its representative, so a later pass whose expansion succeeds would scope
 // replay to editions that were never displayed and never cached. SyncPlaylist
 // then finds nothing cached and disables replay outright (see
@@ -658,9 +669,10 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // resolveOfflineCachePlaylist mirrors the playlistUrl/dp1_call resolution
 // Process already does for CMD_DISPLAY_PLAYLIST, but with minimal=false: a
 // download request wants the whole playlist (up to dp1.MAX_PLAYLIST_ITEMS_LIMIT
-// items), not the minimal first batch a live display uses. Kept as its own
-// helper (rather than sharing displayPlaylist's inline switch) so the
-// display-integration todo can evolve that path independently.
+// items of download work), not the CAST_PLAYLIST_ITEMS_LIMIT-bounded list a
+// live display request carries. Kept as its own helper (rather than sharing
+// displayPlaylist's inline switch) so the display-integration todo can evolve
+// that path independently.
 //
 // The ceiling in that first sentence bounds the download WORK, and it is
 // applied where that work is scheduled — Service.DownloadPlaylist's maxQueued
@@ -705,7 +717,7 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 // neither #455 nor #453 names a dynamic-playlist reproduction, so that path
 // is deliberately left on today's unconditional-expand behavior (tracked as
 // an explicit Out of scope, not a silent gap).
-func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any) (*dp1.Playlist, []offlinecache.SeriesSegment, error) {
+func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[string]any, rawInline json.RawMessage) (*dp1.Playlist, []offlinecache.SeriesSegment, error) {
 	switch {
 	case args["playlistUrl"] != nil:
 		url, ok := args["playlistUrl"].(string)
@@ -731,11 +743,14 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 			return nil, nil, fmt.Errorf("playlist is not a map")
 		}
 
-		playlistBytes, err := h.json.Marshal(playlistMap)
+		playlistBytes, err := h.inlinePlaylistBytes(rawInline, playlistMap)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal playlist: %w", err)
+			return nil, nil, err
 		}
 
+		if err := dp1.CheckInlineCast(h.logger, "dp1_call", playlistBytes); err != nil {
+			return nil, nil, err
+		}
 		var playlist *dp1.Playlist
 		if err := h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 			return nil, nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
@@ -756,6 +771,32 @@ func (h *handler) resolveOfflineCachePlaylist(ctx context.Context, args map[stri
 	default:
 		return nil, nil, fmt.Errorf("request must include playlistUrl or dp1_call")
 	}
+}
+
+// inlinePlaylistBytes returns the bytes an inline `dp1_call` is validated,
+// decoded and verified on. Display and download must share it, or one refuses
+// a document the other accepts.
+//
+// raw is the caller's own token, kept verbatim by the ingress decoders
+// (Command.RawArgument), and it wins: a signer covered exactly those bytes,
+// and a member named twice survives only there — decoding into a map keeps
+// the last one, so the schema gate would never see the repeat.
+//
+// The re-marshal fallback is only for commands built in-process (OOM recovery,
+// recast, the refresher, tests), which never had a wire form. It is lossy in a
+// way a verifier feels: encoding/json HTML-escapes `&`/`<`/`>`, six bytes
+// each, which can inflate the document past sigverify.MaxDocumentBytes and
+// report an honest document as invalid. (Its float64 rounding of large
+// integers is absorbed by JCS, see commands.Command.RawArguments.)
+func (h *handler) inlinePlaylistBytes(raw json.RawMessage, playlist map[string]interface{}) ([]byte, error) {
+	if len(raw) > 0 {
+		return raw, nil
+	}
+	b, err := h.json.Marshal(playlist)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal playlist: %w", err)
+	}
+	return b, nil
 }
 
 // toOfflineCacheSegments converts plan.Segments to offlinecache's own
@@ -805,10 +846,10 @@ func toOfflineCacheSegments(plan dp1.CastPlan) []offlinecache.SeriesSegment {
 }
 
 // fromOfflineCacheSegments is toOfflineCacheSegments' inverse, for a reader
-// (handler.go's playlistUrl cast-failure fallback, #455; playlist-
+// (handler.go's playlistUrl display request-failure fallback, #455; playlist-
 // refresher's resync, #453) that loaded a sidecar and needs a dp1.CastPlan
 // to call its existing Narrow(deviceMode) on — the exact narrowing logic a
-// live cast already uses, with no second catalog round trip.
+// live display already uses, with no second catalog round trip.
 func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastSegment {
 	out := make([]dp1.CastSegment, 0, len(segments))
 	for _, seg := range segments {
@@ -870,7 +911,7 @@ func fromOfflineCacheSegments(segments []offlinecache.SeriesSegment) []dp1.CastS
 // current series-playback override — the exact same dp1.CastPlan.Narrow
 // logic a live ProcessPlaylistURLForCast already applies — rather than
 // played back as the unnarrowed full-editions list the download saved.
-// Both of this method's callers (handler.go's playlistUrl cast fallback,
+// Both of this method's callers (handler.go's playlistUrl display request fallback,
 // and resolveDisplayedPlaylist's PlaylistURL branch below) get this for
 // free. A cache with no sidecar (a plain playlist, or one downloaded
 // before this feature existed) is unaffected: Items stay exactly as
@@ -885,6 +926,9 @@ func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	}
 	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
 		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
+	}
+	if err := dp1.CheckPlayable(h.logger, "offline cache", raw); err != nil {
+		return nil, fmt.Errorf("offline cache: cached playlist for %s: %w", url, err)
 	}
 	var playlist *dp1.Playlist
 	if err := h.json.Unmarshal(raw, &playlist); err != nil {

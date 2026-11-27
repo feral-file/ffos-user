@@ -112,7 +112,7 @@ func (r *rig) get(path string) (int, []byte) {
 	return resp.StatusCode, b
 }
 
-// relayerCast delivers a cast over the relayer path and returns the RPC
+// relayerCast delivers a command over the relayer path and returns the RPC
 // message the mediator answered with (nil when it sent none).
 func (r *rig) relayerCast(cast []byte) json.RawMessage {
 	r.t.Helper()
@@ -298,7 +298,7 @@ func TestControlProtocolEndToEnd(t *testing.T) {
 	// --- the controller plays, but cannot reset; tiers hold on both routes ---
 	s = cli.build(control.OpCmd, "displayPlaylist", `{"dp1_call":{}}`, "")
 	if reply = r.lanEnvelope(cli, s); !reply.OK {
-		t.Fatalf("controller cast: %+v", reply)
+		t.Fatalf("controller command: %+v", reply)
 	}
 	if c := r.rec.last(); c.principal != (control.Principal{ControllerID: cli.ctl, Role: control.RoleController}) {
 		t.Fatalf("ran as %+v", c)

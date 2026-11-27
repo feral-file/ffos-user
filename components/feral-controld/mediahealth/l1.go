@@ -7,7 +7,7 @@ package mediahealth
 // the frame: a known-bad fingerprint (an error page that paints fine), a
 // blank frame (confirmed by a second, longer render), or a real render.
 // Its verdicts are stored under the record's `l1` sub-record and shown to
-// the app as `suspect`; they are NEVER a hint and NEVER count toward cast
+// the app as `suspect`; they are NEVER a hint and NEVER count toward display
 // rejection — a blank frame is weaker evidence than a byte-level failure,
 // and a false blank hides real art, the worst outcome here.
 //
@@ -151,7 +151,7 @@ const (
 	// and a wake resets the clock.
 	DefaultMinAsleep = 2 * time.Minute
 	// defaultGateWatch is how often an in-flight render re-checks the gate
-	// so a wake (or a cast) cancels it rather than letting it finish.
+	// so a wake (or a display request) cancels it rather than letting it finish.
 	defaultGateWatch = 2 * time.Second
 )
 
@@ -553,7 +553,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 		settle = l.cfg.ConfirmSettle
 	}
 	// The record's OWN source, fragment kept — never Record.WireURL: the
-	// cast pass shares one request between wire-identical siblings and
+	// display pass shares one request between wire-identical siblings and
 	// copies that probe's URL into every sibling's record, so a `work#two`
 	// record carries `work#one`'s wire URL, and a fragment is the whole
 	// identity of such a work (PR #443 review, F19). The renderer routes
@@ -563,7 +563,7 @@ func (l *L1) renderAndRecord(ctx context.Context, rec *Record) {
 	wire := rec.Source
 
 	// Cancel on wake: the gate is re-checked while the render runs, so a
-	// panel that wakes (or a cast that interrupts the night) stops the
+	// panel that wakes (or a display request that interrupts the night) stops the
 	// headless browser's work instead of letting it finish beside the wall.
 	renderCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -240,7 +240,7 @@ func postLiveCast(ctx context.Context, httpBaseURL string, apiKey string, topicI
 		return liveCastResult{status: resp.StatusCode, err: err}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return liveCastResult{status: resp.StatusCode, err: fmt.Errorf("cast failed with status %d: %v", resp.StatusCode, decoded.Error)}
+		return liveCastResult{status: resp.StatusCode, err: fmt.Errorf("display request failed with status %d: %v", resp.StatusCode, decoded.Error)}
 	}
 	return liveCastResult{status: resp.StatusCode, body: decoded.Message}
 }

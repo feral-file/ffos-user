@@ -137,6 +137,18 @@ type executor struct {
 	invMu     sync.Mutex
 	invTimer  *time.Timer
 	invExpiry time.Time
+	// requestedCodeDeadline, under invMu, is when a first-owner code that a
+	// showPairingQRCode{purpose:"enroll"} request put on a CLAIMED device
+	// comes down if nobody enrolled. Zero: no deadline (an unclaimed
+	// device's own claim QR, the code a released device paints).
+	requestedCodeDeadline time.Time
+
+	// relayShowCodeMu guards the precheck state of the show-code request
+	// admitted on relay v2 (RelayShowCode): the gate runs started from v2
+	// this boot, and whether one is still in its gate or paint.
+	relayShowCodeMu       sync.Mutex
+	relayShowCodeRuns     int
+	relayShowCodeInFlight bool
 
 	// sshMu guards sshTail, the end of the queue that runs SSH changes
 	// (sshAccess and the first-owner revocation) one at a time in the order
@@ -404,8 +416,8 @@ type executor struct {
 	// device carries the v2 relay and whether its socket is up right now. The
 	// claim flow's remote-route wait ends on a legacy topic OR a live v2
 	// socket, and with v2 wired an online device paints even when neither
-	// arrived: first-owner enrollment is LAN-only, so a claim never needs a
-	// remote route, and the app reaches the device by device ID afterwards.
+	// arrived: the QR carries the device keys and its LAN address, so the
+	// first owner can enroll on the LAN before the v2 socket is up.
 	// nil (an old controld.json with no relayV2, no control wiring) keeps the
 	// legacy rule exactly: no topic, no QR.
 	v2Wired     func() bool
@@ -597,8 +609,9 @@ func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 // authority (controlgate.ClaimQR implements it).
 type ControlClaim interface {
 	// ClaimQRFields returns the invitation fields to append to the claim URL
-	// (inv, thumb(devSig), thumb(devEnc), gen) and when the invitation
-	// expires; ok is false unless the device is in the legacy state.
+	// (inv, thumb(devSig), thumb(devEnc), gen and, on a device that dials
+	// relay v2, exp, devSig, devEnc, host) and when the invitation expires;
+	// ok is false unless the device is in the legacy state.
 	ClaimQRFields() (fields []string, expiresAt time.Time, ok bool)
 	// ClaimQRPins returns the same four fields with an empty invitation
 	// ("", thumb(devSig), thumb(devEnc), gen) whenever the device can vouch
@@ -653,6 +666,73 @@ func (e *executor) armInvitationTimerLocked() {
 	e.invTimer = time.AfterFunc(d, e.refreshInvitationQR)
 }
 
+// requestedCodeLife is how long a first-owner code requested on a claimed
+// device stays up without an enroll. A phone off the LAN cannot take the
+// code down (show:false is never admitted on relay v2), so this deadline is
+// the takedown there. A var so tests can shorten it.
+var requestedCodeLife = 10 * time.Minute
+
+// maxRelayShowCodeRuns caps the pre-claim gate runs relay v2 may start per
+// boot. The channel is public: each run can start an update ladder and puts
+// the first-owner code on screen for requestedCodeLife.
+const maxRelayShowCodeRuns = 3
+
+// RelayShowCode is the precheck of the one plaintext request relay v2 admits:
+// showPairingQRCode{show:true,purpose:"enroll"} on a legacy device
+// (control.Policy). It runs before the command and its side effects, and
+// returns exactly one of: a public error code; a reply to send while running
+// nothing; or done, which the caller invokes after it ran the command.
+//
+// The order is the contract (docs/ff1-control-v1.md §7.2):
+//  1. An unclaimed device paints its code on its own; the request is refused
+//     with the code v2 gives every legacy plaintext.
+//  2. A live code already on screen, or an admitted request still in its
+//     gate or paint, is answered as success and runs nothing and counts
+//     nothing, so repeated taps cannot spend the budget or restart the gate.
+//     A claim QR without an invitation is not a live code and is repainted.
+//  3. The budget counts gate runs STARTED, not requests or paints.
+//
+// The check and the marks share one critical section. The LAN request does
+// not come through here and is never counted.
+func (e *executor) RelayShowCode() (reply any, done func(), code string) {
+	if !e.deviceClaimed() {
+		return nil, nil, control.CodeEnrollmentRequired
+	}
+	e.relayShowCodeMu.Lock()
+	defer e.relayShowCodeMu.Unlock()
+	if e.relayShowCodeInFlight || e.invitationQRShowing() {
+		return CmdOK, nil, ""
+	}
+	if e.relayShowCodeRuns >= maxRelayShowCodeRuns {
+		return nil, nil, control.CodeRateLimited
+	}
+	e.relayShowCodeRuns++
+	e.relayShowCodeInFlight = true
+	return nil, func() {
+		e.relayShowCodeMu.Lock()
+		e.relayShowCodeInFlight = false
+		e.relayShowCodeMu.Unlock()
+	}, ""
+}
+
+// invitationQRShowing reports whether a claim QR carrying an invitation is
+// the narration on screen. The watch timer is armed exactly while such a QR
+// was painted and not yet voided (scheduleInvitationRefresh,
+// stopInvitationRefresh), and the 15 s watch can lag the screen, hence both.
+func (e *executor) invitationQRShowing() bool {
+	e.invMu.Lock()
+	armed := e.invTimer != nil
+	e.invMu.Unlock()
+	return armed && e.setupUI().ClaimQRShowing()
+}
+
+// setRequestedCodeDeadline arms or clears (zero) the takedown deadline.
+func (e *executor) setRequestedCodeDeadline(at time.Time) {
+	e.invMu.Lock()
+	e.requestedCodeDeadline = at
+	e.invMu.Unlock()
+}
+
 // clearControlInvitation voids the invitation and stops its watch.
 func (e *executor) clearControlInvitation() {
 	if e.control == nil {
@@ -686,11 +766,22 @@ func (e *executor) refreshInvitationQR() {
 		return
 	}
 	e.invMu.Lock()
-	due := time.Until(e.invExpiry) <= invitationRefreshLead
-	if !due {
+	overdue := !e.requestedCodeDeadline.IsZero() && time.Until(e.requestedCodeDeadline) <= 0
+	due := !overdue && time.Until(e.invExpiry) <= invitationRefreshLead
+	if !overdue && !due {
 		e.armInvitationTimerLocked()
 	}
 	e.invMu.Unlock()
+	if overdue {
+		// Nobody enrolled with the requested code: it comes down and stops
+		// being redeemable. The device is claimed, so what was on screen
+		// before the request returns.
+		e.logger.Info("Requested first-owner code not used in time; taking it down")
+		e.enrollQR.Store(false)
+		e.setupUI().HideIfShowing(setupui.StateClaimQR)
+		e.clearControlInvitation()
+		return
+	}
 	if due {
 		e.setupUI().RefreshClaimQRURL(func() string { return e.buildDeviceConnectURL(context.Background()) })
 	}
@@ -722,6 +813,8 @@ func (e *executor) ControlReleased() {
 	e.revokeSshAccess("ownership release")
 	go func() {
 		e.enrollQR.Store(true)
+		// A released device keeps its code up until someone enrolls.
+		e.setRequestedCodeDeadline(time.Time{})
 		// Not automatic: an automatic paint is refused while another
 		// overlay owns the screen, and nothing would repaint it later.
 		e.paintClaimQRWithInvitation(context.Background(), false)
@@ -923,7 +1016,7 @@ func (e *executor) connect(ctx context.Context, args []byte) (interface{}, error
 
 	wasClaimed := e.deviceClaimed()
 
-	// §7.1: connect is controller tier so every controller's cast (which
+	// §7.1: connect is controller tier so every controller's display request (which
 	// starts with connect) works, but only an owner claims or rebinds. Under
 	// the protocol, a non-owner connect to a claimed device is answered ok
 	// and changes nothing; one to an unclaimed device is refused.
@@ -1051,6 +1144,10 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 	e.enrollQR.Store(cmdArgs.Show && cmdArgs.Purpose == "enroll")
+	// The deadline of an earlier request must not fire while this one is in
+	// its gate: the takedown would reset enrollQR under it and the paint
+	// that follows would carry no invitation. It is re-armed after the paint.
+	e.setRequestedCodeDeadline(time.Time{})
 
 	// controld drives the claim/pairing QR in-process: on show=true it runs the
 	// mandatory pre-claim OTA gate and, only on a supported build, paints the
@@ -1060,7 +1157,22 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 		// pairing confirmation (e.g. a re-pair round).
 		e.pairingConfirmed.Store(false)
 	}
-	return e.showPairingQRCodeInProcess(ctx, cmdArgs.Show)
+	res, err := e.showPairingQRCodeInProcess(ctx, cmdArgs.Show)
+	e.armRequestedCodeDeadline()
+	return res, err
+}
+
+// armRequestedCodeDeadline runs after every showPairingQRCode. A request for
+// the first-owner code on a claimed device arms the takedown; every other
+// request clears it. It runs after the paint, so the deadline measures time
+// on screen, and the watch that enforces it (refreshInvitationQR) was armed
+// by that paint.
+func (e *executor) armRequestedCodeDeadline() {
+	var deadline time.Time
+	if e.enrollQR.Load() && e.deviceClaimed() {
+		deadline = time.Now().Add(requestedCodeLife)
+	}
+	e.setRequestedCodeDeadline(deadline)
 }
 
 // showPairingQRCodeInProcess is the controld-owned claim flow. On show=true it
@@ -1871,7 +1983,7 @@ func (e *executor) claimWithoutRemoteRoute(ctx context.Context) bool {
 	if err != nil || !online {
 		return false
 	}
-	e.logger.Info("Auto claim flow: no remote route yet, but v2 is wired and the device is online; painting (first-owner enrollment is LAN-only)")
+	e.logger.Info("Auto claim flow: no remote route yet, but v2 is wired and the device is online; painting (the first owner can enroll on the LAN)")
 	return true
 }
 
@@ -1915,10 +2027,11 @@ func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 // other builder this once had to match, was deleted with feral-setupd.)
 //
 // invitation, when present, is the feral-file#3551 control invitation
-// appended as four more fields (docs/ff1-control-v1.md §11):
+// appended as more fields (docs/ff1-control-v1.md §11):
 // |<inv>|<thumb(devSig)>|<thumb(devEnc)>|<gen>, with <inv> empty when there is
-// no invitation. Old app parsers read only indices 0, 1 and 3, so the topic
-// stays at index 1.
+// no invitation, and after a live invitation on a device that dials relay v2
+// |<exp>|<devSig>|<devEnc>|<host> (control.Invitation.KeyFields). Old app
+// parsers read only indices 0, 1 and 3, so the topic stays at index 1.
 func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string, invitation ...string) string {
 	internet := "false"
 	if online {
@@ -3455,7 +3568,7 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 		}
 	}
 	// The media observation store is the previous owner's playlist evidence
-	// (which works they cast, which failed): best-effort, same rollback
+	// (which works they display, which failed): best-effort, same rollback
 	// reasoning as the content policy above.
 	if e.mediaHealthResetter != nil {
 		if err := e.mediaHealthResetter(); err != nil {

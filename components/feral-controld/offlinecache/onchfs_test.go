@@ -76,9 +76,15 @@ func (r *fakeOnchfsResolver) Resolve(ctx context.Context, root, _ string) (*onch
 func newTestMaterializer(t *testing.T, store offlinecache.Store, r offlinecache.OnchfsResolver, cfg offlinecache.OnchfsMaterializerConfig) *offlinecache.OnchfsMaterializer {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	cfg.Store, cfg.Resolver, cfg.Logger, cfg.Base = store, r, zaptest.NewLogger(t), ctx
-	return offlinecache.NewOnchfsMaterializer(cfg)
+	m := offlinecache.NewOnchfsMaterializer(cfg)
+	// Cancel, then wait for the jobs: a canceled job logs its failure, and
+	// that log must land before the test returns (see DrainForTest).
+	t.Cleanup(func() {
+		cancel()
+		m.DrainForTest()
+	})
+	return m
 }
 
 func TestOnchfsMaterializerWritesARecordReplayServes(t *testing.T) {
@@ -206,7 +212,7 @@ func TestOnchfsMaterializerFailuresLeaveNoRecord(t *testing.T) {
 	}
 }
 
-// A slow read does not hold the cast: Ensure returns at its wait, the job
+// A slow read does not hold the display request: Ensure returns at its wait, the job
 // finishes in the background, OnReady tells the caller to widen the scope,
 // and a second Ensure for the same work joins the running job.
 func TestOnchfsMaterializerFinishesSlowWorkInTheBackground(t *testing.T) {
@@ -623,7 +629,7 @@ func (r *rootGatedResolver) Resolve(ctx context.Context, root, _ string) (*onchf
 }
 
 // PR #461 review F13: slow background works holding every read slot must
-// not keep the cast's first work from starting within the cast wait.
+// not keep the display request's first work from starting within the display request wait.
 func TestOnchfsMaterializerFirstWorkSkipsTheQueue(t *testing.T) {
 	store, _ := newTestStore(t)
 	slowRoots := []string{
@@ -645,7 +651,7 @@ func TestOnchfsMaterializerFirstWorkSkipsTheQueue(t *testing.T) {
 	assert.Zero(t, m.Ensure(context.Background(), append(background, first), 0))
 	time.Sleep(50 * time.Millisecond)
 
-	// The cast waits for its first work, which is promoted past the queue.
+	// The display request waits for its first work, which is promoted past the queue.
 	cast := append([]dp1playlist.PlaylistItem{first}, background...)
 	assert.Equal(t, 1, m.Ensure(context.Background(), cast, 3*time.Second))
 }
@@ -669,7 +675,7 @@ func (r *blockingResolver) Resolve(ctx context.Context, _, _ string) (*onchfs.Tr
 	return nil, ctx.Err()
 }
 
-// PR #461 review F14: casts that give up waiting do not add reads beyond
+// PR #461 review F14: display requests that give up waiting do not add reads beyond
 // the materializer's bound; foreground priority does not lift it.
 func TestOnchfsMaterializerBoundsReadsAcrossCasts(t *testing.T) {
 	store, _ := newTestStore(t)
@@ -678,7 +684,7 @@ func TestOnchfsMaterializerBoundsReadsAcrossCasts(t *testing.T) {
 	n := 0
 	for range 3 { // waves
 		var wg sync.WaitGroup
-		for range 4 { // casts per wave, each waiting for its own first work
+		for range 4 { // display requests per wave, each waiting for its own first work
 			n++
 			root := fmt.Sprintf("%064x", n)
 			wg.Go(func() {

@@ -26,7 +26,7 @@ func TestResolveSeriesPlaybackMode_DocumentWinsWhenNoDeviceOverride(t *testing.T
 }
 
 // Owner decision, 2026-10-30: content published before this field existed —
-// or any series item that simply states nothing — keeps casting exactly as
+// or any series item that simply states nothing — keeps displaying exactly as
 // it does today (feral-file/ffos-user#421's always-expand-every-edition
 // behavior), so the default must be full, not first.
 func TestResolveSeriesPlaybackMode_DefaultsToFullWhenNeitherStatesAnything(t *testing.T) {
@@ -56,7 +56,7 @@ func TestNarrowEditions_FullKeepsEveryEdition(t *testing.T) {
 // An empty artworkModel — the catalog did not state it — must not narrow
 // full either: that is the behavior this package had before
 // SeriesArtworkModel existed, and content the catalog cannot yet tell us
-// about must keep casting exactly as it does today.
+// about must keep displaying exactly as it does today.
 func TestNarrowEditions_FullWithUnknownArtworkModelStillKeepsEveryEdition(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackFull, "", editionItem("representative"), editions)
@@ -70,20 +70,20 @@ func TestNarrowEditions_FullNarrowsToRepresentativeForASingleSeries(t *testing.T
 	editions := []dp1playlist.PlaylistItem{editionItem("a")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackFull, dp1.SeriesArtworkModelSingle, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "representative", got[0].ID)
+	assert.Equal(t, uid("representative"), got[0].ID)
 }
 
 // Owner decision, 2026-11-06: a multi series' editions are identical copies
-// of one artwork, so full gains nothing by casting all of them — it must
+// of one artwork, so full gains nothing by displaying all of them — it must
 // narrow to the representative exactly as first would.
 func TestNarrowEditions_FullNarrowsToRepresentativeForAMultiSeries(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackFull, dp1.SeriesArtworkModelMulti, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "representative", got[0].ID)
+	assert.Equal(t, uid("representative"), got[0].ID)
 }
 
-// feralfile-bot F1, 2026-10-30: first must cast the DOCUMENT's own
+// feralfile-bot F1, 2026-10-30: first must display the DOCUMENT's own
 // representative, not editions[0] — the catalog's ordering has no
 // guarantee of matching what the item itself named as representative, so
 // the representative here is deliberately absent from editions.
@@ -91,11 +91,11 @@ func TestNarrowEditions_FirstKeepsOnlyTheRepresentative(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackFirst, dp1.SeriesArtworkModelMultiUnique, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "representative", got[0].ID)
+	assert.Equal(t, uid("representative"), got[0].ID)
 }
 
 // Owner decision, 2026-11-06 (supersedes AC4 of feral-file/ffos-user#425):
-// a genuine random PICK at cast time is both possible and wanted for a
+// a genuine random PICK at display time is both possible and wanted for a
 // multi_unique series, even though FF1 still has no re-roll-per-loop
 // behavior. Run enough trials that more than one distinct edition showing
 // up is a near-certainty under real randomness and a near-impossibility by
@@ -126,7 +126,7 @@ func TestNarrowEditions_RandomNarrowsToRepresentativeWhenArtworkModelHasNoDistin
 	editions := []dp1playlist.PlaylistItem{editionItem("a"), editionItem("b"), editionItem("c")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, dp1.SeriesArtworkModelMulti, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "representative", got[0].ID)
+	assert.Equal(t, uid("representative"), got[0].ID)
 }
 
 // The unresolved-group fallback (unresolvedSeriesGroup) hands NarrowEditions
@@ -136,14 +136,14 @@ func TestNarrowEditions_RandomWithOneEditionReturnsIt(t *testing.T) {
 	editions := []dp1playlist.PlaylistItem{editionItem("representative")}
 	got := dp1.NarrowEditions(dp1.SeriesPlaybackRandom, dp1.SeriesArtworkModelMultiUnique, editionItem("representative"), editions)
 	require.Len(t, got, 1)
-	assert.Equal(t, "representative", got[0].ID)
+	assert.Equal(t, uid("representative"), got[0].ID)
 }
 
 // feralfile-bot F4, 2026-10-30: first/random used to hand back representative
 // completely unchanged — still carrying the document's own series marker
-// (contract.seriesId, no tokenId) — so a cast built from that output still
+// (contract.seriesId, no tokenId) — so a display request built from that output still
 // satisfied isSeriesItem and re-triggered catalog expansion on any later
-// re-entry (setSeriesPlayback's re-cast, a recently-played replay). The
+// re-entry (setSeriesPlayback's re-display, a recently-played replay). The
 // caller's own representative — kept inside ResolvedSeriesGroup for a later
 // re-narrow under a different mode — must come through unmutated.
 func TestNarrowEditions_FirstClearsTheSeriesMarkerWithoutMutatingTheCallersRepresentative(t *testing.T) {
@@ -158,7 +158,7 @@ func TestNarrowEditions_FirstClearsTheSeriesMarkerWithoutMutatingTheCallersRepre
 	assert.Equal(t, dp1playlist.SeriesID("387"), *representative.Provenance.Contract.SeriesID)
 }
 
-// castPlanBody is the raw dp1_call bytes a static cast would have been
+// castPlanBody is the raw dp1_call bytes a static display request would have been
 // decoded from — the ONE thing ResolveSeriesCastPlan reads seriesPlayback
 // from that the typed dp1playlist.PlaylistItem has no field for.
 func castPlanBody(items ...map[string]any) []byte {
@@ -174,7 +174,7 @@ func castPlanBody(items ...map[string]any) []byte {
 }
 
 func seriesItemRaw(seriesPlayback string) map[string]any {
-	m := map[string]any{"id": "item-series", "source": "https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4"}
+	m := map[string]any{"id": itemSeriesID, "source": "https://cdn.artworks.feralfile.io/previews/scrampled/0.mp4"}
 	if seriesPlayback != "" {
 		m["seriesPlayback"] = seriesPlayback
 	}
@@ -186,7 +186,7 @@ func TestResolveSeriesCastPlan_ReadsTheItemsOwnSeriesPlaybackFromRawBytes(t *tes
 	defer ts.teardown()
 
 	raw := castPlanBody(seriesItemRaw("first"))
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
@@ -195,8 +195,8 @@ func TestResolveSeriesCastPlan_ReadsTheItemsOwnSeriesPlaybackFromRawBytes(t *tes
 
 	require.True(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
-	require.Len(t, narrowed, 1, "the item's own seriesPlayback:first must narrow the cast to the representative")
-	assert.Equal(t, "item-series", narrowed[0].ID, "first must cast the item's own representative, not the catalog's first-returned edition")
+	require.Len(t, narrowed, 1, "the item's own seriesPlayback:first must narrow the display request to the representative")
+	assert.Equal(t, itemSeriesID, narrowed[0].ID, "first must display the item's own representative, not the catalog's first-returned edition")
 }
 
 // feralfile-bot F4, 2026-10-30, end to end: recastForMode and
@@ -211,21 +211,21 @@ func TestResolveSeriesCastPlan_ANarrowedRepresentativeNeverReExpands(t *testing.
 	defer ts.teardown()
 
 	raw := castPlanBody(seriesItemRaw("first"))
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, raw, nil, 0)
 	narrowed := plan.Narrow(nil)
-	require.Len(t, narrowed, 1, "the document's own first narrows the initial cast to the representative")
+	require.Len(t, narrowed, 1, "the document's own first narrows the initial display request to the representative")
 
 	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
 	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
 
 	assert.False(t, again.HasSeriesGroups(), "a narrowed representative must never satisfy isSeriesItem again")
-	require.Len(t, again.Narrow(nil), 1, "and must cast through unchanged, not re-fetch and re-expand to full")
-	assert.Equal(t, "item-series", again.Narrow(nil)[0].ID)
+	require.Len(t, again.Narrow(nil), 1, "and must pass through unchanged, not re-fetch and re-expand to full")
+	assert.Equal(t, itemSeriesID, again.Narrow(nil)[0].ID)
 }
 
 func TestResolveSeriesCastPlan_DeviceOverrideWinsOverTheDocument(t *testing.T) {
@@ -233,7 +233,7 @@ func TestResolveSeriesCastPlan_DeviceOverrideWinsOverTheDocument(t *testing.T) {
 	defer ts.teardown()
 
 	raw := castPlanBody(seriesItemRaw("first"))
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
@@ -245,14 +245,14 @@ func TestResolveSeriesCastPlan_DeviceOverrideWinsOverTheDocument(t *testing.T) {
 	assert.Len(t, narrowed, 3, "a device override of full must win over the document's own first")
 }
 
-// Owner decision, 2026-11-06: a multi series (identical editions) must cast
+// Owner decision, 2026-11-06: a multi series (identical editions) must display
 // only its representative even under full — the config has nothing real to
 // choose between when every edition is the same artwork.
 func TestResolveSeriesCastPlan_FullNarrowsToRepresentativeForAMultiSeries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(3, dp1.SeriesArtworkModelMulti, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -263,7 +263,7 @@ func TestResolveSeriesCastPlan_FullNarrowsToRepresentativeForAMultiSeries(t *tes
 
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 1, "full must still narrow a multi (identical-editions) series to its one representative")
-	assert.Equal(t, "item-series", narrowed[0].ID)
+	assert.Equal(t, itemSeriesID, narrowed[0].ID)
 }
 
 // Owner decision, 2026-11-06: a single (1/1) series behaves the same way —
@@ -273,7 +273,7 @@ func TestResolveSeriesCastPlan_FullNarrowsToRepresentativeForASingleSeries(t *te
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(1, dp1.SeriesArtworkModelSingle, editionItem("a")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -283,7 +283,7 @@ func TestResolveSeriesCastPlan_FullNarrowsToRepresentativeForASingleSeries(t *te
 
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 1)
-	assert.Equal(t, "item-series", narrowed[0].ID)
+	assert.Equal(t, itemSeriesID, narrowed[0].ID)
 }
 
 // A multi_unique series is the one shape full/first actually chooses
@@ -292,7 +292,7 @@ func TestResolveSeriesCastPlan_FullKeepsEveryEditionForAMultiUniqueSeries(t *tes
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(3, dp1.SeriesArtworkModelMultiUnique, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -309,7 +309,7 @@ func TestResolveSeriesCastPlan_NoDocumentModeDefaultsToFull(t *testing.T) {
 	defer ts.teardown()
 
 	raw := castPlanBody(seriesItemRaw(""))
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(2, editionItem("a"), editionItem("b")))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(2, editionItem("a"), editionItem("b")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
@@ -319,14 +319,14 @@ func TestResolveSeriesCastPlan_NoDocumentModeDefaultsToFull(t *testing.T) {
 	assert.Len(t, plan.Narrow(nil), 2)
 }
 
-// rawPlaylist may be nil: an internally rebuilt re-cast (setSeriesPlayback's
+// rawPlaylist may be nil: an internally rebuilt re-display (setSeriesPlayback's
 // re-narrow) has no wire form. Every item must then read as absent, falling
 // through to the device override or the built-in default, not error out.
 func TestResolveSeriesCastPlan_NilRawPlaylistFallsThroughToDeviceOrDefault(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(2, editionItem("a"), editionItem("b")))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(2, editionItem("a"), editionItem("b")))
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
@@ -338,7 +338,7 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(nil, assert.AnError)
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
@@ -348,7 +348,7 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	// 2026-11-02; unresolvedSeriesGroup), not a bare Item, so the document's
 	// mode survives into the cache — but it is NOT a "resolved" group
 	// (Resolved stays false), so HasSeriesGroups must still read false: a
-	// lone unresolved series is not worth tracking for a re-cast, and
+	// lone unresolved series is not worth tracking for a re-display, and
 	// treating it as tracked reintroduced a synchronous catalog retry on the
 	// next setSeriesPlayback call (feralfile-bot F1 on this fix,
 	// 2026-11-02). The marker is cleared unconditionally at construction
@@ -359,7 +359,7 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	assert.False(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 1)
-	assert.Equal(t, "item-series", narrowed[0].ID)
+	assert.Equal(t, itemSeriesID, narrowed[0].ID)
 	assert.Nil(t, narrowed[0].Provenance.Contract.SeriesID, "full must not carry the series marker either — there is no catalog data behind this fallback to re-resolve from")
 }
 
@@ -381,7 +381,7 @@ func TestCastPlan_FullKeepsEveryEditionForAMultiSeriesUnlikeNarrow(t *testing.T)
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(3, dp1.SeriesArtworkModelMulti, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -392,14 +392,14 @@ func TestCastPlan_FullKeepsEveryEditionForAMultiSeriesUnlikeNarrow(t *testing.T)
 	require.Len(t, plan.Narrow(nil), 1, "sanity: Narrow still collapses a multi series to its representative")
 	full := plan.Full()
 	assert.Len(t, full, 4, "Full must keep every edition regardless of artworkModel, plus the representative itself")
-	assert.Equal(t, "item-series", full[3].ID, "the representative, whose own source the catalog's editions never carried")
+	assert.Equal(t, itemSeriesID, full[3].ID, "the representative, whose own source the catalog's editions never carried")
 }
 
 func TestCastPlan_FullKeepsEveryEditionForASingleSeriesUnlikeNarrow(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(1, dp1.SeriesArtworkModelSingle, editionItem("a")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -414,7 +414,7 @@ func TestCastPlan_FullKeepsEveryEditionForAMultiUniqueSeries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(3, dp1.SeriesArtworkModelMultiUnique, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -435,7 +435,7 @@ func TestCastPlan_FullDoesNotDuplicateARepresentativeTheCatalogAlreadyIncluded(t
 
 	sameAsRepresentative := editionItem("a")
 	sameAsRepresentative.Source = seriesItem().Source
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(2, dp1.SeriesArtworkModelMultiUnique, sameAsRepresentative, editionItem("b")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -453,7 +453,7 @@ func TestCastPlan_FullReturnsTheRepresentativeWhenCatalogUnreachable(t *testing.
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-series")).
+	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
 		Return(nil, assert.AnError)
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
@@ -461,7 +461,7 @@ func TestCastPlan_FullReturnsTheRepresentativeWhenCatalogUnreachable(t *testing.
 
 	full := plan.Full()
 	require.Len(t, full, 1)
-	assert.Equal(t, "item-series", full[0].ID)
+	assert.Equal(t, itemSeriesID, full[0].ID)
 }
 
 // A plain (non-series) item must pass through Full unchanged, same as
@@ -471,18 +471,18 @@ func TestCastPlan_FullPassesThroughAPlainItemAndKeepsAMixedSeriesInFull(t *testi
 	ts := setup(t)
 	defer ts.teardown()
 
-	serveEditions(ts, "playlist-1", "item-series",
+	serveEditions(ts, "playlist-1", itemSeriesID,
 		editionsBodyWithModel(3, dp1.SeriesArtworkModelMultiUnique, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
-	plain := dp1playlist.PlaylistItem{ID: "plain-item", Source: "https://cdn/plain.png"}
+	plain := dp1playlist.PlaylistItem{ID: uid("plain-item"), Source: "https://cdn/plain.png"}
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{plain, seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, nil, nil, 0)
 
 	full := plan.Full()
 	require.Len(t, full, 5, "the plain item plus all 3 editions plus the representative of the resolved series")
-	assert.Equal(t, "plain-item", full[0].ID)
+	assert.Equal(t, uid("plain-item"), full[0].ID)
 }
 
 // TestCastPlan_RandomPicksFromNarrowed_ReportsTheRandomGroupsChosenEdition
@@ -550,7 +550,7 @@ func TestCastPlan_RandomPicksFromNarrowed_SkipsSingleMultiGroupsEvenUnderRandom(
 
 	items := plan.Narrow(nil)
 	require.Len(t, items, 1)
-	assert.Equal(t, "item-series", items[0].ID, "sanity: a multi series always collapses to the representative")
+	assert.Equal(t, itemSeriesID, items[0].ID, "sanity: a multi series always collapses to the representative")
 	assert.Empty(t, plan.RandomPicksFromNarrowed(nil, items))
 }
 
@@ -558,8 +558,8 @@ func TestCastPlan_RandomPicksFromNarrowed_SkipsSingleMultiGroupsEvenUnderRandom(
 // pins run-reviewer's consolidated F1 on pass 5 of this fix (2026-11-16):
 // unresolvedSeriesGroup's catalog-failure fallback leaves ArtworkModel at
 // its zero value "", which hasDistinctEditions() treats as true BY DESIGN
-// for the casting decision (empty/unrecognized defaults to "has a real
-// choice" so content pre-dating the field keeps casting as before) — but
+// for the displaying decision (empty/unrecognized defaults to "has a real
+// choice" so content pre-dating the field keeps displaying as before) — but
 // an unresolved group's lone Editions entry is just the representative,
 // behind no real catalog data, so NarrowEditions' "random" pick here is
 // not a genuine choice at all. Resolved must gate the pick the same way
@@ -580,7 +580,7 @@ func TestCastPlan_RandomPicksFromNarrowed_SkipsUnresolvedGroupsEvenUnderRandom(t
 
 	items := plan.Narrow(nil)
 	require.Len(t, items, 1)
-	assert.Equal(t, "item-series", items[0].ID, "sanity: an unresolved group narrows to its representative")
+	assert.Equal(t, itemSeriesID, items[0].ID, "sanity: an unresolved group narrows to its representative")
 	assert.Empty(t, plan.RandomPicksFromNarrowed(nil, items),
 		"an unresolved group must never report a pick, even though its empty ArtworkModel would otherwise read as hasDistinctEditions()")
 }
@@ -683,7 +683,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsEither(t 
 	rebuilt := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: narrowed}}
 	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
 
-	require.Len(t, again.Narrow(nil), 2, "must cast both through unchanged, not re-fetch and re-expand either")
+	require.Len(t, again.Narrow(nil), 2, "must pass both through unchanged, not re-fetch and re-expand either")
 	assert.Equal(t, "item-a", again.Narrow(nil)[0].ID)
 	assert.Equal(t, "item-b", again.Narrow(nil)[1].ID)
 }
@@ -732,7 +732,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsUnderFull
 	again := ts.client.ResolveSeriesCastPlan(ts.ctx, rebuilt, nil, nil, 0)
 
 	assert.False(t, again.HasSeriesGroups(), "neither A's editions nor B's cleared fallback must look like a series again")
-	require.Len(t, again.Narrow(nil), 4, "must cast all four through unchanged, not re-fetch and re-expand B")
+	require.Len(t, again.Narrow(nil), 4, "must pass all four through unchanged, not re-fetch and re-expand B")
 }
 
 func TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone(t *testing.T) {
@@ -745,8 +745,8 @@ func TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone(t *testing.T) {
 	assert.False(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
 	require.Len(t, narrowed, 2)
-	assert.Equal(t, "a", narrowed[0].ID)
-	assert.Equal(t, "b", narrowed[1].ID)
+	assert.Equal(t, uid("a"), narrowed[0].ID)
+	assert.Equal(t, uid("b"), narrowed[1].ID)
 }
 
 // feralfile-bot F6, 2026-11-02: a plain playlist (no series items at all)
@@ -765,7 +765,7 @@ func TestResolveSeriesCastPlan_APlainPlaylistLongerThanTheCastCapIsNotTruncated(
 	}
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: items}}
 
-	// maxItems set exactly as the live-cast call site does, so this
+	// maxItems set exactly as the live-display request call site does, so this
 	// reproduces the handler's real call shape rather than only the
 	// zero-maxItems case TestResolveSeriesCastPlan_LeavesAPlainPlaylistAlone
 	// already covers.
@@ -773,7 +773,7 @@ func TestResolveSeriesCastPlan_APlainPlaylistLongerThanTheCastCapIsNotTruncated(
 
 	assert.False(t, plan.HasSeriesGroups())
 	narrowed := plan.Narrow(nil)
-	require.Len(t, narrowed, dp1.CAST_PLAYLIST_ITEMS_LIMIT+1, "no series was expanded, so nothing here is subject to the cast cap")
+	require.Len(t, narrowed, dp1.CAST_PLAYLIST_ITEMS_LIMIT+1, "no series was expanded, so nothing here is subject to the display cap")
 }
 
 // The full edition set is kept on the plan regardless of which mode it
@@ -786,14 +786,14 @@ func TestResolveSeriesCastPlan_KeepsTheFullEditionSetForANetworkFreeRenarrow(t *
 	raw := castPlanBody(seriesItemRaw("first"))
 	// Fetched exactly ONCE: resolving the plan (narrowed to "first" below)
 	// must not re-fetch when Narrow is called again with a different mode.
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(3, editionItem("a"), editionItem("b"), editionItem("c")))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
 	plan := ts.client.ResolveSeriesCastPlan(ts.ctx, playlist, raw, nil, 0)
 
-	require.Len(t, plan.Narrow(nil), 1, "the document's own first narrows the initial cast")
+	require.Len(t, plan.Narrow(nil), 1, "the document's own first narrows the initial display request")
 	full := mode(dp1.SeriesPlaybackFull)
 	require.Len(t, plan.Narrow(full), 3, "re-narrowing the SAME plan under a new device mode needs no second catalog call")
 }
@@ -812,7 +812,7 @@ func TestResolveSeriesCastPlan_PreservesTrailingSegmentsForALaterNarrowerMode(t 
 	for i := range editions {
 		editions[i] = editionItem(fmt.Sprintf("e%d", i))
 	}
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(len(editions), editions...))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(len(editions), editions...))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
 
@@ -834,8 +834,8 @@ func TestResolveSeriesCastPlan_PreservesTrailingSegmentsForALaterNarrowerMode(t 
 	first := mode(dp1.SeriesPlaybackFirst)
 	narrowed := plan.Narrow(first)
 	require.Len(t, narrowed, 2, "first leaves room for both the representative and the tail — the SAME plan must still carry it")
-	assert.Equal(t, "item-series", narrowed[0].ID)
-	assert.Equal(t, "tail", narrowed[1].ID)
+	assert.Equal(t, itemSeriesID, narrowed[0].ID)
+	assert.Equal(t, uid("tail"), narrowed[1].ID)
 }
 
 // feralfile-bot's F1 evidence on ff-player#320 was exactly two different

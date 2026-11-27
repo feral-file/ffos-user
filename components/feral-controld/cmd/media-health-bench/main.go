@@ -1,4 +1,4 @@
-// Command media-health-bench measures the cast-time L0 pass and the store
+// Command media-health-bench measures the accept-time L0 pass and the store
 // against a real playlist (feral-file/ffos-user#392 acceptance: "a playlist
 // of 1,000 works is measured: L0 latency added per item, storage used").
 //

@@ -2,9 +2,12 @@ package dp1_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -66,23 +69,29 @@ func TestCastPlanNarrowMapsOnchfsSources(t *testing.T) {
 	assert.Equal(t, "onchfs://"+caseyReasRoot, item.Source, "the plan's own item is not written through")
 }
 
-// A Raster walk (the path #427 was filed for) hands the player the
-// device-local source, not the raw URI and not the dead gateway.
-func TestRaster_OnchfsWorkLeavesWithADeviceLocalSource(t *testing.T) {
-	rs := setupRaster(t)
-	rs.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
-		return respond(200, rasterPage(t, []map[string]any{
-			rasterNode(rasterToken(7, map[string]any{
-				"media": map[string]any{"contentUrl": "onchfs://" + caseyReasRoot + "/?fxhash=0x06ec&fxiteration=1", "normalizedContentUrl": ""},
-			})),
-		}, false, ""))
+// DP-1 hydration (a `dp1/*` dynamicQuery) hands the player the device-local
+// source, not the raw URI: dp1-go decodes hydrated items without
+// Playlist.UnmarshalJSON, so processDynamicPlaylist's own exit is what maps
+// them. The provenance chain names the family (PR #461 review F1).
+func TestDynamicHydration_OnchfsWorkLeavesWithADeviceLocalSource(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	body := `{"data":{"items":[{"id":"585f79b6-a45f-4c1c-8080-e93a192adccc","title":"w","duration":10,"license":"open",` +
+		`"source":"onchfs://` + caseyReasRoot + `/?fxhash=0x06ec&fxiteration=1",` +
+		`"provenance":{"type":"onChain","contract":{"chain":"evm","standard":"erc721","address":"0xabc","tokenId":"1"}}}]}}`
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
 	}).Times(1)
 
-	result, err := rs.client.ProcessDynamicPlaylist(t.Context(), rasterPlaylist(t), false)
+	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{DynamicQuery: &playlists.DynamicQuery{
+		Profile:         dp1playlist.ProfileGraphQLV1,
+		Endpoint:        "https://example.com/graphql",
+		Query:           `query { items(limit: {{limit}}, offset: {{offset}}) { id } }`,
+		ResponseMapping: playlists.ResponseMapping{ItemsPath: "data.items", ItemSchema: "dp1/1.0"},
+	}}}
+	result, err := ts.client.ProcessDynamicPlaylist(t.Context(), playlist, false)
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
-	// Raster gives the token's chain, so the source names its family: the
-	// work is read only from EVM chains (PR #461 review F1).
 	assert.Equal(t, caseyReasEVMHost+"/?fxhash=0x06ec&fxiteration=1", result.Items[0].Source)
 }
 
@@ -137,7 +146,7 @@ func TestResolveSeriesCastPlan_MapsOnchfsEditionsInThePlan(t *testing.T) {
 	a, b := editionItem("a"), editionItem("b")
 	a.Source = "onchfs://" + caseyReasRoot + "/?fxhash=1"
 	b.Source = "onchfs://" + caseyReasRoot + "/?fxhash=2"
-	serveEditions(ts, "playlist-1", "item-series", editionsBody(2, a, b))
+	serveEditions(ts, "playlist-1", itemSeriesID, editionsBody(2, a, b))
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) })
 

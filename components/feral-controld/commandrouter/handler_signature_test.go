@@ -1,7 +1,7 @@
 package commandrouter_test
 
 // DP-1 signature verification on the displayPlaylist path
-// (feral-file/ffos-user#307): verify-and-report. Every cast still
+// (feral-file/ffos-user#307): verify-and-report. Every display request still
 // plays; the verdict rides the reply and the active-verdict slot. The
 // verifier itself is covered in sigverify; these cover the handler's wiring:
 // which bytes it verifies, where the verdict lands, and when the slot moves.
@@ -100,7 +100,7 @@ func TestCommandHandler_Process_DisplayPlaylist_URL_ReportsVerdictFromResolver(t
 	assert.True(t, found)
 	assert.Equal(t, sigverify.StatusValid, st)
 	st, found = active.Lookup("", playlistURL)
-	assert.True(t, found, "URL casts must be matchable by playlistURL too")
+	assert.True(t, found, "URL display requests must be matchable by playlistURL too")
 	assert.Equal(t, sigverify.StatusValid, st)
 }
 
@@ -139,7 +139,7 @@ func inlineTyped(id string) *dp1.Playlist {
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_Inline_UnsignedStillPlays is
-// today's ordinary app cast: no signatures at all. It plays, the reply says
+// today's ordinary app display request: no signatures at all. It plays, the reply says
 // so, and the slot records it.
 func TestCommandHandler_Process_DisplayPlaylist_Inline_UnsignedStillPlays(t *testing.T) {
 	ts := setup(t)
@@ -199,8 +199,10 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesWireTokenNotRemar
 	doc := map[string]any{
 		"dpVersion": "1.1.0",
 		"id":        "amp-1",
-		"title":     strings.Repeat("&", sigverify.MaxDocumentBytes/5),
-		"items":     []any{map[string]any{"id": "i", "source": "https://example.com/a", "duration": 10, "license": "open"}},
+		"title":     "t",
+		// An unknown member carries the bulk: the schema caps the title.
+		"padding": strings.Repeat("&", sigverify.MaxDocumentBytes/5),
+		"items":   []any{map[string]any{"id": "i", "source": "https://example.com/a", "duration": 10, "license": "open"}},
 	}
 	unsignedBytes, err := json.Marshal(doc) // encoding/json escapes: NOT the wire form
 	require.NoError(t, err)
@@ -278,8 +280,8 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_InvalidStillPlaysAndRepor
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID pins the
-// log-field cap: a caster-sized playlist id (the open hub admits 4 MiB
-// inline casts) must not reach the journal whole.
+// log-field cap: a sender-sized playlist id (the open hub admits 4 MiB
+// inline display requests) must not reach the journal whole.
 func TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -288,7 +290,7 @@ func TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID(t *testing
 	wireVerification(ts)
 
 	hugeID := strings.Repeat("x", 1<<20)
-	raw := []byte(`{"dpVersion":"1.1.0","id":"` + hugeID + `","title":"t","items":[]}`)
+	raw := []byte(`{"dpVersion":"1.1.0","id":"` + hugeID + `","title":"t","items":[{"source":"https://example.com/a"}]}`)
 	command := inlineCast(ts, raw, inlineTyped(hugeID))
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -352,7 +354,7 @@ func TestCommandHandler_Process_DisplayPlaylist_NotWired_ReplyUntouched(t *testi
 // TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified: the
 // offline cached copy is a typed, hydrated re-marshal, not the signed bytes,
 // so it carries NO verdict — the reply omits signatureStatus and the active
-// slot is CLEARED, even though an earlier signed cast of the same URL had
+// slot is CLEARED, even though an earlier signed display request of the same URL had
 // seeded it: player_status must not vouch for bytes nobody verified. The
 // cached body here is byte-identical to the signed fixture precisely to
 // prove the loader does not judge it: if it did, this would come back
@@ -366,7 +368,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 	active := wireVerification(ts)
 
 	playlistURL := "https://feed.example/p.json"
-	active.Set("cached-1", playlistURL, sigverify.StatusValid) // an earlier live cast of this URL
+	active.Set("cached-1", playlistURL, sigverify.StatusValid) // an earlier live display request of this URL
 	cachedRaw := signedFixture(t)
 	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).Return(nil, dp1.CastPlan{}, errors.New("network unreachable")).Times(1)
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRaw), []offlinecache.SeriesSegment(nil), nil).Times(1)
@@ -383,13 +385,13 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedFallback_NotVerified(t *te
 	result, err := ts.handler.Process(ts.ctx, displayPlaylistURLCommand(playlistURL))
 
 	require.NoError(t, err)
-	assert.Equal(t, playerOkResponse(), result, "no verdict keys on a cached-copy cast")
+	assert.Equal(t, playerOkResponse(), result, "no verdict keys on a cached-copy display request")
 	_, found := active.Lookup("cached-1", playlistURL)
 	assert.False(t, found, "the seeded verdict must not survive an unverified push of the same URL")
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover: a
-// future-only displayAt cast is accepted without reaching the player. The
+// future-only displayAt display request is accepted without reaching the player. The
 // verdict is reported on the acceptance reply, the playlist still showing
 // keeps its own verdict (same URL, different document), and the new verdict
 // becomes visible only when the scheduler's push observer promotes it —
@@ -455,10 +457,10 @@ func TestCommandHandler_Process_DisplayPlaylist_Deferred_PendingUntilCutover(t *
 }
 
 // TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush: a
-// displayAt cast whose active cohort is non-empty is displayed at once AND
+// displayAt display request whose active cohort is non-empty is displayed at once AND
 // cached by the scheduler. After a player reload the reconnect reconciler
 // clears current and the scheduler re-pushes the same schedule; its
-// promotion must restore this cast's verdict — a static inline schedule
+// promotion must restore this request's verdict — a static inline schedule
 // has no refresher pass that would restage it.
 func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -492,7 +494,7 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 	})
 
 	// Static inline schedule: one cohort active now, one tomorrow.
-	raw := []byte(`{"dpVersion":"1.1.0","id":"sched-1","title":"t","items":[]}`)
+	raw := []byte(`{"dpVersion":"1.1.0","id":"sched-1","title":"t","items":[{"source":"https://example.com/now"}]}`)
 	typed := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID: "sched-1",
 		Items: []dp1playlist.PlaylistItem{
@@ -568,7 +570,7 @@ func TestCommandHandler_Process_DisplayPlaylist_InvalidatesBeforeSend(t *testing
 
 // TestCommandHandler_Process_DisplayPlaylist_PublishesInsidePushLock pins the
 // ordering rule: the slot is written inside the same WithPlayerPush critical
-// section as the send. Cast A's player reply starts cast B concurrently; B
+// section as the send. Display request A's player reply starts display request B concurrently; B
 // can only send once A's closure has released the push lock. Two things
 // must then hold: at B's send the slot carries NO attestation (B's own
 // pre-send invalidation cleared A's — the window in which the player may

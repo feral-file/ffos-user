@@ -38,7 +38,7 @@ type SeriesGroupKey struct {
 // itself (Representative), and the FULL edition set the catalog returned —
 // kept un-narrowed so a later read (a device-setting change, or a catalog-
 // unreachable offline fallback) can re-narrow it with no network round
-// trip, exactly like dp1.CastPlan.Narrow already does for a live cast. See
+// trip, exactly like dp1.CastPlan.Narrow already does for a live display. See
 // dp1.ResolvedSeriesGroup's doc for the full field-by-field rationale —
 // this is the same data, kept in step as it evolves.
 type SeriesGroup struct {

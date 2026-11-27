@@ -80,7 +80,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 			require.Len(t, items, 1)
 			item0 := items[0].(map[string]interface{})
 			assert.Equal(t, "day22", item0["id"])
-			// Cast path must force-display: player rejects missing intent.action.
+			// Display path must force-display: player rejects missing intent.action.
 			intent, ok := cmd.Arguments["intent"].(map[string]interface{})
 			require.True(t, ok, "intent should be present")
 			assert.Equal(t, "now_display", intent["action"])
@@ -135,7 +135,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefersFutureOnlySchedule(t *test
 // TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUntouched
 // is the regression test for the "scope switched before the scheduler
 // decided anything would display" hazard (feral-file/ffos-user#229 review
-// finding): a future-only cast defers — the player keeps showing the
+// finding): a future-only display request defers — the player keeps showing the
 // previous playlist — so replay's Fetch-interception scope must not move
 // either. The old shape synced scope to the NEW playlist before
 // PrepareWithSource ran, then returned a synthetic ok that bypassed the
@@ -162,7 +162,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUnt
 	).AnyTimes()
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
-	// The playback coordinator is still taken — whether the cast defers is
+	// The playback coordinator is still taken — whether the display request defers is
 	// only known once the scheduler filtered under it — but scope must not
 	// move: no SyncPlaylist / MarkPlaybackChanged expectations, so either
 	// call is an unexpected mock invocation that fails the test.
@@ -185,7 +185,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUnt
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSend
-// pins the two halves of the scope-vs-scheduler contract for a cast whose
+// pins the two halves of the scope-vs-scheduler contract for a display request whose
 // active set is a strict subset:
 //   - ordering: SyncPlaylist runs BEFORE the CDP send (scope must be in
 //     place before the artwork's first requests can arrive), enforced via
@@ -193,7 +193,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DeferredCastLeavesReplayScopeUnt
 //   - breadth: scope covers the FULL playlist's item IDs, not just the
 //     filtered active cohort — the scheduler's timer/wake/retry cutovers
 //     push later cohorts directly with no replay-scope hook of their own,
-//     so the scope installed at cast time must already contain every
+//     so the scope installed at accept time must already contain every
 //     cohort a cutover can display (see the syncReplayScope call site's
 //     comment in handler.go).
 func TestCommandHandler_Process_DisplayPlaylist_ScopesFullPlaylistBeforeActiveSend(t *testing.T) {
@@ -376,7 +376,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 			var cmd commands.Command
 			require.NoError(t, json.Unmarshal([]byte(payload), &cmd))
 			intent, ok := cmd.Arguments["intent"].(map[string]interface{})
-			require.True(t, ok, "plain cast must still default intent.action")
+			require.True(t, ok, "a plain display request must still default intent.action")
 			assert.Equal(t, "now_display", intent["action"])
 			return playerOkResponse(), nil
 		},

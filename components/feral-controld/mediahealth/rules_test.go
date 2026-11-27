@@ -337,9 +337,9 @@ func (f slowFetcher) Fetch(ctx context.Context, _ FetchRequest) (*FetchResponse,
 	}
 }
 
-// Background probes get BackgroundItemTimeout; the cast pass keeps the
+// Background probes get BackgroundItemTimeout; the display request pass keeps the
 // Probe's short ItemTimeout. A gateway that answers its 404 slowly is
-// only a timeout at cast, but a real answer in the background.
+// only a timeout at display, but a real answer in the background.
 func TestRules_BackgroundProbesWaitLongerThanTheCast(t *testing.T) {
 	clock := &testClock{t: time.Now()}
 	f := slowFetcher{delay: 200 * time.Millisecond, ans: ok(404, "text/html", []byte("404 - Page cannot be found"), -1)}
@@ -348,10 +348,10 @@ func TestRules_BackgroundProbesWaitLongerThanTheCast(t *testing.T) {
 	p.BackgroundItemTimeout = 2 * time.Second
 
 	cast := p.Preflight(context.Background(), []string{"https://arweave.example/tx"})
-	assert.Equal(t, VerdictInconclusive, cast[0].Verdict, "at cast the slow answer is a timeout")
+	assert.Equal(t, VerdictInconclusive, cast[0].Verdict, "at display the slow answer is a timeout")
 	rec, err := p.Store.Get("https://arweave.example/tx")
 	require.NoError(t, err)
-	assert.Nil(t, rec, "the cast's short deadline is not the source's failure: nothing recorded, no hold, no issue")
+	assert.Nil(t, rec, "the display request's short deadline is not the source's failure: nothing recorded, no hold, no issue")
 
 	bg := p.ProbeAndRecord(context.Background(), "https://arweave.example/tx")
 	assert.Equal(t, 404, bg.Status, "in the background the gateway's real answer arrives")
@@ -360,5 +360,5 @@ func TestRules_BackgroundProbesWaitLongerThanTheCast(t *testing.T) {
 
 func TestRules_BackgroundTimeoutDefaults(t *testing.T) {
 	assert.Equal(t, 30*time.Second, DefaultBackgroundItemTimeout)
-	assert.Equal(t, 5*time.Second, DefaultItemTimeout, "the cast keeps its short deadline")
+	assert.Equal(t, 5*time.Second, DefaultItemTimeout, "the display request keeps its short deadline")
 }

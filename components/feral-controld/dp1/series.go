@@ -2,8 +2,10 @@ package dp1
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"time"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
@@ -171,7 +173,7 @@ const (
 // (a deployment older than this field, or a defensive/unresolved expansion
 // that never asked the catalog) — defaults to true: that is the behavior
 // this package already had before SeriesArtworkModel existed, so content the
-// catalog cannot yet tell us about keeps casting exactly as it does today
+// catalog cannot yet tell us about keeps displaying exactly as it does today
 // rather than silently collapsing to one edition.
 func (m SeriesArtworkModel) hasDistinctEditions() bool {
 	switch m {
@@ -206,8 +208,10 @@ func (m SeriesArtworkModel) HasDistinctEditions() bool {
 // ff-player group the run — and its grouping default is what makes that
 // harmful; see the note on seriesEditions.
 type catalogEditions struct {
-	Total  int                        `json:"total"`
-	Items  []dp1playlist.PlaylistItem `json:"items"`
+	Total int `json:"total"`
+	// Raw, so each edition is judged by the schema as the catalog sent it and
+	// one that fails does not take the others with it.
+	Items  []json.RawMessage `json:"items"`
 	Series struct {
 		ArtworkModel SeriesArtworkModel `json:"artworkModel"`
 	} `json:"series"`
@@ -292,7 +296,7 @@ func (d *dp1) expandSeriesEditions(ctx context.Context, playlist Playlist, maxIt
 
 		// Checked after every append, not only a successful expansion's:
 		// a plain item or a kept-unexpanded representative can cross
-		// maxItems just as a batch of editions can, and the cast path
+		// maxItems just as a batch of editions can, and the display path
 		// that passes a non-zero cap here must never hand the player
 		// more than it asked for regardless of which branch grew the
 		// slice (see CAST_PLAYLIST_ITEMS_LIMIT at the call site).
@@ -308,7 +312,7 @@ func (d *dp1) expandSeriesEditions(ctx context.Context, playlist Playlist, maxIt
 
 // ExpandSeriesItems is expandSeriesItems, exported for a caller outside this
 // package that already holds a decoded, static playlist it did not get from
-// ProcessPlaylistURL/ProcessDynamicPlaylist — the non-cast variants; the
+// ProcessPlaylistURL/ProcessDynamicPlaylist — the non-display variants; the
 // *ForCast variants narrow via resolveSeriesCastPlan instead and need no
 // separate call. See the DP1 interface doc.
 func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems int) Playlist {
@@ -320,7 +324,7 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 //
 // The catalog merges each edition with its OWN copy of the series item, which
 // is not necessarily the item in the document being played: a dp1_call payload,
-// or a cast of a playlist edited after the catalog ingested it, can carry a
+// or a display request of a playlist edited after the catalog ingested it, can carry a
 // schedule or a rating the catalog's copy never had. Everything else an edition
 // needs is already merged catalog-side (duration, license, display, repro, the
 // manifest's artists), so only the fields that belong to THIS playlist instance
@@ -329,10 +333,10 @@ func (d *dp1) ExpandSeriesItems(ctx context.Context, playlist Playlist, maxItems
 // Three consumers read these fields after expansion, which is why losing them
 // is not cosmetic:
 //
-//   - the cast preflight's scheduled-playlist scan (commandrouter/handler.go):
+//   - the accept-time preflight's scheduled-playlist scan (commandrouter/handler.go):
 //     a series whose editions carry no displayAt is read as unscheduled, so the
 //     dead-link probe runs against a premiere whose sources are legitimately
-//     not up yet and REJECTS the cast outright.
+//     not up yet and REJECTS the display request outright.
 //   - the displayAt scheduler (playlistschedule): no displayAt on any item is
 //     the "nothing scheduled" branch, which clears the Daily timer and plays a
 //     scheduled series immediately.
@@ -404,9 +408,9 @@ func inheritInstanceFields(item dp1playlist.PlaylistItem, editions []dp1playlist
 		// below. The catalog answers from a snapshot of the series item taken
 		// at its last ingest, so a schedule a curator has since removed can
 		// still come back on every edition — and `displayAt` has no safe
-		// direction to fail in: a stale timestamp both makes the cast
+		// direction to fail in: a stale timestamp both makes the display request
 		// preflight treat an unscheduled playlist as scheduled (skipping the
-		// dead-link probe) and arms a Daily timer that delays a cast the
+		// dead-link probe) and arms a Daily timer that delays a display request the
 		// document in hand no longer delays. So the item in hand decides
 		// whether there is a schedule at all, not merely which one.
 		editions[i].DisplayAt = nil
@@ -516,11 +520,14 @@ func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1pla
 	// its items go straight into the playlist. Only the cap is applied here:
 	// one request asks for seriesPageLimit, and a series larger than that is
 	// played in part rather than not at all.
-	editions := answer.Items
-	if len(editions) > seriesPageLimit {
-		editions = editions[:seriesPageLimit]
+	raws := answer.Items
+	if len(raws) > seriesPageLimit {
+		raws = raws[:seriesPageLimit]
 	}
-	if answer.Total > len(editions) {
+	// Dropping every edition leaves the series item's representative playing,
+	// the same shape as a catalog that answered with none.
+	editions := d.conformingEditions(playlistID, item, raws)
+	if answer.Total > len(raws) {
 		d.logger.Info("series expanded in part",
 			zap.String("playlist_id", playlistID),
 			zap.String("item_slug", item.Slug),
@@ -528,6 +535,26 @@ func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1pla
 			zap.Int("total", answer.Total))
 	}
 	return editions, answer.Series.ArtworkModel, nil
+}
+
+// conformingEditions decodes the editions that conform to the schema.
+func (d *dp1) conformingEditions(playlistID string, series dp1playlist.PlaylistItem, raws []json.RawMessage) []dp1playlist.PlaylistItem {
+	editions := make([]dp1playlist.PlaylistItem, 0, len(raws))
+	for i, raw := range raws {
+		var edition dp1playlist.PlaylistItem
+		err := checkItem(raw)
+		if err == nil {
+			err = d.json.Unmarshal(stripCaseVariants(raw, reflect.TypeOf(edition)), &edition)
+		}
+		if err != nil {
+			d.logger.Warn("dropping a series edition that does not conform to the schema",
+				zap.String("playlist_id", playlistID), zap.String("item_slug", series.Slug),
+				zap.Int("edition_index", i), zap.Error(err))
+			continue
+		}
+		editions = append(editions, edition)
+	}
+	return editions
 }
 
 // buildCatalogEditionsURL is the catalog's editions route for one series

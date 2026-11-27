@@ -1155,16 +1155,25 @@ func TestService_IndexPlaylistForOfflineDisplay_BeforeStartReturnsNotStarted(t *
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 }
 
-// TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors mirrors
-// DownloadPlaylist's own validation for a playlist with no id.
-func TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors(t *testing.T) {
+// TestService_IndexPlaylistForOfflineDisplay_IDLessPlaylist: `id` is optional
+// in DP-1, so the record is filed under a derived key and still serves the URL.
+func TestService_IndexPlaylistForOfflineDisplay_IDLessPlaylist(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json", 0, nil)
+	url := "https://example.com/p.json"
+	doc := json.RawMessage(`{"dpVersion":"1.1.0","title":"no id","items":[{"source":"https://example.com/a"}]}`)
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(doc, url, 0, nil))
+
+	raw, _, err := ts.service.CachedPlaylistForURL(url)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(doc), string(raw))
+	// The derived key is what clears it.
+	require.NoError(t, ts.service.ClearPlaylist(offlinecache.PlaylistRecordKey("", url, nil)))
+	_, _, err = ts.service.CachedPlaylistForURL(url)
 	assert.Error(t, err)
 }
 
@@ -1184,17 +1193,6 @@ func TestService_DownloadPlaylist_InvalidJSON(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "", 0, nil)
-	assert.Error(t, err)
-}
-
-func TestService_DownloadPlaylist_MissingID(t *testing.T) {
-	ts := setupService(t, 0, nil)
-	defer ts.ctrl.Finish()
-
-	raw, err := json.Marshal(map[string]interface{}{"dpVersion": "1.0.0", "items": []interface{}{}})
-	require.NoError(t, err)
-
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
 	assert.Error(t, err)
 }
 
@@ -4195,4 +4193,38 @@ func TestService_DownloadPlaylist_RequiredRepresentativeSurvivesWhenItsSourceIsA
 	assert.Equal(t, len(items), total, "total still reports the playlist's real item count")
 
 	waitForState(t, ts.service, repSource, offlinecache.StateReady)
+}
+
+// A case variant of a modeled member is unknown to DP-1, so the cache must
+// read the same items playback does: "itemſ" folds to "items" under
+// encoding/json, and "Signatures" would fail a typed decode.
+func TestService_PlaylistRecord_MatchesMemberNamesExactly(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const shown, hidden = "https://example.com/shown.html", "https://example.com/hidden.html"
+	raw := []byte(`{"dpVersion":"1.0.0","id":"playlist-1","title":"t",` +
+		`"items":[{"source":"` + shown + `"}],"itemſ":[{"source":"` + hidden + `"}],"Signatures":{}}`)
+
+	// Only the exact "items" list is classified and captured.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), shown).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "", 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	waitForState(t, ts.service, shown, offlinecache.StateReady)
+
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, "https://feed.example.com/p", 0, nil))
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+	_, err = ts.store.LoadItem(offlinecache.SourceKey(shown))
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 }

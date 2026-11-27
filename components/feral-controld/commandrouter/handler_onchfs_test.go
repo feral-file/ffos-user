@@ -40,7 +40,7 @@ func (p *orderedProber) Preflight(ctx context.Context, sources []string) []media
 	return p.fakeMediaHealth.Preflight(ctx, sources)
 }
 
-// A cast reads its onchfs works from chain before the preflight and before
+// A display request reads its onchfs works from chain before the preflight and before
 // anything reaches the player, with the items' device-local sources.
 func TestCommandHandler_Process_DisplayPlaylist_ReadsOnchfsWorksBeforeThePreflight(t *testing.T) {
 	ts := setup(t)
@@ -56,7 +56,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ReadsOnchfsWorksBeforeThePreflig
 	var order []string
 	materializer := &fakeOnchfs{order: &order}
 	commandrouter.SetOnchfsMaterializer(ts.handler, materializer, ts.logger)
-	// Both dead keeps the test away from the player: the cast is rejected
+	// Both dead keeps the test away from the player: the display request is rejected
 	// after the preflight, and only the order is under test.
 	prober := &orderedProber{order: &order, fakeMediaHealth: fakeMediaHealth{results: []mediahealth.ProbeResult{
 		{Source: onchfsSource, Verdict: mediahealth.VerdictDead, Status: 404},

@@ -22,7 +22,7 @@ import (
 //
 // The rewrite is applied at each exit an item can take: Playlist.UnmarshalJSON
 // (every decoded document, static or fetched), processDynamicPlaylist (DP-1
-// hydration, the Raster walk, the legacy indexer), expandSeriesItems and
+// hydration, the legacy indexer), expandSeriesItems and
 // CastPlan.Narrow (catalog editions). It is idempotent and a pure function of
 // the source, so applying it twice, or to a playlist the player echoed back,
 // changes nothing. It runs after signature verification, which covers the

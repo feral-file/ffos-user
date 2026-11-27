@@ -19,7 +19,7 @@ import (
 
 // A scheduler cutover push builds its own displayPlaylist command, so it
 // carries the media-health hint argument for the cohort it pushes
-// (feral-file/ffos-user#392), exactly like commandrouter's casts.
+// (feral-file/ffos-user#392), exactly like commandrouter's display requests.
 func TestPush_CarriesMediaHealthHintsForTheCohort(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
