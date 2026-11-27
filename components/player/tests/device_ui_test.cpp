@@ -46,6 +46,18 @@ int main(int argc,char** argv){
     item.playlist["links"].push_back({{"url","https://other.example/"}});
     check(ff::render_title_card(item,1920,1080).rgba==linked.rgba,"First usable link wins");
     save(linked,std::string(argv[2])+"/linked-title-card.png");
+    {
+      // docs/TITLE-CARD.md: a 50-unit margin at 1.5 px per unit, text in
+      // #EDEDED, and a borderless code whose top-left finder corner is ink.
+      auto at=[&](int x,int y){return linked.rgba[(size_t(y)*1920+x)*4];};
+      bool margin_clear=true;
+      for(int y=0;y<1080;++y)for(int x=0;x<1920;++x)
+        if((x<73||x>=1847||y<73)&&at(x,y)>40)margin_clear=false;
+      check(margin_clear,"Title card text and code stay inside the 50-unit margin");
+      check(at(1920-75-180+3,1080-140)==0 || at(1920-75-180+3,1080-140)==0xED,"Code is drawn in the text color on black");
+      int ink=0;for(int y=700;y<1080;++y)if(at(1920-75-178,y)==0xED)++ink;
+      check(ink>40,"The code's left finder edge sits at the right margin, 120 units wide");
+    }
     item.playlist.erase("links");
     item.playlist_title="Another exhibition";
     check(ff::render_title_card(item,1920,1080).rgba!=landscape.rgba,"The exhibition name belongs on the card");
