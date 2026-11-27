@@ -54,6 +54,10 @@ grep -Fq 'fitCard();' "$page_dir/index.html" || fail "index.html no longer fits 
 # The display-check page's own playback failures latch (it reports them in #stat).
 grep -Fq "DID NOT PLAY|NO WEBGL" "$page_dir/index.html" || fail "index.html no longer collects display-check's playback failures"
 grep -Fq "'VIDEO DID NOT PLAY'" "$display_page" || fail "display-check no longer reports a clip that did not play the way burnin collects it"
+grep -Fq "pageFails.add('video stalled')" "$page_dir/index.html" || fail "index.html no longer watches a clip inside the frame"
+# Acceptance spec §1.4: the capture needs 10 s of powered-off recording.
+{ grep -Fq 'keep recording 10 s more' "$page_dir/index.html" && grep -Fq '再继续录 10 秒' "$page_dir/index.html"; } || \
+  fail "the Panel Check notice must ask for 10 s of recording after the power pull, in both languages"
 # Session time and deadlines never come from the wall clock.
 if grep -nE 'Date\.now\(\) */ *1000|now\(\) *- *(status|st)\.(started_at|checks_done_at)' "$page_dir/index.html"; then
   fail "index.html times the session with the wall clock"

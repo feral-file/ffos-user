@@ -262,11 +262,24 @@ async function runSegment(seg) {
     // (a clip that did not play, no WebGL); latch them before the frame goes.
     // Its pacing verdicts are not taken: this page judges frame rate itself,
     // against the panel's measured rate.
+    // A clip inside the frame (display-check's video slide) must also keep
+    // playing while it is shown: 3 checks without progress latch a stall,
+    // as the HEVC segment does.
     const pageFails = new Set();
+    let clip = null, last = -1, still = 0, moved = false;
     const collect = setInterval(() => {
       try {
-        const st = frame.contentDocument.getElementById('stat');
+        const doc = frame.contentDocument;
+        const st = doc.getElementById('stat');
         if (st && st.classList.contains('bad') && /DID NOT PLAY|NO WEBGL/.test(st.textContent)) pageFails.add(st.textContent.trim());
+        const v = doc.querySelector('video');
+        if (v !== clip) { clip = v; last = -1; still = 0; moved = false; }
+        // Counted only once the clip has been seen moving: one still starting
+        // is not a stall (one that never starts, display-check reports).
+        if (v && !v.paused && !v.ended) {
+          if (v.currentTime === last) { if (moved && ++still >= 3) pageFails.add('video stalled'); }
+          else { if (last >= 0) moved = true; still = 0; last = v.currentTime; }
+        }
       } catch (e) { /* frame gone */ }
     }, 1000 / FAST);
     const r = await countFrames(seg.seconds);
@@ -288,8 +301,8 @@ function statusCard(next) {
   const fps = B.SEGMENTS.map(seg => `${seg.id} ${stats.fps[seg.id] === undefined ? '–' : stats.fps[seg.id].toFixed(1)}`).join(' · ');
   const prev = status && status.previous;
   showCard(header(v.ok ? 'Burn-in OK' : 'Burn-in FAILED', v.ok ? '老化测试正常' : '老化测试失败') +
-    (panelNext ? `<h2>Next: Panel Check, 2 min of black and gray. Brightness at the factory default. Start the phone capture, record about 60 s, then pull the power while still recording.</h2>
-      <h2 class="zh">下一段：Panel Check，黑灰画面 2 分钟。亮度须为出厂默认值。开始用手机录像，约 60 秒后在录像中拔掉电源。</h2>` : '') + `
+    (panelNext ? `<h2>Next: Panel Check, 2 min of black and gray. Brightness at the factory default. Start the phone capture, record about 60 s, pull the power while still recording, keep recording 10 s more, then stop.</h2>
+      <h2 class="zh">下一段：Panel Check，黑灰画面 2 分钟。亮度须为出厂默认值。开始用手机录像，约 60 秒后在录像中拔掉电源，再继续录 10 秒后停止。</h2>` : '') + `
     <div class="row"><div>
       ${v.ok ? '' : `<div><b>Why:</b> ${esc(clip(v.reasons.join(' · '), 160))}</div>`}
       ${checksTable()}
