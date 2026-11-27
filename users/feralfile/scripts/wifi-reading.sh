@@ -12,7 +12,7 @@
 #
 # Needs only what every FF OS image ships: wpa_cli, gawk, jq. Runs as root, or
 # as feralfile (sudo for wpa_cli). Batch-2 requirements item 14 is the reason
-# this exists; the factory-check live-ISO entry is the usual way it runs.
+# this exists; ff1-burnin.sh (the factory burn-in) is the usual way it runs.
 set -euo pipefail
 
 SCAN_TIMEOUT=20 # an RTL8821CE scan takes several seconds, and longer while busy

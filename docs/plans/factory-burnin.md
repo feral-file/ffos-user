@@ -1,6 +1,6 @@
 # Factory burn-in: a hidden boot entry on the installed FF1
 
-Status: plan rev 2, accepted 2026-11-27 (rev 1 adversarial review: revise, fixed here). Stage 1 implemented: ffos-user feat/factory-burnin, ffos feat/factory-burnin-entry. Spans ffos-user and ffos.
+Status: plan rev 2, accepted 2026-11-27 (rev 1 adversarial review: revise, fixed here). Stages 1–4 implemented together (owner's call: one bench at the end): ffos-user feat/factory-burnin, ffos feat/factory-burnin-entry. Spans ffos-user and ffos.
 
 ## Goal and decisions already made
 
@@ -162,9 +162,12 @@ Bench = needs an FF1. "Now" = can be settled before hardware.
   - The page shows the check phase (live per-check progress), then the result
     card, then loops the test passes.
   - The shell side (`ff1-burnin.sh`) runs the checks and writes
-    `/run/ff1-burnin/status.json`. The page reads it with `XMLHttpRequest`
-    under `--allow-file-access-from-files`. Chromium's `fetch()` rejects the
-    `file:` scheme even with that flag.
+    `status.json`. The page, the display-check page and the load works are
+    served with `status.json` by a loopback `python3 -m http.server`
+    (127.0.0.1:8180), not from `file://`: Chromium's `fetch()` rejects
+    `file:` even with `--allow-file-access-from-files`, and both WebGL works
+    load their shaders with fetch (uneasy-dream's README says it needs a
+    server). nftables does not filter loopback.
   - Chromium draws Chinese, so kmscon, the VT 8 hand-off (#497) and the text
     screen go.
 - **B. Keep the kmscon text screen and hand the display back and forth**
@@ -182,7 +185,7 @@ What the page shows:
     phone replaces photographing the screen.
   - The full JSON also lands on a FAT stick when one is plugged in, as today.
   - The card stays 60 s, then the loop starts.
-- **Status card between passes (~5 s, full screen).**
+- **Status card between passes (8 s, full screen).**
   - Background: green if nothing has failed this session, red once anything
     has (latched).
   - It shows:
@@ -201,10 +204,20 @@ What the page shows:
 
 ### 4.3 What a pass contains
 
+- **The Panel Check opens each pass** (added 2026-11-27 for
+  FF-Acceptance-Packing-Spec v1.0 §1, no key press): 2 min of the
+  display-check `?set=panel` loop (black 15 s, gray 15 s) with nothing else
+  on screen, once the unit has been on 10 minutes (`/proc/uptime`). The
+  status card before it says so. Whoever is at the unit films about 60 s and
+  pulls the power while still recording. The same segment gives the spec's
+  black-field and gray-field inspection.
 - **A. Assembly slides + load (chosen).** Each pass is the nine assembly
   slides (~102 s), then about 3 min of load:
   - two WebGL works from the soak set, about 60 s each (the e-volved shader;
-    uneasy-dream, p5);
+    uneasy-dream, p5). Their frame rate is shown but never judged: GPU-bound
+    work at 4K may run below the panel rate on a healthy unit. The slides
+    and the video are judged (average under 50 fps, or more than 1 % of the
+    clip's frames dropped, latches red);
   - one **4K 10-bit HEVC clip**, looped for 60 s through the kiosk's VA-API
     flags.
 

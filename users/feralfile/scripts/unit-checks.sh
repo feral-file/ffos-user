@@ -15,9 +15,9 @@
 # saves them as JSON. A check that cannot run says SKIP or FAIL and the next one
 # still runs: a missing tool never ends the script. Needs only what every FF OS
 # image ships: ddcutil, pactl/pacat, busctl, python3, gawk, jq. Runs as root
-# (the factory-check live-ISO entry) or as feralfile over SSH on an installed
-# unit. Batch-2 requirements items 10 and 11 and the second antenna lead are
-# the reason this exists.
+# (ff1-burnin.sh, the factory burn-in boot entry of an installed unit) or as
+# feralfile over SSH on an installed unit. Batch-2 requirements items 10 and
+# 11 and the second antenna lead are the reason this exists.
 # jq programs handed to json() are single-quoted on purpose.
 # shellcheck disable=SC2016
 set -uo pipefail
@@ -31,8 +31,8 @@ AUDIO_USER="${FF_AUDIO_USER:-feralfile}" # owns the PulseAudio the player uses
 
 STATUS="" DETAIL="" DATA=null
 BRIGHTNESS_RESTORE=""                         # the level to put the panel back to
-# The same level on disk while the panel is away from it, so a later run (the
-# factory loop starts one per reading) still knows where the panel belongs.
+# The same level on disk while the panel is away from it, so a later run (one
+# killed mid-check, then run again) still knows where the panel belongs.
 BRIGHTNESS_OWED="${FF_STATE_DIR:-${TMPDIR:-/tmp}}/unit-checks.brightness"
 AUDIO_SINK="" AUDIO_VOLUMES="" AUDIO_MUTE=""  # the sink's state to put back
 AUDIO_UID=""
@@ -40,20 +40,20 @@ AUDIO_UID=""
 have() { command -v "$1" >/dev/null 2>&1; }
 is_root() { [ "$(id -u)" -eq 0 ]; }
 
-# run <seconds> <command...>: nothing here may hold the factory loop for good,
+# run <seconds> <command...>: nothing here may hold its caller for good,
 # so every outside command has a deadline, and a kill behind it.
 run() { timeout -k 5 "$@"; }
 
 # zh <text>: the same line again in Simplified Chinese, for the line's
 # engineers. The Linux text console cannot draw Chinese (its fonts hold 512
-# glyphs, so it would show boxes): there only the English shows. The factory
-# ISO runs the check in kmscon, which draws it with the image's Noto CJK font.
+# glyphs, so it would show boxes): there only the English shows. A terminal
+# that can draw it (an SSH session) gets the Chinese line too.
 # The English line always comes first and stays as it was, so whatever reads
-# the output (factory-check.sh, the tests) keeps reading English.
+# the output (ff1-burnin.sh, the tests) keeps reading English.
 zh() { [ "${TERM:-}" = linux ] || printf '%s\n' "$*"; }
 
 # result <name> <status> <detail> <detail in Chinese>: the line a person and
-# factory-check read ("== ", English, also the JSON detail), then its Chinese
+# ff1-burnin.sh read ("== ", English, also the JSON detail), then its Chinese
 # line ("-- ").
 result() {
   local name status
@@ -177,7 +177,7 @@ check_brightness() {
 # --- speakers ---------------------------------------------------------------
 
 # pa <seconds> <command...>: run a PulseAudio client against the server the
-# player uses. That server belongs to feralfile; root (the live ISO) has none
+# player uses. That server belongs to feralfile; root (the burn-in) has none
 # of its own and libpulse does not start one for root.
 pa() {
   local secs=$1; shift
@@ -245,7 +245,7 @@ check_speakers() {
       result Speakers SKIP "no $AUDIO_USER user to play the tone as" "没有 $AUDIO_USER 用户可以播放测试音"
       return
     fi
-    # On the live ISO nothing has logged feralfile in; its user manager (and
+    # Under the burn-in nothing has logged feralfile in; its user manager (and
     # the PulseAudio socket in it) may still need starting.
     if ! pa 10 pactl info >/dev/null 2>&1; then
       run 30 systemctl start "user@$AUDIO_UID.service" >/dev/null 2>&1 || true
