@@ -19,6 +19,33 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.1.4 — full-image Development OTA qualification
+
+On FF1-BJT8ZQP9, the production 3.0.1 updater installed the signed Development
+image from the branch feed. A two-work playlist cast after the updater took
+its snapshot survived the upgrade. The native player displayed the second
+work on first boot and again after an ordinary reboot. The OTA health check
+confirmed playback three times and rejected a different playlist receipt.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | caaa9f0954b38c62de1fada3176335630b7eb79d |
+| ffos_user_ref | b789339cfddfd85969fde8e7c38117717e70bcb5 |
+| version | 3.1.4 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| soak-test | false |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The downloaded ISO matched the published SHA-256
+`8ca27187d3c1fb866b13dc758f8f1ec99f76be1268e12607640144baf465b6d0`
+and verified against the FF1 release public key.
+[Development build](https://github.com/feral-file/ffos/actions/runs/45978716773) ·
+[Signed Development image](https://ffosdev.feralfile.com/archlinux/codex/native-player/FF1-dev-3.1.4.iso).
+
 ## 3.1.0.native.20261121.11 — full-image Development trial
 
 This image pairs the native kiosk session with its socket-only daemons. Native
