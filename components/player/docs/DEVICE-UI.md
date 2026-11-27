@@ -22,7 +22,7 @@ Font licensing remains the existing product's distribution responsibility.
 
 The native panel follows SetupOverlay's short-edge font sizes, line heights,
 82% scrim, rounded QR panel and two-module quiet margin. Claim copy follows the
-newer installed homelab player. The exhibition title card covers the display in black at playlist start and hourly. It names the artist and work at lower left, and the exhibition at upper right. The card lasts ten readable seconds. The opening can wait up to fifteen additional seconds for the work. Item changes and recasting the same playlist preserve the hourly clock. Both enabled tombstone settings use this cadence. Off suppresses the card. The QR destination is unset in the current exhibition contract.
+newer installed homelab player. The exhibition title card is specified in [TITLE-CARD.md](TITLE-CARD.md).
 
 The bundled setup artwork is the original p5 sketch and seed. Its two inline
 scripts were extracted unchanged to permit strict CSP. Provenance and hashes
