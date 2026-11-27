@@ -3630,7 +3630,10 @@ cannot decode as a rating at all, so the playlist is rejected as
 `playlistInvalid`. That rejection names the failing field by **JSON pointer
 only** — `playlistInvalid: at /items/0/contentRating` — never the offending
 value: the underlying validator prints the value whole, and this text is
-returned verbatim to LAN and relayer callers. The
+returned verbatim to LAN and relayer callers. A pointer can still carry a
+member name the sender chose, so each one is cut to 256 bytes (ending in
+`…`) and at most 10 are named, to keep the reply and the log line small
+whatever the body. The
 rejection is carried as a typed error to both transports — HTTP 422 on the LAN
 hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
 for fetched `playlistUrl` documents alike. Inline bytes are validated before
