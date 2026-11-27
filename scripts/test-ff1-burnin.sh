@@ -47,6 +47,11 @@ size=$(du -sb "$page_dir" | cut -f1)
 grep -Fq 'doc.location.pathname + doc.location.search === seg.src' "$page_dir/index.html" || \
   fail "index.html's frameReady must compare the path and the query"
 
+# The clip must keep playing for the whole segment (a freeze after it started
+# is a failure), and a card too full for the panel shrinks rather than cuts.
+grep -Fq "B.fail(stats, 'video stalled')" "$page_dir/index.html" || fail "index.html no longer watches the clip's progress"
+grep -Fq 'fitCard();' "$page_dir/index.html" || fail "index.html no longer fits the card to the panel"
+
 # --- ff1-burnin.sh helpers ----------------------------------------------------
 # shellcheck source=/dev/null
 source "$burnin"

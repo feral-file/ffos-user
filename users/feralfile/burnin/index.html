@@ -25,18 +25,24 @@
   video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
   .hidden { display: none !important; }
   #card { position: fixed; inset: 0; padding: 5vmin; box-sizing: border-box; display: flex; flex-direction: column;
-    gap: 2vmin; font-size: 2.6vmin; line-height: 1.35; }
+    gap: 1.4vmin; font-size: 2.1vmin; line-height: 1.3; }
   #card.ok { background: #0b5d1e; } #card.bad { background: #8a1010; } #card.wait { background: #111; }
-  #card h1 { font-size: 6vmin; margin: 0; } #card h2 { font-size: 3.4vmin; margin: 0; font-weight: 600; }
+  /* Sizes are relative to the card's font size, which fitCard() lowers until
+     everything shows (a worst-case card on a square panel). */
+  #card h1 { font-size: 2.3em; margin: 0; } #card h2 { font-size: 1.3em; margin: 0; font-weight: 600; }
   #card .zh { opacity: .85; }
-  #card table { border-collapse: collapse; font-size: 3vmin; }
+  #card table { border-collapse: collapse; font-size: 1.15em; margin-bottom: .5em; }
+  #card td.k { white-space: nowrap; }
   #card td { padding: .4vmin 2vmin .4vmin 0; vertical-align: top; }
   .PASS { color: #9f9; } .FAIL { color: #ff8a8a; font-weight: 700; } .SKIP, .PLAYED { color: #ffd27a; }
   #card.bad .FAIL { color: #fff; background: #c00; padding: 0 .6vmin; }
   #qr { background: #fff; padding: 1.5vmin; align-self: flex-start; line-height: 0; }
-  #qr svg { width: 34vmin; height: 34vmin; }
-  .row { display: flex; flex-wrap: wrap; gap: 4vmin; align-items: flex-start; }
-  .row > :first-child { flex: 1 1 60vmin; }
+  /* Results and QR side by side on any panel, the square 1920×1920 one
+     included: 90vmin inside the padding = text + 3vmin gap + 31vmin QR. */
+  #qr { flex: 0 0 auto; }
+  #qr svg { width: 28vmin; height: 28vmin; }
+  .row { display: flex; gap: 3vmin; align-items: flex-start; }
+  .row > :first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
   #dot { position: fixed; z-index: 10; display: flex; align-items: center; gap: 1vmin; padding: .6vmin 1.2vmin;
     border-radius: 3vmin; background: rgba(0,0,0,.55); font: 600 2.2vmin "Noto Sans Mono", monospace; }
   #dot i { width: 2.2vmin; height: 2.2vmin; border-radius: 50%; background: #2c2; display: block; }
@@ -83,9 +89,11 @@ function header(title, zh) {
   return `<h1>${esc(title)} <span class="zh">${esc(zh)}</span></h1>
     <h2>${esc(st.board || 'FF1')} · ${esc(st.version || '')} · running ${B.hms(st.started_at ? now() - st.started_at : 0)}</h2>`;
 }
+// clip(s, n): one card line's worth of a detail string (the JSON keeps it all).
+const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 function checksTable() {
   const rows = (status && status.checks || []).map(c =>
-    `<tr><td>${esc(c.name)}</td><td class="${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.detail)}</td></tr>`);
+    `<tr><td class="k">${esc(c.name)}</td><td class="k ${esc(c.status)}">${esc(c.status)}</td><td>${esc(clip(c.detail, 72))}</td></tr>`);
   return `<table>${rows.join('') || '<tr><td>…</td></tr>'}</table>`;
 }
 function qrSvg() {
@@ -97,6 +105,16 @@ function qrSvg() {
 function showCard(html, cls) {
   frame.classList.add('hidden'); video.classList.add('hidden'); dot.classList.add('hidden');
   card.className = cls; card.innerHTML = html; card.classList.remove('hidden');
+  fitCard();
+}
+
+// fitCard: the card fills the panel at 2.1vmin when it can, and shrinks its
+// text, a step at a time, until nothing is cut off (down to 1.2vmin).
+function fitCard() {
+  for (let t = 21; t >= 12; t--) {   // tenths: no floating-point drift
+    card.style.fontSize = (t / 10) + 'vmin';
+    if (card.scrollHeight <= card.clientHeight) return;
+  }
 }
 
 async function checksPhase() {
@@ -197,9 +215,21 @@ async function runSegment(seg) {
       stats = B.fail(stats, 'video did not start');
       return;
     }
+    // Playback must keep going for the whole segment: a clip that started and
+    // then froze (a stalled request, a decoder hang) or raised a media error
+    // is a failure, whatever the page's own frame count says.
+    let last = video.currentTime, still = 0, stalled = false, errored = false;
+    const onError = () => { errored = true; };
+    video.addEventListener('error', onError);
+    const watch = setInterval(() => {
+      if (video.currentTime === last) { if (++still >= 3) stalled = true; } else { still = 0; last = video.currentTime; }
+    }, 1000 / FAST);
     const q0 = video.getVideoPlaybackQuality();
     const r = await countFrames(seg.seconds);
     const q1 = video.getVideoPlaybackQuality();
+    clearInterval(watch); video.removeEventListener('error', onError);
+    if (stalled) stats = B.fail(stats, 'video stalled');
+    if (errored || video.error) stats = B.fail(stats, 'video error');
     video.pause(); video.removeAttribute('src'); video.load(); video.classList.add('hidden');
     stats = B.recordSegment(stats, seg.id, r.frames, r.seconds, seg.judged);
     const decoded = q1.totalVideoFrames - q0.totalVideoFrames;
@@ -233,22 +263,27 @@ function statusCard(next) {
     (panelNext ? `<h2>Next: Panel Check, 2 min of black and gray. Brightness at the factory default. Start the phone capture, record about 60 s, then pull the power while still recording.</h2>
       <h2 class="zh">下一段：Panel Check，黑灰画面 2 分钟。亮度须为出厂默认值。开始用手机录像，约 60 秒后在录像中拔掉电源。</h2>` : '') + `
     <div class="row"><div>
-      <div>Passes ${stats.passes} · worst fps: ${esc(fps)}</div>
-      <div>Video dropped ${stats.dropped} / ${stats.decoded} frames</div>
-      <div>Max °C: CPU ${s.cpu_max ?? '–'} · GPU ${s.gpu_max ?? '–'} · NVMe ${s.nvme_max ?? '–'}</div>
-      <div>Kernel errors ${s.kernel_errors ?? '–'}${s.last_error ? ': ' + esc(s.last_error) : ''}</div>
-      <div>Chromium restarts ${s.restarts ?? 0} · Wi-Fi ${esc(s.wifi ?? '–')} · Bluetooth ${esc(s.bt ?? '–')} · panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '–'}</div>
-      <div>A running time that stops moving means the unit hung. 运行时间停止跳动表示机器卡死。</div>
-      ${prev ? `<div>Previous session: ran ${B.hms(prev.ran)}, last sample ${esc(prev.last)}, kernel errors ${prev.kernel_errors}, restarts ${prev.restarts}</div>` : ''}
-      ${v.ok ? '' : `<div><b>Why:</b> ${esc(v.reasons.join(' · '))}</div>`}
+      ${v.ok ? '' : `<div><b>Why:</b> ${esc(clip(v.reasons.join(' · '), 160))}</div>`}
       ${checksTable()}
+      <div>Passes ${stats.passes} · worst fps: ${esc(fps)}</div>
+      <div>Video dropped ${stats.dropped} / ${stats.decoded} · panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '–'}</div>
+      <div>Max °C: CPU ${s.cpu_max ?? '–'} · GPU ${s.gpu_max ?? '–'} · NVMe ${s.nvme_max ?? '–'}</div>
+      <div>Kernel errors ${s.kernel_errors ?? '–'}${s.last_error ? ': ' + esc(clip(s.last_error, 90)) : ''}</div>
+      <div>Chromium restarts ${s.restarts ?? 0} · Wi-Fi ${esc(s.wifi ?? '–')} · Bluetooth ${esc(s.bt ?? '–')}</div>
+      ${prev ? `<div>Previous session: ran ${B.hms(prev.ran)}, until ${esc(prev.last)}, kernel errors ${prev.kernel_errors}, restarts ${prev.restarts}</div>` : ''}
+      <div class="zh">A running time that stops moving means a hang. 运行时间停止跳动表示机器卡死。</div>
     </div><div id="qr">${qrSvg()}</div></div>`, v.ok ? 'ok' : 'bad');
 }
 
 (async () => {
   // ?preview=card: the status card alone, from the current status.json (to
   // check the layout on a panel without waiting a pass).
-  if (q.get('preview') === 'card') { await readStatus(); statusCard(); return; }
+  if (q.get('preview') === 'card') {
+    await readStatus();
+    const up = status && status.sys ? status.sys.uptime : null;
+    statusCard(B.passSegments(up === null || up === undefined ? null : up + B.CARD_SECONDS));
+    return;
+  }
   await checksPhase();
   await resultPhase();
   // The first pass is announced by no card (after a Chromium restart it can
