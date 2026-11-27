@@ -311,7 +311,6 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
   const auto mode = playback.state()["settings"].value("tombstone","timed");
   drawing_occurrence_=occurrence ? occurrence->id : "";
   const auto& selected=playback.desired();
-  const auto* card_work=selected ? &*selected : nullptr;
   if (!selected) {
     card_cast_.clear();
     card_clock_.select("",ticks);
@@ -328,8 +327,7 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
     card_clock_.select(identity,ticks);
   }
   const bool work_ready=selected && occurrence && occurrence->id==selected->id && (artwork || external) && blend.opacity>0;
-  if (selected && occurrence && occurrence->cast_id==selected->cast_id && card_clock_.hourly(ticks))
-    card_work=occurrence;
+  const auto& card_work=card_clock_.artwork(ticks,selected,playback.visible());
   const bool show_notice=!artwork && !external && !playback.runtime_notice().is_null();
   auto schedule=playback.state().value("scheduleOutcome",Json(nullptr));
   auto update=playback.state().value("updateOutcome",Json(nullptr));
@@ -356,7 +354,7 @@ std::optional<FrameSubmission> Presentation::draw(const Surface* artwork, const 
   const int label_phase=show_loading?1+int((ticks-loading_started_-2000)%3000/16):0;
   const bool pointer_pressed = pointer_visible && ticks < pointer_press_until_;
   const DrawKey key{playback.revision(), artwork?artwork->texture:0, artwork?artwork->frames:0,
-    occurrence?occurrence->id:"", width_,height_,pointer_visible,card_visible_,pointer_pressed,
+    occurrence?occurrence->id:"", width_,height_,pointer_visible,card_visible_?card_work->id:"",pointer_pressed,
     pointer_visible?pointer_x_:0,pointer_visible?pointer_y_:0,label_phase,backdrop?backdrop->texture:0,backdrop?backdrop->frames:0,backdrop_opacity,
     blend.outgoing?blend.outgoing->texture:0,blend.outgoing?blend.outgoing->frames:0,blend.outgoing_opacity,blend.opacity};
   // Resubmitting an unchanged texture still consumes GPU/compositor work and

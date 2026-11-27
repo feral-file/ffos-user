@@ -90,7 +90,7 @@ class Presentation {
   FrameClock draw_clock_;
   GLuint last_frame_texture_ = 0;
   uint64_t last_frame_number_ = 0;
-  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, bool, bool, double, double, int, GLuint, uint64_t, float, GLuint, uint64_t, float, float>;
+  using DrawKey = std::tuple<uint64_t, GLuint, uint64_t, std::string, int, int, bool, std::string, bool, double, double, int, GLuint, uint64_t, float, GLuint, uint64_t, float, float>;
   std::optional<DrawKey> draw_key_;
   std::string last_frame_occurrence_;
   void activate();

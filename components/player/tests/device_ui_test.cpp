@@ -61,11 +61,22 @@ int main(int argc,char** argv){
     check(ff::render_title_card(daily,1920,1080).rgba==lone.rgba,"A scheduled lone work does not repeat its title");
     ff::TitleCardClock clock;
     clock.select("playlist",100);
+    std::optional<ff::Occurrence> upcoming=item, shown=item, none;
+    upcoming->cast_id="scheduled-plantoid";upcoming->item["title"]="Plantoid";
+    shown->cast_id="previous-slot";shown->item["title"]="Lately When I Fly";
+    check(&clock.artwork(100,upcoming,none)==&upcoming, "Opening card introduces the selection before the first frame");
+    check(&clock.artwork(3600100,upcoming,shown)==&shown, "Hourly card belongs to the presented work across casts");
+    check(!clock.artwork(3600100,upcoming,none), "An unpresented selection cannot supply an hourly card");
+    check(!clock.artwork(3600100,none,shown), "A stopped playlist has no card");
     check(!clock.visible(100,false,false),"Wait for metadata");
     check(clock.visible(300,true,true) && !clock.visible(10300,true,true),"Ten seconds from first readable title");
     clock.select("playlist",10400);
     check(!clock.visible(10400,true,true),"Recast and item changes preserve the hour");
     check(clock.visible(3600100,true,true) && !clock.visible(3610100,true,true),"Hourly card lasts ten seconds");
+    clock.select("late-opening",0);
+    check(!clock.visible(0,true,false,false) && clock.visible(3595000,true,false), "A covered opening can become readable just before the hour");
+    check(clock.visible(3600000,true,false) && &clock.artwork(3600000,upcoming,shown)==&shown,
+          "A visible opening card switches ownership at the first hour even while the artwork frame is static");
     clock.select("next",4000000);
     check(clock.visible(4000000,true,false) && clock.visible(4010000,true,false) && !clock.visible(4025000,true,false),"Bound the opening wait for artwork");
     clock.select("covered",5000000);

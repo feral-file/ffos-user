@@ -26,9 +26,11 @@ UIRaster render_title_card(const Occurrence& occurrence, int width, int height);
 class TitleCardClock {
  public:
   void select(const std::string& playlist, uint64_t now);
-  bool hourly(uint64_t now) const { return now-start_ >= 3600000; }
+  const std::optional<Occurrence>& artwork(uint64_t now, const std::optional<Occurrence>& selected,
+                                          const std::optional<Occurrence>& presented) const;
   bool visible(uint64_t now, bool titled, bool work_ready, bool can_show=true);
  private:
+  static constexpr uint64_t hour_ms = 3600000;
   std::string playlist_;
   uint64_t start_ = 0, hour_ = 0;
   std::optional<uint64_t> readable_, covered_;

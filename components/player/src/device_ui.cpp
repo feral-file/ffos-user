@@ -363,8 +363,16 @@ void TitleCardClock::select(const std::string& playlist,uint64_t now) {
   finished_=false;
 }
 
+const std::optional<Occurrence>& TitleCardClock::artwork(uint64_t now, const std::optional<Occurrence>& selected,
+                                                       const std::optional<Occurrence>& presented) const {
+  // The opening card introduces a selection. Hourly cards identify what made
+  // it to the display, even when the next scheduled cast is loading or failed.
+  if (!selected || now-start_ < hour_ms) return selected;
+  return presented;
+}
+
 bool TitleCardClock::visible(uint64_t now,bool titled,bool work_ready,bool can_show) {
-  const auto hour=(now-start_)/3600000;
+  const auto hour=(now-start_)/hour_ms;
   if (hour!=hour_) {
     hour_=hour;
     readable_.reset();
