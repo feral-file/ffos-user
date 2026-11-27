@@ -1,4 +1,5 @@
 #include "ff/public_browser.hpp"
+#include "ff/plain_text_layout.hpp"
 #include "ff/sketch_startup.hpp"
 
 #include <fcntl.h>
@@ -334,6 +335,8 @@ void PublicBrowser::message(const Json& m) {
     if (type == "page" && session_.empty()) {
       session_ = child;
       send("Page.enable", {}, child);
+      send("Page.addScriptToEvaluateOnNewDocument",
+           {{"source", plain_text_layout}, {"worldName", "ff-plain-text-layout"}}, child);
       send("Network.enable", {}, child);
       if (routed_document_) {
         send("Audits.enable", {}, child);
