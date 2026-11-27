@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap/zaptest"
 
@@ -1524,4 +1525,22 @@ func TestDisplayPlaylistRespellsAnOnchfsStartItemAsTheItemSource(t *testing.T) {
 func TestValidationPointersKeepsTheRootLocation(t *testing.T) {
 	require.Equal(t, []string{"/"},
 		dp1.ValidationPointers(errors.New("validation failed\n- at '': missing property 'title'")))
+}
+
+// A member name is sender-chosen and lands inside the pointer; a long one is
+// cut so a refusal's reply and log line stay small, on a rune boundary.
+func TestValidationPointersCapsASenderChosenMemberName(t *testing.T) {
+	long := "/items/0/display/userOverrides/" + strings.Repeat("k", 100000)
+	got := dp1.ValidationPointers(errors.New("validation failed\n- at '" + long + "': got string, want boolean"))
+	require.Len(t, got, 1)
+	require.LessOrEqual(t, len(got[0]), 256+len("…"))
+	require.True(t, strings.HasPrefix(got[0], "/items/0/display/userOverrides/kkk"))
+	require.True(t, strings.HasSuffix(got[0], "…"))
+
+	multi := "/" + strings.Repeat("é", 200) // 2-byte runes: 256 falls mid-rune
+	got = dp1.ValidationPointers(errors.New("x\n- at '" + multi + "': bad"))
+	require.True(t, utf8.ValidString(got[0]))
+
+	short := "/items/3/source"
+	require.Equal(t, []string{short}, dp1.ValidationPointers(errors.New("x\n- at '"+short+"': bad")))
 }

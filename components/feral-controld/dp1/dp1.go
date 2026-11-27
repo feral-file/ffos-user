@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"github.com/display-protocol/dp1-go/extension/playlists"
@@ -29,10 +30,17 @@ import (
 // Deliberately an allow-list of one shape — the pointer after "at '" — rather
 // than a redaction of known-bad substrings: anything the extractor does not
 // recognize is dropped, so a future validator message cannot leak by wording
-// this does not anticipate. A pointer is structural (indices and field names
-// from the schema), never document content, which matters because dp1-go's
-// format assertions print the offending VALUE whole and these errors are
-// returned verbatim to senders on both transports.
+// this does not anticipate. A pointer is structural (indices and member
+// names), never a document VALUE, which matters because dp1-go's format
+// assertions print the offending value whole and these errors are returned
+// verbatim to senders on both transports.
+//
+// A member name is sender-chosen, though: under a schema with
+// additionalProperties a pointer can carry a key of any length (a 4 MiB body
+// can make one pointer about 4 MiB), and every refusal is both replied and
+// logged. So each pointer is cut to maxPointerBytes, on a rune boundary,
+// with a trailing "…" marking the cut; the location stays readable, the
+// reply and the log stay small.
 func ValidationPointers(err error) []string {
 	if err == nil {
 		return nil
@@ -60,12 +68,28 @@ func ValidationPointers(err error) []string {
 		if pointer == "" {
 			pointer = "/"
 		}
+		pointer = capPointer(pointer)
 		if !seen[pointer] {
 			seen[pointer] = true
 			out = append(out, pointer)
 		}
 	}
 	return out
+}
+
+// maxPointerBytes bounds one reported pointer (see ValidationPointers). Real
+// DP-1 locations are a few dozen bytes; 256 keeps any of them whole.
+const maxPointerBytes = 256
+
+func capPointer(pointer string) string {
+	if len(pointer) <= maxPointerBytes {
+		return pointer
+	}
+	cut := maxPointerBytes
+	for cut > 0 && !utf8.RuneStart(pointer[cut]) {
+		cut--
+	}
+	return pointer[:cut] + "…"
 }
 
 // ErrPlaylistInvalid marks a fetched DP-1 document whose content-rating
