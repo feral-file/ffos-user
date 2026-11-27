@@ -9,4 +9,5 @@ chmod +x /home/feralfile/scripts/wifi-reading.sh
 chmod +x /home/feralfile/scripts/factory-check.sh
 chmod +x /home/feralfile/scripts/unit-checks.sh
 chmod +x /home/feralfile/scripts/display-check.sh
+chmod +x /home/feralfile/scripts/ff1-burnin.sh
 sudo chmod +x /usr/local/bin/vmagent-prod
