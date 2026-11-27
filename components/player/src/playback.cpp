@@ -342,6 +342,32 @@ int Playback::prepare_replace(Json& next,const Json& p){
     }
  return reselection?2:1;
 }
+void Playback::import_legacy(const Json& records) {
+  // This runs offline, before promotion. Use the same policy and playlist
+  // validation as a live cast. Never import a renderer's ready/presented bit.
+  for (auto key : {"contentPolicy", "castInfo", "boot_playlist"})
+    require(records.contains(key), "invalid_params", "Incomplete legacy storage export");
+  if (!records["contentPolicy"].is_null()) command("policy.set", records["contentPolicy"]);
+  const auto& boot = records["boot_playlist"];
+  if (!boot.is_null()) {
+    bool wrapped = boot.contains("playlist");
+    command("boot.set", {{"playlist", wrapped ? boot.at("playlist") : boot},
+                         {"context", wrapped ? boot.value("contentContext", "curated") : "curated"}});
+  }
+  const auto& cast = records["castInfo"];
+  require(cast.is_null() || cast.is_object(), "invalid_params", "Invalid legacy cast record");
+  if (cast.is_null() || !cast.contains("playlist") || cast["playlist"].is_null()) {
+    if (!boot.is_null()) command("playback.replace", state_["boot"]);
+    return;
+  }
+  command("playback.replace", {{"playlist", cast["playlist"]}, {"index", cast.value("index", 0)},
+                               {"context", cast.value("contentContext", "curated")},
+                               {"playlistUrl", cast.value("playlistUrl", "")}});
+  if (!cast["playlist"]["items"].empty())
+    command("playback.mode", {{"loop", cast.value("loopMode", "playlist")}, {"shuffle", cast.value("shuffle", false)}});
+  if (cast.value("isPaused", false)) command("playback.pause", {{"paused", true}});
+}
+
 void Playback::system_boot(const std::string& id){
   require(!id.empty()&&id.size()<=64,"invalid_params","Invalid operating-system boot ID");
   if(state_.value("systemBootId","")==id)return;

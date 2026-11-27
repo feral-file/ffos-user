@@ -31,15 +31,27 @@ extern "C" int ff_host(int argc, char** argv) {
     options[arg.substr(0, equals)] = equals == std::string::npos ? "" : arg.substr(equals + 1);
   }
   auto state_path = options["--state-dir"], socket = options["--socket"];
-  if (state_path.empty() || socket.empty()) {
+  const bool importing = options.contains("--import-legacy");
+  if (state_path.empty() || (socket.empty() && !importing)) {
     std::cerr << "Required --state-dir=PATH --socket=PATH\n";
     return 2;
   }
   try {
     std::filesystem::create_directories(state_path);
     ff::Store store(state_path + "/state.sqlite");
-    ff::sweep_browser_profiles(state_path + "/browser");
     ff::Playback playback(store);
+    if (importing) {
+      // The updater supplies a new, private staging directory. Refuse to replay
+      // a legacy cast over an already initialized player, even on a retry.
+      ff::require(!playback.state().contains("systemBootId") && playback.state()["playlist"].is_null(),
+                  "storage_in_use", "Native playback state already exists");
+      ff::Json records;
+      std::cin >> records;
+      playback.import_legacy(records);
+      std::cout << (playback.desired() ? "active" : "idle") << '\n';
+      return 0;
+    }
+    ff::sweep_browser_profiles(state_path + "/browser");
     std::ifstream boot_file("/proc/sys/kernel/random/boot_id");
     std::string boot_id;
     std::getline(boot_file, boot_id);

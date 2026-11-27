@@ -34,6 +34,7 @@ class Playback {
  public:
   explicit Playback(Store& store);
   Json command(std::string_view method, const Json& params);
+  void import_legacy(const Json& records);
   void system_boot(const std::string& id);
   Json snapshot() const;
   void tick(int64_t monotonic_ms, int64_t wall_time_ms);

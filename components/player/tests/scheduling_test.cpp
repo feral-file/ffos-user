@@ -15,6 +15,21 @@ int main(){
   std::filesystem::create_directory(directory);auto path=(directory/"state.sqlite").string();
   try{
     {
+      const auto db=(directory/"migrate.sqlite").string();
+      {
+        ff::Store store(db); ff::Playback p(store);
+        p.import_legacy({{"contentPolicy",nullptr},{"boot_playlist",playlist()},
+                         {"castInfo",{{"playlist",playlist()},{"index",1},{"isPaused",true},
+                                      {"loopMode","one"},{"contentContext","personal"}}}});
+      }
+      ff::Store store(db); ff::Playback p(store); p.system_boot("first-native-boot");
+      check(p.desired() && p.desired()->index==1 && !p.visible(),"Restore exact slot, await a fresh frame");
+      check(p.state()["paused"] && p.state()["loop"]=="one" && p.state()["context"]=="personal",
+            "Restore legacy playback intent");
+      p.system_boot("next-boot");
+      check(p.desired() && p.desired()->index==0,"Subsequent boot uses saved boot playlist");
+    }
+    {
       ff::Store store(path);ff::Playback p(store);p.tick(1000,1000);
       p.command("playback.replace",{{"playlist",playlist()}});auto id=p.desired()->id;p.committed(id);p.presented(id);
       p.packaged_engine({{"identity", "packaged"}});

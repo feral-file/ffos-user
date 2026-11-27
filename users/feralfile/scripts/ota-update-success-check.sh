@@ -41,7 +41,10 @@ check_services() {
       return 1
     fi
   done
-  echo "All services are active"
+  if [[ -e /etc/FF_OS_OTA_EXPECT_PLAYBACK ]]; then
+    python3 /home/feralfile/scripts/player-health.py --presented || return 1
+  fi
+  echo "All required services and playback checks passed"
   return 0
 }
 
