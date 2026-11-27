@@ -74,5 +74,6 @@ verify-scripts:
 	@./scripts/test-wifi-reading.sh
 	@./scripts/test-unit-checks.sh
 	@./scripts/test-display-check.sh
+	@./scripts/test-ff1-burnin.sh
 	@./scripts/test-agent-iso-build-guard.sh
 	@./scripts/test-agent-branch-flow-guard.sh
