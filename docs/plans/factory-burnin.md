@@ -204,6 +204,13 @@ What the page shows:
 
 ### 4.3 What a pass contains
 
+- **The Panel Check opens each pass** (added 2026-11-27 for
+  FF-Acceptance-Packing-Spec v1.0 §1, no key press): 2 min of the
+  display-check `?set=panel` loop (black 15 s, gray 15 s) with nothing else
+  on screen, once the unit has been on 10 minutes (`/proc/uptime`). The
+  status card before it says so. Whoever is at the unit films about 60 s and
+  pulls the power while still recording. The same segment gives the spec's
+  black-field and gray-field inspection.
 - **A. Assembly slides + load (chosen).** Each pass is the nine assembly
   slides (~102 s), then about 3 min of load:
   - two WebGL works from the soak set, about 60 s each (the e-volved shader;

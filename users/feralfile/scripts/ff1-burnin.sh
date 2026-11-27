@@ -38,6 +38,7 @@ RUN_DIR="${XDG_RUNTIME_DIR:-/run/ff1-burnin}"
 HWMON="${FF_HWMON:-/sys/class/hwmon}"
 NET="${FF_NET:-/sys/class/net}"
 BLUETOOTH="${FF_BLUETOOTH:-/sys/class/bluetooth}"
+UPTIME="${FF_UPTIME:-/proc/uptime}"
 MOUNT=/mnt/ff1-burnin
 BURNIN_PORT=8180     # loopback only; nothing else listens on this boot
 SCANS=10             # Wi-Fi scans in the one reading
@@ -183,7 +184,8 @@ max() {
 # status_json <cpu> <gpu> <nvme> <cpu_max> <gpu_max> <nvme_max> <kernel "n\tlast">
 # <wifi> <bt> (adapter_state): one status.json. The rest comes from the globals and from the
 # files in RUN_DIR the checks write: checks.json, checks_done_at, where,
-# restarts.
+# restarts. uptime is seconds since boot (monotonic), what the page times the
+# Panel Check's 10 minutes of power-on with.
 status_json() {
   jq -n \
     --arg board "$BOARD" --arg version "$VERSION" --argjson started "$STARTED_AT" \
@@ -194,12 +196,13 @@ status_json() {
     --argjson cpu_max "$4" --argjson gpu_max "$5" --argjson nvme_max "$6" \
     --argjson kerr "${7%%$'\t'*}" --arg klast "${7#*$'\t'}" \
     --arg wifi "$8" --arg bt "$9" \
-    --argjson restarts "$(cat "$RUN_DIR/restarts" 2>/dev/null || echo 0)" '
+    --argjson restarts "$(cat "$RUN_DIR/restarts" 2>/dev/null || echo 0)" \
+    --argjson uptime "$(cut -d. -f1 "$UPTIME" 2>/dev/null || echo null)" '
     {board: $board, version: $version, started_at: $started, updated_at: (now | floor),
      checks: $checks, checks_done_at: $checks_done, where: $where, previous: $previous,
      sys: {cpu: $cpu, gpu: $gpu, nvme: $nvme, cpu_max: $cpu_max, gpu_max: $gpu_max, nvme_max: $nvme_max,
            kernel_errors: $kerr, last_error: (if $klast == "" then null else $klast end),
-           wifi: $wifi, bt: $bt, restarts: $restarts}}'
+           wifi: $wifi, bt: $bt, restarts: $restarts, uptime: $uptime}}'
 }
 
 # adapter_state <state> <glob> -> the next state of one adapter: unseen until

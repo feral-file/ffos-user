@@ -17,7 +17,14 @@ const SLIDES_SECONDS = 102;
 // test content runs: the display-check page has put a slide on its stage,
 // evolved has compiled its shaders and written the formula, p5 has made its
 // canvas. An error page or a work that failed to start matches nothing.
+// panel is the Panel Check of FF-Acceptance-Packing-Spec §1: black 15 s,
+// gray 15 s, nothing else on screen (clean: no status dot), long enough for a
+// 60 s phone capture plus the power pull while still recording. It opens a
+// pass, so the status card before it can announce it, and only once the unit
+// has been on PANEL_MIN_UPTIME (the spec's 10 minutes, counted from boot).
+const PANEL_MIN_UPTIME = 600;
 const SEGMENTS = [
+  { id: 'panel', seconds: 120, src: '/display-check/index.html?set=panel', ready: '#stage > *', judged: false, clean: true },
   { id: 'slides', seconds: SLIDES_SECONDS, src: '/display-check/index.html', ready: '#stage > *', judged: true },
   { id: 'evolved', seconds: 60, src: '/burnin/load/evolved/index.html', ready: '#overlay:not(:empty)', judged: false },
   { id: 'uneasy', seconds: 60, src: '/burnin/load/uneasy-dream/index.html', ready: 'canvas', judged: false },
@@ -86,6 +93,13 @@ function recordVideo(stats, dropped, decoded) {
     out.bad = addBad(out.bad, `video dropped ${dropped}/${decoded}`);
   }
   return out;
+}
+
+// passSegments(uptimeSeconds) -> the segments of a pass starting now: the
+// Panel Check only once the unit has been on long enough (null: not known
+// yet, so not yet).
+function passSegments(uptimeSeconds) {
+  return SEGMENTS.filter(seg => seg.id !== 'panel' || (uptimeSeconds ?? 0) >= PANEL_MIN_UPTIME);
 }
 
 // fail(stats, reason) -> stats with reason latched for the rest of the session.
@@ -202,7 +216,7 @@ function resultCardUntil(status) {
 }
 
 const api = {
-  SLIDES_SECONDS, SEGMENTS, START_SECONDS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
+  SLIDES_SECONDS, SEGMENTS, PANEL_MIN_UPTIME, passSegments, START_SECONDS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
   emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardUntil,
 };
 if (typeof module !== 'undefined') module.exports = api;

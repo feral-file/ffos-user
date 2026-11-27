@@ -42,6 +42,11 @@ size=$(du -sb "$page_dir" | cut -f1)
 [ "$size" -le "$budget" ] || fail "burnin/ is $size bytes, over the 12 MB budget"
 [ -s "$display_page" ] || fail "the display-check page the slides segment shows is missing"
 
+# A segment's frame counts as its own only with the query too: the Panel Check
+# is the display-check page with ?set=panel.
+grep -Fq 'doc.location.pathname + doc.location.search === seg.src' "$page_dir/index.html" || \
+  fail "index.html's frameReady must compare the path and the query"
+
 # --- ff1-burnin.sh helpers ----------------------------------------------------
 # shellcheck source=/dev/null
 source "$burnin"
@@ -132,8 +137,11 @@ RUN_DIR="$tmp_dir/run"; mkdir -p "$RUN_DIR"
 BOARD=FF1-TEST VERSION=3.1.0 STARTED_AT=1000 PREVIOUS=null
 echo '[{"name":"Brightness","status":"PASS","detail":""}]' >"$RUN_DIR/checks.json"
 echo 1100 >"$RUN_DIR/checks_done_at"; echo /var/log/ff1-burnin/x >"$RUN_DIR/where"; echo 2 >"$RUN_DIR/restarts"
-got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, (.updated_at > 0)]')
-[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,true]' ] || fail "status_json: $got"
+echo "612.34 1000.00" >"$tmp_dir/uptime"
+# shellcheck disable=SC2034 # read by status_json
+UPTIME="$tmp_dir/uptime"
+got=$(status_json 70 60 null 75 61 null $'3\tGPU reset begin!' present lost | jq -c '[.board, .started_at, .checks_done_at, .checks[0].status, .sys.cpu_max, .sys.nvme_max, .sys.kernel_errors, .sys.last_error, .sys.wifi, .sys.bt, .sys.restarts, .sys.uptime, (.updated_at > 0)]')
+[ "$got" = '["FF1-TEST",1000,1100,"PASS",75,null,3,"GPU reset begin!","present","lost",2,612,true]' ] || fail "status_json: $got"
 rm -f "$RUN_DIR/checks.json" "$RUN_DIR/checks_done_at"
 got=$(status_json null null null null null null $'0\t' unseen unseen | jq -c '[.checks, .checks_done_at, .sys.last_error]')
 [ "$got" = '[[],null,null]' ] || fail "status_json before the checks: $got"
@@ -253,6 +261,17 @@ sf = B.recordSegment(sf, 'slides', 30 * 99, 99, true);
 sf = B.recordSegment(sf, 'slides', 31 * 99, 99, true);
 assert.deepStrictEqual(sf.bad, ['slides did not load', 'slides 30.0 fps']);
 assert.ok(B.SEGMENTS.every(seg => seg.video || seg.ready), 'every frame segment has a ready selector');
+
+// The Panel Check (acceptance spec §1): black/gray only, a clean screen,
+// opening a pass, and only after 10 minutes of power-on.
+const panel = B.SEGMENTS[0];
+assert.deepStrictEqual([panel.id, panel.src, panel.clean, panel.judged], ['panel', '/display-check/index.html?set=panel', true, false]);
+assert.ok(panel.seconds >= 60 + 30, 'room for a 60 s capture, the reaction time and the power pull');
+assert.ok(B.passSegments(null).every(seg => seg.id !== 'panel'), 'no uptime yet: no Panel Check');
+assert.ok(B.passSegments(599).every(seg => seg.id !== 'panel'), 'before 10 minutes: no Panel Check');
+assert.strictEqual(B.passSegments(600)[0].id, 'panel');
+assert.strictEqual(B.passSegments(600).length, B.SEGMENTS.length);
+assert.ok(/panel:\s*\['black','gray'\]/.test(page) && /panel: 15/.test(page), 'the display-check panel set is black/gray 15 s');
 
 // Running time and corners.
 assert.strictEqual(B.hms(0), '0:00:00');

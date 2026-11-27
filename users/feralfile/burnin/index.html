@@ -4,8 +4,10 @@
   by ff1-burnin.sh's loopback server at http://127.0.0.1:8180/burnin/.
     1. While the unit checks run: what is being checked, and what to listen for.
     2. Result card, RESULT_SECONDS: one line per check, and a QR of the summary.
-    3. Then passes until the power is pulled: the display-check slides, two
-       WebGL works, a 4K 10-bit HEVC clip, then the status card (CARD_SECONDS):
+    3. Then passes until the power is pulled: the Panel Check (black/gray, a
+       clean screen for the phone capture of the acceptance spec; once the
+       unit has been on 10 minutes), the display-check slides, two WebGL
+       works, a 4K 10-bit HEVC clip, then the status card (CARD_SECONDS):
        green if nothing has failed this session, red once anything has.
   During a pass a small dot (green / latched red) with the running time sits in
   one corner, a different one each pass. A clock that stops means a hang.
@@ -169,7 +171,7 @@ async function frameReady(seg) {
   while (now() < end) {
     try {
       const doc = frame.contentDocument;
-      if (doc && doc.location.pathname === seg.src && doc.querySelector(seg.ready)) return true;
+      if (doc && doc.location.pathname + doc.location.search === seg.src && doc.querySelector(seg.ready)) return true;
     } catch (e) { /* not readable yet */ }
     await new Promise(r => setTimeout(r, 250));
   }
@@ -179,6 +181,8 @@ async function frameReady(seg) {
 async function runSegment(seg) {
   card.classList.add('hidden');
   dot.className = B.cornerFor(stats.passes); tickDot();
+  // The Panel Check is captured on a phone and scored: nothing on screen.
+  if (seg.clean) dot.classList.add('hidden');
   if (seg.video) {
     frame.classList.add('hidden'); frame.src = 'about:blank';
     video.src = seg.video; video.classList.remove('hidden');
@@ -215,12 +219,19 @@ async function runSegment(seg) {
   }
 }
 
-function statusCard() {
+// statusCard(next): next is the segment list of the pass after the card,
+// decided before the card is drawn, so the notice and the pass agree.
+function statusCard(next) {
   const v = B.verdict(status, stats, stale());
+  // Tell whoever is there to get a phone when the next pass opens with the
+  // Panel Check.
+  const panelNext = !!next && next[0].id === 'panel';
   const s = (status && status.sys) || {};
   const fps = B.SEGMENTS.map(seg => `${seg.id} ${stats.fps[seg.id] === undefined ? '–' : stats.fps[seg.id].toFixed(1)}`).join(' · ');
   const prev = status && status.previous;
-  showCard(header(v.ok ? 'Burn-in OK' : 'Burn-in FAILED', v.ok ? '老化测试正常' : '老化测试失败') + `
+  showCard(header(v.ok ? 'Burn-in OK' : 'Burn-in FAILED', v.ok ? '老化测试正常' : '老化测试失败') +
+    (panelNext ? `<h2>Next: Panel Check, 2 min of black and gray. Brightness at the factory default. Start the phone capture, record about 60 s, then pull the power while still recording.</h2>
+      <h2 class="zh">下一段：Panel Check，黑灰画面 2 分钟。亮度须为出厂默认值。开始用手机录像，约 60 秒后在录像中拔掉电源。</h2>` : '') + `
     <div class="row"><div>
       <div>Passes ${stats.passes} · worst fps: ${esc(fps)}</div>
       <div>Video dropped ${stats.dropped} / ${stats.decoded} frames</div>
@@ -240,11 +251,18 @@ function statusCard() {
   if (q.get('preview') === 'card') { await readStatus(); statusCard(); return; }
   await checksPhase();
   await resultPhase();
+  // The first pass is announced by no card (after a Chromium restart it can
+  // open with the Panel Check unannounced; that run is already red).
+  let segs = B.passSegments(status && status.sys ? status.sys.uptime : null);
   for (;;) {
-    for (const seg of B.SEGMENTS) await runSegment(seg);
+    for (const seg of segs) await runSegment(seg);
     stats = { ...stats, passes: stats.passes + 1 };
     await readStatus();
-    statusCard();
+    // The card ends CARD_SECONDS from now: decide the next pass on the uptime
+    // it will have then, and show the notice from the same list.
+    const up = status && status.sys ? status.sys.uptime : null;
+    segs = B.passSegments(up === null || up === undefined ? null : up + B.CARD_SECONDS);
+    statusCard(segs);
     await sleep(B.CARD_SECONDS);
   }
 })();
