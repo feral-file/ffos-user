@@ -162,39 +162,47 @@ function hms(seconds) {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-// qrPayload(status, stats, nowSeconds) -> the compact JSON a phone scans in
-// place of a photograph. Short keys keep it within a QR code a phone reads
-// from across a bench (QR_MAX_BYTES; the test checks a worst case).
-const QR_MAX_BYTES = 400;
-function qrPayload(status, stats, runningSeconds, staleSeconds = 0) {
+// qrText(status, stats, runningSeconds, staleSeconds) -> what a phone shows
+// when it scans the QR: plain text a person reads as is (a phone camera shows
+// a text QR as text; a data: URL page is refused by both iOS and Android, so
+// an HTML report is not an option). The first line is the verdict, so a scan
+// answers "pass or fail" at a glance; the lines after it are the status
+// card's. Within QR_MAX_BYTES, so the code stays one a phone reads from the
+// small corner QR too (the test checks a worst case).
+const QR_MAX_BYTES = 600;
+function qrText(status, stats, runningSeconds, staleSeconds = 0) {
   const st = status || {};
   const s = st.sys || {};
   const v = verdict(status, stats, staleSeconds);
-  const fps = id => (stats.fps[id] === undefined ? null : Math.round(stats.fps[id] * 10) / 10);
-  const p = {
-    ff1: 'burnin/1',
-    b: st.board || null,
-    v: st.version || null,
-    t: runningSeconds === null || runningSeconds === undefined ? null : Math.max(0, Math.floor(runningSeconds)),
-    n: stats.passes,
-    ok: v.ok ? 1 : 0,
-    c: Object.fromEntries((st.checks || []).map(c => [c.name.slice(0, 4), c.status])),
-    f: SEGMENTS.map(seg => fps(seg.id)),
-    d: [stats.dropped, stats.decoded],
-    T: [s.cpu_max ?? null, s.gpu_max ?? null, s.nvme_max ?? null],
-    e: s.kernel_errors ?? null,
-    r: s.restarts ?? null,
-  };
-  // The reasons go in one by one while the payload stays within budget; the
+  const n = x => (x === null || x === undefined ? '-' : x);
+  const fps = id => (stats.fps[id] === undefined ? '-' : stats.fps[id].toFixed(1));
+  const lines = [
+    `FF1 burn-in ${v.ok ? 'OK' : 'FAILED'}`,
+    `${n(st.board)} ${n(st.version)}`,
+    `Ran ${runningSeconds === null || runningSeconds === undefined ? '-' : hms(runningSeconds)}, passes ${stats.passes}`,
+    (st.checks || []).map(c => `${c.name} ${c.status}`).join(', ') || 'Checks -',
+    'Worst fps: ' + SEGMENTS.filter(seg => seg.id !== 'panel').map(seg => `${seg.id} ${fps(seg.id)}`).join(', '),
+    `Video dropped ${stats.dropped}/${stats.decoded}, panel ${stats.refresh ? stats.refresh.toFixed(1) + ' Hz' : '-'}`,
+    `Max C: CPU ${n(s.cpu_max)}, GPU ${n(s.gpu_max)}, NVMe ${n(s.nvme_max)}`,
+    `Kernel errors ${n(s.kernel_errors)}, Chromium restarts ${n(s.restarts)}`,
+    `Wi-Fi ${n(s.wifi)}, Bluetooth ${n(s.bt)}`,
+  ].map(l => ascii(l).slice(0, 80));
+  // The reasons go in one by one while the text stays within budget; the
   // status card on screen always lists them all.
-  let out = JSON.stringify(p);
-  const why = [];
+  let out = lines.join('\n');
   for (const r of v.reasons) {
-    const next = JSON.stringify({ ...p, why: why.concat(r.slice(0, 32)) });
+    const next = `${out}\n- ${ascii(r).slice(0, 60)}`;
     if (byteLength(next) > QR_MAX_BYTES) break;
-    why.push(r.slice(0, 32)); out = next;
+    out = next;
   }
   return out;
+}
+
+// ascii(s): the text in plain ASCII ("96 °C" -> "96 C"). The vendored
+// encoder writes one byte per character, which only ASCII survives on every
+// phone reader.
+function ascii(s) {
+  return String(s).replace(/°/g, '').replace(/[^\x20-\x7e]/g, '?');
 }
 
 function byteLength(s) {
@@ -241,7 +249,7 @@ function running(status, uptimeNow) {
 
 const api = {
   SLIDES_SECONDS, SEGMENTS, PANEL_MIN_UPTIME, passSegments, START_SECONDS, CARD_SECONDS, RESULT_SECONDS, WARMUP_SECONDS, LIMITS, QR_MAX_BYTES,
-  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrPayload, cornerFor, resultCardLeft, running, advanceUptime, uptimeAt,
+  emptyStats, fail, trackFreshness, staleFor, latchStatus, withRefresh, minFps, dropAllowance, recordSegment, recordVideo, verdict, hms, qrText, cornerFor, resultCardLeft, running, advanceUptime, uptimeAt,
 };
 if (typeof module !== 'undefined') module.exports = api;
 else window.Burnin = api;
