@@ -368,8 +368,14 @@ void Playback::import_legacy(const Json& records) {
     command("playback.replace", {{"playlist", cast["playlist"]}, {"index", cast.value("index", 0)},
                                {"context", cast.value("contentContext", "curated")},
                                {"playlistUrl", cast.value("playlistUrl", "")}});
-    if (!cast["playlist"]["items"].empty())
-      command("playback.mode", {{"loop", cast.value("loopMode", "playlist")}, {"shuffle", cast.value("shuffle", false)}});
+    command("playback.mode", {{"loop", cast.value("loopMode", "playlist")}});
+    if (cast.value("shuffle", false)) {
+      // The web player already persisted the shuffled sequence in items.
+      // Keep replace()'s sequential indices and resume from the saved slot.
+      auto next = state_;
+      next["shuffle"] = true;
+      persist(std::move(next));
+    }
     if (cast.value("isPaused", false)) command("playback.pause", {{"paused", true}});
   }
   auto schedule = records.value("dp1_scheduled_tasks", Json(nullptr));

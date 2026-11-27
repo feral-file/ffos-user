@@ -20,12 +20,14 @@ int main(){
         ff::Store store(db); ff::Playback p(store);
         p.import_legacy({{"contentPolicy",nullptr},{"boot_playlist",playlist()},
                          {"castInfo",{{"playlist",playlist()},{"index",1},{"isPaused",true},
-                                      {"loopMode","one"},{"contentContext","personal"}}}});
+                                      {"loopMode","one"},{"shuffle",true},{"contentContext","personal"}}}});
       }
       ff::Store store(db); ff::Playback p(store); p.system_boot("first-native-boot");
       check(p.desired() && p.desired()->index==1 && !p.visible(),"Restore exact slot, await a fresh frame");
       check(p.state()["paused"] && p.state()["loop"]=="one" && p.state()["context"]=="personal",
             "Restore legacy playback intent");
+      check(p.state()["shuffle"] && p.state()["order"]==ff::Json::array({0,1}),
+            "A migrated shuffle keeps the web player's persisted sequence");
       p.system_boot("next-boot");
       check(p.desired() && p.desired()->index==0,"Subsequent boot uses saved boot playlist");
     }
