@@ -1,6 +1,35 @@
 # Factory burn-in: a hidden boot entry on the installed FF1
 
-Status: plan rev 2, accepted 2026-11-27 (rev 1 adversarial review: revise, fixed here). Stages 1–4 implemented together (owner's call: one bench at the end): ffos-user feat/factory-burnin, ffos feat/factory-burnin-entry. Spans ffos-user and ffos.
+Status: rev 3 (2026-11-27): the single burn-in entry is split into three factory entries, see §0; §4.2 and §4.3 below describe rev 2 and are superseded where §0 differs. Rev 2, accepted 2026-11-27 (rev 1 adversarial review: revise, fixed here). Stages 1–4 implemented together (owner's call: one bench at the end): ffos-user feat/factory-burnin, ffos feat/factory-burnin-entry. Spans ffos-user and ffos.
+
+## 0. Rev 3: three factory entries
+
+The product owner split the one burn-in into three tests, each its own entry
+in the installed boot menu (ffos `ff1_write_boot_set`), all booting
+`ff1-burnin.target` with `ff1.burnin ff1.factory=<test>`. `ff1-burnin.sh`
+reads the word; an entry without one (the rev 2 `ff1_burnin.conf`, which a
+factory reset can bring back) runs the panel test.
+
+| Entry | `ff1.factory=` | What runs |
+|---|---|---|
+| FF1 - Factory: panel check, black/gray | `panel` | A start card (the panel's refresh rate is measured on it). Load in a new random order each round (display-check slides, evolved, uneasy-dream, the 4K HEVC clip), judged as in rev 2, with the corner dot (no QR: the operator comes back after hours, when the screen is the clean Panel Check). At 10 minutes of uptime the running segment is cut and the Panel Check (black 15 s, gray 15 s) loops until the power is pulled, nothing else on screen. Also the long power-on run: record the Panel Check after hours, not minutes. |
+| FF1 - Factory: hardware test | `hardware` | The unit checks once (brightness, speakers, Bluetooth, Wi-Fi), then the result card with the QR, held and refreshed until the power is pulled. Results copied to a USB stick. |
+| FF1 - Factory: nine-point and color fields | `fields` | The display-check page's `fields` set: the nine-point chart (crosses at 1/6, 1/2, 5/6 of each axis, to be matched to Senda's report), then white, gray, black, red, green, blue. One slide per key press (any key next, Left previous, held keys ignored), never on a timer; a measured field shows only "n/7" for a second. A USB keyboard is attached at the factory. |
+
+Removed with rev 3: the status card between passes, the timed result card,
+the previous-session line, and the Panel Check notice; the Panel Check is
+no longer a segment of a pass but the end state of the panel test.
+
+Kept: the loopback server, the sampler (panel and hardware only; the fields
+need no record) and its `last.json` per session folder
+(`<time>-<test>`), the latched verdict, the corner dot during load. The corner QR of #504 is removed: it showed only during the first 10 minutes.
+During the Panel Check the verdict is not on screen: the session's
+`last.json` holds the system part of it (kernel faults, restarts,
+temperatures, adapters).
+
+Bench additions: the keyboard reaches the page under cage with no click;
+the nine-point positions match Senda's report; the Panel Check starts at
+10 minutes and stays clean for hours.
 
 ## Goal and decisions already made
 
@@ -132,7 +161,7 @@ Bench = needs an FF1. "Now" = can be settled before hardware.
 | R5 | **No firewall in burn-in.** `nftables` is `multi-user`-pulled, NM may join a remembered network on a fielded unit, and the target lists no nftables. | No listening service runs in burn-in (no controld hub, sshd is off by default). Add `nftables.service` to the target anyway: it costs nothing. |
 | R6 | **OTA candidate pending.** If burn-in is picked from the menu at the reboot where an OTA armed `arch-candidate.conf` (`LoaderEntryOneShot`), the one-shot is used up and the candidate never boots. The next normal boot's `btrfs-subvolume-manager` deletes `@ota_new` as an orphan. | Harmless: the update is dropped and offered again at the next timer window, and the running image is untouched. Bench once: arm an OTA, burn-in boot, normal boot. Expected: the old image boots, `@ota_new` is gone, and the next update run works. |
 | R7 | **Chromium as root.** cage + Chromium in a root service need `--no-sandbox` (as display-check does), unlike the kiosk. | Accepted: offline local page, and only on an explicitly chosen test boot. Alternative: run the page as feralfile inside `user@1000`, as the kiosk does. Decided in implementation review, not here. |
-| R8 | **Static pixels for days.** A permanent overlay could leave image retention. | No fixed overlay. The status card (full screen, ~5 s) appears between passes, and the corner status dot and its QR change corner every pass. The QR (≈ 20 vmin, light gray rather than white) still holds one corner for a whole pass (~5 min) right before a Panel Check: the bench looks for a ghost square in the gray field's corners. |
+| R8 | **Static pixels for days.** A permanent overlay could leave image retention. | No fixed overlay. The corner status dot changes corner every load segment, and the Panel Check has nothing on it. |
 | R9 | **The hang/crash record.** The cmdline sets no `panic=`, so a kernel panic freezes the screen like a hang. A firmware or hardware reset lands in the *default* entry (normal FF1 UI), since the burn-in is chosen only from the menu. | Both are visible on the floor: a running-time counter that stopped, or the normal UI. `/var/log/ff1-burnin/last.json`, written every minute, lets the next burn-in boot show "previous session: ran 6 h 12 m, last OK 14:02". It cannot tell a crash from a power pull; the screen state at the time does. |
 | R10 | **Entry on fielded units.** After this ships, every OTA writes the entry on customer devices (`post-extraction.sh` writes the staged boot set and `btrfs-subvolume-manager` promotes it). A factory reset restores the boot set from the install-time `factory_reset_boot` copy, so on a unit installed before this release a reset removes the entry until the next OTA or recovery update. | Same exposure as Factory Reset, and less harmful (no data change). Title says it is for the factory. Accepted; the factory installs from the new image, so it always has the entry. |
 | R11 | **The ffos-user/ffos split.** Script and page are in ffos-user, units and entry are in ffos; a mismatched build shows an entry with nothing behind it. | The burn-in service checks for the script and shows a one-line error screen instead of a black one. Both PRs land in one full-image version. |
@@ -331,7 +360,7 @@ the stage-2 PR.
    `systemctl list-units` without kiosk/controld/watchdog/updater;
    `systemctl --user` without the kiosk stack.
 4. Each check gives the same result as the factory check did on that unit.
-5. The QR scans on an iPhone and an Android phone, the corner one included, and the phone shows the whole text (iOS Camera may offer only a banner: the verdict line must be enough).
+5. The hardware result's QR scans on an iPhone and an Android phone, and the phone shows the whole text (iOS Camera may offer only a banner: the verdict line must be enough).
 6. Pull power, then a normal boot: the kiosk comes up and the owner state is
    unchanged.
 7. R6 sequence once, with R6's expected result.

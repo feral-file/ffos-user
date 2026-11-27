@@ -11,12 +11,15 @@ One file, no network. Works from file:// and from a web server.
   index.html                 Assembly Check: cycles the nine slides, forever
   index.html?set=brightness  white, gray, black, 60 s each: brightness, evenness, light leak
   index.html?set=panel       black 15 s, gray 15 s, no caption: the Panel Check loop Feral File scores
-  Keys (any set): Right/Space next, Left previous; the slide then holds until the next key. A resumes the cycle.
+  index.html?set=fields      nine-point chart, then white, gray, black, red, green, blue: one slide per
+                             key press (any key next, Left previous), never on a timer; for the
+                             nine-point uniformity measurement and the dot inspection
+  Keys (other sets): Right/Space next, Left previous; the slide then holds until the next key. A resumes the cycle.
   index.html?slide=red       holds one slide (a DP-1 playlist item)
   index.html?label=0         no on-screen caption
   index.html?seconds=5       every slide lasts 5 s (default: per slide below)
 
-Slides: white red green blue ramp geometry motion video gpu gray black
+Slides: points white red green blue ramp geometry motion video gpu gray black
 -->
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
@@ -30,6 +33,9 @@ Slides: white red green blue ramp geometry motion video gpu gray black
     transition: opacity .4s; pointer-events: none;
   }
   #label small { display: block; font-size: 1.8vh; opacity: .85; }
+  /* On the nine-point chart the caption sits between the first two rows of
+     points (1/6 and 1/2 of the height), clear of every cross. */
+  #label.mid { bottom: auto; top: 30vh; }
   #stat {
     position: fixed; left: 50%; top: 6vh; transform: translateX(-50%);
     padding: 1vh 2vh; border-radius: 0.6vh; background: rgba(0,0,0,.78); color: #fff;
@@ -197,7 +203,26 @@ function gpu() {
   raf = requestAnimationFrame(draw);
 }
 
+// The nine measuring points of the uniformity test: the centers of a 3 × 3
+// grid (1/6, 1/2 and 5/6 of the width and of the height), on white. The
+// meter is aimed here, then the measured fields follow with nothing on them.
+// If Senda's per-panel report places the points elsewhere, move them here.
+function points() {
+  const d = document.createElement('div'); d.style.background = '#fff'; stage.append(d);
+  const at = [1 / 6, 1 / 2, 5 / 6];
+  at.forEach((y, r) => at.forEach((x, c) => {
+    const m = document.createElement('div');
+    m.style.cssText = `position:absolute;left:${x * 100}%;top:${y * 100}%;width:6vmin;height:6vmin;transform:translate(-50%,-50%);` +
+      'background:linear-gradient(#000,#000) center/100% 2px no-repeat,linear-gradient(#000,#000) center/2px 100% no-repeat;';
+    const n = document.createElement('div');
+    n.textContent = r * 3 + c + 1;
+    n.style.cssText = `position:absolute;left:calc(${x * 100}% + 2vmin);top:calc(${y * 100}% + 1vmin);font:600 2.4vmin system-ui,sans-serif;color:#000;`;
+    d.append(m, n);
+  }));
+}
+
 const SLIDES = [
+  { id: 'points',   s: 0,  run: points,        en: 'Nine points: aim the meter at each cross. Warm up 30 min first. Any key: next field', zh: '九点：把亮度计对准每个十字。先暖机 30 分钟。按任意键：下一张' },
   { id: 'white',    s: 10, run: field('#fff'), en: 'White: dark dots, dust, any tint or uneven patch',            zh: '白场：暗点、灰尘、偏色或亮度不均' },
   { id: 'red',      s: 8,  run: field('#f00'), en: 'Red: any black or off-color dot or line',                     zh: '红场：黑点、异色点或线' },
   { id: 'green',    s: 8,  run: field('#0f0'), en: 'Green: any black or off-color dot or line',                   zh: '绿场：黑点、异色点或线' },
@@ -214,7 +239,10 @@ const SETS = {
   assembly:   ['white','red','green','blue','ramp','geometry','motion','video','gpu'],
   brightness: ['white','gray','black'],
   panel:      ['black','gray'],
+  fields:     ['points','white','gray','black','red','green','blue'],
 };
+// fields is stepped by hand: each measurement takes as long as it takes.
+const MANUAL = q.get('set') === 'fields';
 
 function show(slide, n, total) {
   cancelAnimationFrame(raf); stop(); stop = () => {};
@@ -222,11 +250,20 @@ function show(slide, n, total) {
   slide.run();
   if (q.get('label') === '0' || q.get('set') === 'panel') { label.style.opacity = 0; return; }
   label.innerHTML = '';
+  label.classList.toggle('mid', slide.id === 'points');
+  // A measured field carries only its number, for a second: the meter reads
+  // the panel, not a caption. The chart keeps its instructions.
+  if (MANUAL && slide.id !== 'points') {
+    label.textContent = `${n}/${total}`; label.style.opacity = 1;
+    clearTimeout(hide); hide = setTimeout(() => { label.style.opacity = 0; }, 1000);
+    return;
+  }
   const zh = document.createElement('div'); zh.textContent = (total ? `${n}/${total}  ` : '') + slide.zh;
   const en = document.createElement('small'); en.textContent = slide.en;
   label.append(zh, en); label.style.opacity = 1;
   // The slide is read with nothing on it: the caption leaves after 4 s.
-  clearTimeout(hide); hide = setTimeout(() => { label.style.opacity = 0; }, 4000);
+  clearTimeout(hide);
+  if (!(MANUAL && slide.id === 'points')) hide = setTimeout(() => { label.style.opacity = 0; }, 4000);
 }
 
 const one = SLIDES.find(s => s.id === q.get('slide'));
@@ -235,7 +272,7 @@ const list = (SETS[q.get('set')] || SETS.assembly).map(id => SLIDES.find(s => s.
 // length for every slide; assembly uses each slide's own s.
 const SET_SECONDS = { brightness: 60, panel: 15 };
 const fixed = Number(q.get('seconds')) || SET_SECONDS[q.get('set')] || 0;
-let i = 0, timer = 0, auto = true;
+let i = 0, timer = 0, auto = !MANUAL;
 function go(k) {
   i = ((k % list.length) + list.length) % list.length;
   const s = list[i]; show(s, i + 1, list.length);
@@ -244,6 +281,12 @@ function go(k) {
 if (one) show(one); else go(0);
 addEventListener('keydown', e => {
   if (one) return;
+  if (MANUAL) {
+    // Any key moves on; a held key does not race through the fields.
+    if (e.repeat) return;
+    go(e.key === 'ArrowLeft' ? i - 1 : i + 1);
+    return;
+  }
   if (e.key === 'ArrowRight' || e.key === ' ') { auto = false; go(i + 1); }
   else if (e.key === 'ArrowLeft') { auto = false; go(i - 1); }
   else if (e.key === 'a' || e.key === 'A') { auto = true; go(i); }
