@@ -1275,7 +1275,7 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 			Type: commands.CMD_DISPLAY_PLAYLIST,
 			Arguments: map[string]interface{}{
 				"intent":               map[string]interface{}{"action": "now_display"},
-				"dp1_call":             &dp1.Playlist{Playlist: dp1playlist.Playlist{}},
+				"dp1_call":             retireSignalDocument(),
 				"contentContext":       string(origin),
 				"retireBlockedCurrent": true,
 			},
@@ -1289,6 +1289,18 @@ func (r *refresher) retireBlockedCurrentWithoutASource(source playlistschedule.S
 	} else {
 		send()
 	}
+}
+
+// retireSignalDocument is the empty list retireBlockedCurrent travels with.
+// The player reads an empty list as "clear playback". It is a signal rather
+// than a playlist (the schema requires at least one item), but it still names
+// the DP-1 version and a title instead of sending both empty and items null.
+func retireSignalDocument() *dp1.Playlist {
+	return &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		DPVersion: dp1.EmittedDPVersion,
+		Title:     "Retired",
+		Items:     []dp1playlist.PlaylistItem{},
+	}}
 }
 
 // currentPlayerItem returns the item the player reports as on screen.
@@ -2237,6 +2249,9 @@ func (r *refresher) loadCachedPlaylistForURL(url string, currentlyDisplayed func
 	}
 	if err := contentrating.ValidatePlaylistFragment(raw); err != nil {
 		return nil, fmt.Errorf("playlistInvalid: offline cache content rating for %s: %w", url, err)
+	}
+	if err := dp1.CheckPlayable(r.logger, "offline cache", raw); err != nil {
+		return nil, fmt.Errorf("offline cache: cached playlist for %s: %w", url, err)
 	}
 	var playlist *dp1.Playlist
 	if err := r.json.Unmarshal(raw, &playlist); err != nil {

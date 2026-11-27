@@ -637,7 +637,9 @@ document `invalid` before any cryptography runs: that entry is reported as
 `malformed signature` with the oversized field blanked, and its in-bounds
 siblings as `unverified`. The outcome is one of three `signatureStatus` values:
 `valid`
-(every `signatures[]` entry verifies), `invalid` (signatures present, at
+(every `signatures[]` entry verifies and at least one has role `feed` or
+`curator`, §7.1.1; otherwise `invalid` with reason
+`no feed or curator signature`), `invalid` (signatures present, at
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, a `role` outside the DP-1 §7.1 set
 (`curator`, `feed`, `agent`, `institution`, `licensor`) reported as `malformed signature`, malformed entry), or `unsigned` (no `signatures[]`; a
@@ -669,6 +671,31 @@ Playlist URL example:
 }
 ```
 
+**Schema conformance.** Every document the device plays must conform to the
+DP-1 playlist schema (core with the playlists and content-rating extensions):
+an inline `dp1_call`, a fetched `playlistUrl`, a replay or series re-display
+controld builds, an offline cached copy, and a persisted inline `displayAt`
+source. One that does not is refused as `playlistInvalid`, naming JSON
+pointers only. Two allowances: signatures are not judged (a missing or
+malformed one never blocks; see signature verification above), and a legacy
+`dynamicQueries` playlist may carry an empty `items`. A series edition or a
+legacy indexer item that fails the schema is dropped on its own; if a series
+has no conforming edition its representative item plays. Member names are
+matched exactly, so a case variant (`"Source"`) is an unknown member. A
+document that names a member twice in one object is refused.
+A dpVersion of another major is logged, not refused.
+
+**Temporary, inline documents only** (a `dp1_call`, and what controld rebuilds
+or keeps from one): a playlist or item `id` that is not a UUID, a `created`
+with no timezone offset, and a playlist `title` over 200 characters are also
+accepted, because released ff-app builds send them. A `playlistUrl` document
+gets none of this. To be removed once ff-app's wire converter is fixed,
+shipped, and made the app's `required_version`
+(`components/feral-controld/dp1/inline_exemption.go`).
+
+The `signatures` block in the examples below is a placeholder that does not
+verify.
+
 Inline DP1 example:
 
 ```json
@@ -678,12 +705,24 @@ Inline DP1 example:
     "command": "displayPlaylist",
     "request": {
       "dp1_call": {
+        "dpVersion": "1.1.0",
+        "title": "Works",
         "items": [
           {
-            "id": "work-1",
+            "id": "7f0c2b52-3f6a-4a37-9a55-0d8d4a5b1c10",
             "title": "Work 1",
             "source": "https://cdn.example/work-1.mp4",
             "duration": 300
+          }
+        ],
+        "signatures": [
+          {
+            "alg": "ed25519",
+            "kid": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "ts": "2025-01-01T00:00:00Z",
+            "payload_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "role": "feed",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           }
         ]
       }
@@ -701,7 +740,19 @@ Dynamic DP1 example:
     "command": "displayPlaylist",
     "request": {
       "dp1_call": {
+        "dpVersion": "1.1.0",
+        "title": "Dynamic works",
         "items": [],
+        "signatures": [
+          {
+            "alg": "ed25519",
+            "kid": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "ts": "2025-01-01T00:00:00Z",
+            "payload_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "role": "feed",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }
+        ],
         "dynamicQuery": {
           "profile": "graphql-v1",
           "endpoint": "https://api.example/graphql",
