@@ -194,6 +194,26 @@ int main(){
             "Explicit selection of an eligible old slot must resolve against the refreshed playlist");
     }
     {
+      ff::Store store(path+".blocked-boundary"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist(); source["items"][0]["duration"] = 1;
+      auto blocked = source["items"][1]; blocked["source"] = "https://example.org/blocked";
+      source["items"].push_back(blocked);
+      p.command("playback.replace", {{"playlist",source}});
+      const auto current = p.desired()->id; p.committed(current); p.presented(current);
+      blocked["contentRating"] = "mature";
+      p.command("playback.update", {{"items",{source["items"][1],blocked}},{"activationTimes",{900,1500}}});
+      p.tick(501,1500);
+      check(p.state()["pendingUpdate"].is_null() && p.state()["updateOutcome"]["contentBlocked"] == true,
+            "Blocked activation must retire the expired pending cohort");
+      try {
+        p.command("playback.select", {{"index",2}});
+        throw std::runtime_error("Selection reused expired cohort after failed activation");
+      } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong expired cohort error"); }
+      p.tick(2001,3000);
+      check(p.desired() && p.desired()->id == current, "Duration expiry must not apply a superseded cohort");
+    }
+    {
       ff::Store store(path+".future-refresh");ff::Playback p(store);
       p.tick(1,3000);
       p.system_boot("first");

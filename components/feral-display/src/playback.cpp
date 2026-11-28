@@ -881,7 +881,16 @@ void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
         Json outcome={{"id",uuid()},{"atMs",active.is_null()?Json(0):active},{"executedAtMs",wall_time_ms},{"instance",instance_},{"generation",generation_+1},{"outcome","applied"}};
         bool applied=false;
         if(!list["items"].empty())try{replace(next,{{"playlist",list},{"context",plan["context"]},{"playlistUrl",plan["playlistUrl"]}});applied=true;}
-        catch(const Error& error){if(error.code!="content_blocked")throw;next=state_;outcome["outcome"]="failed";outcome["error"]={{"code",error.code},{"message",error.what()}};}
+        catch(const Error& error){
+          if(error.code!="content_blocked")throw;
+          next=state_;outcome["outcome"]="failed";outcome["error"]={{"code",error.code},{"message",error.what()}};
+          // A pending projection belongs to the previous cohort. Its slots
+          // expire at this boundary even when the new cohort cannot play.
+          if (!next.value("pendingUpdate", Json(nullptr)).is_null()) {
+            next["updateOutcome"] = {{"id",next["pendingUpdate"]["id"]},{"outcome","failed"},{"contentBlocked",true}};
+            next["pendingUpdate"] = nullptr;
+          }
+        }
 
         // A cohort boundary advances the current cast; it must not cancel a
         // later explicit schedule accepted while that cast was playing.
