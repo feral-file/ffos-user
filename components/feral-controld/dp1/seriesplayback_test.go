@@ -338,7 +338,7 @@ func TestResolveSeriesCastPlan_CatalogUnreachableKeepsTheRepresentative(t *testi
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", itemSeriesID)).
 		Return(nil, assert.AnError)
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
@@ -453,7 +453,7 @@ func TestCastPlan_FullReturnsTheRepresentativeWhenCatalogUnreachable(t *testing.
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", itemSeriesID)).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", itemSeriesID)).
 		Return(nil, assert.AnError)
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{seriesItem()}}}
@@ -661,7 +661,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsEither(t 
 	)
 
 	serveEditions(ts, "playlist-1", "item-a", editionsBody(3, editionItem("a1"), editionItem("a2"), editionItem("a3")))
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-b")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-b")).
 		Return(nil, assert.AnError)
 	ts.mockJSON.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(data []byte, v interface{}) error { return encjson.Unmarshal(data, v) })
@@ -716,7 +716,7 @@ func TestResolveSeriesCastPlan_AnUnresolvedRepresentativeNeverReExpandsUnderFull
 	}
 
 	serveEditions(ts, "playlist-1", "item-a", editionsBody(3, editionItem("a1"), editionItem("a2"), editionItem("a3")))
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "item-b")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "item-b")).
 		Return(nil, assert.AnError)
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{itemA, itemB}}}
@@ -860,9 +860,9 @@ func TestResolveSeriesCastPlan_GroupsByChainAddressAndSeriesIdNotSeriesIdAlone(t
 			Contract: &dp1playlist.ProvenanceContract{Chain: "evm", Address: "0xBBB", SeriesID: &seriesID},
 		},
 	}
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "series-a")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "series-a")).
 		Return(nil, assert.AnError)
-	ts.mockHTTP.EXPECT().Get(editionsURL("playlist-1", "series-b")).
+	ts.mockHTTP.EXPECT().GetContext(gomock.Any(), editionsURL("playlist-1", "series-b")).
 		Return(nil, assert.AnError)
 
 	playlist := dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{itemA, itemB}}}

@@ -184,7 +184,7 @@ func TestRebootDeferredDuringUpdate(t *testing.T) {
 // the monitor grants a fresh grace instead of restarting on stale state.
 func TestChromiumMonitorUpdateSuppressesEscalation(t *testing.T) {
 	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
-	monitor := NewChromiumMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	monitor.mu.Lock()
@@ -355,7 +355,7 @@ func TestRAMRebootWaitsForUpdate(t *testing.T) {
 // the update re-anchors the grace.
 func TestChromiumMonitorDevConsoleThenUpdate(t *testing.T) {
 	restartFile, _, _, _ := installFallbackStubs(t)
-	monitor := NewChromiumMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(closedLocalHTTPEndpoint(t), zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty2")
 	monitor.mu.Lock()

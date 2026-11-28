@@ -56,6 +56,10 @@ import (
 // the file: losing re-learnable observations is cheaper than a store that
 // may be damaged.
 func Open(path string, opts Options) (*Store, error) {
+	return openWithCheck(path, opts, openChecked)
+}
+
+func openWithCheck(path string, opts Options, openChecked func(string, Options) (*Store, bool, error)) (*Store, error) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -102,7 +106,7 @@ var ErrStoreCheckRunaway = errors.New("media health: store integrity check did n
 // walk may run on once it has reported damage. A healthy store of any
 // realistic size (~300 B per record) checks in milliseconds; a damaged one
 // either finishes or loops, and a loop is what both bounds catch.
-var (
+const (
 	checkTimeout = 5 * time.Second
 	checkGrace   = 500 * time.Millisecond
 )
@@ -138,17 +142,23 @@ func checkPages(path string) (runaway bool, err error) {
 		_ = db.Close()
 		return false, fmt.Errorf("media health: begin store check: %w", err)
 	}
-	errs := tx.Check()
+	runaway, err = awaitPageCheck(tx.Check(), checkTimeout)
+	if !runaway {
+		_ = tx.Rollback()
+		_ = db.Close()
+	}
+	return runaway, err
+}
+
+func awaitPageCheck(errs <-chan error, timeout time.Duration) (bool, error) {
 	var checkErr error
-	deadline := time.NewTimer(checkTimeout)
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	var grace <-chan time.Time
 	for {
 		select {
 		case e, open := <-errs:
 			if !open {
-				_ = tx.Rollback()
-				_ = db.Close()
 				if checkErr != nil {
 					return false, fmt.Errorf("media health: store integrity check: %w", checkErr)
 				}
@@ -161,7 +171,7 @@ func checkPages(path string) (runaway bool, err error) {
 		case <-grace:
 			return true, fmt.Errorf("%w: %w", ErrStoreCheckRunaway, checkErr)
 		case <-deadline.C:
-			return true, fmt.Errorf("%w: no result within %s", ErrStoreCheckRunaway, checkTimeout)
+			return true, fmt.Errorf("%w: no result within %s", ErrStoreCheckRunaway, timeout)
 		}
 	}
 }

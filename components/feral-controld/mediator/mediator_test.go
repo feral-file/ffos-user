@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
@@ -26,55 +24,32 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 )
 
-// stubSessionCDP is a minimal playersession.CDPSender double that always
-// reports the player command handler installed, so a playersession.Session
-// built on it reaches StageHandler readiness on the first probe — the
-// connectivity tests below exercise the mediator's OWN cache/coalescing/push
-// logic, not playersession's barrier polling.
-type stubSessionCDP struct{}
-
-func (stubSessionCDP) Initialized() bool { return true }
-func (stubSessionCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
-	if method == cdp.METHOD_EVALUATE {
-		return map[string]any{"ready": true}, nil
-	}
-	return map[string]any{}, nil
-}
-
-// wireConnectivitySession wires a playersession.Session into ts.mediator,
-// exactly mirroring production wiring order (SetSession, THEN the session's
-// first generation bump — main.go calls SetSession once at composition time,
-// before CDP.Start ever bumps a generation). Because SetSession registers the
-// "connectivity" reconciler, that first bump's generation-ready worker runs
-// it immediately — with nothing known yet, that is ONE single-flight cold
-// probe (§3.1), which this helper expects and drains before returning so
-// subtests' OWN mockCDP/mockDbus expectations start from a clean slate.
-func wireConnectivitySession(t *testing.T, ts *testSetup) *playersession.Session {
+// wireConnectivityPlayer waits for the initial host snapshot and cold probe.
+// The returned trigger simulates a reconnect/gap without an artwork page.
+func wireConnectivityPlayer(t *testing.T, ts *testSetup) func() {
 	t.Helper()
-	ts.mockDbus.EXPECT().
-		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
-		Return([]interface{}{false}, nil).
-		Times(1)
-	// The cold probe resolves a level, and the reconciler push then SENDS it
-	// to the player unconditionally — absorb that push too so subtests' own
-	// mockCDP.Send expectations start clean.
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-			"expression": "window.handleConnectivityChange(false)",
-		}).
-		Return(map[string]interface{}{"result": "ok"}, nil).
-		Times(1)
-
-	session := playersession.New(context.Background(), stubSessionCDP{}, nil, nil, zap.NewNop())
-	ts.mediator.SetSession(session)
-	session.OnConnect()
+	ts.mockDbus.EXPECT().Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).Return([]interface{}{false}, nil).Times(1)
+	ts.mockPlayer.EXPECT().SetConnectivity(gomock.Any(), false).Return(nil).Times(1)
+	trigger := make(chan struct{}, 16)
+	ts.mockPlayer.EXPECT().Watch(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, deliver func(playerlink.SnapshotDelivery)) error {
+		deliver(playerlink.SnapshotDelivery{Initial: true})
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-trigger:
+				deliver(playerlink.SnapshotDelivery{Initial: true})
+			}
+		}
+	}).Times(1)
+	ts.mediator.SetConnectivityPlayer(ts.mockPlayer)
 	ts.waitForConnectivityPush(t)
-	return session
+	return func() { trigger <- struct{}{} }
 }
 
 // drainConnectivityPushes drains every completed connectivity push attempt
@@ -97,7 +72,7 @@ type testSetup struct {
 	ctx                context.Context
 	mockRelayer        *mocks.MockRelayer
 	mockDbus           *mocks.MockDBus
-	mockCDP            *mocks.MockCDP
+	mockPlayer         *mocks.MockConnectivityPlayer
 	mockExecutor       *mocks.MockExecutor
 	mockCommandHandler *mocks.MockCommandHandler
 	mockRefresher      *mocks.MockRefresher
@@ -107,14 +82,14 @@ type testSetup struct {
 
 	// connPushDone fires once per completed connectivity push attempt (see
 	// mediator.SetConnectivityPushHook) — the async completion seam the
-	// connectivity tests wait on instead of asserting the CDP send
+	// connectivity tests wait on instead of asserting the native socket send
 	// synchronously inline with the DBus signal handler call.
 	connPushDone chan struct{}
 }
 
 // waitForConnectivityPush blocks until at least one connectivity push attempt
 // has completed (see connPushDone), or fails the test. Call it after invoking
-// the connectivity_change handler and before asserting on mockCDP.
+// the connectivity_change handler and before asserting on mockPlayer.
 func (ts *testSetup) waitForConnectivityPush(t *testing.T) {
 	t.Helper()
 	select {
@@ -127,11 +102,12 @@ func (ts *testSetup) waitForConnectivityPush(t *testing.T) {
 func setup(t *testing.T) *testSetup {
 	ctrl := gomock.NewController(t)
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
 	mockRelayer := mocks.NewMockRelayer(ctrl)
 	mockDbus := mocks.NewMockDBus(ctrl)
-	mockCDP := mocks.NewMockCDP(ctrl)
+	mockPlayer := mocks.NewMockConnectivityPlayer(ctrl)
 	mockExecutor := mocks.NewMockExecutor(ctrl)
 	mockCommandHandler := mocks.NewMockCommandHandler(ctrl)
 	mockRefresher := mocks.NewMockRefresher(ctrl)
@@ -141,7 +117,6 @@ func setup(t *testing.T) *testSetup {
 		ctx,
 		mockRelayer,
 		mockDbus,
-		mockCDP,
 		mockCommandHandler,
 		mockExecutor,
 		mockRefresher,
@@ -149,10 +124,10 @@ func setup(t *testing.T) *testSetup {
 		logger,
 	)
 
-	// No session is wired by default: m.session stays nil, so pushConnectivity
+	// No native player is wired by default: m.player stays nil, so pushConnectivity
 	// no-ops and every test that does not care about connectivity keeps its
 	// original, unmodified behavior. The two connectivity-focused test
-	// functions below opt in via wireConnectivitySession.
+	// functions below opt in via wireConnectivityPlayer.
 	connPushDone := make(chan struct{}, 8)
 	med.SetConnectivityPushHook(func() {
 		select {
@@ -166,7 +141,7 @@ func setup(t *testing.T) *testSetup {
 		ctx:                ctx,
 		mockRelayer:        mockRelayer,
 		mockDbus:           mockDbus,
-		mockCDP:            mockCDP,
+		mockPlayer:         mockPlayer,
 		mockExecutor:       mockExecutor,
 		mockCommandHandler: mockCommandHandler,
 		mockRefresher:      mockRefresher,
@@ -351,12 +326,10 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 		{
 			name: "connectivity gained - relayer not connected",
 			setupFunc: func(ts *testSetup) (godbus.DBusPayload, error) {
-				// Expect CDP send to be called
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(true)",
-					}).
-					Return(map[string]interface{}{"result": "ok"}, nil).
+				// Expect native socket send to be called
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), true).
+					Return(nil).
 					Times(1)
 
 				// Expect IsConnected to be called twice (once for logging, once for condition check)
@@ -383,12 +356,10 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 		{
 			name: "connectivity gained - relayer already connected",
 			setupFunc: func(ts *testSetup) (godbus.DBusPayload, error) {
-				// Expect CDP send to be called
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(true)",
-					}).
-					Return(map[string]interface{}{"result": "ok"}, nil).
+				// Expect native socket send to be called
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), true).
+					Return(nil).
 					Times(1)
 
 				// Expect IsConnected to be called twice (once for logging, once for condition check)
@@ -408,12 +379,10 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 		{
 			name: "connectivity lost",
 			setupFunc: func(ts *testSetup) (godbus.DBusPayload, error) {
-				// Expect CDP send to be called
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(false)",
-					}).
-					Return(map[string]interface{}{"result": "ok"}, nil).
+				// Expect native socket send to be called
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), false).
+					Return(nil).
 					Times(1)
 
 				// Expect IsConnected to be called once for logging (condition short-circuits since connected=false)
@@ -431,16 +400,14 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 			},
 		},
 		{
-			name: "CDP send error",
+			name: "native socket send error",
 			setupFunc: func(ts *testSetup) (godbus.DBusPayload, error) {
-				cdpError := errors.New("CDP send failed")
+				socketError := errors.New("native socket send failed")
 
-				// Expect CDP send to be called and return error
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(true)",
-					}).
-					Return(nil, cdpError).
+				// Expect native socket send to be called and return error
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), true).
+					Return(socketError).
 					Times(1)
 
 				// Expect IsConnected to be called twice (once for logging, once for condition check)
@@ -460,7 +427,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Body:   []interface{}{true},
 				}
 
-				return payload, nil // Should not return error despite CDP failure
+				return payload, nil // Should not return error despite socket failure
 			},
 		},
 		{
@@ -480,7 +447,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
-			wireConnectivitySession(t, ts)
+			wireConnectivityPlayer(t, ts)
 
 			payload, expectedError := tt.setupFunc(ts)
 
@@ -509,9 +476,9 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Nil(t, result)
-				// The CDP push now runs on the async connectivity worker
+				// The native socket push now runs on the async connectivity worker
 				// (design doc section 3.1); wait for it before ctrl.Finish()
-				// checks the mockCDP.Send expectation.
+				// checks the mockPlayer.SetConnectivity expectation.
 				ts.waitForConnectivityPush(t)
 			}
 		})
@@ -519,8 +486,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 }
 
 // TestMediator_ConnectivityEdgeRacesReconciler_LastDeliveredValueIsCacheNewest
-// pins M6: the connectivity reconciler (run by the session on every
-// generation-ready) and the edge-triggered connectivity_change handler both
+// pins M6: the connectivity reconciler (run on host reconnect) and the edge-triggered connectivity_change handler both
 // enqueue through the SAME single worker rather than one of them calling
 // pushConnectivity directly — so racing them concurrently must never produce
 // a stale overwrite; the last value actually delivered to the player must be
@@ -528,18 +494,17 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 func TestMediator_ConnectivityEdgeRacesReconciler_LastDeliveredValueIsCacheNewest(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
-	session := wireConnectivitySession(t, ts) // cache: known=true, level=false
+	reconnect := wireConnectivityPlayer(t, ts) // cache: known=true, level=false
 
 	var mu sync.Mutex
 	var sentLevels []bool
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
-			expr, _ := params["expression"].(string)
+	ts.mockPlayer.EXPECT().
+		SetConnectivity(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, online bool) error {
 			mu.Lock()
-			sentLevels = append(sentLevels, strings.Contains(expr, "true"))
+			sentLevels = append(sentLevels, online)
 			mu.Unlock()
-			return map[string]interface{}{"result": "ok"}, nil
+			return nil
 		}).
 		AnyTimes()
 	ts.mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
@@ -555,7 +520,7 @@ func TestMediator_ConnectivityEdgeRacesReconciler_LastDeliveredValueIsCacheNewes
 	ts.mediator.Start()
 
 	// Race the edge (connectivity_change: connected=true, the NEWEST value)
-	// against the reconciler (session.OnConnect() bumps the generation,
+	// against the reconciler (reconnect() bumps the generation,
 	// re-running the registered "connectivity" reconciler) firing at
 	// approximately the same time.
 	var wg sync.WaitGroup
@@ -569,7 +534,7 @@ func TestMediator_ConnectivityEdgeRacesReconciler_LastDeliveredValueIsCacheNewes
 	}()
 	go func() {
 		defer wg.Done()
-		session.OnConnect()
+		reconnect()
 	}()
 	wg.Wait()
 
@@ -604,11 +569,9 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 			name:   "internet gained, link up - re-registers advertiser",
 			linkUp: true,
 			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(true)",
-					}).
-					Return(map[string]interface{}{"result": "ok"}, nil).
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), true).
+					Return(nil).
 					Times(1)
 
 				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
@@ -629,11 +592,9 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 			name:   "internet lost but link up - advertiser stays up",
 			linkUp: true,
 			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(false)",
-					}).
-					Return(map[string]interface{}{"result": "ok"}, nil).
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), false).
+					Return(nil).
 					Times(1)
 
 				ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
@@ -652,11 +613,9 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 			name:   "internet lost and link down - advertiser stays down",
 			linkUp: false,
 			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(false)",
-					}).
-					Return(map[string]interface{}{"result": "ok"}, nil).
+				ts.mockPlayer.EXPECT().
+					SetConnectivity(gomock.Any(), false).
+					Return(nil).
 					Times(1)
 
 				ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
@@ -675,7 +634,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
-			wireConnectivitySession(t, ts)
+			wireConnectivityPlayer(t, ts)
 
 			mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
 			payload := tt.setupFunc(ts, mockAdvertiser)
@@ -700,9 +659,9 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.Nil(t, result)
-			// The CDP push now runs on the async connectivity worker (design
+			// The native socket push now runs on the async connectivity worker (design
 			// doc section 3.1); wait for it before ctrl.Finish() checks the
-			// mockCDP.Send expectation.
+			// mockPlayer.SetConnectivity expectation.
 			ts.waitForConnectivityPush(t)
 		})
 	}

@@ -647,3 +647,11 @@ func TestMediaCapturer_Capture_TimeoutFreeClientStillEnforcesDiskLimit(t *testin
 	_, loadErr := store.LoadItem(offlinecache.SourceKey(srv.URL + "/video.mp4"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 }
+
+func (c wholeRequestTimeoutClient) GetContext(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(req)
+}

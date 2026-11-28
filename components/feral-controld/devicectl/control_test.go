@@ -257,7 +257,7 @@ func TestConnectClaimClearsInvitation(t *testing.T) {
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil, errors.New("player not connected")).AnyTimes()
 
 	fc := &fakeControl{}
-	e := &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, json: wrapper.NewJSON(), cdp: mockCDP}
+	e := &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, json: wrapper.NewJSON(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}}
 	e.SetControl(fc)
 	_, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 	require.NoError(t, err)
@@ -278,7 +278,7 @@ func TestConnectUnderControl_OnlyOwnerClaims(t *testing.T) {
 		sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{Claimed: claimed}).AnyTimes()
 		mockCDP := mocks.NewMockCDP(ctrl)
 		mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil, errors.New("player not connected")).AnyTimes()
-		return &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, json: wrapper.NewJSON(), cdp: mockCDP}, sm
+		return &executor{logger: zap.NewNop(), setupNarrator: &narratorSpy{}, json: wrapper.NewJSON(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}}, sm
 	}
 
 	t.Run("claimed, non-owner: ok, nothing written", func(t *testing.T) {

@@ -1,0 +1,120 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.05kB 0.1s done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/4] FROM docker.io/library/ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+#4 resolve docker.io/library/ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 0.0s done
+#4 DONE 0.0s
+
+#5 [2/4] RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     build-essential cmake ninja-build pkg-config python3 ca-certificates curl     libsqlite3-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libdrm-dev     libcairo2-dev libpango1.0-dev libqrencode-dev libnss3 libatk-bridge2.0-0     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64 libgtk-3-0     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*
+#5 CACHED
+
+#6 [3/4] WORKDIR /src
+#6 CACHED
+
+#7 [4/4] RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     meson git python3-jinja2 libavcodec-dev libavformat-dev libavfilter-dev     libavutil-dev libswresample-dev libswscale-dev libass-dev libva-dev     libpulse-dev liblcms2-dev libxxhash-dev libgl-dev libwayland-dev libvulkan-dev     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*
+#7 3.204 Get:1 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+#7 7.715 Get:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [2211 kB]
+#7 9.001 Get:3 http://archive.ubuntu.com/ubuntu noble InRelease [256 kB]
+#7 120.3 Ign:3 http://archive.ubuntu.com/ubuntu noble InRelease
+#7 120.3 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 585.8 Ign:4 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages
+#7 585.8 Ign:5 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages
+#7 585.8 Ign:6 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages
+#7 585.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 586.0 Ign:7 http://archive.ubuntu.com/ubuntu noble-updates InRelease
+#7 586.0 Ign:8 http://archive.ubuntu.com/ubuntu noble-backports InRelease
+#7 586.0 Ign:3 http://archive.ubuntu.com/ubuntu noble InRelease
+#7 586.8 Ign:4 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages
+#7 586.8 Ign:5 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages
+#7 586.8 Ign:6 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages
+#7 587.0 Ign:7 http://archive.ubuntu.com/ubuntu noble-updates InRelease
+#7 587.0 Ign:8 http://archive.ubuntu.com/ubuntu noble-backports InRelease
+#7 587.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 588.1 Ign:3 http://archive.ubuntu.com/ubuntu noble InRelease
+#7 588.8 Ign:4 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages
+#7 588.8 Ign:5 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages
+#7 588.8 Ign:6 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages
+#7 589.1 Ign:7 http://archive.ubuntu.com/ubuntu noble-updates InRelease
+#7 589.1 Ign:8 http://archive.ubuntu.com/ubuntu noble-backports InRelease
+#7 591.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 591.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 591.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 591.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 591.8 Ign:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 591.8 Err:2 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages
+#7 591.8   Connection timed out [IP: 91.189.92.22 80]
+#7 592.1 Err:3 http://archive.ubuntu.com/ubuntu noble InRelease
+#7 592.1   Connection timed out [IP: 185.125.190.83 80]
+#7 593.1 Err:7 http://archive.ubuntu.com/ubuntu noble-updates InRelease
+#7 593.1   Could not connect to archive.ubuntu.com:80 (185.125.190.83), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.91.81), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.90.40), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.91.83), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.91.82), connection timed out Could not connect to archive.ubuntu.com:80 (185.125.190.81), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.92.24), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.92.22), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.92.23), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.90.11), connection timed out Could not connect to archive.ubuntu.com:80 (185.125.190.82), connection timed out [IP: 185.125.190.83 80]
+#7 593.1 Err:8 http://archive.ubuntu.com/ubuntu noble-backports InRelease
+#7 593.1   Unable to connect to archive.ubuntu.com:http: [IP: 185.125.190.83 80]
+#7 593.2 Fetched 126 kB in 1min 18s (1627 B/s)
+#7 593.2 Reading package lists...
+#7 593.5 W: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble/InRelease  Connection timed out [IP: 185.125.190.83 80]
+#7 593.5 W: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble-updates/InRelease  Could not connect to archive.ubuntu.com:80 (185.125.190.83), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.91.81), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.90.40), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.91.83), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.91.82), connection timed out Could not connect to archive.ubuntu.com:80 (185.125.190.81), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.92.24), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.92.22), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.92.23), connection timed out Could not connect to archive.ubuntu.com:80 (91.189.90.11), connection timed out Could not connect to archive.ubuntu.com:80 (185.125.190.82), connection timed out [IP: 185.125.190.83 80]
+#7 593.5 W: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble-backports/InRelease  Unable to connect to archive.ubuntu.com:http: [IP: 185.125.190.83 80]
+#7 593.5 W: Failed to fetch http://security.ubuntu.com/ubuntu/dists/noble-security/restricted/binary-amd64/Packages  Connection timed out [IP: 91.189.92.22 80]
+#7 593.5 W: Some index files failed to download. They have been ignored, or old ones used instead.
+#7 593.7 Reading package lists...
+#7 593.9 Building dependency tree...
+#7 593.9 Reading state information...
+#7 593.9 Package git is not available, but is referred to by another package.
+#7 593.9 This may mean that the package is missing, has been obsoleted, or
+#7 593.9 is only available from another source
+#7 593.9 
+#7 593.9 Package libvulkan-dev is not available, but is referred to by another package.
+#7 593.9 This may mean that the package is missing, has been obsoleted, or
+#7 593.9 is only available from another source
+#7 593.9 However the following packages replace it:
+#7 593.9   libvulkan1
+#7 593.9 
+#7 593.9 E: Unable to locate package meson
+#7 593.9 E: Package 'git' has no installation candidate
+#7 593.9 E: Unable to locate package python3-jinja2
+#7 593.9 E: Unable to locate package libavcodec-dev
+#7 593.9 E: Unable to locate package libavformat-dev
+#7 593.9 E: Unable to locate package libavfilter-dev
+#7 593.9 E: Unable to locate package libavutil-dev
+#7 593.9 E: Unable to locate package libswresample-dev
+#7 593.9 E: Unable to locate package libswscale-dev
+#7 593.9 E: Unable to locate package libass-dev
+#7 593.9 E: Unable to locate package libva-dev
+#7 593.9 E: Unable to locate package liblcms2-dev
+#7 593.9 E: Unable to locate package libxxhash-dev
+#7 593.9 E: Package 'libvulkan-dev' has no installation candidate
+#7 ERROR: process "/bin/sh -c apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     meson git python3-jinja2 libavcodec-dev libavformat-dev libavfilter-dev     libavutil-dev libswresample-dev libswscale-dev libass-dev libva-dev     libpulse-dev liblcms2-dev libxxhash-dev libgl-dev libwayland-dev libvulkan-dev     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*" did not complete successfully: exit code: 100
+------
+ > [4/4] RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     meson git python3-jinja2 libavcodec-dev libavformat-dev libavfilter-dev     libavutil-dev libswresample-dev libswscale-dev libass-dev libva-dev     libpulse-dev liblcms2-dev libxxhash-dev libgl-dev libwayland-dev libvulkan-dev     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*:
+593.9 E: Unable to locate package libavformat-dev
+593.9 E: Unable to locate package libavfilter-dev
+593.9 E: Unable to locate package libavutil-dev
+593.9 E: Unable to locate package libswresample-dev
+593.9 E: Unable to locate package libswscale-dev
+593.9 E: Unable to locate package libass-dev
+593.9 E: Unable to locate package libva-dev
+593.9 E: Unable to locate package liblcms2-dev
+593.9 E: Unable to locate package libxxhash-dev
+593.9 E: Package 'libvulkan-dev' has no installation candidate
+------
+Dockerfile:9
+--------------------
+   8 |     WORKDIR /src
+   9 | >>> RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  10 | >>>     meson git python3-jinja2 libavcodec-dev libavformat-dev libavfilter-dev \
+  11 | >>>     libavutil-dev libswresample-dev libswscale-dev libass-dev libva-dev \
+  12 | >>>     libpulse-dev liblcms2-dev libxxhash-dev libgl-dev libwayland-dev libvulkan-dev \
+  13 | >>>     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*
+  14 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     meson git python3-jinja2 libavcodec-dev libavformat-dev libavfilter-dev     libavutil-dev libswresample-dev libswscale-dev libass-dev libva-dev     libpulse-dev liblcms2-dev libxxhash-dev libgl-dev libwayland-dev libvulkan-dev     && dpkg-query -W > /toolchain-packages.txt && rm -rf /var/lib/apt/lists/*" did not complete successfully: exit code: 100

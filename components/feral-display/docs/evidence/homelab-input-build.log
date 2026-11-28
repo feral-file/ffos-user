@@ -1,0 +1,49 @@
+Nov 17 19:27:15 homelab systemd[928]: Started [systemd-run] /bin/bash -c "set -e; cmake --build build -j3; LD_LIBRARY_PATH=/home/feralfile/ff-player-native-build/build-media/prefix/lib ctest --test-dir build --output-on-failure".
+Nov 17 19:27:15 homelab bash[1744602]: [0/1] Re-running CMake...
+Nov 17 19:27:15 homelab bash[1744603]: -- Configuring done (0.0s)
+Nov 17 19:27:16 homelab bash[1744603]: -- Generating done (0.0s)
+Nov 17 19:27:16 homelab bash[1744603]: -- Build files have been written to: /home/feralfile/ff-player-native-build/build
+Nov 17 19:27:20 homelab bash[1744602]: [1/31] Building CXX object CMakeFiles/ff_core.dir/src/store.cpp.o
+Nov 17 19:27:21 homelab bash[1744602]: [2/31] Building CXX object CMakeFiles/ff_core.dir/src/json.cpp.o
+Nov 17 19:27:25 homelab bash[1744602]: [3/31] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+Nov 17 19:27:25 homelab bash[1744602]: [4/31] Building CXX object CMakeFiles/ff_core.dir/src/server.cpp.o
+Nov 17 19:27:26 homelab bash[1744602]: [5/31] Building CXX object CMakeFiles/ff_core.dir/src/protocol.cpp.o
+Nov 17 19:27:27 homelab bash[1744602]: [6/31] Building CXX object CMakeFiles/ff_core.dir/src/media_kind.cpp.o
+Nov 17 19:27:28 homelab bash[1744602]: [7/31] Building CXX object CMakeFiles/ff_core.dir/src/input.cpp.o
+Nov 17 19:27:29 homelab bash[1744602]: [8/31] Building CXX object CMakeFiles/ff_media_ipc.dir/src/media_ipc.cpp.o
+Nov 17 19:27:29 homelab bash[1744602]: [9/31] Linking CXX static library libff_core.a
+Nov 17 19:27:29 homelab bash[1744602]: [10/31] Building CXX object CMakeFiles/ff-player-core.dir/src/core_main.cpp.o
+Nov 17 19:27:32 homelab bash[1744602]: [11/31] Building CXX object CMakeFiles/server-tests.dir/tests/server_test.cpp.o
+Nov 17 19:27:32 homelab bash[1744602]: [12/31] Linking CXX static library libff_media_ipc.a
+Nov 17 19:27:33 homelab bash[1744602]: [13/31] Building CXX object CMakeFiles/input-tests.dir/tests/input_test.cpp.o
+Nov 17 19:27:35 homelab bash[1744602]: [14/31] Building CXX object CMakeFiles/media-ipc-tests.dir/tests/media_ipc_test.cpp.o
+Nov 17 19:27:36 homelab bash[1744602]: [15/31] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+Nov 17 19:27:37 homelab bash[1744602]: [16/31] Building CXX object CMakeFiles/core-tests.dir/tests/core_test.cpp.o
+Nov 17 19:27:39 homelab bash[1744602]: [17/31] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+Nov 17 19:27:42 homelab bash[1744602]: [18/31] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+Nov 17 19:27:42 homelab bash[1744602]: [19/31] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+Nov 17 19:27:46 homelab bash[1744602]: [20/31] Building CXX object CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o
+Nov 17 19:27:46 homelab bash[1744602]: [21/31] Linking CXX executable ff-player-core
+Nov 17 19:27:46 homelab bash[1744602]: [22/31] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation.cpp.o
+Nov 17 19:27:46 homelab bash[1744602]: [23/31] Linking CXX executable core-tests
+Nov 17 19:27:46 homelab bash[1744602]: [24/31] Linking CXX executable server-tests
+Nov 17 19:27:46 homelab bash[1744602]: [25/31] Linking CXX executable input-tests
+Nov 17 19:27:46 homelab bash[1744602]: [26/31] Linking CXX executable media-ipc-tests
+Nov 17 19:27:47 homelab bash[1744602]: [27/31] Linking CXX executable media-decode-tests
+Nov 17 19:27:47 homelab bash[1744602]: [28/31] Linking CXX executable ff-media-worker
+Nov 17 19:27:48 homelab bash[1744602]: [29/31] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+Nov 17 19:27:49 homelab bash[1744602]: [30/31] Linking CXX executable ff-player-native
+Nov 17 19:27:49 homelab bash[1744592]: Test project /home/feralfile/ff-player-native-build/build
+Nov 17 19:27:49 homelab bash[1744592]:     Start 1: core
+Nov 17 19:27:50 homelab bash[1744592]: 1/5 Test #1: core .............................   Passed    1.01 sec
+Nov 17 19:27:50 homelab bash[1744592]:     Start 2: server
+Nov 17 19:27:50 homelab bash[1744592]: 2/5 Test #2: server ...........................   Passed    0.00 sec
+Nov 17 19:27:50 homelab bash[1744592]:     Start 3: input
+Nov 17 19:27:50 homelab bash[1744592]: 3/5 Test #3: input ............................   Passed    0.00 sec
+Nov 17 19:27:50 homelab bash[1744592]:     Start 4: media-ipc
+Nov 17 19:27:50 homelab bash[1744592]: 4/5 Test #4: media-ipc ........................   Passed    0.00 sec
+Nov 17 19:27:50 homelab bash[1744592]:     Start 5: media-decode
+Nov 17 19:27:53 homelab bash[1744592]: 5/5 Test #5: media-decode .....................   Passed    2.59 sec
+Nov 17 19:27:53 homelab bash[1744592]: 100% tests passed out of 5
+Nov 17 19:27:53 homelab bash[1744592]: Total Test time (real) =   3.61 sec
+Nov 17 19:27:53 homelab systemd[928]: ff-native-input-build.service: Consumed 1min 35.191s CPU time over 37.340s wall clock time, 1.4G memory peak.

@@ -909,7 +909,7 @@ the network.
 
 Outside `legacy`, two more LAN surfaces close:
 - `GET /api/screenshot` answers `403 enrollment_required`. It has no envelope
-  form (it is a raw PNG GET), and the screen can carry pairing material.
+  form (it is a raw PNG GET), and the screen can carry pairing material. An enrolled owner can request the separate `captureScreenshot` command through a signed LAN envelope. Its bounded compositor PNG is returned inside the encrypted reply (see `docs/api-design.md`).
 - `/api/status` and `/api/v2/status` serve `topic_id:""` even before the
   relayer claim lands: an owner enrolls first and claims second, and in
   between the topic would still be a relayer bearer credential for any LAN

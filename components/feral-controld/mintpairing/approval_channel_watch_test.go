@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+
 	minter "github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,8 +40,7 @@ func startPendingApproval(t *testing.T, ch *fakeBrokerChannel, sessions *countin
 		},
 		&fakeBrokerStarter{channel: ch},
 		sessions,
-		relayerClient,
-		&fakeCDP{},
+		relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -254,7 +255,7 @@ func (c *cancelledGonePollChannel) PollMintRequest(ctx context.Context, _ int64)
 }
 
 func TestApprovalWait_GoneAnswerRacingStopIsKept(t *testing.T) {
-	s := newService(Options{Enabled: true, ChannelWatchInterval: time.Millisecond}, nil, nil, nil, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	s := newService(Options{Enabled: true, ChannelWatchInterval: time.Millisecond}, nil, nil, nil, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop()).(*service)
 	ch := &cancelledGonePollChannel{fakeBrokerChannel: &fakeBrokerChannel{}, polling: make(chan struct{})}
 
 	watch := s.watchChannelWhileApproving(context.Background(), ch, 0)
@@ -280,7 +281,7 @@ func goneApprovalFixture(t *testing.T) (*service, *pendingApproval, *fakeRelayer
 	sessions := &countingSessionCreator{created: make(chan struct{}, 1)}
 	s := newService(
 		Options{Enabled: true, ApprovalTimeout: time.Minute, PollInterval: time.Millisecond},
-		nil, sessions, relayerClient, nil, wrapper.NewJSON(), zap.NewNop(),
+		nil, sessions, relayerClient, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop(),
 	).(*service)
 	pending := &pendingApproval{
 		approvalRequestID: "mpa_1",

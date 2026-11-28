@@ -94,7 +94,6 @@ systemctl --user start --no-block "enable-wake-on-lan.service" || echo "WARN: en
 systemctl --user start "feral-sys-monitord.service" || echo "WARN: feral-sys-monitord.service failed to start"
 systemctl --user start "feral-vmagent.service" || echo "WARN: feral-vmagent.service failed to start"
 systemctl --user start "display-restore.service" || echo "WARN: display-restore.service failed to start"
-systemctl --user start "feral-player.service" || echo "WARN: feral-player.service failed to start"
 systemctl --user start "chromium-kiosk.service" || echo "WARN: chromium-kiosk.service failed to start"
 systemctl --user start "ota-update-success-check.service" || echo "WARN: ota-update-success-check.service failed to start"
 

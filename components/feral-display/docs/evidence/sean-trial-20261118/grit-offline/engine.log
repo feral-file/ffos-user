@@ -1,0 +1,100 @@
+[2:2:1118/130920.694088:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:208] open /home/feralfile/.config/google-chrome-for-testing/Crash Reports/settings.dat: Read-only file system (30)
+[2:2:1118/130920.694622:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:208] open /home/feralfile/.config/google-chrome-for-testing/Crash Reports/settings.dat: Read-only file system (30)
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.924: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.925: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.939: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.939: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.940: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.974: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.975: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+
+(chrome:2): dconf-CRITICAL **: 13:09:20.976: unable to create file '/run/user/1000/dconf/user': Read-only file system.  dconf will not work properly.
+[2:45:1118/130920.991102:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:208] open /home/feralfile/.config/google-chrome-for-testing/Crash Reports/settings.dat: Read-only file system (30)
+[53:53:1118/130921.250234:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+[2:2:1118/130921.567560:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.systemd1.Manager.StartTransientUnit: object_path= /org/freedesktop/systemd1: org.freedesktop.DBus.Error.InvalidArgs: Process 2 is a kernel thread, refusing.
+[2:2:1118/130921.655191:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+[2:2:1118/130922.052947:ERROR:chrome/browser/component_updater/soda_component_installer.cc:101] On demand update of the SODA component failed with error: 5
+[2:2:1118/130922.055239:ERROR:chrome/browser/component_updater/soda_language_pack_component_installer.cc:87] On demand update of the SODA language component failed with error: 5

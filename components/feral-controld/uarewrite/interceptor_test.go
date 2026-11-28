@@ -180,7 +180,7 @@ func TestProcessPausedSlashesBareCIDSubresource(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?v=2", got[0]["url"], "unlisted host: same host, slashed")
 	assert.NotContains(t, got[0], "headers")
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidV0+"/?v=2", got[1]["url"], "retired host: the replacement gateway, slashed")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?v=2", got[1]["url"], "retired host: the replacement gateway, slashed")
 	assert.NotContains(t, got[1], "headers")
 }
 
@@ -501,19 +501,12 @@ func TestProcessPausedTimeoutRetiresSession(t *testing.T) {
 		t.Fatal("timed out waiting for the wedged session to be closed")
 	}
 
-	// recoverFrom's "go i.tryAttach(...)" accelerator is still running on
-	// its own goroutine at this point — retire() (which closed the session
-	// above) runs before the spawn, not after. Returning without waiting
-	// for it lets that goroutine log through zaptest.NewLogger(t) after
-	// this test has already completed, which zaptest treats as a fatal
-	// race (it writes through *testing.T, which is not safe once the test
-	// has returned). tryAttach's deferred releaseAttach runs strictly
-	// after its own log call, so polling attaching back to false is a
-	// direct wait on "the goroutine's logging is done", not a sleep guess.
+	// Before the recovery goroutine runs, attaching is also false. Wait for
+	// its claim and release so it finishes logging before the test returns.
 	require.Eventually(t, func() bool {
 		i.redialMu.Lock()
 		defer i.redialMu.Unlock()
-		return !i.attaching
+		return !i.lastRedial.IsZero() && !i.attaching
 	}, 2*time.Second, time.Millisecond, "tryAttach's accelerator goroutine must finish before the test returns")
 
 	i.mu.Lock()
@@ -863,7 +856,7 @@ func TestProcessPausedRedirectsRetiredGatewayCIDPath(t *testing.T) {
 		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150", "Accept": "image/*"}, nil))
 
 	assert.Equal(t, "req-1", got["requestId"])
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cid+"/sunrise.gif?display_mode=fit", got["url"])
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cid+"/sunrise.gif?display_mode=fit", got["url"])
 	assert.NotContains(t, got, "headers",
 		"a redirected request must keep Chromium's own headers")
 }
@@ -936,7 +929,7 @@ func TestProcessPausedAppliesTheGatewayOverride(t *testing.T) {
 	assert.Equal(t, "https://ar-io.dev/"+tx+"/other.js", got[1]["url"], "a subresource follows its document: the Referer reaches the lookup (header name as the renderer sent it)")
 	assert.NotContains(t, got[2], "url", "no override and no policy match: continued untouched")
 	assert.NotContains(t, got[2], "headers")
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[3]["url"], "the static policy still applies when the override has no answer")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[3]["url"], "the static policy still applies when the override has no answer")
 	assert.Equal(t, []string{"", "https://arweave.net/" + tx + "/index.html", "", ""}, referrers)
 }
 

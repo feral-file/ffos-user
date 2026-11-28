@@ -20,6 +20,7 @@ type HTTPClient interface {
 	NewRequest(method string, url string, body go_io.Reader) (*go_http.Request, error)
 	Do(req *go_http.Request) (*go_http.Response, error)
 	Get(url string) (*go_http.Response, error)
+	GetContext(ctx context.Context, url string) (*go_http.Response, error)
 	Post(url string, contentType string, body go_io.Reader) (*go_http.Response, error)
 }
 
@@ -66,6 +67,15 @@ func (h httpClient) Do(req *go_http.Request) (*go_http.Response, error) {
 
 func (h httpClient) Get(url string) (*go_http.Response, error) {
 	return h.client.Get(url)
+}
+
+// GetContext carries operation deadlines through dialing and body reads.
+func (h httpClient) GetContext(ctx context.Context, url string) (*go_http.Response, error) {
+	req, err := go_http.NewRequestWithContext(ctx, go_http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return h.client.Do(req)
 }
 
 func (h httpClient) Post(url string, contentType string, body go_io.Reader) (*go_http.Response, error) {

@@ -368,6 +368,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	// delivered with no handler to answer it — an unanswered pause hangs
 	// that request until the capture window closes.
 	guard := c.attachSourceGuard(ctx, session)
+	guard.workerScript = tracker.recordWorkerScript
 
 	if _, err := session.Send(ctx, "Network.enable", map[string]interface{}{}); err != nil {
 		return nil, fmt.Errorf("offline cache: Network.enable: %w", err)
@@ -424,6 +425,16 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	finalizeCtx, finalizeCancel := context.WithTimeout(ctx, captureFinalizeWindowDefault)
 	defer finalizeCancel()
 	resources, coverage := c.resolveResources(ctx, finalizeCtx, tracker, c.newDiskBudget())
+	// Entry bytes do not establish coverage of requests a paused child would
+	// have made. Keep the snapshot usable while reporting that uncertainty.
+	if count := guard.childSetupFailures.Load(); count > 0 {
+		coverage.Complete = false
+		reason := fmt.Sprintf("unobserved_child_targets:%d", count)
+		if coverage.Reason != "" {
+			coverage.Reason += "; "
+		}
+		coverage.Reason += reason
+	}
 
 	// resetTargetState above only reaches item.Source's OWN origin,
 	// which cannot cover an origin this navigation redirects to or
@@ -612,6 +623,7 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 
 	result := make([]Resource, 0, len(keys))
 	var failureReasons []string
+	completedWorkerScripts := make(map[string]bool)
 	for _, key := range keys {
 		res, ok := resources[key]
 		if !ok {
@@ -635,7 +647,9 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 		// transfer bounds itself instead — see resourceTransfer.
 		if phaseCtx.Err() != nil {
 			failureReasons = append(failureReasons, fmt.Sprintf("finalization_deadline_exceeded:%s", res.URL))
-			result = append(result, res)
+			if !res.pendingWorkerScript {
+				result = append(result, res)
+			}
 			continue
 		}
 		method := res.EffectiveMethod()
@@ -645,7 +659,7 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 			// RedirectTo/Status alone (see replay.go's onRequestPaused),
 			// and the redirect itself was only ever observed, never
 			// re-issued, so method safety does not apply here.
-		case res.Status < go_http.StatusOK || res.Status >= go_http.StatusMultipleChoices:
+		case !res.pendingWorkerScript && (res.Status < go_http.StatusOK || res.Status >= go_http.StatusMultipleChoices):
 			// A non-2xx, non-redirect response (4xx/5xx, or a 304 the
 			// page's own request observed via HTTP cache revalidation)
 			// has no faithful replay short of storing the exact error
@@ -705,16 +719,24 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 				// unfetched and reported incomplete, same shape as
 				// fetch_failed, so replay treats it as an honest miss.
 				failureReasons = append(failureReasons, fmt.Sprintf("over_disk_budget:%s", res.URL))
-				result = append(result, res)
+				if !res.pendingWorkerScript {
+					result = append(result, res)
+				}
 				continue
 			}
-			hash, size, fetchErr := c.fetchAndStoreBody(ctx, res.URL, method, capBytes)
+			hash, size, fetchErr := c.fetchAndStoreBody(ctx, &res, method, capBytes)
 			if fetchErr != nil {
 				failureReasons = append(failureReasons, fmt.Sprintf("fetch_failed:%s", res.URL))
 			} else {
 				res.SHA256 = hash
 				budget.record(size)
 			}
+		}
+		if res.pendingWorkerScript {
+			if res.SHA256 == "" {
+				continue
+			}
+			completedWorkerScripts[res.URL] = true
 		}
 		result = append(result, res)
 	}
@@ -730,6 +752,9 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 	// resource offline playback does not actually have. Counting it as a
 	// failure here is what keeps that promise honest.
 	for _, u := range pendingURLs {
+		if completedWorkerScripts[u] {
+			continue
+		}
 		failureReasons = append(failureReasons, fmt.Sprintf("unresolved_at_deadline:%s", u))
 	}
 
@@ -758,7 +783,8 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 // on-disk size alongside its hash so the caller can charge the budget
 // for the real bytes written, not the (possibly much larger) reserved
 // cap.
-func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, capBytes int64) (string, int64, error) {
+func (c *capturer) fetchAndStoreBody(ctx context.Context, resource *Resource, method string, capBytes int64) (string, int64, error) {
+	url := resource.URL
 	req, err := c.fetchClient.NewRequest(method, url, nil)
 	if err != nil {
 		return "", 0, err
@@ -778,11 +804,25 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, ca
 	if resp.StatusCode < go_http.StatusOK || resp.StatusCode >= go_http.StatusMultipleChoices {
 		return "", 0, fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode, url)
 	}
+	if resource.pendingWorkerScript {
+		resource.captureBodyHeaders(resp)
+		if resource.BrowserPolicyVersion != 2 {
+			return "", 0, fmt.Errorf("worker script response cannot be replayed at its original URL")
+		}
+		resource.Status = resp.StatusCode
+		resource.ContentType = resp.Header.Get("Content-Type")
+		if len(resource.ContentType) > MaxCaptureResourceMetaBytes {
+			return "", 0, fmt.Errorf("worker script content type too long")
+		}
+	}
 	// resp.Body is streamed straight into the store (hashed while it is
 	// copied to disk, never buffered whole in memory first).
 	hash, err := c.store.WriteBlob(transfer.Body(resp.Body), capBytes)
 	if err != nil {
 		return "", 0, err
+	}
+	if resource.BrowserPolicyVersion == 2 && !resource.pendingWorkerScript {
+		resource.captureBodyHeaders(resp)
 	}
 	size, err := c.store.BlobSize(hash)
 	if err != nil {
@@ -846,6 +886,7 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 				Status:     evt.RedirectResponse.Status,
 				RedirectTo: evt.Request.URL,
 				Headers:    filterReplayableHeaders(evt.RedirectResponse.Headers),
+				RawHeaders: evt.RedirectResponse.Headers,
 				Method:     redirectMethod,
 			})
 		}
@@ -883,6 +924,7 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 			ContentType:        headerValue(evt.Response.Headers, "Content-Type"),
 			SniffedContentType: evt.Response.MimeType,
 			Headers:            filterReplayableHeaders(evt.Response.Headers),
+			RawHeaders:         evt.Response.Headers,
 			Method:             method,
 		})
 		tracker.resolveRequest(evt.RequestID)
@@ -1021,7 +1063,32 @@ type observedResponse struct {
 	SniffedContentType string
 	RedirectTo         string
 	Headers            map[string]string
+	RawHeaders         map[string]string
 	Method             string
+}
+
+// A dedicated worker remains paused when Chromium cannot guard its target.
+// Its entry URL can still be acquired through the normal guarded download
+// client. Keep a placeholder only until the browser provides a real response.
+func (t *captureTracker) recordWorkerScript(url string) {
+	if len(url) > MaxCaptureResourceURLBytes {
+		return
+	}
+	if origin, err := requestOrigin(url); err != nil || (!strings.HasPrefix(origin, "https://") && !strings.HasPrefix(origin, "http://")) {
+		return
+	}
+	key := resourceKey("GET", url)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, exists := t.resources[key]; exists {
+		return
+	}
+	if len(t.resources) >= MaxCaptureResources {
+		t.overflow++
+		return
+	}
+	t.order = append(t.order, key)
+	t.resources[key] = Resource{URL: url, pendingWorkerScript: true}
 }
 
 func (t *captureTracker) recordResource(obs observedResponse) {
@@ -1099,7 +1166,15 @@ func (t *captureTracker) recordResource(obs observedResponse) {
 	if normalized := strings.ToUpper(method); normalized != "" && normalized != go_http.MethodGet {
 		storedMethod = normalized
 	}
+	fields, supported := browserReplayHeaders(obs.RawHeaders)
+	policyVersion := 0
+	if obs.RawHeaders != nil && supported {
+		policyVersion = 2
+	} else if obs.RawHeaders != nil {
+		t.overflow++
+	}
 	t.resources[key] = Resource{
+		BrowserPolicyVersion: policyVersion, HeaderFields: fields,
 		URL:                url,
 		Status:             status,
 		ContentType:        contentType,
@@ -1327,8 +1402,9 @@ func (c *capturer) attachSourceGuardWithRewrite(ctx context.Context, session CDP
 // child target: one concurrency bound across ALL of them, so a page
 // cannot multiply its decision budget by spawning iframes.
 type captureGuard struct {
-	c     *capturer
-	slots chan struct{}
+	workerScript func(string) // Set before child auto-attach, only for artwork downloads.
+	c            *capturer
+	slots        chan struct{}
 	// rewrite, when set (the media-health L1 render only; nil for every
 	// capture), is the kiosk's gateway policy applied to each paused
 	// request BEFORE the guard judges it: the URL to continue with (or
@@ -1558,6 +1634,7 @@ func (c *capturer) armAutoAttachHandler(ctx context.Context, root, session CDPSe
 			// PAUSED and it never runs. Dropping the event is therefore
 			// safe in the direction that matters — the opposite of
 			// admitting an unguarded target.
+			guard.childSetupFailures.Add(1)
 			guard.targetSaturatedOnce.Do(func() {
 				c.logger.Warn("offline cache capture: child-target setup saturated; further targets left paused for this capture",
 					zap.Int("concurrency", captureTargetSetupConcurrency))
@@ -1618,6 +1695,9 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 		// exact trade this fail-closed branch refuses.
 		// TestCapturer_RealBrowser_LoopbackRequestsNeverLeaveTheBrowser
 		// pins it against a real browser.
+		if guard.workerScript != nil && evt.TargetInfo.Type == "worker" {
+			guard.workerScript(evt.TargetInfo.URL)
+		}
 		guard.childSetupFailures.Add(1)
 		c.logger.Warn("offline cache capture: Fetch.enable on child target failed; leaving it paused",
 			zap.String("session_id", evt.SessionID),
@@ -1644,6 +1724,7 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 	}
 
 	if _, err := child.Send(ctx, "Runtime.runIfWaitingForDebugger", map[string]interface{}{}); err != nil {
+		guard.childSetupFailures.Add(1)
 		c.logger.Debug("offline cache capture: resuming child target failed",
 			zap.String("session_id", evt.SessionID), zap.Error(err))
 	}

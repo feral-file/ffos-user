@@ -1,0 +1,3 @@
+{"file":"docs\/evidence\/homelab-setup\/00-softap_qr.png","qr":["WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"]}
+{"file":"docs\/evidence\/homelab-setup\/01-softap_qr.png","qr":["http:\/\/10.42.0.1\/"]}
+{"file":"docs\/evidence\/homelab-setup\/02-claim_qr.png","qr":["https:\/\/example.org\/claim?token=SYNTHETIC-TEST"]}

@@ -50,7 +50,7 @@ func TestSystemdMonitor_ServiceFailedIncident_OneForCascade(t *testing.T) {
 	metrics := collector.Metrics()
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="chromium-kiosk.service"} 1`, 1)
 }
 
 func TestSystemdMonitor_ServiceFailedIncident_ReopensAfterRecovery(t *testing.T) {
@@ -73,7 +73,7 @@ func TestSystemdMonitor_ServiceFailedIncident_ReopensAfterRecovery(t *testing.T)
 	metrics := collector.Metrics()
 	assertMetricCount(t, metrics, "service_failed_incident 1", 2)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="chromium-kiosk.service"} 1`, 1)
 }
 
 func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
@@ -88,7 +88,7 @@ func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="chromium-kiosk.service"} 1`, 1)
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
 
@@ -125,7 +125,7 @@ func TestSystemdMonitor_InactiveServiceLogLevels(t *testing.T) {
 
 	assertInactiveLogLevels(t, logs, map[string]zapcore.Level{
 		"feral-controld.service":     zapcore.ErrorLevel,
-		"feral-player.service":       zapcore.ErrorLevel,
+		"chromium-kiosk.service":     zapcore.ErrorLevel,
 		"feral-sys-monitord.service": zapcore.ErrorLevel,
 	})
 }
@@ -144,7 +144,7 @@ func TestSystemdMonitor_InactivePlayerSysMonitord_NoFailureMetric(t *testing.T) 
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 0)
+	assertMetricCount(t, metrics, `ff_service_failed{service="chromium-kiosk.service"} 1`, 0)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-sys-monitord.service"} 1`, 0)
 	assertMetricCount(t, metrics, "service_failed_incident 1", 0)
 }
@@ -222,7 +222,7 @@ fi
 
 state="active"
 case "$unit" in
-  "feral-player.service")
+  "chromium-kiosk.service")
     state="${FF_TEST_PLAYER_STATE:-active}"
     ;;
   "feral-controld.service")

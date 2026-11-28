@@ -11,7 +11,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -77,35 +76,36 @@ func (f *fakeWS) SendAll(payload any) error {
 
 func (f *fakeWS) Close() {}
 
-type fakeCDP struct {
-	pageNavigationURL      string
-	pageNavigationURLError error
-	noLogSendCalls         int
-	noLogSendResult        any
-	noLogSendErr           error
-	// notInitialized inverts Initialized() so the zero value reports a connected client
-	// (the common case for these tests); set it to exercise the CDP-absent skip path.
-	notInitialized bool
+// The poller consumes controller DTOs, not CDP. Literal legacy reply bodies
+// below retain the external notification/annotation regression coverage.
+type fakePlayer struct {
+	calls int
+	reply any
+	err   error
 }
 
-func (f *fakeCDP) Init(context.Context) error { return nil }
-
-func (f *fakeCDP) Start(context.Context, func()) {}
-
-func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
-
-func (f *fakeCDP) NoLogSend(string, map[string]interface{}) (interface{}, error) {
-	f.noLogSendCalls++
-	return f.noLogSendResult, f.noLogSendErr
+func (f *fakePlayer) FetchPlayerStatus(context.Context) (*PlayerStatus, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.reply == nil {
+		return nil, nil
+	}
+	envelope, ok := f.reply.(map[string]interface{})
+	if !ok {
+		return nil, errors.New("invalid test fixture")
+	}
+	raw, err := json.Marshal(envelope["message"])
+	if err != nil {
+		return nil, err
+	}
+	var result PlayerStatus
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
-
-func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
-	return f.pageNavigationURL, f.pageNavigationURLError
-}
-
-func (f *fakeCDP) Close() {}
-
-func (f *fakeCDP) Initialized() bool { return !f.notInitialized }
 
 type fakeDeviceStatus struct {
 	status *DeviceStatusResponse
@@ -218,15 +218,13 @@ func TestPollDeviceStatus_SendsDeviceStatus(t *testing.T) {
 	}
 }
 
-func TestPollPlayerStatus_SkipsWhenNotOnPlayerPage(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: "file:///opt/feral/ui/launcher/index.html?step=qr",
-	}
+func TestPollPlayerStatus_ReadsNativeSource(t *testing.T) {
+	mockPlayer := &fakePlayer{}
 	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
 	mockWS := &fakeWS{}
 
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),
@@ -237,126 +235,15 @@ func TestPollPlayerStatus_SkipsWhenNotOnPlayerPage(t *testing.T) {
 
 	p.pollPlayerStatus(context.Background())
 
-	if mockWS.sendAllCalls != 0 {
-		t.Fatalf("expected no websocket send while launcher is shown, got %d", mockWS.sendAllCalls)
-	}
-	if mockRelayer.sendCalls != 0 {
-		t.Fatalf("expected no relayer send while launcher is shown, got %d", mockRelayer.sendCalls)
-	}
-}
-
-func TestPollPlayerStatus_SkipsWhenNotOnPlayerPageAdvancesPlaybackMetrics(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: "file:///opt/feral/ui/launcher/index.html?step=qr",
-	}
-	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
-	mockWS := &fakeWS{}
-
-	p := &poller{
-		cdp:                       mockCDP,
-		relayer:                   mockRelayer,
-		ws:                        mockWS,
-		logger:                    zap.NewNop(),
-		lastPlaybackSampleAt:      time.Now().Add(-2 * time.Second),
-		lastIsPlaying:             true,
-		playbackSampleInitialized: true,
-		lastRelayerStatusHashes:   make(map[relayer.NotificationType]string),
-		lastWSStatusHashes:        make(map[relayer.NotificationType]string),
-	}
-
-	before := counterValue(artPlaybackDurationSecondsTotal)
-	p.pollPlayerStatus(context.Background())
-	after := counterValue(artPlaybackDurationSecondsTotal)
-
-	if after <= before {
-		t.Fatalf("expected playback duration counter to advance when skipping launcher page, before=%v after=%v", before, after)
-	}
-}
-
-func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURLError: errors.New("target unavailable"),
-	}
-	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
-	mockWS := &fakeWS{}
-
-	p := &poller{
-		cdp:                     mockCDP,
-		relayer:                 mockRelayer,
-		ws:                      mockWS,
-		json:                    wrapper.NewJSON(),
-		logger:                  zap.NewNop(),
-		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
-		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
-	}
-
-	p.pollPlayerStatus(context.Background())
-
-	if mockCDP.noLogSendCalls != 1 {
-		t.Fatalf("expected checkStatus to run when page URL cannot be read, got %d calls", mockCDP.noLogSendCalls)
-	}
-}
-
-func TestPollPlayerStatus_SkipsWhenCDPNotConnected(t *testing.T) {
-	// Headless / mid-reconnect: CDP reports not connected. The poll must skip entirely
-	// (no checkStatus send, no error notification) so logs are not flooded.
-	mockCDP := &fakeCDP{
-		notInitialized:    true,
-		pageNavigationURL: constants.WEBAPP_URL,
-	}
-	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
-	mockWS := &fakeWS{}
-
-	p := &poller{
-		cdp:                     mockCDP,
-		relayer:                 mockRelayer,
-		ws:                      mockWS,
-		logger:                  zap.NewNop(),
-		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
-		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
-	}
-
-	p.pollPlayerStatus(context.Background())
-
-	if mockCDP.noLogSendCalls != 0 {
-		t.Fatalf("expected no checkStatus send while CDP is disconnected, got %d", mockCDP.noLogSendCalls)
-	}
-	if mockWS.sendAllCalls != 0 {
-		t.Fatalf("expected no websocket notification while CDP is disconnected, got %d", mockWS.sendAllCalls)
-	}
-	if mockRelayer.sendCalls != 0 {
-		t.Fatalf("expected no relayer notification while CDP is disconnected, got %d", mockRelayer.sendCalls)
-	}
-}
-
-func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-	}
-	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
-	mockWS := &fakeWS{}
-
-	p := &poller{
-		cdp:                     mockCDP,
-		relayer:                 mockRelayer,
-		ws:                      mockWS,
-		json:                    wrapper.NewJSON(),
-		logger:                  zap.NewNop(),
-		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
-		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
-	}
-
-	p.pollPlayerStatus(context.Background())
-
-	if mockCDP.noLogSendCalls != 1 {
-		t.Fatalf("expected one checkStatus call on the player page, got %d", mockCDP.noLogSendCalls)
+	if mockPlayer.calls != 1 {
+		t.Fatalf("expected one checkStatus call on the player page, got %d", mockPlayer.calls)
 	}
 }
 
 func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-		noLogSendResult: map[string]interface{}{
+	mockPlayer := &fakePlayer{
+
+		reply: map[string]interface{}{
 			"message": map[string]interface{}{
 				"ok":           true,
 				"castCommand":  "displayPlaylist",
@@ -370,7 +257,7 @@ func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
 	mockWS := &fakeWS{}
 
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),
@@ -406,9 +293,9 @@ func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
 // leaks onto the relayer/websocket-facing player_status payload, even though
 // it is reported to the stamp observer.
 func TestPollPlayerStatus_StripsStampFromNotificationPayload(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-		noLogSendResult: map[string]interface{}{
+	mockPlayer := &fakePlayer{
+
+		reply: map[string]interface{}{
 			"message": map[string]interface{}{
 				"ok":    true,
 				"stamp": "42-abc123",
@@ -419,7 +306,7 @@ func TestPollPlayerStatus_StripsStampFromNotificationPayload(t *testing.T) {
 	mockWS := &fakeWS{}
 
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),
@@ -450,9 +337,9 @@ func TestPollPlayerStatus_StripsStampFromNotificationPayload(t *testing.T) {
 // carrier: an observed stamp rides the existing checkStatus round-trip and is
 // reported to the wired observer.
 func TestPollPlayerStatus_ReportsStampToObserver(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-		noLogSendResult: map[string]interface{}{
+	mockPlayer := &fakePlayer{
+
+		reply: map[string]interface{}{
 			"message": map[string]interface{}{
 				"ok":    true,
 				"stamp": "42-abc123",
@@ -465,7 +352,7 @@ func TestPollPlayerStatus_ReportsStampToObserver(t *testing.T) {
 	var observed []string
 	var observedPresent []bool
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),
@@ -495,9 +382,9 @@ func TestPollPlayerStatus_ReportsStampToObserver(t *testing.T) {
 // distinguish "old player, source unavailable" from "new player whose
 // document genuinely carries no stamp yet".
 func TestPollPlayerStatus_ReportsAbsentStampWhenOmitted(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-		noLogSendResult: map[string]interface{}{
+	mockPlayer := &fakePlayer{
+
+		reply: map[string]interface{}{
 			"message": map[string]interface{}{
 				"ok": true,
 			},
@@ -509,7 +396,7 @@ func TestPollPlayerStatus_ReportsAbsentStampWhenOmitted(t *testing.T) {
 	var observed []string
 	var observedPresent []bool
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),
@@ -533,7 +420,7 @@ func TestPollPlayerStatus_ReportsAbsentStampWhenOmitted(t *testing.T) {
 }
 
 func TestSetStampObserver_Wires(t *testing.T) {
-	p := NewPoller(&fakeCDP{}, &fakeRelayer{}, &fakeWS{}, nil, nil, wrapper.NewJSON(), zap.NewNop())
+	p := NewPoller(&fakePlayer{}, &fakeRelayer{}, &fakeWS{}, nil, nil, wrapper.NewJSON(), zap.NewNop())
 	called := false
 	p.SetStampObserver(func(string, bool) { called = true })
 	// Reach into the concrete type only to confirm wiring; behavior is
@@ -551,66 +438,14 @@ func TestSetStampObserver_Wires(t *testing.T) {
 	}
 }
 
-func TestPollRound_ClearsDedupHashesWhenCDPReconnects(t *testing.T) {
-	fCDP := &fakeCDP{notInitialized: true}
-	p := &poller{
-		cdp:     fCDP,
-		relayer: &fakeRelayer{}, // never connected: device/DDC polls skip themselves
-		ws:      &fakeWS{},
-		logger:  zap.NewNop(),
-		lastRelayerStatusHashes: map[relayer.NotificationType]string{
-			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
-		},
-		lastWSStatusHashes: map[relayer.NotificationType]string{
-			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
-		},
-	}
-	ctx := context.Background()
-
-	// CDP still down: the caches describe the last state actually pushed and must
-	// survive so the down-window itself does not force re-sends.
-	p.pollRound(ctx)
-	if len(p.lastRelayerStatusHashes) != 1 || len(p.lastWSStatusHashes) != 1 {
-		t.Fatalf("expected dedup hashes to survive while CDP stays down, got %d/%d entries",
-			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
-	}
-
-	// CDP (re)connects: a restarted Chromium reloaded the web app from defaults, so
-	// "unchanged since last push" no longer proves clients have the state — both
-	// caches must be dropped for one fresh push (the old PartOf= design got this by
-	// restarting controld).
-	fCDP.notInitialized = false
-	p.pollRound(ctx)
-	if len(p.lastRelayerStatusHashes) != 0 || len(p.lastWSStatusHashes) != 0 {
-		t.Fatalf("expected dedup hashes cleared on CDP reconnect, got %d/%d entries",
-			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
-	}
-
-	// Steady state after the reconnect tick: no further clearing churn.
-	p.lastWSStatusHashes[relayer.NOTIFICATION_TYPE_PLAYER_STATUS] = "fresh"
-	p.pollRound(ctx)
-	if len(p.lastWSStatusHashes) != 1 {
-		t.Fatalf("expected dedup hashes kept while CDP stays connected, got %d entries",
-			len(p.lastWSStatusHashes))
-	}
-}
-
 // fakePanelDDC captures the context for deadline inspection.
 type fakePanelDDC struct {
-	collectCtx chan context.Context
-	status     *ddc.DdcPanelStatus
-	err        error
-	// noPoll simulates the availability tracker's "unsupported" verdict.
-	noPoll bool
-	// shouldPollCalls counts ShouldPoll invocations; the real implementation
-	// refreshes the display fingerprint as a side effect, so the poller must
-	// call it every round even when the no-display gate skips the poll.
+	collectCtx      chan context.Context
+	status          *ddc.DdcPanelStatus
+	err             error
+	noPoll          bool
 	shouldPollCalls int
-	// shouldPollSeq scripts individual ShouldPoll answers (consumed in order,
-	// then falling back to !noPoll) so a single pollDDCStatus call can see the
-	// gate open and the post-collect verdict still closed, the way a failed
-	// reprobe of an unsupported panel does.
-	shouldPollSeq []bool
+	shouldPollSeq   []bool
 }
 
 func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {

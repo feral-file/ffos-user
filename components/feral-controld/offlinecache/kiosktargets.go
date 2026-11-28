@@ -84,6 +84,7 @@ type targetAttachedEvent struct {
 	SessionID  string `json:"sessionId"`
 	TargetInfo struct {
 		TargetID string `json:"targetId"`
+		URL      string `json:"url"`
 		Type     string `json:"type"`
 	} `json:"targetInfo"`
 }

@@ -439,7 +439,11 @@ func (d *downloader) start(ctx context.Context) error {
 		// process already makes by design (it exists specifically to
 		// navigate to and execute untrusted third-party artwork code).
 		"--use-gl=angle",
-		"--use-angle=swiftshader-webgl",
+		// WebGPU-gated works start their module workers only after acquiring
+		// an adapter. Keep both ANGLE and Dawn on the CPU during discovery.
+		"--use-angle=swiftshader",
+		"--use-vulkan=swiftshader",
+		"--enable-unsafe-webgpu",
 		"--enable-unsafe-swiftshader",
 		// Matches the kiosk's autoplay policy (start-kiosk.sh). An
 		// artwork that only requests further assets after a video/audio

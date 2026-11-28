@@ -1,0 +1,55 @@
+{
+  "startedAt": "2026-11-18T02:26:52.339Z",
+  "checks": [
+    {
+      "name": "exif-rotate-6",
+      "occurrence": "32e3c424-cb13-4a8d-a928-11d8039351a7",
+      "observed": {
+        "size": [
+          20,
+          40
+        ],
+        "complete": true,
+        "fit": "contain",
+        "width": 3840,
+        "height": 2160
+      }
+    },
+    {
+      "name": "animated-gif",
+      "occurrence": "480b1315-e1c0-4c2c-b7a6-301eccee95fa",
+      "observed": {
+        "size": [
+          40,
+          20
+        ],
+        "complete": true,
+        "fit": "contain",
+        "width": 3840,
+        "height": 2160
+      }
+    },
+    {
+      "name": "alpha-png",
+      "occurrence": "b71a0646-d68d-42c9-a19e-fa4663e0a36c",
+      "observed": {
+        "size": [
+          40,
+          20
+        ],
+        "complete": true,
+        "fit": "contain",
+        "width": 3840,
+        "height": 2160
+      }
+    }
+  ],
+  "result": "passed",
+  "finishedAt": "2026-11-18T02:26:57.547Z",
+  "pixelChecks": [
+    "EXIF 6: red top, blue bottom, pillarbox",
+    "GIF: both frames observed",
+    "PNG: half-alpha blue over black; letterbox"
+  ],
+  "physicalOutputVerified": false
+}

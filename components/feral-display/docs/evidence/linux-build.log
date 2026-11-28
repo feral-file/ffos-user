@@ -1,0 +1,4 @@
+[1/4] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+[2/4] Linking CXX executable media-decode-tests
+[3/4] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+[4/4] Linking CXX executable ff-media-worker

@@ -1,7 +1,4 @@
 {
-  "cdp": {
-    "endpoint": "http://localhost:9222"
-  },
   "vmagent": {
     "url": "http://0.0.0.0:9431/api/v1/import/prometheus"
   }

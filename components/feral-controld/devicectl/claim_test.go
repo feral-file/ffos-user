@@ -1131,7 +1131,7 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 		Times(1)
 
 	spy := &narratorSpy{}
-	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}}
 
 	args := []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`)
 
@@ -1165,7 +1165,7 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 		Return(nil, errors.New("player not connected"))
 
 	spy := &narratorSpy{}
-	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}}
 
 	res, err := e.connect(context.Background(), []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
 	require.NoError(t, err)
@@ -1225,7 +1225,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 		},
 	).AnyTimes()
 
-	scheduler := playlistschedule.New(context.Background(), mockCDP, mockClock, func() *time.Location {
+	scheduler := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location {
 		return time.UTC
 	}, zap.NewNop())
 	_ = scheduler.Prepare(&dp1.Playlist{
@@ -1251,7 +1251,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 		logger:        zap.NewNop(),
 		setupNarrator: spy,
 		json:          wrapper.NewJSON(),
-		cdp:           mockCDP,
+		cdp:           mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 	}
 	SetWithPlayerPush(e, scheduler.WithPlayerPush, zap.NewNop())
 

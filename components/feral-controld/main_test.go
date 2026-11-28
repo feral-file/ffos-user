@@ -6,7 +6,6 @@ import (
 	"net/http"
 	stdos "os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -79,7 +78,6 @@ type testSetup struct {
 	mockStateManager *mocks.MockStateManager
 
 	// Mocked components
-	mockCDP          *mocks.MockCDP
 	mockRelayer      *mocks.MockRelayer
 	mockDBus         *mocks.MockDBus
 	mockMediator     *mocks.MockMediator
@@ -117,7 +115,6 @@ func setup(t *testing.T) *testSetup {
 		cancel:           cancel,
 		logger:           l,
 		mockStateManager: mocks.NewMockStateManager(ctrl),
-		mockCDP:          mocks.NewMockCDP(ctrl),
 		mockRelayer:      mocks.NewMockRelayer(ctrl),
 		mockDBus:         mocks.NewMockDBus(ctrl),
 		mockMediator:     mocks.NewMockMediator(ctrl),
@@ -142,9 +139,6 @@ func setup(t *testing.T) *testSetup {
 
 	// Create test config
 	ts.config = &config.Config{
-		CDPConfig: &config.CDPConfig{
-			Endpoint: "http://localhost:9222",
-		},
 		RelayerConfig: &config.RelayerConfig{
 			Endpoint: "wss://test.relay.com",
 			APIKey:   "test-api-key",
@@ -166,7 +160,6 @@ func setup(t *testing.T) *testSetup {
 		ts.mockRandom,
 		ts.mockExec,
 		ts.mockMath,
-		ts.mockCDP,
 		ts.mockRelayer,
 		ts.mockDBus,
 		ts.mockDeviceStatus,
@@ -237,9 +230,6 @@ func TestApp_Run_Success(t *testing.T) {
 
 				// CDP now connects in the background and never gates startup: run() calls
 				// Start (fire-and-forget) and Close on shutdown.
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
-
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
@@ -288,7 +278,6 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockRelayer.EXPECT().Close()
 
 				// Mock OOM recoverer
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 		},
 		{
@@ -326,8 +315,6 @@ func TestApp_Run_Success(t *testing.T) {
 					AnyTimes()
 				ts.mockDBus.EXPECT().Stop().Return(nil).AnyTimes()
 
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
 				ts.mockMediator.EXPECT().Start()
@@ -336,7 +323,6 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Stop()
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 				// The LAN recovery hub still comes up...
 				ts.mockHub.EXPECT().Start()
@@ -399,8 +385,6 @@ func TestApp_Run_Success(t *testing.T) {
 					AnyTimes()
 				ts.mockDBus.EXPECT().Stop().Return(nil).AnyTimes()
 
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
 				ts.mockMediator.EXPECT().Start()
@@ -409,7 +393,6 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Stop()
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
@@ -462,8 +445,6 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
 					AnyTimes()
 
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
 				ts.mockDBus.EXPECT().Start().Return(nil)
@@ -475,7 +456,6 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
@@ -505,8 +485,6 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
 					AnyTimes()
 
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
 				ts.mockDBus.EXPECT().Start().Return(nil)
@@ -518,7 +496,6 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 				// Online...
 				ts.mockDBus.EXPECT().
@@ -548,9 +525,6 @@ func TestApp_Run_Success(t *testing.T) {
 
 				// CDP now connects in the background and never gates startup: run() calls
 				// Start (fire-and-forget) and Close on shutdown.
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
-
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
@@ -575,7 +549,6 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
 				// Mock OOM recoverer
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 				// Mock DBus call
 				ts.mockDBus.EXPECT().
@@ -622,9 +595,6 @@ func expectSuccessfulRunWithoutRelayer(ts *testSetup) {
 
 	// CDP now connects in the background and never gates startup: run() calls
 	// Start (fire-and-forget) and Close on shutdown.
-	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-	ts.mockCDP.EXPECT().Close()
-
 	// Mock Watchdog start and stop
 	ts.mockWatchdog.EXPECT().Start(gomock.Any())
 	ts.mockWatchdog.EXPECT().Stop()
@@ -664,7 +634,6 @@ func expectSuccessfulRunWithoutRelayer(ts *testSetup) {
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
 	// Mock OOM recoverer
-	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 	// Mock DBus call
 	ts.mockDBus.EXPECT().
@@ -679,8 +648,6 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-	ts.mockCDP.EXPECT().Close()
 	ts.mockWatchdog.EXPECT().Start(gomock.Any())
 	ts.mockWatchdog.EXPECT().Stop()
 	ts.mockDBus.EXPECT().Start().Return(nil)
@@ -698,7 +665,6 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 	ts.mockDBus.EXPECT().
 		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 		Return([]interface{}{false}, nil)
@@ -746,8 +712,6 @@ func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-	ts.mockCDP.EXPECT().Close()
 	ts.mockWatchdog.EXPECT().Start(gomock.Any())
 	ts.mockWatchdog.EXPECT().Stop()
 	ts.mockDBus.EXPECT().Start().Return(nil)
@@ -765,7 +729,6 @@ func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
 	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
 	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 	ts.mockDBus.EXPECT().
 		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 		Return([]interface{}{false}, nil)
@@ -811,72 +774,7 @@ func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
 // this test did, and it pinned a resync that could not actually work at this
 // point in the lifecycle (the status fetch it depends on evaluates
 // window.handleCDPRequest against a document that has not hydrated yet).
-func TestApp_Run_OnConnectAttachesOfflineCacheReplay(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
 
-	ts.mockWatchdog.EXPECT().Start(gomock.Any())
-	ts.mockWatchdog.EXPECT().Stop()
-	ts.mockDBus.EXPECT().Start().Return(nil)
-	ts.mockDBus.EXPECT().Stop().Return(nil)
-	ts.mockMediator.EXPECT().Start()
-	ts.mockMediator.EXPECT().Stop()
-	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
-	ts.mockStatusPoller.EXPECT().Stop()
-	ts.mockRefresher.EXPECT().Start()
-	ts.mockRefresher.EXPECT().Stop()
-	ts.mockHub.EXPECT().Start()
-	ts.mockHub.EXPECT().Stop().Return(nil)
-	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
-	ts.mockOS.EXPECT().ReadFile(constants.DEVICE_NAME_FILE).Return(nil, stdos.ErrNotExist)
-	ts.mockOS.EXPECT().IsNotExist(stdos.ErrNotExist).Return(true)
-	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
-	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
-	ts.mockDBus.EXPECT().
-		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
-		Return([]interface{}{false}, nil)
-	ts.mockStateManager.EXPECT().
-		Load(ts.logger).
-		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
-	ts.mockStateManager.EXPECT().
-		ClaimSnapshot().
-		Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
-		AnyTimes()
-	// Relayer.Close is called unconditionally on shutdown regardless of the
-	// connectivity-gate outcome above (see run()'s own doc on why).
-	ts.mockRelayer.EXPECT().Close()
-
-	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
-	mockKioskReplay.EXPECT().AttachOnReconnect(gomock.Any()).Return(nil).Times(1)
-	ts.app.KioskReplay = mockKioskReplay
-	// Deliberately no ForceRefresh expectation: the scope resync moved to the
-	// replay-scope-resync reconciler. ts.mockRefresher is a strict gomock mock,
-	// so an unexpected ForceRefresh here fails the test — which is what pins
-	// the split rather than merely not asserting it.
-
-	var onConnect func()
-	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any()).Do(func(_ context.Context, fn func()) {
-		onConnect = fn
-	})
-	ts.mockCDP.EXPECT().Close()
-
-	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
-	defer cancel()
-
-	err := ts.app.run(testCtx, ts.config)
-	assert.NoError(t, err)
-
-	require.NotNil(t, onConnect, "CDP.Start must be given an onConnect callback")
-	onConnect()
-}
-
-// TestReplayScopeResyncReconciler pins the half of the reconnect resync that
-// moved off the CDP connect callback. Before this split the assertion lived in
-// TestApp_Run_OnConnectAttachesOfflineCacheReplay; without a test here the
-// resync would be entirely uncovered, and a future edit dropping the
-// registration in initializeApp would silently reinstate the up-to-
-// PLAYLIST_REFRESH_INTERVAL replay outage the reconciler exists to prevent.
 func TestReplayScopeResyncReconciler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -893,10 +791,8 @@ func TestReplayScopeResyncReconciler(t *testing.T) {
 // connect force-refreshes status, so without this the regression would be
 // uncovered on both sides of the move.
 //
-// There is deliberately no sibling TestSetupUIResyncReconciler: the other
-// moved producer, setupUIResyncReconciler, takes a concrete *setupui.Service
-// rather than a consumer-owned interface, so there is no seam to assert
-// against without narrowing that parameter first.
+// Setup narration instead observes native host snapshots; its reconnect
+// replay is covered in setupui.
 func TestStatusForceRefreshReconciler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -978,9 +874,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockRelayer.EXPECT().Close()
 
 				// run() must proceed past the relayer failure to the full startup sequence.
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
-
 				// Mock Hub start and stop
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
@@ -1008,7 +901,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
 				// Mock OOM recoverer
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 			wantErr: "",
 		},
@@ -1027,9 +919,6 @@ func TestApp_Run_Errors(t *testing.T) {
 					AnyTimes()
 
 				// CDP connects in the background; run() reaches Start + Close here.
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
-
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
@@ -1077,7 +966,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(false, errors.New("daemon notify failed"))
 
 				// Mock OOM recoverer
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 			wantErr: "", // No error expected
 		},
@@ -1096,9 +984,6 @@ func TestApp_Run_Errors(t *testing.T) {
 					AnyTimes()
 
 				// CDP connects in the background; run() reaches Start + Close here.
-				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-				ts.mockCDP.EXPECT().Close()
-
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
 				ts.mockWatchdog.EXPECT().Stop()
@@ -1146,7 +1031,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
 				// Mock OOM recoverer
-				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 			wantErr: "",
 		},
@@ -1261,7 +1145,6 @@ func TestInitializeApp(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1286,6 +1169,7 @@ func TestInitializeApp(t *testing.T) {
 		nil,
 	)
 
+	t.Cleanup(app.Cancel)
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.NotNil(t, app.Ctx)
@@ -1295,7 +1179,7 @@ func TestInitializeApp(t *testing.T) {
 	// fixes (#296) leaves those artworks permanently unrenderable. A nil
 	// here would mean the fix ships switched off for exactly the fleet that
 	// needs it.
-	assert.NotNil(t, app.UARewrite, "kiosk User-Agent rewrite must default ON with absent config")
+	assert.NotNil(t, app.GatewayPolicy, "kiosk User-Agent rewrite must default ON with absent config")
 
 	// The app context is the daemon-lifetime context handed to long-lived
 	// components (hub, claim flow); Cancel must cancel exactly it, or those
@@ -1313,7 +1197,6 @@ func TestInitializeApp(t *testing.T) {
 		t.Fatal("app.Cancel did not cancel app.Ctx")
 	}
 
-	assert.NotNil(t, app.CDP)
 	assert.NotNil(t, app.Relayer)
 	assert.NotNil(t, app.DBus)
 	assert.NotNil(t, app.Mediator)
@@ -1352,7 +1235,6 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1369,6 +1251,7 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		nil,
 	)
 
+	t.Cleanup(app.Cancel)
 	assert.NotNil(t, app)
 	assert.NotNil(t, app.KioskReplay)
 	assert.NotNil(t, app.OfflineCacheService)
@@ -1383,7 +1266,6 @@ func TestInitializeTestApp(t *testing.T) {
 	ctx := context.Background()
 
 	// Create minimal mocks for testing
-	mockCDP := mocks.NewMockCDP(ctrl)
 	mockRelayer := mocks.NewMockRelayer(ctrl)
 	mockDBus := mocks.NewMockDBus(ctrl)
 	mockMediator := mocks.NewMockMediator(ctrl)
@@ -1420,7 +1302,6 @@ func TestInitializeTestApp(t *testing.T) {
 		mockRandom,
 		mockExec,
 		mockMath,
-		mockCDP,
 		mockRelayer,
 		mockDBus,
 		mockDeviceStatus,
@@ -1437,7 +1318,6 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.Equal(t, ctx, app.Ctx)
-	assert.Equal(t, mockCDP, app.CDP)
 	assert.Equal(t, mockRelayer, app.Relayer)
 	assert.Equal(t, mockDBus, app.DBus)
 	assert.Equal(t, mockMediator, app.Mediator)
@@ -1517,10 +1397,7 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	ts.mockRefresher.EXPECT().Stop()
 	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
 	ts.mockStatusPoller.EXPECT().Stop()
-	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-	ts.mockCDP.EXPECT().Close()
 	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
 	defer cancel()
@@ -1550,7 +1427,6 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1566,9 +1442,9 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 		"com.feralfile.test",
 		nil,
 	)
-	defer app.Cancel()
+	t.Cleanup(app.Cancel)
 
-	assert.Nil(t, app.UARewrite)
+	assert.Nil(t, app.GatewayPolicy)
 }
 
 // A host list in which NO entry is usable must degrade to the default scope,
@@ -1583,7 +1459,6 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1599,13 +1474,13 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 		"com.feralfile.test",
 		nil,
 	)
-	defer app.Cancel()
+	t.Cleanup(app.Cancel)
 
 	assert.NotNil(t, app, "invalid host list must not abort startup")
 	// Every entry was unusable, so there is no operator scope left to
 	// honor and the rewrite lands on the built-in defaults — the same
 	// place an entirely unreadable config block lands.
-	assert.NotNil(t, app.UARewrite, "an unusable host list must degrade to the default scope, not to no rewrite")
+	assert.NotNil(t, app.GatewayPolicy, "an unusable host list must degrade to the default scope, not to no rewrite")
 }
 
 // The realistic operator edit is APPENDING a newly hostile gateway, and
@@ -1619,7 +1494,6 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 
 	app := initializeApp(
 		logger,
-		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
 		"",
@@ -1637,40 +1511,19 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 		"com.feralfile.test",
 		nil,
 	)
-	defer app.Cancel()
+	t.Cleanup(app.Cancel)
 
 	require.NotNil(t, app)
-	assert.NotNil(t, app.UARewrite, "one bad entry must not disable the whole rewrite")
+	assert.NotNil(t, app.GatewayPolicy, "one bad entry must not disable the whole rewrite")
 }
 
-// TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute pins the ORDER of two
-// registrations in initializeApp, because registration order is the execution
-// order on every generation-ready and the two reconcilers are not independent.
-//
-// A freshly initialized player starts on default content policy. If
-// playlist-recompute runs first, its force-pushed cohort is filtered by the
-// player against those defaults, and nothing re-pushes the scheduler when
-// content-policy syncs a moment later — so a durable, acknowledged
-// showMatureContent setting visibly fails after a player restart until some
-// later display request, refresh or cutover.
-//
-// Asserted against the source rather than a live session because the session
-// exposes no way to read back its registration order; this is the same
-// source-inspection approach as importlint_test.go.
-func TestReconcilerOrder_ContentPolicyBeforePlaylistRecompute(t *testing.T) {
+// Native reconnect must not introduce a second scheduler or replay a playlist.
+// The host restores its durable selection before publishing its socket.
+func TestNativeReconcilerDoesNotRecomputePlaylist(t *testing.T) {
 	source, err := stdos.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	policyAt := strings.Index(text, `session.RegisterReconciler("content-policy"`)
-	recomputeAt := strings.Index(text, `session.RegisterReconciler("playlist-recompute"`)
-	if policyAt < 0 || recomputeAt < 0 {
-		t.Fatalf("reconciler registrations not found (content-policy=%d playlist-recompute=%d)", policyAt, recomputeAt)
-	}
-	if policyAt > recomputeAt {
-		t.Fatal("content-policy must be registered BEFORE playlist-recompute: a reconnect would otherwise push a scheduled cohort to a player still on default policy")
-	}
+	require.NoError(t, err)
+	require.Contains(t, string(source), `session.RegisterReconciler("content-policy"`)
+	require.NotContains(t, string(source), `session.RegisterReconciler("playlist-recompute"`)
 }
 
 // fakePolicyRefresher records whether the reconciler asked for a re-send.

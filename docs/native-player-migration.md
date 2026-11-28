@@ -1,0 +1,163 @@
+# Native player migration history
+
+These notes follow the implementation in chronological order. For the shipped
+process layout, Unix socket boundary, cache ownership and mapping of former CDP
+consumers, see the [native cutover guide](../components/feral-display/docs/MIGRATION.md).
+The [release ledger](../RELEASES.md) records the pinned Development image.
+
+Ordinary casts, source refresh, runtime-instance recovery, setup/pairing,
+sleep, input, history and watchdog now use `components/feral-display` over native IPC.
+The coordinated cutover is installed on FF1-SKYZ2E3A for Anh's testing.
+**Do not deploy controld independently of the player and matching session files.**
+There is no CDP fallback. See [the feral-display cutover record](../components/feral-display/docs/CUTOVER.md) for evidence and remaining gaps.
+
+## Implemented boundary
+
+`playerlink` speaks framed protocol version 1 over a Unix-domain socket. The
+default is `$XDG_RUNTIME_DIR/ff-player/player.sock` (falling back to
+`/run/user/<uid>/ff-player/player.sock`). `FF_PLAYER_SOCKET` selects an isolated
+test instance. Client and server check peer UID. The client keeps one ordered
+connection, bounds operations to five seconds, closes it on cancellation or
+transport failure, and never blindly retries an uncertain mutation.
+
+`status.NativePlayer` maps typed native snapshots to the existing controller
+status DTO. It uses `presentedPlaylist` and the presented occurrence's context
+while a new cast loads; incoming failure remains visible under `runtime.selected`.
+Render code 2 requires a host-composed occurrence, not a page navigation. Device
+status's `displayURL` is a device-owned UI URI. It preserves the older phone
+`step=qr` hint for the native claim overlay without exposing artwork URLs or
+signed asset credentials. Artwork pages do not
+supply either status object.
+
+Native verification lookup takes `(instance, presented generation, playlist ID,
+playlist URL)`. The previous ID/URL-only slot is deliberately not consulted for
+native snapshots. Publishing the fenced verdict from native cast/schedule
+receipts is part of the remaining command migration; until wired, the field is
+omitted. Acceptance must never manufacture a trusted displayed verdict.
+
+The old document-stamp interfaces remain fixture/rollback code. Native state
+never populates them. Runtime-instance reconciliation replaces document sessions;
+no CDP health/OOM loop starts in production. Remove dormant constructors and
+fixture-only helpers with the rollback paths after native release acceptance.
+
+## Verification so far
+
+- Shared Go/C++ JSON/framing fixtures and real Unix-socket interoperability.
+- Race tests for the client and status boundary.
+- Status tests for incoming/outgoing same-URL occurrences, failed incoming
+  renderers, absent presentation after restart/stop, and generation-fenced trust.
+- Full controld tests, vet and changed-diff lint during this stage. Evidence is
+  retained in `components/feral-display/docs/evidence/`.
+
+See the sibling tree's `docs/PLAN.md`, `docs/BEHAVIOR.md`, `docs/VERIFICATION.md`
+and `protocol/README.md` for current implementation, device checks and gaps.
+The required release remains a full-image release, prepared on `develop` with
+human-operated promotion. No publishing workflow has been dispatched.
+
+## Setup narration migration
+
+Setup's shared overlay arbitration, conditional hides, stale-overlay sweep,
+claim URL/name refresh and ordered ready/hide delivery are retained. Delivery
+uses `playerlink.SetOverlay`, requires `overlay.setup.v1`, and never evaluates
+JavaScript. The renderer-independent host watch replays current intent on
+reconnect. Failed sends never block provisioning; status uses observed host
+snapshots instead of treating queued intent as a visible panel.
+
+The old page-navigation park and setup bundle manifest fallbacks are deleted.
+The coordinated release requires all setup states; unknown states fail with
+`unsupported` instead of silently disappearing. The remaining legacy status
+manifest helper has an explicit removal condition: migration of devicectl boot
+recovery and media-health capability consumers. It is not a narration fallback.
+
+Native setup includes the Wi-Fi join/attached-portal QR phases, credential
+escaping, claim QR and device-name guidance, neutral connecting copy, failures,
+update progress and reset instructions. `ready` clears setup without clearing
+another overlay owner. Native PP Mori, QR layout, tombstone timing and the
+bundled animated setup artwork are implemented. Device regression evidence and
+remaining fidelity/activation limits are in `components/feral-display/docs/DEVICE-UI.md`.
+Normal player control is now activated.
+
+## Input cutover
+
+Phone keyboard, move, click/double-click/long-press, click-and-drag and zoom
+commands now use native occurrence-fenced input. The old CDP implementation and
+its cached pointer/viewport state are deleted. A dedicated connection and
+whole-gesture lane prevent interleaving; failure or cancellation disconnects it
+to release held keys/buttons. ASCII phone codes map to physical HID plus
+separate text; the native protocol also supports Unicode text. Reference-width
+deltas preserve existing movement sensitivity using current host geometry.
+All batches are validated before dispatch. The existing 16-offset pressed-drag
+and 16-step zoom limits are retained; ordinary moves are bounded to 128 offsets per request. Oversized input is
+rejected, never silently truncated. No CDP fallback exists. Normal playback and session/watchdog now use this native boundary.
+
+## Playback controls and display settings cutover
+
+The six controller commands `moveToArtwork`, `setShuffle`, `setLoop`,
+`updateDefaultDuration`, `updateArtFraming` and `updateDisplaySettings` now use
+`playback.select`, `playback.mode`, `settings.set` or `presentation.set`.
+Authorization and the staged-reset guard run before this adapter. There is no
+CDP fallback if native wiring or the host is unavailable. Every write uses a
+fresh host-instance/generation fence and is sent once; errors retain their
+structured code. A failed snapshot reports unavailable without sending a write;
+a lost mutation reply reports outcome_unknown and requires status reconciliation.
+Existing command names and reply `message.ok` remain, with an
+additive admission outcome/identity. Composition acceptance retains the public
+`acceptedCompositionRevision` field.
+
+Saved framing, tombstone and scaling update device defaults. Ephemeral
+scaling/margin/background writes require the current presented occurrence;
+older keyless phones resolve it in controld and still reject while a replacement
+loads. Same-URL adjacent occurrences never share a target. The native host
+rechecks the target and authored override lock. Unknown fields are rejected as
+a whole, without partially applying valid fields. Legacy per-side/token flags
+and ephemeral autoplay/loop flags are not covered by this adapter yet; they must
+not be called supported merely because the old browser accepted their envelope.
+
+The real Go adapter passed against the FF1 native host: saved settings,
+loop/shuffle, same-URL selection, stale showing rejection, composed margin/color
+preview, malformed host parameter rejection and duration override reset. This adapter is now active in the ordinary daemon.
+
+
+## Artwork refresh cutover
+
+`refreshArtwork` now calls `playback.refresh` with the current instance and
+generation. The host creates a fresh occurrence and resets bounded renderer
+recovery while keeping the playlist/generation. Empty, stopped or sleeping
+selection returns `no_artwork` and does not wake the display. The command does
+not depend on a live artwork JavaScript context. The former global Chromium
+cache purge and `NavigateHomeInline` escalation, its router/session wiring and
+its CDP-only tests are deleted. A fresh isolated artwork request context supplies
+the reload; whole-process recovery stays external. An unavailable host returns
+a structured failure instead of claiming a recovery it did not perform.
+
+
+## Direct status cutover
+
+Direct `checkStatus` now reads the same native snapshot mapper as periodic
+notifications. It reports the presented occurrence/composition while a newer
+selection loads, including identical URLs, and supplies both identities under
+`runtime`. Setup/pairing overlay and series override come from controld. The
+legacy signature slot is not consulted. Raw outcome/history rings never cross
+this status boundary. The old untyped document-response forwarding and its
+annotation helpers are removed; both LAN and legacy relayer egress are tested
+with real adapters, including explicit host-unavailable/unknown-mutation replies.
+
+
+## Recently played cutover
+
+`getRecentlyPlayed` reads `history.list` atomically, including the active presented
+occurrence. Retained same-URL entries remain distinct; restart retains the list
+without inventing an active showing. `activeOccurrenceKnown` is true only for
+a presented ID found in retained history, preserving phone polling through
+restart or failed history writes. The controller reply preserves its bounded
+label allowlist, inline-manifest metadata precedence and sanitized thumbnail
+URLs. Full items, defaults, sources and context stay device-local. Empty history,
+incomplete recording, malformed responses and unavailable/unsupported host
+operations remain distinct.
+
+`playRecentlyPlayed` resolves only the opaque record ID through `history.resolve`.
+The resolved item, applicable defaults and recorded content context re-enter the
+normal `displayPlaylist` admission/source pipeline, with no playlist signature
+copied from the original cast. No browser resolver or fallback remains. The
+subsequent cast is still part of the unfinished cast-transport migration; this
+change does not make the daemon deployable by itself.

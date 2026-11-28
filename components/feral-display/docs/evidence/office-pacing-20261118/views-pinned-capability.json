@@ -1,0 +1,33 @@
+{
+  "checkedAt": "2026-11-18T03:36:48.665Z",
+  "version": {
+    "Browser": "Chrome/156.0.8078.96",
+    "File-Path-Style": "posix",
+    "Protocol-Version": "1.3",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    "V8-Version": "15.6.75.50",
+    "WebKit-Version": "537.36 (@2ad9b7f5a86846e0b264090723a6a78964bb84c4)",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:29347/devtools/browser/e45a0f2b-fea4-48ca-b3b2-83be736e7fae"
+  },
+  "document": {
+    "fixture": {
+      "seed": "feral-frame-pacing-20261118",
+      "sourceSha256": "cb3ee76d4343631d31430a29484999a6c5e2b681ae16837e8e9b38ed8bfbc602",
+      "sourceUrl": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark"
+    },
+    "ready": "complete",
+    "visible": "visible",
+    "viewport": [
+      3840,
+      2160,
+      1
+    ],
+    "canvas": [
+      3840,
+      2160
+    ],
+    "renderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon Graphics (RADV REMBRANDT) (0x00001681)), radv)"
+  },
+  "performanceMeasured": false,
+  "physicalOutputVerified": false
+}

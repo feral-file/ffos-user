@@ -15,7 +15,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/control"
@@ -25,7 +24,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -33,7 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-//go:generate mockgen -source=mediator.go -destination=../mocks/mediator.go -package=mocks -mock_names=Mediator=MockMediator
+//go:generate mockgen -destination=../mocks/mediator.go -package=mocks github.com/feral-file/ffos-user/components/feral-controld/mediator Mediator
 
 type Mediator interface {
 	Start()
@@ -57,25 +56,12 @@ type Mediator interface {
 	// cache's admission gate. The sink runs inline on the D-Bus per-signal
 	// goroutine and must not block.
 	SetSysMetricsObserver(observer func(raw []byte))
-	// SetSession injects the playersession.Session that owns page-generation
-	// readiness. The mediator registers itself as a connectivity reconciler
-	// (run on every generation-ready) and routes every connectivity push —
-	// both the edge-triggered ones and the reconciler ones — through it
-	// (§4): pushes wait AwaitStage(StageHandler) with the fail-fast, so a
-	// push never races a page that has not installed its handler yet. Call
-	// once at wiring time, before Start.
-	//
-	// Takes the concrete *playersession.Session (not a narrower
-	// consumer-owned interface): mediator's Mediator interface is mocked
-	// (mocks.MockMediator), and playersession is a leaf package with no
-	// dependency on devicectl — unlike a mediator-package-defined interface
-	// type, referencing it from mocks cannot reintroduce the
-	// mocks->mediator->devicectl->mocks import cycle devicectl's own tests
-	// would otherwise hit.
-	SetSession(session *playersession.Session)
+	// SetConnectivityPlayer installs the host transport and starts reconnect
+	// reconciliation. Call once before Start; it never waits for artwork readiness.
+	SetConnectivityPlayer(playerlink.ConnectivityPlayer)
 	// SetConnectivityPushHook registers a callback invoked after every
 	// connectivity push ATTEMPT completes (success, failure, or skipped —
-	// e.g. AwaitStage's fail-fast). It exists purely as a test synchronization
+	// e.g. a canceled daemon context). It exists purely as a test synchronization
 	// seam for the otherwise-async connectivity worker; production wiring
 	// never calls it, and a nil hook (the default) is a no-op.
 	SetConnectivityPushHook(fn func())
@@ -89,7 +75,6 @@ type mediator struct {
 	daemonCtx  context.Context
 	relayer    relayer.Relayer
 	dbus       dbus.DBus
-	cdp        cdp.CDP
 	cmdHandler commandrouter.Handler
 	executor   devicectl.Executor
 	logger     *zap.Logger
@@ -125,10 +110,11 @@ type mediator struct {
 	// "already up" without relying on Advertiser.Start's already-started error.
 	mdnsStarted bool
 
-	// session, when set (SetSession), is the playersession.Session the
-	// connectivity owner routes every push through (§4). Nil until wired;
-	// pushConnectivity no-ops when nil (headless test/wiring paths).
-	session *playersession.Session
+	player     playerlink.ConnectivityPlayer
+	playerCtx  context.Context
+	stopPlayer context.CancelFunc
+	playerDone chan struct{}
+	connRetry  atomic.Bool
 
 	// connMu guards the mediator-owned connectivity cache — the single
 	// authority for what level the player was last told, closing M5/M6
@@ -272,7 +258,6 @@ func New(
 	ctx context.Context,
 	relayer relayer.Relayer,
 	dbus dbus.DBus,
-	cdp cdp.CDP,
 	cmdHandler commandrouter.Handler,
 	executor devicectl.Executor,
 	refresher playlist_refresher.Refresher,
@@ -286,7 +271,6 @@ func New(
 		daemonCtx:  ctx,
 		relayer:    relayer,
 		dbus:       dbus,
-		cdp:        cdp,
 		cmdHandler: cmdHandler,
 		executor:   executor,
 		json:       json,
@@ -301,6 +285,10 @@ func (m *mediator) Start() {
 }
 
 func (m *mediator) Stop() {
+	if m.stopPlayer != nil {
+		m.stopPlayer()
+		<-m.playerDone
+	}
 	m.relayer.RemoveRelayerMessage(m.handleRelayerMessage)
 	m.dbus.RemoveBusSignal(m.handleDBusSignal)
 }
@@ -343,29 +331,6 @@ func (m *mediator) SetTopicObserver(observer func()) {
 // interface doc.
 func (m *mediator) SetSysMetricsObserver(observer func(raw []byte)) {
 	m.sysMetricsObserver = observer
-}
-
-// SetSession injects the session and registers the connectivity reconciler.
-// See the Mediator interface doc.
-//
-// The reconciler enqueues through enqueueConnectivityPush — the SAME
-// single worker the edge-triggered connectivity_change handler uses — rather
-// than calling pushConnectivity directly. Registering pushConnectivity itself
-// as the reconciler would let it run CONCURRENTLY with the edge worker's own
-// pushConnectivity call: both do an independent cache-read-then-CDP-send, so
-// two overlapping runs are not truly serialized against each other (only
-// each's own field-level locking is), narrowing M5's stale-overwrite window
-// rather than closing it. Routing both through the one worker makes
-// cache-read+send happen in exactly one place at a time, and the worker's
-// existing coalescing (a push already in flight absorbs a trailing re-push
-// reading the cache at ITS execution time) is what actually closes it.
-func (m *mediator) SetSession(session *playersession.Session) {
-	m.session = session
-	if session != nil {
-		session.RegisterReconciler("connectivity", func(context.Context) {
-			m.enqueueConnectivityPush()
-		})
-	}
 }
 
 // SetInternetObserver wires the applied-verdict observer (see the field doc).
@@ -418,7 +383,7 @@ func (m *mediator) enqueueConnectivityPush() {
 
 func (m *mediator) runConnectivityPushWorker() {
 	for {
-		m.pushConnectivity(context.Background())
+		m.pushConnectivity(m.daemonCtx)
 		m.connPushMu.Lock()
 		if !m.connPushMore {
 			m.connPushBusy = false
@@ -430,41 +395,33 @@ func (m *mediator) runConnectivityPushWorker() {
 	}
 }
 
-// pushConnectivity is the connectivity edge-triggered push worker's body
-// (§4), run ONLY on the single worker enqueueConnectivityPush/
-// runConnectivityPushWorker serialize — the connectivity reconciler
-// (registered on the session, run on every generation-ready) enqueues
-// through that same worker rather than calling this directly, so
-// cache-read+send only ever happens in one place at a time. It reads the
-// cache AT EXECUTION TIME (never a snapshot taken when the edge or
-// generation-ready fired), which is what keeps a late reconcile from
-// overwriting a fresher edge and what lets a reload-lost seed recover on the
-// next generation-ready.
+// pushConnectivity reads the cache on the one coalescing worker, including
+// reconnect and retry triggers. A renderer crash cannot block host delivery.
 func (m *mediator) pushConnectivity(ctx context.Context) {
-	if m.session == nil {
-		m.fireConnectivityPushHook()
+	defer m.fireConnectivityPushHook()
+	if m.player == nil {
 		return
 	}
-	// Handler-readiness discipline: fail fast (no wait) when CDP is not
-	// connected; otherwise wait for the player's command handler so the push
-	// never races a page that has not installed it yet.
-	if err := m.session.AwaitStage(ctx, playersession.StageHandler); err != nil {
-		m.logger.Debug("Connectivity push skipped: player not ready", zap.Error(err))
-		m.fireConnectivityPushHook()
+	if m.playerCtx != nil {
+		ctx = m.playerCtx
+	}
+	if ctx.Err() != nil {
 		return
 	}
-
 	level, known, seq := m.connectivitySnapshot()
 	if !known {
 		level, known = m.coldProbeConnectivity(seq)
 		if !known {
 			m.logger.Debug("Connectivity push skipped: level unknown and the cold probe failed")
-			m.fireConnectivityPushHook()
+			m.connRetry.Store(true)
 			return
 		}
 	}
-	m.sendConnectivityToPlayer(level)
-	m.fireConnectivityPushHook()
+	err := m.player.SetConnectivity(ctx, level)
+	m.connRetry.Store(err != nil)
+	if err != nil {
+		m.logger.Warn("Failed to push connectivity to native player", zap.Error(err))
+	}
 }
 
 // coldProbeConnectivity issues ONE single-flighted refresh=true D-Bus query
@@ -541,29 +498,6 @@ func (m *mediator) queryConnectivityRefresh(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("expected bool, got %T", resp[0])
 	}
 	return connected, nil
-}
-
-// sendConnectivityToPlayer issues the actual CDP push. Kept a thin,
-// well-named leaf so pushConnectivity's flow reads as gate-then-send.
-func (m *mediator) sendConnectivityToPlayer(level bool) {
-	_, err := m.cdp.Send(
-		cdp.METHOD_EVALUATE,
-		map[string]interface{}{
-			"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", level),
-		})
-	if err != nil {
-		// handleConnectivityChange is a notify-only hook; player builds that
-		// return nothing surface as "type mismatch: undefined" from the CDP
-		// client — the call was delivered, there is just no return value.
-		// Only real delivery failures deserve a visible log.
-		if strings.Contains(err.Error(), "type mismatch: undefined") {
-			m.logger.Debug("Connectivity pushed; player handler returned no value")
-		} else {
-			m.logger.Warn("Failed to push connectivity to player", zap.Error(err))
-		}
-		return
-	}
-	m.logger.Debug("Connectivity pushed to player", zap.Bool("connected", level))
 }
 
 // SetClaimed updates the advertised claim state. Because zeroconf only publishes
@@ -789,11 +723,11 @@ func (m *mediator) handleDBusSignal(
 		)
 
 		// Update the mediator-owned connectivity cache and arm an async push
-		// through the session worker (§4). The edge handler no longer sends
+		// through the native connectivity worker. The edge handler no longer sends
 		// to CDP directly: pushConnectivity reads this cache AT EXECUTION
 		// TIME (never a value snapshotted here) and waits for the player's
 		// command handler first, so an edge that fires before DevTools
-		// attaches is not lost — the generation-ready reconciler picks it up
+		// attaches is not lost — the host reconnect reconciler picks it up
 		// the moment a page connects instead.
 		m.connMu.Lock()
 		m.connLevel = connected

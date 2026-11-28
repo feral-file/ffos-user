@@ -1,0 +1,1008 @@
+{
+  "source": "https://github.com/feral-file/canon/blob/main/raw/sessions/2026-11-16-display-prototype/playlist.json",
+  "blobSHA": "6d1d9183ae3a1857cfa66a72c7ee0daa6f319fd0",
+  "device": "homelab",
+  "engine": "CEF 156.0.30 / Chromium 156.0.8078.96",
+  "checks": [
+    {
+      "index": 0,
+      "title": "Leander Herzog \u2014 holz",
+      "source": "https://leanderherzog.ch/2026/holz/",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Blue log pile and native label visible; artist performance readout retained.",
+      "screenshot": "docs/evidence/device/corpus-first/00-compositor.png",
+      "screenshotSHA256": "c0dcbb4c61e973fe02e8c7cf0175b3759cdfb10198d1c5c251f3dc696e2bd2a2",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://leanderherzog.ch/2026/holz/",
+          "title": "holz",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "60 FPS\u2003\u200337 OBJ\u2003\u20037.5k PTS\u2003\u20030:09",
+          "webgpu": true,
+          "resourceCount": 6
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2274131.2",
+          "timestamp": 671084.147933,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://leanderherzog.ch/2026/holz/",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "no-cache",
+            "cf-cache-status": "DYNAMIC",
+            "cf-ray": "a5bfc18d0a61fd8d-SIN",
+            "content-encoding": "zstd",
+            "content-security-policy": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site",
+            "content-type": "text/html",
+            "date": "Tue, 17 Nov 2026 15:26:50 GMT",
+            "expires": "Tue, 17 Nov 2026 15:36:50 GMT",
+            "last-modified": "Tue, 17 Nov 2026 04:43:18 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "permissions-policy": "camera=(), microphone=(), geolocation=()",
+            "referrer-policy": "strict-origin-when-cross-origin",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=%2BsfCg09D2u6oQHxcNij5f2wYswDkdwmcEHcmor8tzVG24%2Bq%2FPStr7BQyRpJfiwH1h9k%2BHTPK2YkK5BUPAD65Rx%2Bigzc9d1Hdacup5p8KwLOmW6q%2FGo91uQ4k%2BomKUPA%2FNl9M\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfCacheStatus;desc=\"DYNAMIC\"\ncfEdge;dur=194,cfOrigin;dur=18",
+            "strict-transport-security": "max-age=31536000; includeSubDomains",
+            "vary": "Accept-Encoding",
+            "x-content-type-options": "nosniff"
+          }
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "title": "Casey Reas \u2014 Pre-Process",
+      "source": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/383000000",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "White circles and connecting lines visible.",
+      "screenshot": "docs/evidence/device/corpus-first/01-compositor.png",
+      "screenshotSHA256": "ac006aa46ff977fc18f426c8236870595700648172984c68f702aa4c112f917b",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/383000000",
+          "title": "",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 2
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/383000000",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-origin": "*",
+            "cache-control": "public, max-age=12, s-maxage=12",
+            "cf-cache-status": "MISS",
+            "cf-ray": "a5bfc1e89b4a9e1e-SIN",
+            "content-encoding": "br",
+            "content-type": "text/html; charset=UTF-8",
+            "date": "Tue, 17 Nov 2026 15:27:05 GMT",
+            "last-modified": "Tue, 17 Nov 2026 15:27:05 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=Wqfdm2WmCim%2F6GEt6sImBYaJ7kIiTJyyFApMyY2AzljpkMQgOXDkvMWHOUEDMg%2FEdjnBH%2BHxHFLF3ccle0jrQjg2YZ2ZSzoNmGEFoM%2Fw27sSJTUYP%2BSN1tismvKtNtvvE9Srhb6SXsQ%3D\"}]}",
+            "rndr-id": "b6a21f56-d42d-47f1",
+            "server": "cloudflare",
+            "vary": "Origin, Accept-Encoding",
+            "x-render-origin-server": "Render",
+            "x-request-id": "080d839f-6d81-48fb-8594-b0014c68be06"
+          }
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "title": "Casey Reas \u2014 Network C",
+      "source": "https://generator.artblocks.io/1/0x0a1bbd57033f57e7b6743621b79fcb9eb2ce3676/6000000",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Yellow field and angular colored segments visible.",
+      "screenshot": "docs/evidence/device/corpus-first/02-compositor.png",
+      "screenshotSHA256": "0245e5008ffd257b681316e3a3bab4e472f4f8977b39c4dc2d228602b9cf8fe0",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://generator.artblocks.io/1/0x0a1bbd57033f57e7b6743621b79fcb9eb2ce3676/6000000",
+          "title": "",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 2
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://generator.artblocks.io/1/0x0a1bbd57033f57e7b6743621b79fcb9eb2ce3676/6000000",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-origin": "*",
+            "cache-control": "public, max-age=12, s-maxage=12",
+            "cf-cache-status": "MISS",
+            "cf-ray": "a5bfc2448cf4b486-SIN",
+            "content-encoding": "br",
+            "content-type": "text/html; charset=UTF-8",
+            "date": "Tue, 17 Nov 2026 15:27:20 GMT",
+            "last-modified": "Tue, 17 Nov 2026 15:27:20 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=HwpjbIoU1H6xul9QZMpzafsg3YzKxMxYV3gdcvJwFEr%2FyOHoyOPP73%2BSaLcyDkUG3e43WujBUGrvs9nrfY7sZRQpW7WQ2U0U6XAuAwROeddUsRDOj8KQScxhGWWq2aFRid%2FWKZeOxb4%3D\"}]}",
+            "rndr-id": "b470dbe2-e0a7-4e9f",
+            "server": "cloudflare",
+            "vary": "Origin, Accept-Encoding",
+            "x-render-origin-server": "Render",
+            "x-request-id": "eb87ab6d-0008-4bf8-91d3-e3f36f45345e"
+          }
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "title": "Casey Reas \u2014 METASOTO",
+      "source": "https://cdn.feralfileassets.com/previews/9e8992c9-91f0-48c7-a7c7-6ca7bcff9d6a/1668537579/?edition_number=0&blockchain=ethereum&contract=0x2A86C5466f088caEbf94e071a77669BAe371CD87&token_id=15042014439770355205730296321097090521853295916950766059900103364979980239529&token_id_hash=0x762a02a969817d1b1c4995b5585cdf86acc21fe62b286da95ed1dc7d986a41b4",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Vertical white/black lines visible.",
+      "screenshot": "docs/evidence/device/corpus-first/03-compositor.png",
+      "screenshotSHA256": "b942bc3b079e207f021b04ec7a64b3fdddffb5cb970cdffaaf386b919cfc7989",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/9e8992c9-91f0-48c7-a7c7-6ca7bcff9d6a/1668537579/?edition_number=0&blockchain=ethereum&contract=0x2A86C5466f088caEbf94e071a77669BAe371CD87&token_id=15042014439770355205730296321097090521853295916950766059900103364979980239529&token_id_hash=0x762a02a969817d1b1c4995b5585cdf86acc21fe62b286da95ed1dc7d986a41b4",
+          "title": "",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            },
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 5
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2275817.5",
+          "timestamp": 671136.615869,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/9e8992c9-91f0-48c7-a7c7-6ca7bcff9d6a/1668537579/?edition_number=0&blockchain=ethereum&contract=0x2A86C5466f088caEbf94e071a77669BAe371CD87&token_id=15042014439770355205730296321097090521853295916950766059900103364979980239529&token_id_hash=0x762a02a969817d1b1c4995b5585cdf86acc21fe62b286da95ed1dc7d986a41b4",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfc2d589f4fcfe-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html; charset=utf-8",
+            "date": "Tue, 17 Nov 2026 15:27:43 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=G1P5siuU5vvN%2BnqNdxK48NO9RJyszCl93xE0%2Fns0J9t5L%2B3%2Bv31elV%2Bne3H%2Fm9jxS4LPzMvmBOc9sTL7TSZ0FvAN2UO5J9om%2BOY4U023c0GICoEQdXZctDifNzX9LwLR5YvO%2ByCIQ4UP2w%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=23,cfOrigin;dur=0,cfWorker;dur=158",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "title": "Zach Lieberman \u2014 horizon(te)s #1",
+      "source": "https://dweb.link/ipfs/QmePX7dqW9WFdm1rvNc5hmVmyJ2JdWbKxpCGzyEFPTCuRT?fxhash=onk8XxSXiM7BVmrKwsDDw3y4RyVAJXroRFP5jSVd8DuXZh2Sw5r",
+      "observation": "not_presented",
+      "visualObservation": "Native error UI: HTTP 403.",
+      "screenshot": "docs/evidence/device/corpus-first/04-compositor.png",
+      "screenshotSHA256": "64876227a7dbe3ffa5699754e17b5eabff802d162bead8ab94337be006ed7ad9",
+      "document": null,
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://dweb.link/ipfs/QmePX7dqW9WFdm1rvNc5hmVmyJ2JdWbKxpCGzyEFPTCuRT?fxhash=onk8XxSXiM7BVmrKwsDDw3y4RyVAJXroRFP5jSVd8DuXZh2Sw5r",
+          "status": 403,
+          "type": "Document",
+          "headers": {
+            "accept-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cf-mitigated": "challenge",
+            "cf-ray": "a5bfc335bc46044d-HKG",
+            "content-encoding": "br",
+            "content-security-policy": "default-src 'none'; script-src 'nonce-2tJ1yBIgJNk40dDNHzkKaw' 'unsafe-eval' https://challenges.cloudflare.com; script-src-attr 'none'; style-src 'unsafe-inline'; img-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com blob:; child-src 'self' https://challenges.cloudflare.com blob:; worker-src blob:; form-action http: https:; base-uri 'self'",
+            "content-type": "text/html; charset=UTF-8",
+            "critical-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "cross-origin-embedder-policy": "require-corp",
+            "cross-origin-opener-policy": "same-origin",
+            "cross-origin-resource-policy": "same-origin",
+            "date": "Tue, 17 Nov 2026 15:27:58 GMT",
+            "origin-agent-cluster": "?1",
+            "permissions-policy": "accelerometer=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=*",
+            "referrer-policy": "same-origin",
+            "server": "cloudflare",
+            "server-timing": "chlray;desc=\"a5bfc335bc46044d\"",
+            "x-content-type-options": "nosniff",
+            "x-frame-options": "SAMEORIGIN",
+            "x-robots-tag": "noindex, nofollow"
+          }
+        },
+        {
+          "url": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/rch/t6x3l/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "accept-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+            "cf-ray": "a5bfc339c89bd604-HKG",
+            "content-encoding": "br",
+            "content-security-policy": "default-src 'none'; script-src 'nonce-iVv7B1VWHRX0pLc7bV82m9' 'unsafe-eval'; script-src-attr 'none'; worker-src blob:; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self' https://hagen.challenges.cloudflare.com https://brunhild.challenges.cloudflare.com https://*.alg13.dnstest.challenges.cloudflare.com https://*.mldsa44.dnstest.challenges.cloudflare.com https://dnstest.dev https://ca2.cloudflarecaptcha.com https://ca1.cloudflarecaptcha.com; frame-src 'self' blob:; child-src 'self' blob:; form-action 'none'; base-uri 'self'; trusted-types _8fd8127231cac126e14643c4 default; require-trusted-types-for 'script'; sandbox allow-same-origin allow-scripts allow-popups allow-forms",
+            "content-type": "text/html; charset=UTF-8",
+            "critical-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "cross-origin-embedder-policy": "require-corp",
+            "cross-origin-opener-policy": "same-origin",
+            "cross-origin-resource-policy": "cross-origin",
+            "date": "Tue, 17 Nov 2026 15:27:59 GMT",
+            "document-policy": "js-profiling",
+            "origin-agent-cluster": "?1",
+            "permissions-policy": "accelerometer=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=*",
+            "referrer-policy": "same-origin",
+            "server": "cloudflare",
+            "server-timing": "tad19xmq;dur=664487"
+          }
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "title": "Iskra Velitchkova \u2014 horizon(te)s #2",
+      "source": "https://dweb.link/ipfs/QmePX7dqW9WFdm1rvNc5hmVmyJ2JdWbKxpCGzyEFPTCuRT?fxhash=op2xuuGYoCNYd4Ub5j5YU6xJ62HrrZEWvDE3qFGyx8QcgfAYif3",
+      "observation": "not_presented",
+      "visualObservation": "Native error UI: HTTP 403.",
+      "screenshot": "docs/evidence/device/corpus-first/05-compositor.png",
+      "screenshotSHA256": "64876227a7dbe3ffa5699754e17b5eabff802d162bead8ab94337be006ed7ad9",
+      "document": null,
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://dweb.link/ipfs/QmePX7dqW9WFdm1rvNc5hmVmyJ2JdWbKxpCGzyEFPTCuRT?fxhash=op2xuuGYoCNYd4Ub5j5YU6xJ62HrrZEWvDE3qFGyx8QcgfAYif3",
+          "status": 403,
+          "type": "Document",
+          "headers": {
+            "accept-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cf-mitigated": "challenge",
+            "cf-ray": "a5bfc3419f6de903-HKG",
+            "content-encoding": "br",
+            "content-security-policy": "default-src 'none'; script-src 'nonce-JzkKGYKR9pD565Q6ppViEX' 'unsafe-eval' https://challenges.cloudflare.com; script-src-attr 'none'; style-src 'unsafe-inline'; img-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com blob:; child-src 'self' https://challenges.cloudflare.com blob:; worker-src blob:; form-action http: https:; base-uri 'self'",
+            "content-type": "text/html; charset=UTF-8",
+            "critical-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "cross-origin-embedder-policy": "require-corp",
+            "cross-origin-opener-policy": "same-origin",
+            "cross-origin-resource-policy": "same-origin",
+            "date": "Tue, 17 Nov 2026 15:28:00 GMT",
+            "origin-agent-cluster": "?1",
+            "permissions-policy": "accelerometer=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=*",
+            "referrer-policy": "same-origin",
+            "server": "cloudflare",
+            "server-timing": "chlray;desc=\"a5bfc3419f6de903\"",
+            "x-content-type-options": "nosniff",
+            "x-frame-options": "SAMEORIGIN",
+            "x-robots-tag": "noindex, nofollow"
+          }
+        },
+        {
+          "url": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/f/av0/rch/uf99x/0x4AAAAAAADnPIDROrmt1Wwj/light/fbE/new/normal?lang=auto",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "accept-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+            "cf-ray": "a5bfc345ac3fe6ba-HKG",
+            "content-encoding": "br",
+            "content-security-policy": "default-src 'none'; script-src 'nonce-cqd3sD0VQXYbnsCYrscGYF' 'unsafe-eval'; script-src-attr 'none'; worker-src blob:; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self' https://hagen.challenges.cloudflare.com https://brunhild.challenges.cloudflare.com https://*.alg13.dnstest.challenges.cloudflare.com https://*.mldsa44.dnstest.challenges.cloudflare.com https://dnstest.dev https://ca2.cloudflarecaptcha.com https://ca1.cloudflarecaptcha.com; frame-src 'self' blob:; child-src 'self' blob:; form-action 'none'; base-uri 'self'; trusted-types _b17566af93adbbb2c3952a25 default; require-trusted-types-for 'script'; sandbox allow-same-origin allow-scripts allow-popups allow-forms",
+            "content-type": "text/html; charset=UTF-8",
+            "critical-ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+            "cross-origin-embedder-policy": "require-corp",
+            "cross-origin-opener-policy": "same-origin",
+            "cross-origin-resource-policy": "cross-origin",
+            "date": "Tue, 17 Nov 2026 15:28:00 GMT",
+            "document-policy": "js-profiling",
+            "origin-agent-cluster": "?1",
+            "permissions-policy": "accelerometer=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=*",
+            "referrer-policy": "same-origin",
+            "server": "cloudflare",
+            "server-timing": "8gmzjbu4;dur=653841"
+          }
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "title": "Sage Jenson \u2014 36 Points #25",
+      "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+      "observation": "not_presented",
+      "visualObservation": "Native error UI: no presentable frame within 60 seconds.",
+      "screenshot": "docs/evidence/device/corpus-first/06-compositor.png",
+      "screenshotSHA256": "7067f38bcf16c66c907b1147068d5447536bf2598c1bf627568cf46e43d6110d",
+      "document": null,
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2276792.3",
+          "timestamp": 671155.79876,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfc34d19823ba6-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html; charset=utf-8",
+            "date": "Tue, 17 Nov 2026 15:28:02 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=mCPNVwZzfj2UKr3Fp3ktFOPcVk%2FizTHi9kL9Tn%2B5cBujn7W6G0mr1znsXvOgNC%2FOnZsPeROMmH%2Bq8ZQ%2F6ig2JR1h0vstsqLISzwVRPIy69gNgU2EIK6cnEcov%2BR9vYnhorTxZjwcxXUvbQ%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=25,cfOrigin;dur=0,cfWorker;dur=179",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "title": "Dmitri Cherniak \u2014 Transparent Grit",
+      "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+      "observation": "not_presented",
+      "visualObservation": "Retry: native error UI; script DNS failure observed. Initial diagnostic capture failed.",
+      "screenshot": "docs/evidence/device/corpus-diagnostic-retry/07-compositor.png",
+      "screenshotSHA256": "7067f38bcf16c66c907b1147068d5447536bf2598c1bf627568cf46e43d6110d",
+      "document": null,
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2289078.2",
+          "timestamp": 671553.73555,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfcd037977b486-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html",
+            "date": "Tue, 17 Nov 2026 15:34:40 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=2ppMxKGXXJPk3603WuArTmHJekhW3rdTDbvWfbsNd%2Bs9rHbqFMFuUGyxyKiOQsZwSvfRK0EfEpyqCVr2sh9dR9Kj%2BKBwV0b0ZNTnl1Tj%2FbEJTIcFmORGOtUBrolU7GWqpGrnuKcsj7hQVw%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=31,cfOrigin;dur=0,cfWorker;dur=147",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "title": "Rafa\u00ebl Rozendaal \u2014 Infinite Entropy 7",
+      "source": "https://cdn.feralfileassets.com/previews/4ac90d22-2b94-4dad-8685-3df950746010/1646913274/?edition_number=1&blockchain=bitmark",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Color-gradient field and label visible.",
+      "screenshot": "docs/evidence/device/corpus-first/08-compositor.png",
+      "screenshotSHA256": "ee3dd33031cc16d57fa67d5169f7a7c7d1161a7ca29db272cd0b2caee5949954",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/4ac90d22-2b94-4dad-8685-3df950746010/1646913274/?edition_number=1&blockchain=bitmark",
+          "title": "Infinite Entropy 7 by Rafa\u00ebl Rozendaal, 2020-2022",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 6
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2279218.6",
+          "timestamp": 671236.590862,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/4ac90d22-2b94-4dad-8685-3df950746010/1646913274/?edition_number=1&blockchain=bitmark",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfc544ef1a2328-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html; charset=utf-8",
+            "date": "Tue, 17 Nov 2026 15:29:22 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=bvj4INKJtK96AYe%2BpUF5uddH%2FbvHSgZGIuvbgx5gEzaJnKQzHecwXaLl%2B73%2F347FkrN7fY2jiwp1tUVA%2Fnc61NLAaJDZwWO5yadSlVQtNYhFWyDamo75X1BgPtqqdZksmCr%2Flp9Z4x77wg%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=23,cfOrigin;dur=0,cfWorker;dur=271",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "title": "Rafa\u00ebl Rozendaal \u2014 Infinite Entropy 10",
+      "source": "https://cdn.feralfileassets.com/previews/11b4449b-e435-4737-bd14-81cd3366ac89/1646913406/?edition_number=1&blockchain=bitmark",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Color-gradient field and label visible.",
+      "screenshot": "docs/evidence/device/corpus-first/09-compositor.png",
+      "screenshotSHA256": "3308167469955a80f1c598b885adbcefeda42bfc6cc15763382198ecbb836a1b",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/11b4449b-e435-4737-bd14-81cd3366ac89/1646913406/?edition_number=1&blockchain=bitmark",
+          "title": "Infinite Entropy 10 by Rafa\u00ebl Rozendaal, 2020-2022",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 6
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2279781.6",
+          "timestamp": 671256.507379,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/11b4449b-e435-4737-bd14-81cd3366ac89/1646913406/?edition_number=1&blockchain=bitmark",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfc5c2beb41658-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html; charset=utf-8",
+            "date": "Tue, 17 Nov 2026 15:29:43 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=q4NfZ%2FmxZdRkGebHl8ebHasE5gGsL2qHtAhRHX%2Bde9viNQbz9MrDGjgv8EjaggY9uBf1ss89NvVTNzZ2pd4sL3F9rHdmN1Xv8eaEQ%2F3tkq%2F8YwRxqYCfdALviNuXth1u3hNfANGx2O1zPg%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=19,cfOrigin;dur=0,cfWorker;dur=158",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 10,
+      "title": "Travess Smalley \u2014 CRAWL",
+      "source": "https://cdn.feralfileassets.com/previews/82dcf3d9-56ba-40bf-b57d-3a631bbdb7d5/1719374496/_unique-previews/0/",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Pixelated terrain, map controls, and native label visible.",
+      "screenshot": "docs/evidence/device/corpus-first/10-compositor.png",
+      "screenshotSHA256": "5fc5bc65fa234a2c88e8e7df5be1f3a33bb1153d2e48fa3193adead525c3c8b3",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/82dcf3d9-56ba-40bf-b57d-3a631bbdb7d5/1719374496/_unique-previews/0/",
+          "title": "CRAWL MAP VIEWER",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 2560,
+              "height": 2560
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 8
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2280547.4",
+          "timestamp": 671273.653149,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/82dcf3d9-56ba-40bf-b57d-3a631bbdb7d5/1719374496/_unique-previews/0/",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfc62d88b09cbd-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html",
+            "date": "Tue, 17 Nov 2026 15:30:00 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=XuE%2BdPB5FMZ3SpP5kb66LTGlqoM7eI9p0EBzWIxKmm2SX18NJXUbIu95zPHDrf%2FHkEXF8gDhdPgoX8qo4KL0t5SA857RbFeR2fSW7BAcZFkLBUIAeP0sbxEtm8WxMefTQNZfws6H%2BA1ZBQ%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=29,cfOrigin;dur=0,cfWorker;dur=229",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 11,
+      "title": "Kim Asendorf \u2014 Cargo",
+      "source": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/426000000",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Cyan/blue/purple/black patterned field and label visible.",
+      "screenshot": "docs/evidence/device/corpus-first/11-compositor.png",
+      "screenshotSHA256": "d06d93f004c4cfc169995412e1c5a696df23392ec5a7a4f4dc8bb441ce965d44",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/426000000",
+          "title": "",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 300,
+              "height": 150
+            },
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 1
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/426000000",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-origin": "*",
+            "cache-control": "public, max-age=12, s-maxage=12",
+            "cf-cache-status": "EXPIRED",
+            "cf-ray": "a5bfc685cc2d1b63-SIN",
+            "content-encoding": "br",
+            "content-type": "text/html; charset=UTF-8",
+            "date": "Tue, 17 Nov 2026 15:30:15 GMT",
+            "last-modified": "Tue, 17 Nov 2026 15:30:15 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=K2Fqm7XYR%2F6qj9R6tw2BnvvYMOFNDZT8ARg%2B5%2Fcr%2FQtf3WUF0oNjBACh2BZe4ajNDD8fTE9RIRe9X7o4lzp9c3eoenuRq3Np8hcSIqPtBsYQfJxm3P1wcW0aAf1cHSo%2Bo9UTtw7f0eA%3D\"}]}",
+            "rndr-id": "5c726148-365b-4958",
+            "server": "cloudflare",
+            "vary": "Origin, Accept-Encoding",
+            "x-render-origin-server": "Render",
+            "x-request-id": "0d897495-77a2-4b93-82da-14618bc9b50a"
+          }
+        }
+      ]
+    },
+    {
+      "index": 12,
+      "title": "Golan Levin \u2014 Cytographia",
+      "source": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/487000000",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Cell-like line drawing on tan ground and label visible.",
+      "screenshot": "docs/evidence/device/corpus-first/12-compositor.png",
+      "screenshotSHA256": "4c48b4ff28c51ba44ed43f62e8d288632cd2b46b051b4274fa9995472438b204",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/487000000",
+          "title": "",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 1920,
+              "height": 1920
+            },
+            {
+              "width": 1920,
+              "height": 1920
+            },
+            {
+              "width": 1920,
+              "height": 1920
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 256,
+              "height": 256
+            },
+            {
+              "width": 256,
+              "height": 256
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 2
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/487000000",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-origin": "*",
+            "cache-control": "public, max-age=12, s-maxage=12",
+            "cf-cache-status": "MISS",
+            "cf-ray": "a5bfc6e91eac9cf7-SIN",
+            "content-encoding": "br",
+            "content-type": "text/html; charset=UTF-8",
+            "date": "Tue, 17 Nov 2026 15:30:30 GMT",
+            "last-modified": "Tue, 17 Nov 2026 15:30:30 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=2foNSltyFI9Q6T0CknkEmllUZlSKe7eg4AlPIIzLM5eaC2KV3ZhKB%2FMfUIEIjv7jdolL916oEY9QYEVN91NwCEyGlsnhAIl2YzXdSmA4tyCFPH%2FLeVFpyoBOaSTbYhjelhUt7Qtwu%2B0%3D\"}]}",
+            "rndr-id": "3e7cb010-1edb-4e3c",
+            "server": "cloudflare",
+            "vary": "Origin, Accept-Encoding",
+            "x-render-origin-server": "Render",
+            "x-request-id": "7edd85cc-4af6-47b8-89b2-17f5cd86d64e"
+          }
+        }
+      ]
+    },
+    {
+      "index": 13,
+      "title": "Anna Carreras \u2014 Arrels",
+      "source": "https://cdn.feralfileassets.com/previews/43c29566-9fad-42ce-aab9-1c4947164d94/1615728457/?edition_number=1&blockchain=bitmark",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Red field with curved teal/cream line shapes and label visible; diagnostic renderer capture failed.",
+      "screenshot": "docs/evidence/device/corpus-diagnostic-retry/13-compositor.png",
+      "screenshotSHA256": "949cae148fee1959114911445f0ac2ab5f64386070e8219f248f0bf776c52b7b",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/43c29566-9fad-42ce-aab9-1c4947164d94/1615728457/?edition_number=1&blockchain=bitmark",
+          "title": "Arrels by Anna Carreras (2020)",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 4
+        }
+      },
+      "diagnosticError": "Error: Diagnostic CDP connection failed",
+      "loadingFailures": [
+        {
+          "requestId": "2290983.4",
+          "timestamp": 671615.581315,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/43c29566-9fad-42ce-aab9-1c4947164d94/1615728457/?edition_number=1&blockchain=bitmark",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "age": "294",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=14400, s-maxage=300",
+            "cf-cache-status": "HIT",
+            "cf-ray": "a5bfce865cd88958-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html; charset=utf-8",
+            "date": "Tue, 17 Nov 2026 15:35:41 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=bYAlw4ew8zP8%2BnUdkLNH%2Bc%2BgAWYK64vOPlZqGMXUQhFOMIlVanaoVjc9WVIvH9C5LDpHGK5rzCVd2xnbJtwgH5R1D7IgH7G1EBWZUEWWHGo5FfwZucV5Xbb2uEybpnWHQjWqhssf4MoUCA%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfCacheStatus;desc=\"HIT\"\ncfEdge;dur=28,cfOrigin;dur=0,cfWorker;dur=41",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    },
+    {
+      "index": 14,
+      "title": "Matt Kane \u2014 Gazers",
+      "source": "https://generator.artblocks.io/1/0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270/215000000",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Layered green circular geometry and label visible; diagnostic renderer capture failed.",
+      "screenshot": "docs/evidence/device/corpus-diagnostic-retry/14-compositor.png",
+      "screenshotSHA256": "a2d3851245076250accce03cd4ef41a26f1b08792d3cfee10f7f2833c614b7ff",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://generator.artblocks.io/1/0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270/215000000",
+          "title": "",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 2
+        }
+      },
+      "diagnosticError": "Error: Diagnostic CDP connection failed",
+      "loadingFailures": [],
+      "documentResponses": [
+        {
+          "url": "https://generator.artblocks.io/1/0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270/215000000",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-origin": "*",
+            "cache-control": "public, max-age=12, s-maxage=12",
+            "cf-cache-status": "EXPIRED",
+            "cf-ray": "a5bfcee06b50409e-SIN",
+            "content-encoding": "br",
+            "content-type": "text/html; charset=UTF-8",
+            "date": "Tue, 17 Nov 2026 15:35:57 GMT",
+            "last-modified": "Tue, 17 Nov 2026 15:35:57 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=104TaxkyEDjdNJpz83WsOX8OBa9WXYzf6rFkIBAZMoDEC8u0yhCMYitpPYyUzWMb4HGBBATLoJMoGLjtd3yOT8313zHNN8kADNVjuHyFQUQWU0B%2Fqv4zvmwAttt1tmaniTL6Dd1iJls%3D\"}]}",
+            "rndr-id": "10b5b740-5ded-4f08",
+            "server": "cloudflare",
+            "vary": "Origin, Accept-Encoding",
+            "x-render-origin-server": "Render",
+            "x-request-id": "3f3e8962-1045-4e2c-ae23-0b8b7b3c4bb5"
+          }
+        }
+      ]
+    },
+    {
+      "index": 15,
+      "title": "Leander Herzog \u2014 Returns",
+      "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+      "observation": "not_presented",
+      "visualObservation": "Native error UI: no presentable frame within 60 seconds.",
+      "screenshot": "docs/evidence/device/corpus-first/15-compositor.png",
+      "screenshotSHA256": "7067f38bcf16c66c907b1147068d5447536bf2598c1bf627568cf46e43d6110d",
+      "document": null,
+      "diagnosticError": null,
+      "loadingFailures": [],
+      "documentResponses": []
+    },
+    {
+      "index": 16,
+      "title": "jjjjjohn \u2014 Slime Skelly",
+      "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+      "observation": "not_presented",
+      "visualObservation": "Native error UI: no presentable frame within 60 seconds.",
+      "screenshot": "docs/evidence/device/corpus-first/16-compositor.png",
+      "screenshotSHA256": "7067f38bcf16c66c907b1147068d5447536bf2598c1bf627568cf46e43d6110d",
+      "document": null,
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "6BE5448BB409115B4D55E3710FE44174",
+          "timestamp": 671467.489311,
+          "type": "Document",
+          "errorText": "net::ERR_ABORTED",
+          "canceled": true
+        }
+      ],
+      "documentResponses": []
+    },
+    {
+      "index": 17,
+      "title": "ertdfgcvb \u2014 POST 1",
+      "source": "https://cdn.feralfileassets.com/previews/5d7e9132-059f-44d9-a6a9-3c8a9b688965/1632387593/?edition_number=17&blockchain=bitmark",
+      "observation": "host_presented_needs_visual_review",
+      "visualObservation": "Colored text/glyph grid on pale green and label visible.",
+      "screenshot": "docs/evidence/device/corpus-first/17-compositor.png",
+      "screenshotSHA256": "1709533fe4e82612c697a787bd84201774a8dead097c8ba0929bc616f592b424",
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/5d7e9132-059f-44d9-a6a9-3c8a9b688965/1632387593/?edition_number=17&blockchain=bitmark",
+          "title": "ertdfgcvb - POST 1",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 3
+        }
+      },
+      "diagnosticError": null,
+      "loadingFailures": [
+        {
+          "requestId": "2286659.2",
+          "timestamp": 671468.947227,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "documentResponses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/5d7e9132-059f-44d9-a6a9-3c8a9b688965/1632387593/?edition_number=17&blockchain=bitmark",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5bfcaf2bee7fdfe-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html",
+            "date": "Tue, 17 Nov 2026 15:33:15 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=wtrsN74FdMIVtb4zEqf8E80v5mLpTAuW0Y%2BQWjB1kwuz61TQfM3H22MG8wqPUt1w%2BX2g959L13Kdy2OWBilEEjrVt%2BJtQ1PnOYghO6k3QZGNf2tAj%2BtaaA2hIjaToHh7A3NfHyOYkL8WyQ%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=24,cfOrigin;dur=0,cfWorker;dur=134",
+            "vary": "Accept-Encoding"
+          }
+        }
+      ]
+    }
+  ],
+  "physicalOutputVerified": false,
+  "referenceEquivalenceVerified": false,
+  "portfolioAcceptance": false
+}

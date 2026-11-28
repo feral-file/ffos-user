@@ -16,7 +16,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-watchdog/logger"
-	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
 )
 
 const (
@@ -123,30 +122,22 @@ func main() {
 	// Initialize system command executor
 	commandHandler := NewCommandHandler(log, vmagentClient)
 
-	// Initialize CDP client. Chromium owns the CDP socket lifecycle and can be
-	// temporarily absent during boot, OTA, kiosk restarts, or crash recovery. The
-	// watchdog must keep its own recovery monitors alive in those states instead
-	// of letting systemd restart this process and amplify Sentry noise.
-	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
-	initCDPBestEffort(ctx, cdpClient, log)
-	defer cdpClient.Close()
+	// Native host owns presentation and durable playback.
 
 	// Initialize resource monitors
 	ramHandler := NewMemoryHandler(log, commandHandler)
 	diskHandler := NewDiskHandler(log, commandHandler)
 	gpuHandler := NewGPUHandler(log, commandHandler)
-	cpuHandler := NewCPUHandler(log, cdpClient)
+	cpuHandler := NewCPUHandler(log, func(ctx context.Context, active bool) error {
+		return nativePlayerRequest(ctx, nativePlayerSocket(), map[string]bool{"thermal": active})
+	})
 	defer gpuHandler.GracefulShutdown(ctx)
 
-	// Chromium monitor is constructed before the mediator so the mediator
-	// can route feral-controld's EVENT_CDP_STUCK signal to it
-	// (ffos-user#356) — this daemon stays the sole place that decides to
-	// restart chromium-kiosk.service or reboot.
-	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
+	chromiumMonitor := NewChromiumMonitor(log, commandHandler)
 	defer chromiumMonitor.Stop()
 
 	// Initialize mediator
-	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, chromiumMonitor, log)
+	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, log)
 	mediator.Start()
 	defer mediator.Stop()
 
@@ -169,7 +160,9 @@ func main() {
 	}()
 
 	// Start Systemd monitor
-	systemdMonitor := NewSystemdMonitor(cdpClient, log, commandHandler, vmagentClient)
+	systemdMonitor := NewSystemdMonitor(func(ctx context.Context, failed bool) error {
+		return nativePlayerRequest(ctx, nativePlayerSocket(), map[string]bool{"serviceFailure": failed})
+	}, log, commandHandler, vmagentClient)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -200,12 +193,4 @@ func main() {
 	}
 
 	log.Info("feral-watchdog daemon shutdown complete")
-}
-
-func initCDPBestEffort(ctx context.Context, cdpClient cdp.ClientInterface, log *zap.Logger) bool {
-	if err := cdpClient.Init(ctx); err != nil {
-		log.Warn("CDP init unavailable; watchdog will retry on demand", zap.Error(err))
-		return false
-	}
-	return true
 }

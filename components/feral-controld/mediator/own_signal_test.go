@@ -37,7 +37,6 @@ func TestMediator_HandleDBusSignal_DropsOwnSignals(t *testing.T) {
 		context.Background(),
 		mockRelayer,
 		mockDbus,
-		mocks.NewMockCDP(ctrl),
 		mocks.NewMockCommandHandler(ctrl),
 		mocks.NewMockExecutor(ctrl),
 		mocks.NewMockRefresher(ctrl),

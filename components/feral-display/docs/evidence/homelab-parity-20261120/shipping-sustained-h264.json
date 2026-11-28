@@ -1,0 +1,128 @@
+[
+  {
+    "id": "4k",
+    "name": "media-4k-h264.mp4",
+    "before": {
+      "time": 4.024237,
+      "total": 126,
+      "drops": 0,
+      "width": 3840,
+      "height": 2160,
+      "ready": 4,
+      "decoded": 126
+    },
+    "after": {
+      "time": 3.415126,
+      "total": 1908,
+      "drops": 0,
+      "width": 3840,
+      "height": 2160,
+      "ready": 4,
+      "decoded": 1908
+    },
+    "windows": [
+      {
+        "seconds": 10,
+        "total": 296,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 298,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 297,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 296,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 298,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 297,
+        "dropped": 0
+      }
+    ],
+    "total": 1782,
+    "dropped": 0,
+    "players": [
+      {
+        "decoder": "VaapiVideoDecoder",
+        "platform": "true",
+        "tracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"3840x2160\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"3840x2160\",\"orientation\":\"0°\",\"profile\":\"h264 baseline\",\"visible rect\":\"0,0 3840x2160\"}]"
+      }
+    ]
+  },
+  {
+    "id": "square",
+    "name": "media-4096-square-h264.mp4",
+    "before": {
+      "time": 0.995117,
+      "total": 12,
+      "drops": 0,
+      "width": 4096,
+      "height": 4096,
+      "ready": 4,
+      "decoded": 12
+    },
+    "after": {
+      "time": 2.178864,
+      "total": 126,
+      "drops": 0,
+      "width": 4096,
+      "height": 4096,
+      "ready": 4,
+      "decoded": 126
+    },
+    "windows": [
+      {
+        "seconds": 10,
+        "total": 18,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 18,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 23,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 18,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 19,
+        "dropped": 0
+      },
+      {
+        "seconds": 10,
+        "total": 18,
+        "dropped": 0
+      }
+    ],
+    "total": 114,
+    "dropped": 0,
+    "players": [
+      {
+        "decoder": "FFmpegVideoDecoder",
+        "platform": "false",
+        "tracks": "[{\"alpha mode\":\"is_opaque\",\"codec\":\"h264\",\"coded size\":\"4096x4096\",\"color space\":{\"matrix\":\"BT709\",\"primaries\":\"BT709\",\"range\":\"LIMITED\",\"transfer\":\"BT709\"},\"encryption scheme\":\"Unencrypted\",\"has extra data\":true,\"hdr metadata\":{},\"natural size\":\"4096x4096\",\"orientation\":\"0°\",\"profile\":\"h264 baseline\",\"visible rect\":\"0,0 4096x4096\"}]"
+      }
+    ]
+  }
+]

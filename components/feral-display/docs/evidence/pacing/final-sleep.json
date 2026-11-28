@@ -1,0 +1,44 @@
+{
+  "recordedAt": "2026-11-18T00:28:03.402518+00:00",
+  "device": "homelab",
+  "command": "sleepNow",
+  "success": true,
+  "response": {
+    "ok": true,
+    "sleepSchedule": {
+      "enabled": false,
+      "sleepTime": "22:00",
+      "wakeTime": "07:30",
+      "currentState": "sleeping",
+      "overrideState": "sleeping"
+    }
+  },
+  "testUnitsStopped": [
+    "ff-native-runtime-test",
+    "ff-native-chrome-test",
+    "ff-native-test-media"
+  ],
+  "establishedServicesRunning": [
+    "chromium-kiosk",
+    "feral-controld",
+    "feral-watchdog",
+    "feral-sys-monitord",
+    "feral-player",
+    "display-restore"
+  ],
+  "interveningWake": {
+    "time": "2026-11-18T00:26:13.148382909Z",
+    "source": "local device HTTP request",
+    "command": "wakeNow",
+    "note": "Existing Home Assistant feral_file switch supports this command; exact caller not established. No unrelated services or automations changed."
+  },
+  "sleepReissued": true,
+  "finalSleepCommandAt": "2026-11-18T00:31:02.563831576Z",
+  "panelStandbyCommandAt": "2026-11-18T00:31:03.376603977Z",
+  "laterStatusVerifiedAt": "2026-11-18T00:32:40.794583+00:00",
+  "laterStatus": {
+    "currentState": "sleeping",
+    "overrideState": "sleeping"
+  },
+  "verificationLimit": "Panel standby command logged and later device status sleeping; HDMI link remains enabled as expected for DDC standby. No physical panel photograph."
+}

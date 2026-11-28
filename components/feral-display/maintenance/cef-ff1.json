@@ -1,0 +1,8 @@
+{
+  "version": "156.0.8+g426920c+chromium-156.0.8078.48",
+  "platform": "linux64",
+  "archive": "cef_binary_8078_linux_x86_64.tar.xz",
+  "file": "cef.tar.xz",
+  "url": "https://github.com/obs-rust/cef/releases/download/8078/cef_binary_8078_linux_x86_64.tar.xz",
+  "sha256": "fb36df11bc8280c9cb666732becc1fe267f833bb964dbb13d69cad33488171dc"
+}

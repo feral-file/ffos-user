@@ -75,11 +75,11 @@ func TestApplySleepTransitionIfChanged_SkipsUnchangedHealthyState(t *testing.T) 
 	// Exactly one player round-trip despite three IfChanged calls for the same state.
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: &tinyDelayPanelDDC{},
 		logger:   zaptest.NewLogger(t),
 	}
@@ -108,11 +108,11 @@ func TestApplySleepTransitionIfChanged_RetriesAfterFailure(t *testing.T) {
 		// Second tick: retried and succeeds.
 		mockCDP.EXPECT().
 			Send(cdp.METHOD_EVALUATE, gomock.Any()).
-			Return(map[string]any{"result": map[string]any{}}, nil),
+			Return(map[string]any{"message": map[string]any{"ok": true}}, nil),
 	)
 
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: &tinyDelayPanelDDC{},
 		logger:   zaptest.NewLogger(t),
 	}
@@ -141,12 +141,12 @@ func TestApplySleepTransitionIfChanged_RetriesPanelWithoutRedrivingPlayer(t *tes
 	// must not trigger any further player round-trip.
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	panel := &flakyPanelDDC{failN: 1}
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -180,11 +180,11 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		AnyTimes().
-		Return(map[string]any{"result": map[string]any{}}, nil)
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil)
 
 	panel := &flakyPanelDDC{delay: 200 * time.Microsecond}
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -337,12 +337,12 @@ func TestApplySleepTransitionIfChanged_ManualSupersedesStalePanelRetry(t *testin
 	// panel-only retry must not re-drive the player.
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(2)
 
 	panel := &scriptedPanelDDC{entered: make(chan struct{}), release: make(chan error)}
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -465,12 +465,12 @@ func TestApplySleepTransitionIfChanged_PanelRetryIsBounded(t *testing.T) {
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	panel := &blockingFailPanelDDC{entered: make(chan struct{}), release: make(chan struct{})}
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -546,11 +546,11 @@ func TestApplySleepTransitionIfChanged_DefersQuietlyWhileCDPDown(t *testing.T) {
 	// CDP-down ticks must not send.
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: &tinyDelayPanelDDC{},
 		logger:   zaptest.NewLogger(t),
 	}
@@ -583,12 +583,12 @@ func TestApplySleepTransitionIfChanged_PanelRetryRearmsOnDisplayChange(t *testin
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	panel := &blockingFailPanelDDC{entered: make(chan struct{}), release: make(chan struct{})}
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -675,12 +675,12 @@ func TestApplySleepTransitionIfChanged_PanelSuccessRearmsOnDisplayChange(t *test
 	// change must not touch the player.
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).
 		Times(1)
 
 	panel := &scriptedPanelDDC{entered: make(chan struct{}), release: make(chan error)}
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}

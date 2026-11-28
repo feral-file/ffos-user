@@ -1,0 +1,182 @@
+{
+  "startedAt": "2026-11-18T03:57:56.080Z",
+  "physicalOutputVerified": false,
+  "crashes": [
+    {
+      "occurrence": "c1a56484-dfcc-40df-a9eb-282334c803d7",
+      "killed": {
+        "unit": "ff-native-runtime-test.service",
+        "browser": 1023659,
+        "renderers": [
+          1027095,
+          1027096
+        ],
+        "signal": "SIGKILL"
+      },
+      "recovery": {
+        "attempt": 0,
+        "exhausted": false,
+        "failedOccurrence": "c1a56484-dfcc-40df-a9eb-282334c803d7",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 1000
+      },
+      "error": "Renderer terminated (9): 9"
+    },
+    {
+      "occurrence": "25a93eca-9ba0-47ee-a4f8-6e94eec87d2a",
+      "killed": {
+        "unit": "ff-native-runtime-test.service",
+        "browser": 1023659,
+        "renderers": [
+          1027157,
+          1027158
+        ],
+        "signal": "SIGKILL"
+      },
+      "recovery": {
+        "attempt": 1,
+        "exhausted": false,
+        "failedOccurrence": "25a93eca-9ba0-47ee-a4f8-6e94eec87d2a",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 2000
+      },
+      "error": "Renderer terminated (9): 9"
+    },
+    {
+      "occurrence": "2366160f-c5d8-4e64-8158-4d943e7f83ac",
+      "killed": {
+        "unit": "ff-native-runtime-test.service",
+        "browser": 1023659,
+        "renderers": [
+          1027208,
+          1027209
+        ],
+        "signal": "SIGKILL"
+      },
+      "recovery": {
+        "attempt": 2,
+        "exhausted": false,
+        "failedOccurrence": "2366160f-c5d8-4e64-8158-4d943e7f83ac",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": true,
+        "retryDelayMs": 4000
+      },
+      "error": "Renderer terminated (9): 9"
+    },
+    {
+      "occurrence": "104e5acc-1dc9-4b23-b45b-2d188fea5076",
+      "killed": {
+        "unit": "ff-native-runtime-test.service",
+        "browser": 1023659,
+        "renderers": [
+          1027277,
+          1027278
+        ],
+        "signal": "SIGKILL"
+      },
+      "recovery": {
+        "attempt": 3,
+        "exhausted": true,
+        "failedOccurrence": "104e5acc-1dc9-4b23-b45b-2d188fea5076",
+        "lastError": "Renderer terminated (9): 9",
+        "limit": 3,
+        "pending": false,
+        "retryDelayMs": 0
+      },
+      "error": "Renderer terminated (9): 9"
+    }
+  ],
+  "failed": {
+    "composition": null,
+    "context": "curated",
+    "generation": 5,
+    "host": "responsive",
+    "instance": "e3c996a1-5d3c-46fe-bcef-694e29271bba",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": false,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "controld-refresh-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html"
+        }
+      ]
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": null,
+    "presentedPlaylist": null,
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 3,
+      "exhausted": true,
+      "failedOccurrence": "104e5acc-1dc9-4b23-b45b-2d188fea5076",
+      "lastError": "Renderer terminated (9): 9",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "failed",
+    "revision": 87,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "error": "Renderer terminated (9): 9",
+      "exhibition": "",
+      "generation": 5,
+      "id": "104e5acc-1dc9-4b23-b45b-2d188fea5076",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:18990/input.html"
+      },
+      "navigationCommitted": true,
+      "stage": "failed"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "on",
+      "transitionMs": 0,
+      "volume": 0.25
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  },
+  "goTest": "=== RUN   TestNativeRefreshFailedDevice\n    native_controls_test.go:290: refresh accepted after four renderer crashes; host instance/generation preserved and fresh occurrence composed\n--- PASS: TestNativeRefreshFailedDevice (0.23s)\nPASS\nok  \tgithub.com/feral-file/ffos-user/components/feral-controld/commandrouter\t0.844s\n",
+  "result": "passed",
+  "finishedAt": "2026-11-18T03:58:08.608Z"
+}

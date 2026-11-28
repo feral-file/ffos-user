@@ -1,0 +1,4 @@
+ok  	github.com/feral-file/ffos-user/components/feral-sys-monitord	4.932s
+ok  	github.com/feral-file/ffos-user/components/feral-sys-monitord/logger	1.449s
+ok  	github.com/feral-file/ffos-user/components/feral-sys-monitord/metric	1.463s
+?   	github.com/feral-file/ffos-user/components/feral-sys-monitord/mocks	[no test files]

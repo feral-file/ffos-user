@@ -94,20 +94,17 @@ func TestOpen_GarbageFileIsReplacedByAFreshStore(t *testing.T) {
 
 // A check that will not stop (a page cycle in a damaged file makes tx.Check
 // loop and allocate without end) deletes the file and reports runaway, so
-// the daemon exits and restarts onto a fresh store. Simulated with a
-// timeout no walk can meet.
+// the daemon exits and restarts onto a fresh store. The test supplies a walk that produces no result.
 func TestOpen_RunawayCheckDiscardsAndAsksForARestart(t *testing.T) {
 	path := seedStore(t)
-	saved := checkTimeout
-	checkTimeout = time.Nanosecond
-	t.Cleanup(func() { checkTimeout = saved })
-
-	_, err := Open(path, Options{})
+	_, err := openWithCheck(path, Options{}, func(string, Options) (*Store, bool, error) {
+		runaway, err := awaitPageCheck(make(chan error), time.Millisecond)
+		return nil, runaway, err
+	})
 	require.ErrorIs(t, err, ErrStoreCheckRunaway)
 	assert.NoFileExists(t, path)
 	assert.NoFileExists(t, path+".opening", "the file it guarded is gone")
 
-	checkTimeout = saved
 	s, err := Open(path, Options{})
 	require.NoError(t, err, "the restart opens a fresh store")
 	defer func() { _ = s.Close() }()

@@ -555,12 +555,23 @@ func (m *Machine) applyUserSetup(ctx context.Context) {
 		return
 	}
 	m.logger.Info("provisioning: user-requested setup; raising the AP")
+	m.mu.Lock()
+	info := m.apInfo
+	// An attached portal or a failed join already owns the screen. A manual
+	// request only needs to promote an unattended invitation.
+	showInvitation := m.apUp && m.sessionPolicy != sessionUser && m.apAttachPaintedAt.IsZero() && m.lastJoinFailureLocked() == ""
+	m.mu.Unlock()
 	m.clearOffline()
 	m.resetJoinStatus()
 	m.transition(ctx, StateAPActive, Detail{
 		Reason:  ReasonUserRequested,
 		Message: "Wi-Fi setup requested from the app",
 	})
+	// A running automatic hotspot may have yielded the display to offline
+	// playback. Selecting Wi-Fi setup explicitly must reveal its existing QR.
+	if showInvitation && info.SSID != "" {
+		m.notify(StateAPActive, Detail{SSID: info.SSID, PSK: info.PSK, PortalURL: info.PortalURL, Reason: "ap-active"})
+	}
 	// Arm AFTER the transition (the latch inside it is what sets the
 	// user-requested bound). On a fresh raise this double-arms harmlessly
 	// with ensureAPUp's own arm (same tick, same clock reading); on the

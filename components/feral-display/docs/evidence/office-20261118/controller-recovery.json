@@ -1,0 +1,142 @@
+{
+  "startedAt": "2026-11-18T03:53:12.006Z",
+  "physicalOutputVerified": false,
+  "failed": {
+    "composition": {
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "occurrence": "e7c1eb3d-b90e-448b-8244-1faceaae54b8",
+      "revision": 7
+    },
+    "context": "curated",
+    "generation": 3,
+    "host": "responsive",
+    "instance": "e3c996a1-5d3c-46fe-bcef-694e29271bba",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": false,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "controld-refresh-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:1/renderer-failure.html"
+        }
+      ]
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "error": "",
+      "exhibition": "",
+      "generation": 2,
+      "id": "e7c1eb3d-b90e-448b-8244-1faceaae54b8",
+      "index": 1,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:18990/input.html",
+        "title": "Second"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "controld-controls-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "First"
+        },
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "Second"
+        }
+      ]
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 3,
+      "exhausted": true,
+      "failedOccurrence": "4cb56e91-ec50-407b-a84f-fcae11e05882",
+      "lastError": "Cannot determine artwork response type: metadata request failed or timed out",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "failed",
+    "revision": 40,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "error": "Cannot determine artwork response type: metadata request failed or timed out",
+      "exhibition": "",
+      "generation": 3,
+      "id": "4cb56e91-ec50-407b-a84f-fcae11e05882",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:1/renderer-failure.html"
+      },
+      "navigationCommitted": false,
+      "stage": "failed"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "on",
+      "transitionMs": 0,
+      "volume": 0.25
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  },
+  "goTest": "=== RUN   TestNativeRefreshFailedDevice\n    native_controls_test.go:286: refresh accepted by responsive host after renderer recovery exhausted; new occurrence, no browser navigation or displayed-success claim\n--- PASS: TestNativeRefreshFailedDevice (0.16s)\nPASS\nok  \tgithub.com/feral-file/ffos-user/components/feral-controld/commandrouter\t0.623s\n",
+  "result": "passed",
+  "finishedAt": "2026-11-18T03:53:22.221Z"
+}

@@ -56,6 +56,8 @@ there).
 
 ## Core principles
 
+**Critical: one FF1 display path.** Live, downloaded, and signed capsule artwork use `feral-display`. CEF renders web works, and libmpv renders standalone media. Capsule engine pins are provenance for off-device reproduction. Never install or launch a second display engine for a work.
+
 - **Delete before adding.** If the current shape is wrong, prefer removing or
   replacing it over layering more compatibility code on top.
 - **Keep architecture explicit.** Components should have narrow responsibilities

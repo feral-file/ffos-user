@@ -60,8 +60,7 @@ func TestLANRecovery_UploadLogsInProcess_PresignThenPut(t *testing.T) {
 	mockPoller := mocks.NewMockStatusPoller(ctrl)
 	panelDDC := ddc.New(mockExec, mockClock, logger)
 
-	executor := New(
-		mockCDP, mockDevSts, mockPoller, panelDDC,
+	executor := New(mocks.CommandSender{CDP: mockCDP}, mockDevSts, mockPoller, panelDDC,
 		wrapper.NewJSON(), mockOS, mockExec, mockMath, mockClock, logger,
 	).(*executor)
 

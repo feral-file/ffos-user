@@ -31,7 +31,7 @@ func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	clock.EXPECT().Now().Return(now).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -75,7 +75,7 @@ func TestPrepare_DisplayAtWithoutWrapper_FiltersActiveSet(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -116,7 +116,7 @@ func TestPrepare_DisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -154,7 +154,7 @@ func TestPrepare_DisplayAt_PersistsSourceAndClearDeletes(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.NewWithStore(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -196,7 +196,7 @@ func TestPrepare_NonScheduledClearRequiresCommit(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.NewWithStore(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -238,7 +238,7 @@ func TestClearThenWithPlayerPush_ClearRequiresAcceptedDefault(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.NewWithStore(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	_ = sched.PrepareWithSource(
@@ -277,7 +277,7 @@ func TestStop_CancelsTimerWithoutClearingPersistedPlaylist(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.NewWithStore(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	_ = sched.PrepareWithSource(
@@ -334,7 +334,7 @@ func TestStop_DropsPushFromAlreadyFiredTimer(t *testing.T) {
 		return current
 	}).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -408,7 +408,7 @@ func TestNewWithStore_RestoredSourceDoesNotRecomputeUntilRefresh(t *testing.T) {
 	clock.EXPECT().Now().Return(now).AnyTimes()
 	cdpMock.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.NewWithStore(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	require.False(t, sched.HasCache())
@@ -437,7 +437,7 @@ func TestRestore_RestoredPendingSourceOnlyKeepsDurableSource(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.NewWithStore(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	snapshot := sched.Snapshot()
@@ -510,7 +510,7 @@ func TestRestore_ReArmsPushRetryWhenRestoredActiveSetWasNeverPushed(t *testing.T
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -561,7 +561,7 @@ func TestPrepare_TimezoneLessDisplayAtUsesDeviceLocal(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -590,7 +590,7 @@ func TestPrepare_AbsoluteTimezoneDisplayAt(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -654,7 +654,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -707,7 +707,7 @@ func TestRecomputeNow_WakePathForceCastsNowDisplay(t *testing.T) {
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -734,7 +734,7 @@ func TestPrepare_DateOnlyDisplayAt_IsRejected(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -759,7 +759,7 @@ func TestPrepare_InvalidPresentDisplayAt_IsRejected(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
 	clock.EXPECT().Now().Return(now).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -791,7 +791,7 @@ func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -897,7 +897,7 @@ func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) 
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -950,7 +950,7 @@ func TestRecomputeNow_SnapshotsSourceWithActiveSet(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	_ = sched.PrepareWithSource(
@@ -1023,7 +1023,7 @@ func TestRecompute_RetriesAfterFailedFinalBoundaryPush(t *testing.T) {
 		},
 	).Times(2)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1072,7 +1072,7 @@ func TestClear_CancelsPendingPushRetry(t *testing.T) {
 		map[string]interface{}{"ok": false}, nil,
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1118,7 +1118,7 @@ func TestPrepare_ResetsPushRetryStateForNewSchedule(t *testing.T) {
 		map[string]interface{}{"ok": false}, nil,
 	).Times(2)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1163,7 +1163,7 @@ func TestPrepare_AllFutureNoEvergreen_EmptyActiveSet(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1190,7 +1190,7 @@ func TestClear_StopsTimerAndDropsCache(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1249,7 +1249,7 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1326,7 +1326,7 @@ func TestPush_OmitsContentContextWhenTheRestoredSourceHasNone(t *testing.T) {
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1368,7 +1368,7 @@ func TestPush_ReappliesTheContentPolicyProjectionAtCutover(t *testing.T) {
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1421,7 +1421,7 @@ func TestPush_RetiresACutoverTheContentPolicyEmpties(t *testing.T) {
 		},
 	).Times(1)
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1462,7 +1462,7 @@ func TestRecompute_PushesWhenOnlyTheProjectionChanged(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
@@ -1511,7 +1511,7 @@ func TestRecompute_PushesWhenOnlyTheProjectionChanged(t *testing.T) {
 func TestInlineDynamicSource_RoundTripPreservesVerdict(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
-	sched := playlistschedule.New(context.Background(), mocks.NewMockCDP(ctrl), mocks.NewMockClock(ctrl),
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: mocks.NewMockCDP(ctrl)}, mocks.NewMockClock(ctrl),
 		func() *time.Location { return time.UTC }, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	defer sched.Stop()
 
@@ -1569,7 +1569,7 @@ func TestRestore_DoesNotArmARetryWhenOnlyTheProjectionHidItems(t *testing.T) {
 		},
 	).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	t.Cleanup(sched.Stop)

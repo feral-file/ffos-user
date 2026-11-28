@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 )
 
@@ -21,7 +20,7 @@ import (
 func TestMediator_InternetObserverSeesAppliedEdge(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
-	wireConnectivitySession(t, ts)
+	wireConnectivityPlayer(t, ts)
 
 	var mu sync.Mutex
 	var seen []bool
@@ -33,9 +32,9 @@ func TestMediator_InternetObserverSeesAppliedEdge(t *testing.T) {
 		mu.Unlock()
 	})
 
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]interface{}{"result": "ok"}, nil).
+	ts.mockPlayer.EXPECT().
+		SetConnectivity(gomock.Any(), gomock.Any()).
+		Return(nil).
 		AnyTimes()
 	ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
 

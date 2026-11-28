@@ -1,0 +1,43 @@
+{
+  "device": "FF1-SKYZ2E3A",
+  "startedAt": "2026-11-19T04:26:01.402Z",
+  "physicalOutputVerified": false,
+  "checks": [
+    {
+      "type": "renderer-kill",
+      "seconds": 2.079733958,
+      "error": "Public Chromium renderer crashed",
+      "host": "responsive",
+      "attempt": 1
+    },
+    {
+      "type": "browser-kill",
+      "seconds": 3.1566096669999997,
+      "error": "Public Chromium exited: 9",
+      "host": "responsive",
+      "attempt": 2
+    },
+    {
+      "type": "controld-restart",
+      "sameRuntime": true,
+      "sameGeneration": true,
+      "sameOccurrence": true
+    },
+    {
+      "type": "host-stop",
+      "seconds": 31.291972042,
+      "deviceResponseMs": 5626.317541999999,
+      "playlistRestored": true,
+      "instanceChanged": true
+    },
+    {
+      "type": "host-kill",
+      "seconds": 8.087208083999998,
+      "deviceResponseMs": 525.3386670000036,
+      "playlistRestored": true,
+      "instanceChanged": true
+    }
+  ],
+  "result": "passed",
+  "finishedAt": "2026-11-19T04:26:49.932Z"
+}

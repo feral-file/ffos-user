@@ -11,16 +11,15 @@ import (
 
 	"go.uber.org/zap"
 
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 func signatureTestPoller(reply map[string]any, ws *fakeWS) *poller {
 	return &poller{
-		cdp: &fakeCDP{
-			pageNavigationURL: constants.WEBAPP_URL,
-			noLogSendResult:   map[string]any{"message": reply},
+		player: &fakePlayer{
+
+			reply: map[string]any{"message": reply},
 		},
 		relayer:                 &fakeRelayer{connectedResponses: []bool{true}},
 		ws:                      ws,

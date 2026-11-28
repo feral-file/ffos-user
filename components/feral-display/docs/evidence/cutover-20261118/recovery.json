@@ -1,0 +1,31 @@
+[
+  {
+    "test": "controld_restart",
+    "sameInstance": true,
+    "sameOccurrence": true,
+    "samePlaylist": true,
+    "renderer": "presented"
+  },
+  {
+    "test": "host_kill_systemd_recovery",
+    "elapsedMs": 8145,
+    "newInstance": true,
+    "samePlaylist": true,
+    "externalDeviceControl": true,
+    "renderer": "presented"
+  },
+  {
+    "test": "host_stop_watchdog_recovery",
+    "elapsedMs": 33211,
+    "newInstance": true,
+    "samePlaylist": true,
+    "externalDeviceControl": true,
+    "renderer": "presented"
+  },
+  {
+    "test": "thermal_hold_release",
+    "backendsRetired": true,
+    "samePlaylist": true,
+    "renderer": "presented"
+  }
+]

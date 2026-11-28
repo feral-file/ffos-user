@@ -113,7 +113,7 @@ func TestRetirementWire_SourceRefresh(t *testing.T) {
 			}
 			r := &refresher{
 				context:       context.Background(),
-				cdp:           mockCDP,
+				player:        mocks.CommandSender{CDP: mockCDP},
 				statusPoller:  mockPoller,
 				dp1:           mockDP1,
 				json:          wrapper.NewJSON(),

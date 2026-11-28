@@ -1,0 +1,1789 @@
+{
+  "ff1-original": [
+    {
+      "index": 0,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 35.72,
+      "channelRange": [
+        [
+          0,
+          236
+        ],
+        [
+          0,
+          233
+        ],
+        [
+          0,
+          228
+        ]
+      ],
+      "codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "decoder": "vaapi",
+      "size": [
+        1080,
+        1920
+      ],
+      "drmDecodeNs": 372797719,
+      "sampleSeconds": 6.007,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 1,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Generative Study 1",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 43.13,
+      "channelRange": [
+        [
+          0,
+          214
+        ],
+        [
+          0,
+          196
+        ],
+        [
+          0,
+          202
+        ]
+      ],
+      "codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "decoder": "vaapi",
+      "size": [
+        1080,
+        1920
+      ],
+      "drmDecodeNs": 428296044,
+      "sampleSeconds": 6.016,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureBuild": "469da8cf"
+    },
+    {
+      "index": 2,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Fluid Dreams",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 35.47,
+      "channelRange": [
+        [
+          0,
+          247
+        ],
+        [
+          0,
+          238
+        ],
+        [
+          0,
+          238
+        ]
+      ],
+      "codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "decoder": "vaapi",
+      "size": [
+        1080,
+        1920
+      ],
+      "drmDecodeNs": 413625092,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureBuild": "469da8cf"
+    },
+    {
+      "index": 3,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 A",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          254
+        ],
+        [
+          0,
+          248
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.44,
+      "captureBuild": "469da8cf"
+    },
+    {
+      "index": 4,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 B",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          254
+        ],
+        [
+          0,
+          254
+        ],
+        [
+          0,
+          254
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.48,
+      "captureBuild": "469da8cf"
+    },
+    {
+      "index": 5,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 C",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          252
+        ],
+        [
+          0,
+          251
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.34,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 6,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 D",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          253
+        ],
+        [
+          0,
+          252
+        ],
+        [
+          0,
+          251
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.54,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 7,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 E",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          247
+        ],
+        [
+          0,
+          219
+        ],
+        [
+          0,
+          245
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.34,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 8,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 F",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          254
+        ],
+        [
+          0,
+          243
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.19,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 9,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 G",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          238
+        ],
+        [
+          0,
+          222
+        ],
+        [
+          0,
+          227
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.18,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 10,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 H",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          254
+        ],
+        [
+          0,
+          253
+        ],
+        [
+          0,
+          253
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.28,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 11,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 I",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-raster",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          248
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          235
+        ]
+      ],
+      "decoder": "glycin",
+      "sourceMeanAbsoluteError": 0.37,
+      "captureBuild": "c20fdb7b"
+    },
+    {
+      "index": 12,
+      "title": "Unsupervised \u2014 Data Universe \u2014 MoMA",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 31.29,
+      "channelRange": [
+        [
+          0,
+          232
+        ],
+        [
+          0,
+          165
+        ],
+        [
+          0,
+          221
+        ]
+      ],
+      "codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "decoder": "no",
+      "size": [
+        4096,
+        4096
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.012,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureBuild": "c20fdb7b"
+    }
+  ],
+  "ff1-bbb": [
+    {
+      "index": 0,
+      "title": "bbb-avc.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 30.42,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          251
+        ]
+      ],
+      "codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "decoder": "vaapi",
+      "size": [
+        1920,
+        1080
+      ],
+      "drmDecodeNs": 338995392,
+      "sampleSeconds": 6.013,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "h264",
+        "profile": "High",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "sha256": "f03e635f0d24cdd8b7b482758b16f14eb0cbfa1056c23611a3a72cf3ff039ced"
+      }
+    },
+    {
+      "index": 1,
+      "title": "bbb-hevc-main.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 27.24,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          252
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "vaapi",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 1159168909,
+      "sampleSeconds": 6.016,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 3840,
+        "height": 2160,
+        "pix_fmt": "yuv420p",
+        "sha256": "d352edcd08bfdae8ed48b80234e9859437e47588e228fabb1b0a371e6f2fdc95"
+      }
+    },
+    {
+      "index": 2,
+      "title": "bbb-main10.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 44.84,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          251
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "vaapi",
+      "size": [
+        1920,
+        1080
+      ],
+      "drmDecodeNs": 475877295,
+      "sampleSeconds": 6.012,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "hevc",
+        "profile": "Main 10",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p10le",
+        "sha256": "6c14dec88ea21a0d7ae39983088035dc771f8b785c448cf02665dbf6120076d2"
+      }
+    },
+    {
+      "index": 3,
+      "title": "bbb-main.mkv",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 27.24,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          252
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "vaapi",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 1160393737,
+      "sampleSeconds": 6.017,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "hevc",
+        "profile": "Main",
+        "width": 3840,
+        "height": 2160,
+        "pix_fmt": "yuv420p",
+        "sha256": "11336055da1ac22da75a52957219764d84db0ceedf9776c2950a190df34bf42e"
+      }
+    },
+    {
+      "index": 4,
+      "title": "bbb-main10.ts",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 44.46,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          251
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "vaapi",
+      "size": [
+        1920,
+        1080
+      ],
+      "drmDecodeNs": 463137556,
+      "sampleSeconds": 6.005,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "hevc",
+        "profile": "Main 10",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p10le",
+        "sha256": "4b2973e8322ae8e31124a15ae0ecc035c883fcd791c5ca877752281da596a512"
+      }
+    },
+    {
+      "index": 5,
+      "title": "bbb-rext.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 43.55,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          247
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        960,
+        540
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.008,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "hevc",
+        "profile": "Rext",
+        "width": 960,
+        "height": 540,
+        "pix_fmt": "yuv444p10le",
+        "sha256": "e892f2db5a6ecde390e88e3a98de2b81a8a4db3cadd2d66c2f4ac35bb6581447"
+      }
+    },
+    {
+      "index": 6,
+      "title": "bbb-vp9.webm",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 44.16,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          249
+        ]
+      ],
+      "codec": "Google VP9",
+      "decoder": "vaapi",
+      "size": [
+        960,
+        540
+      ],
+      "drmDecodeNs": 284426164,
+      "sampleSeconds": 6.011,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "vp9",
+        "profile": "Profile 0",
+        "width": 960,
+        "height": 540,
+        "pix_fmt": "yuv420p",
+        "sha256": "2068f834f079e4771004ab4b6d19c06ab0984df8681bfaa82ea25c4780f16e97"
+      }
+    },
+    {
+      "index": 7,
+      "title": "bbb-av1.webm",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 43.58,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          248
+        ]
+      ],
+      "codec": "Alliance for Open Media AV1",
+      "decoder": "vaapi",
+      "size": [
+        960,
+        540
+      ],
+      "drmDecodeNs": 188864299,
+      "sampleSeconds": 6.006,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "input": {
+        "codec_name": "av1",
+        "profile": "Main",
+        "width": 960,
+        "height": 540,
+        "pix_fmt": "yuv420p",
+        "sha256": "117182785325bed90eb5dfb8254b35176f37bde5ede17e80e0863a7b581c8867"
+      }
+    }
+  ],
+  "native-corpus": [
+    {
+      "index": 0,
+      "title": "hevc_4k30P_main_2.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 29.53,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          252
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "vaapi",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 1289491595,
+      "sampleSeconds": 6.012,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 1,
+      "title": "hevc_4k60P_rext_10bit_422_eos_r5c_1.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 11.22,
+      "channelRange": [
+        [
+          0,
+          253
+        ],
+        [
+          0,
+          250
+        ],
+        [
+          0,
+          241
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.008,
+      "voDropDelta": 159,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 2,
+      "title": "hevc_4k50P.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 12.73,
+      "channelRange": [
+        [
+          0,
+          216
+        ],
+        [
+          0,
+          178
+        ],
+        [
+          0,
+          148
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 99,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 3,
+      "title": "hevc_all_i.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 10.05,
+      "channelRange": [
+        [
+          0,
+          233
+        ],
+        [
+          0,
+          196
+        ],
+        [
+          0,
+          157
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 4,
+      "title": "hevc_4K24P_rext_12bit_444_yuv444p12le_1.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 29.88,
+      "channelRange": [
+        [
+          0,
+          212
+        ],
+        [
+          0,
+          205
+        ],
+        [
+          0,
+          197
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 5,
+      "title": "hevc_2K24P_rext_10bit_444_yuv444p10le_1.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 21.78,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          255
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1920,
+        1080
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 6,
+      "title": "hevc_2K24P_rext_10bit_444_yuv444p10le_3.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 40.0,
+      "channelRange": [
+        [
+          0,
+          252
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          254
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1920,
+        1080
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0
+    },
+    {
+      "index": 7,
+      "title": "quick-brown-fox-1280x720-hevc-rext-8bit-400-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          112
+        ],
+        [
+          0,
+          112
+        ],
+        [
+          0,
+          112
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.011,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 4.12,
+      "nonblack": true
+    },
+    {
+      "index": 8,
+      "title": "quick-brown-fox-1280x720-hevc-rext-8bit-420-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          146
+        ],
+        [
+          0,
+          122
+        ],
+        [
+          0,
+          142
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.013,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 7.58,
+      "nonblack": true
+    },
+    {
+      "index": 9,
+      "title": "quick-brown-fox-1280x720-hevc-rext-8bit-422-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          143
+        ],
+        [
+          0,
+          121
+        ],
+        [
+          0,
+          141
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.018,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 7.27,
+      "nonblack": true
+    },
+    {
+      "index": 10,
+      "title": "quick-brown-fox-1280x720-hevc-rext-8bit-444-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          135
+        ],
+        [
+          0,
+          122
+        ],
+        [
+          0,
+          135
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.006,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 3.9,
+      "nonblack": true
+    },
+    {
+      "index": 11,
+      "title": "quick-brown-fox-1280x720-hevc-rext-10bit-400-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          112
+        ],
+        [
+          0,
+          112
+        ],
+        [
+          0,
+          112
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.004,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 4.17,
+      "nonblack": true
+    },
+    {
+      "index": 12,
+      "title": "quick-brown-fox-1280x720-hevc-rext-10bit-420-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          145
+        ],
+        [
+          0,
+          122
+        ],
+        [
+          0,
+          141
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.012,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 7.53,
+      "nonblack": true
+    },
+    {
+      "index": 13,
+      "title": "quick-brown-fox-1280x720-hevc-rext-10bit-422-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          143
+        ],
+        [
+          0,
+          122
+        ],
+        [
+          0,
+          141
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.008,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 7.33,
+      "nonblack": true
+    },
+    {
+      "index": 14,
+      "title": "quick-brown-fox-1280x720-hevc-rext-10bit-444-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          134
+        ],
+        [
+          0,
+          124
+        ],
+        [
+          0,
+          134
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.009,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 3.91,
+      "nonblack": true
+    },
+    {
+      "index": 15,
+      "title": "quick-brown-fox-1280x720-hevc-rext-12bit-400-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          112
+        ],
+        [
+          0,
+          112
+        ],
+        [
+          0,
+          112
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.007,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 4.17,
+      "nonblack": true
+    },
+    {
+      "index": 16,
+      "title": "quick-brown-fox-1280x720-hevc-rext-12bit-420-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          146
+        ],
+        [
+          0,
+          121
+        ],
+        [
+          0,
+          141
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.006,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 7.61,
+      "nonblack": true
+    },
+    {
+      "index": 17,
+      "title": "quick-brown-fox-1280x720-hevc-rext-12bit-422-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          144
+        ],
+        [
+          0,
+          121
+        ],
+        [
+          0,
+          140
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 7.33,
+      "nonblack": true
+    },
+    {
+      "index": 18,
+      "title": "quick-brown-fox-1280x720-hevc-rext-12bit-444-no-audio.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 0.0,
+      "channelRange": [
+        [
+          0,
+          136
+        ],
+        [
+          0,
+          123
+        ],
+        [
+          0,
+          134
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        1280,
+        720
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.01,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "referenceMAE": 3.92,
+      "nonblack": true
+    },
+    {
+      "index": 19,
+      "title": "hevc_4k24P_rext_12bit_444_pq.mp4",
+      "presented": true,
+      "path": "cage",
+      "backend": "native-media",
+      "error": "",
+      "meanPixelChange": 45.12,
+      "channelRange": [
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          250
+        ],
+        [
+          0,
+          233
+        ]
+      ],
+      "codec": "H.265 / HEVC (High Efficiency Video Coding)",
+      "decoder": "no",
+      "size": [
+        3840,
+        2160
+      ],
+      "drmDecodeNs": 0,
+      "sampleSeconds": 6.014,
+      "voDropDelta": 95,
+      "decoderDropDelta": 0
+    }
+  ],
+  "automatic": [
+    {
+      "index": 0,
+      "title": "preview.jpg",
+      "backend": "native-raster",
+      "path": "cage",
+      "renderer": "presented",
+      "url": null
+    },
+    {
+      "index": 1,
+      "title": "bbb-avc.mp4",
+      "backend": "native-media",
+      "path": "cage",
+      "renderer": "presented",
+      "url": null
+    },
+    {
+      "index": 2,
+      "title": "fixture.svg",
+      "backend": "cef-views",
+      "path": "cage",
+      "renderer": "presented",
+      "url": "http://127.0.0.1:18995/fixture.svg"
+    },
+    {
+      "index": 3,
+      "title": "presentation.html",
+      "backend": "cef-views",
+      "path": "cage",
+      "renderer": "presented",
+      "url": "http://127.0.0.1:18995/presentation.html"
+    },
+    {
+      "index": 4,
+      "title": "grit-fixed.html",
+      "backend": "cef-views",
+      "path": "cage",
+      "renderer": "presented",
+      "url": "http://127.0.0.1:18995/grit-fixed.html"
+    },
+    {
+      "index": 5,
+      "title": "Box.glb",
+      "backend": "cef-views",
+      "path": "composited",
+      "renderer": "presented",
+      "url": "https://ff-player.internal/f6e214b9-7b5e-4d14-a0f3-fc6316cb78cc/index.html"
+    }
+  ],
+  "controls": {
+    "pause": true,
+    "seek": true,
+    "muteVolume": true,
+    "resume": true,
+    "wake": true
+  },
+  "pixel-check": {
+    "result": "passed",
+    "checks": [
+      "EXIF orientation 6 pixels",
+      "Straight alpha composition and framing",
+      "AVIF auxiliary alpha",
+      "GIF animation advances through both colors"
+    ],
+    "gifSamples": [
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ]
+    ],
+    "capture": "Compositor output; no physical-panel claim"
+  },
+  "actual-pacing": [
+    {
+      "monotonicNs": 2829260915072,
+      "frames": 353,
+      "sampledAtMs": 1795173462685
+    },
+    {
+      "monotonicNs": 2839357753546,
+      "frames": 536,
+      "sampledAtMs": 1795173472702
+    },
+    {
+      "monotonicNs": 2849466109714,
+      "frames": 725,
+      "sampledAtMs": 1795173482723
+    },
+    {
+      "monotonicNs": 2859567447654,
+      "frames": 913,
+      "sampledAtMs": 1795173492741
+    },
+    {
+      "monotonicNs": 2869665929233,
+      "frames": 1099,
+      "sampledAtMs": 1795173502758
+    },
+    {
+      "monotonicNs": 2879761793181,
+      "frames": 1283,
+      "sampledAtMs": 1795173512783
+    },
+    {
+      "monotonicNs": 2889852370151,
+      "frames": 1467,
+      "sampledAtMs": 1795173522803
+    }
+  ],
+  "ff1-sustain-1": [
+    {
+      "t": 40.768355845,
+      "hwdec": "vaapi",
+      "decodeNs": 775350404,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 3.6
+    },
+    {
+      "t": 50.884825585,
+      "hwdec": "vaapi",
+      "decodeNs": 2818238183,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 13.6
+    },
+    {
+      "t": 61.016763893,
+      "hwdec": "vaapi",
+      "decodeNs": 4885028445,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 23.633333333333333
+    },
+    {
+      "t": 71.14147811,
+      "hwdec": "vaapi",
+      "decodeNs": 6983530050,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 33.666666666666664
+    },
+    {
+      "t": 81.262121742,
+      "hwdec": "vaapi",
+      "decodeNs": 9015376597,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 43.666666666666664
+    },
+    {
+      "t": 91.383012636,
+      "hwdec": "vaapi",
+      "decodeNs": 11086134440,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 53.666666666666664
+    },
+    {
+      "t": 101.514351514,
+      "hwdec": "vaapi",
+      "decodeNs": 13160119147,
+      "voDrops": 3,
+      "decoderDrops": 0,
+      "position": 63.699999999999996
+    }
+  ],
+  "ff1-sustain-2": [
+    {
+      "t": 105.755601516,
+      "hwdec": "vaapi",
+      "decodeNs": 341340309,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 3.9
+    },
+    {
+      "t": 115.889204541,
+      "hwdec": "vaapi",
+      "decodeNs": 1128047896,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 13.921354166666667
+    },
+    {
+      "t": 126.012290087,
+      "hwdec": "vaapi",
+      "decodeNs": 1915105409,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 23.921354166666667
+    },
+    {
+      "t": 136.142581862,
+      "hwdec": "vaapi",
+      "decodeNs": 2708749067,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 33.909375
+    },
+    {
+      "t": 146.269888128,
+      "hwdec": "vaapi",
+      "decodeNs": 3495450265,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 43.930729166666666
+    },
+    {
+      "t": 156.398679896,
+      "hwdec": "vaapi",
+      "decodeNs": 4293095998,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 53.918749999999996
+    },
+    {
+      "t": 166.514321989,
+      "hwdec": "vaapi",
+      "decodeNs": 5076089746,
+      "voDrops": 4,
+      "decoderDrops": 0,
+      "position": 63.940104166666664
+    }
+  ],
+  "sleepRGBRange": [
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      0
+    ]
+  ],
+  "final-state": {
+    "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA",
+    "renderer": "presented",
+    "sleeping": false,
+    "path": "cage",
+    "decoder": "vaapi"
+  },
+  "restart-state": {
+    "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA",
+    "renderer": "presented",
+    "sleeping": false,
+    "path": "cage",
+    "decoder": "vaapi"
+  },
+  "builds": {
+    "installed": "c20fdb7b",
+    "previous": "469da8cf",
+    "archiveSha256": "a9c589d9a3cf03102db36f386bbc184855b31a497ec312f4f422c28880552345",
+    "mediaWorkerSha256BothBuilds": "c1b0e09b34a531d313eb606184971f44edb7b649f16e10a2b6268c624ef2c5dc",
+    "cefCI": "https://github.com/feral-file/ffos-user/actions/runs/44725695811",
+    "ffosPackagingCommit": "f7d09d8"
+  },
+  "captureBuilds": {
+    "ff1-bbb": "c20fdb7b",
+    "automatic": "c20fdb7b",
+    "hevcSustained": "c20fdb7b",
+    "native-corpus": "469da8cf",
+    "actual-pacing": "469da8cf",
+    "pixel-check": "469da8cf"
+  },
+  "viewportPixels": {
+    "ff1-breakpoint-5": {
+      "center": [
+        41,
+        177,
+        86
+      ],
+      "corner": [
+        0,
+        0,
+        0
+      ]
+    },
+    "ff1-breakpoint-100": {
+      "center": [
+        216,
+        74,
+        52
+      ],
+      "corner": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "fadeCenterRGB": [
+    [
+      235,
+      101,
+      64
+    ],
+    [
+      235,
+      101,
+      64
+    ],
+    [
+      126,
+      54,
+      34
+    ],
+    [
+      4,
+      2,
+      1
+    ],
+    [
+      12,
+      24,
+      35
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ],
+    [
+      17,
+      34,
+      51
+    ]
+  ]
+}

@@ -76,7 +76,7 @@ func TestRefresher_SoftRefreshCarriesMediaHealthHints(t *testing.T) {
 		}).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	var asked [][]dp1playlist.PlaylistItem
 	refresher.SetMediaHealthHints(r, func(items []dp1playlist.PlaylistItem) interface{} {

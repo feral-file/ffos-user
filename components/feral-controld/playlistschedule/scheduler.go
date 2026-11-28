@@ -16,9 +16,9 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -199,7 +199,7 @@ type scheduler struct {
 	pushMu sync.Mutex
 
 	ctx    context.Context
-	cdp    cdp.CDP
+	player playercontrol.Sender
 	clock  wrapper.Clock
 	locFn  LocationFunc
 	logger *zap.Logger
@@ -284,12 +284,12 @@ type scheduler struct {
 // New builds a scheduler. locFn may be nil; LocalTimezone is used in that case.
 func New(
 	ctx context.Context,
-	cdpClient cdp.CDP,
+	player playercontrol.Sender,
 	clock wrapper.Clock,
 	locFn LocationFunc,
 	logger *zap.Logger,
 ) Scheduler {
-	return NewWithStore(ctx, cdpClient, clock, locFn, nil, logger)
+	return NewWithStore(ctx, player, clock, locFn, nil, logger)
 }
 
 // NewWithStore builds a scheduler that restores the last refreshable scheduled
@@ -297,7 +297,7 @@ func New(
 // refetch URL/dynamic displayAt schedules before future cutovers resume.
 func NewWithStore(
 	ctx context.Context,
-	cdpClient cdp.CDP,
+	player playercontrol.Sender,
 	clock wrapper.Clock,
 	locFn LocationFunc,
 	store Store,
@@ -308,16 +308,22 @@ func NewWithStore(
 	}
 	s := &scheduler{
 		ctx:    ctx,
-		cdp:    cdpClient,
+		player: player,
 		clock:  clock,
 		locFn:  locFn,
 		logger: logger,
 		store:  store,
 	}
-	s.restorePersisted()
+	if !s.hostOwnsSchedule() {
+		s.restorePersisted()
+	}
 	return s
 }
 
+func (s *scheduler) hostOwnsSchedule() bool {
+	owner, ok := s.player.(interface{ OwnsSchedule() bool })
+	return ok && owner.OwnsSchedule()
+}
 func (s *scheduler) HasCache() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -448,6 +454,11 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 		}
 	}
 
+	if s.hostOwnsSchedule() {
+		s.clearLocked()
+		return playlist
+	}
+
 	if !HasDisplayAtSchedule(playlist) {
 		// A non-scheduled display request must cancel any prior Daily timer; otherwise the
 		// previous playlist's next displayAt would overwrite the new display request.
@@ -505,7 +516,10 @@ func (s *scheduler) resumePersisted(ctx context.Context) bool {
 }
 
 func (s *scheduler) recompute(ctx context.Context, force bool) {
-	// Hold pushMu for the whole read+push loop so a display request/refresh
+	if s.hostOwnsSchedule() {
+		return
+	}
+	// Hold pushMu for the whole read+push loop so a cast/refresh
 	// WithPlayerPush cannot interleave mid-update. If Prepare bumps generation
 	// during CDP Send, loop once more and push the newer active set before
 	// releasing — avoiding a stale playlist stuck on screen.
@@ -866,10 +880,10 @@ func (s *scheduler) waitAndRetryPush(timerCtx context.Context, wait time.Duratio
 }
 
 func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Source) error {
-	if s.cdp == nil {
+	if s.player == nil {
 		return fmt.Errorf("cdp not configured")
 	}
-	if !s.cdp.Initialized() {
+	if !s.player.Ready(ctx) {
 		return fmt.Errorf("cdp not connected")
 	}
 
@@ -937,10 +951,6 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 			command.Arguments["mediaHealth"] = hints
 		}
 	}
-	payload, err := command.JSON()
-	if err != nil {
-		return fmt.Errorf("marshal displayAt playlist command: %w", err)
-	}
 
 	// Last gate before the write leaves controld. A timer or retry goroutine
 	// may have been released from SleepContext just before Stop latched, in
@@ -955,9 +965,7 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	if s.pushObserver != nil {
 		s.pushObserver(PushStarting)
 	}
-	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-	})
+	result, err := s.player.Send(ctx, command)
 	if err != nil {
 		return fmt.Errorf("send displayAt playlist to CDP: %w", err)
 	}

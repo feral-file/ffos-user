@@ -210,3 +210,11 @@ func TestStart_StopsOnClose(t *testing.T) {
 	}, "supervisor should stop dialing after Close")
 	assert.False(t, c.Initialized(), "CDP must stay disconnected after Close")
 }
+
+func (h *fakeHTTP) GetContext(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return h.Do(req)
+}

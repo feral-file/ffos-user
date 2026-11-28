@@ -15,6 +15,21 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
+type interactiveSeriesKey struct{}
+
+// WithInteractiveSeriesResolution bounds optional catalog expansion on a phone
+// cast. A timeout retains each published representative; periodic refresh still
+// gets its normal budget to resolve full editions later.
+func WithInteractiveSeriesResolution(ctx context.Context) context.Context {
+	return context.WithValue(ctx, interactiveSeriesKey{}, true)
+}
+func seriesWalkBudget(ctx context.Context) time.Duration {
+	if interactive, _ := ctx.Value(interactiveSeriesKey{}).(bool); interactive {
+		return 2 * time.Second
+	}
+	return seriesExpansionBudget
+}
+
 // contentRatingRank orders a rating by how LITTLE the device's content policy
 // admits it, so "stricter" is one comparison instead of a special case per
 // label. It mirrors contentpolicy.Policy.Allows and must be changed with it:
@@ -496,7 +511,7 @@ func (d *dp1) seriesEditions(ctx context.Context, playlistID string, item dp1pla
 		return nil, "", err
 	}
 
-	resp, err := d.httpClient.Get(endpoint)
+	resp, err := d.httpClient.GetContext(ctx, endpoint)
 	if err != nil {
 		return nil, "", err
 	}

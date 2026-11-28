@@ -54,14 +54,14 @@ func (s *slowBlockingPanelDDC) ApplyControl(ctx context.Context, action ddc.DdcP
 func TestApplySleepTransition_DoesNotBlockOnFfpPowerDDC(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil)
 
 	applyStarted := make(chan struct{}, 1)
 	unblock := make(chan struct{})
 	panel := &slowBlockingPanelDDC{applyStarted: applyStarted, unblock: unblock}
 
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -95,10 +95,10 @@ func TestInvalidatePlayerSleepState_ForcesRedriveAfterCDPReconnect(t *testing.T)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	// Exactly two player round-trips: the initial drive and the post-invalidation
 	// re-drive. The aligned tick in between must not send.
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).Times(2)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).Times(2)
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger: zaptest.NewLogger(t),
 	}
 	ctx := context.Background()
@@ -145,10 +145,10 @@ func TestCurrentGeneration_NilSeamReadsZero(t *testing.T) {
 func TestApplySleepTransitionLocked_GenerationStable_RecordsApplied(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil)
 
 	e := &executor{
-		cdp:               mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger:            zaptest.NewLogger(t),
 		sessionGeneration: func() uint64 { return 7 },
 	}
@@ -173,11 +173,11 @@ func TestApplySleepTransitionLocked_GenerationMovedDuringSend_NotRecordedApplied
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(string, map[string]interface{}) (interface{}, error) {
 			gen = 2 // the page changed generation while the send was in flight
-			return map[string]any{"result": map[string]any{}}, nil
+			return map[string]any{"message": map[string]any{"ok": true}}, nil
 		})
 
 	e := &executor{
-		cdp:               mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger:            zaptest.NewLogger(t),
 		sessionGeneration: func() uint64 { return gen },
 	}
@@ -209,15 +209,15 @@ func TestApplySleepTransition_GenerationRace_SwallowsErrorAndSuppressesOnAwake(t
 
 	gen := uint64(1)
 	firstSend := mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]any{"result": map[string]any{}}, nil).Times(1)
+		Return(map[string]any{"message": map[string]any{"ok": true}}, nil).Times(1)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
 			gen = 2 // the page changed generation while THIS (wake) send was in flight
-			return map[string]any{"result": map[string]any{}}, nil
+			return map[string]any{"message": map[string]any{"ok": true}}, nil
 		}).Times(1).After(firstSend)
 
 	e := &executor{
-		cdp:               mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger:            zaptest.NewLogger(t),
 		sessionGeneration: func() uint64 { return gen },
 	}
@@ -281,14 +281,14 @@ func (s *stagedPanelDDC) appliedPowers() []string {
 func TestApplySleepTransition_SerializesRapidFfpPowerChanges(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).Times(2)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).Times(2)
 
 	release := make(chan struct{})
 	entered := make(chan struct{}, 2)
 	panel := &stagedPanelDDC{release: release, entered: entered}
 
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
@@ -340,10 +340,10 @@ func (t *tinyDelayPanelDDC) ApplyControl(ctx context.Context, action ddc.DdcPane
 func TestApplyFfpPowerStateAsyncConcurrentEnqueue(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).AnyTimes().Return(map[string]any{"result": map[string]any{}}, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).AnyTimes().Return(map[string]any{"message": map[string]any{"ok": true}}, nil)
 
 	e := &executor{
-		cdp:      mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		panelDDC: &tinyDelayPanelDDC{delay: time.Millisecond},
 		logger:   zaptest.NewLogger(t),
 	}
@@ -371,10 +371,10 @@ func TestSetOnAwake_FiresAfterSuccessfulWakeOutsideSleepLock(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).AnyTimes()
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger: zaptest.NewLogger(t),
 	}
 	ctx := context.Background()
@@ -417,10 +417,10 @@ func TestSetOnAwake_NotCalledOnSleep(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).AnyTimes()
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger: zaptest.NewLogger(t),
 	}
 	called := 0
@@ -439,10 +439,10 @@ func TestSetOnAwake_NotCalledWithoutSleepEdge(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).AnyTimes()
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger: zaptest.NewLogger(t),
 	}
 	ctx := context.Background()
@@ -485,11 +485,11 @@ func TestSetOnAwake_FiresAfterFailedSleepApply(t *testing.T) {
 				failNext = false
 				return nil, assert.AnError
 			}
-			return map[string]any{"result": map[string]any{}}, nil
+			return map[string]any{"message": map[string]any{"ok": true}}, nil
 		}).AnyTimes()
 
 	e := &executor{
-		cdp:    mockCDP,
+		cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP},
 		logger: zaptest.NewLogger(t),
 	}
 	ctx := context.Background()
@@ -518,10 +518,10 @@ func TestSetOnAwake_FailedWakeThenRetryFiresOnce(t *testing.T) {
 				failNext = false
 				return nil, assert.AnError
 			}
-			return map[string]any{"result": map[string]any{}}, nil
+			return map[string]any{"message": map[string]any{"ok": true}}, nil
 		}).AnyTimes()
 
-	e := &executor{cdp: mockCDP, logger: zaptest.NewLogger(t)}
+	e := &executor{cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}, logger: zaptest.NewLogger(t)}
 	ctx := context.Background()
 	called := 0
 	SetOnAwake(e, func(context.Context) { called++ }, zaptest.NewLogger(t))
@@ -546,9 +546,9 @@ func TestSetOnAwake_InvalidateDuringAwakeHoursFiresZero(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).AnyTimes()
 
-	e := &executor{cdp: mockCDP, logger: zaptest.NewLogger(t)}
+	e := &executor{cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}, logger: zaptest.NewLogger(t)}
 	ctx := context.Background()
 	called := 0
 	SetOnAwake(e, func(context.Context) { called++ }, zaptest.NewLogger(t))
@@ -577,9 +577,9 @@ func TestSetOnAwake_RestartWhileSleepingWakeBoundaryFiresOnce(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
-	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"message": map[string]any{"ok": true}}, nil).AnyTimes()
 
-	e := &executor{cdp: mockCDP, logger: zaptest.NewLogger(t)}
+	e := &executor{cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}, logger: zaptest.NewLogger(t)}
 	ctx := context.Background()
 	called := 0
 	SetOnAwake(e, func(context.Context) { called++ }, zaptest.NewLogger(t))

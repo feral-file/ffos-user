@@ -1,0 +1,104 @@
+{
+  "physicalOutputVerified": false,
+  "runs": [
+    {
+      "file": "direct-cef1.json",
+      "arm": "direct",
+      "outputIntervals": {
+        "count": 1147,
+        "meanMs": 55.05625980819529,
+        "medianMs": 50.0,
+        "p95Ms": 66.667,
+        "p99Ms": 66.667,
+        "over100ms": 0
+      },
+      "rafTimestamps": {
+        "count": 1095,
+        "meanMs": 54.9312328767123,
+        "medianMs": 50,
+        "p95Ms": 66.70000000000437,
+        "p99Ms": 66.79999999999927,
+        "standardDeviationMs": 7.605767568529771,
+        "over50ms": 324
+      },
+      "callbackDelivery": {
+        "count": 1095,
+        "meanMs": 54.93205479456954,
+        "medianMs": 50.20000001788139,
+        "p95Ms": 67.2999999821186,
+        "p99Ms": 67.90000000596046
+      },
+      "cpuPercentOneCore": 25.470211454094066,
+      "cgroupMemoryMiB": 362.70703125,
+      "cgroupPeakMiB": 377.0703125
+    },
+    {
+      "file": "host-cef.json",
+      "arm": "cef",
+      "outputIntervals": {
+        "count": 1086,
+        "meanMs": 58.05670349907919,
+        "medianMs": 50.0,
+        "p95Ms": 66.667,
+        "p99Ms": 83.333,
+        "over100ms": 0
+      },
+      "rafTimestamps": {
+        "count": 1040,
+        "meanMs": 57.99634615384609,
+        "medianMs": 50.099999999998545,
+        "p95Ms": 83.40000000000146,
+        "p99Ms": 116.69999999999709,
+        "standardDeviationMs": 16.4888530562604,
+        "over50ms": 452
+      },
+      "callbackDelivery": {
+        "count": 1040,
+        "meanMs": 57.99375,
+        "medianMs": 52.19999998807907,
+        "p95Ms": 73.5,
+        "p99Ms": 107.5
+      },
+      "cpuPercentOneCore": 31.377271747528546,
+      "cgroupMemoryMiB": 337.13671875,
+      "cgroupPeakMiB": 350.953125,
+      "wholeRunCopiesIncludingWarmup": {
+        "gpuCopies": 0,
+        "cpuCopies": 0,
+        "coalescedFrames": 3,
+        "directTextureImports": 1566
+      }
+    },
+    {
+      "file": "direct-cef2.json",
+      "arm": "direct",
+      "outputIntervals": {
+        "count": 1144,
+        "meanMs": 55.37553321678322,
+        "medianMs": 50.0,
+        "p95Ms": 66.667,
+        "p99Ms": 66.667,
+        "over100ms": 0
+      },
+      "rafTimestamps": {
+        "count": 1087,
+        "meanMs": 55.320331186752526,
+        "medianMs": 50,
+        "p95Ms": 66.70000000000437,
+        "p99Ms": 66.80000000000291,
+        "standardDeviationMs": 7.768667796883767,
+        "over50ms": 347
+      },
+      "callbackDelivery": {
+        "count": 1087,
+        "meanMs": 55.31977920885358,
+        "medianMs": 50.30000001192093,
+        "p95Ms": 67.40000000596046,
+        "p99Ms": 68.19999998807907
+      },
+      "cpuPercentOneCore": 20.115740531544596,
+      "cgroupMemoryMiB": 270.67578125,
+      "cgroupPeakMiB": 271.80078125
+    }
+  ]
+}

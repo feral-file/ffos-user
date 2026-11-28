@@ -1,0 +1,12 @@
+{
+  "physicalOutputVerified": false,
+  "checks": [
+    "software preview commits after configuration; native matte and inner viewport pixels match",
+    "same URL replacement resets preview and rejects delayed prior-occurrence write",
+    "paused video applies resize/scaling/color and emits a new configured frame without resuming",
+    "no-op preview receives a later causal composition revision",
+    "authored CSS backgrounds resolve consistently for paused media and the native matte",
+    "covered superseding configuration retains prior composition and completes after uncovering"
+  ],
+  "result": "passed"
+}

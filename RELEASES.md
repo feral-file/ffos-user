@@ -19,6 +19,129 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.2.0 — full-image Staging build request
+
+The `feral-display` package replaces the native development player in the full image. Its matching daemons and session scripts ship together.
+After promoting both repositories from `develop` to `staging`, the release
+operator dispatches `feral-file/ffos` workflow `build-image-to-cf.yml` on
+`staging` with these inputs.
+
+| Input | Value |
+| --- | --- |
+| version | 3.2.0 |
+| environment | Staging |
+| ffos_user_ref | staging |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | false |
+| update_min_version | false |
+| update_required_version | false |
+| update_recovery_version | false |
+
+The three update flags preserve the existing runtime, upgrade and recovery
+thresholds when publishing this staging candidate.
+
+## 3.1.4 — full-image Development rebuild after merging develop
+
+The November 28 rebuild reuses the Development download URL from the
+November 27 qualification below. Identify the two images by their build
+runs and checksums. The earlier on-device OTA result applies to the
+November 27 image.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | 3e432cde645564412fc2a011cd94b5bb27a19219 |
+| ffos_user_ref | 301232351b87a84714a2e957f404bbba70fff568 |
+| version | 3.1.4 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The downloaded ISO verified against the FF1 release public key. Its SHA-256 is
+`dc579f68a0c2b4416e3f10b6d129947d6668b4236cc668366b80f309c07e17cf`.
+[November 28 Development build](https://github.com/feral-file/ffos/actions/runs/46096555726).
+
+## 3.1.4 — full-image Development OTA qualification (November 27)
+
+On FF1-BJT8ZQP9, the production 3.0.1 updater installed the signed Development
+image from the branch feed. A two-work playlist cast after the updater took
+its snapshot survived the upgrade. The native player displayed the second
+work on first boot and again after an ordinary reboot. The OTA health check
+confirmed playback three times and rejected a different playlist receipt.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | caaa9f0954b38c62de1fada3176335630b7eb79d |
+| ffos_user_ref | b789339cfddfd85969fde8e7c38117717e70bcb5 |
+| version | 3.1.4 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| soak-test | false |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The downloaded ISO matched the published SHA-256
+`8ca27187d3c1fb866b13dc758f8f1ec99f76be1268e12607640144baf465b6d0`
+and verified against the FF1 release public key.
+[Development build](https://github.com/feral-file/ffos/actions/runs/45978716773) ·
+[Signed Development image](https://ffosdev.feralfile.com/archlinux/codex/native-player/FF1-dev-3.1.4.iso).
+
+## 3.1.0.native.20261121.11 — full-image Development trial
+
+This image pairs the native kiosk session with its socket-only daemons. Native
+images poll the branch's `native/os/$arch` package index. Existing legacy
+images stay on their original index until a full-image update installs the new
+session and pacman configuration.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | 30ff01607b3abf692955c26927ad55528695f8e0 |
+| ffos_user_ref | a10199351137c576efe341df14ba8cb3196d818e |
+| version | 3.1.0.native.20261121.11 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| soak-test | false |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The workflow extracted the finished ISO and checked its installed packages,
+kiosk startup and package index. SHA-256 is `05333758ac1caff2aeec1c1c8b108cf7bdcbbfb22ba65d2cb26904f27209cd39`.
+[Development build](https://github.com/feral-file/ffos/actions/runs/44883887023) ·
+[Signed Development image](https://ffosdev.feralfile.com/archlinux/codex/native-player/FF1-dev-3.1.0.native.20261121.11.iso).
+
+Homelab retained its existing OS. Its in-place trial used the signed player,
+controld and watchdog packages from the same workflow. The isolated pacman
+upgrade replaced `feral-player` with `ff-player-native`.
+
+## 3.1.0.native.20261121.3 — full-image Development trial
+
+The kiosk session, native player package, controld and watchdog change together.
+The player hosts codec-enabled CEF 156 and libmpv under Cage. The image builds
+the runtime from the selected ffos-user revision or consumes its tested artifact.
+The image verification step checks the selected native package in the ISO filesystem.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | b95fc0ab44d6472682ebfa240a2bc9dc35aec9c2 |
+| ffos_user_ref | 8fe7305b28c8e58da7ce3ae695cf148b9410c0d7 |
+| version | 3.1.0.native.20261121.3 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| soak-test | false |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The homelab trial stages files directly and has a separate rollback backup.
+[Development workflow run](https://github.com/feral-file/ffos/actions/runs/44879156913).
+
 ## 3.1.0 — full-image (cross-rail; paired with the ffos release)
 
 Everything on `develop` since `v3.0.1`: what #496 promoted (develop

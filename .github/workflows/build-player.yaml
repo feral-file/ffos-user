@@ -1,0 +1,50 @@
+name: Build feral-display
+on:
+  push:
+    branches: [develop, 'codex/**']
+    paths: ['components/feral-display/**', 'components/feral-controld/contentpath/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/feral-display/docs/**', '!components/feral-display/README.md', '.github/workflows/build-player.yaml']
+  pull_request:
+    paths: ['components/feral-display/**', 'components/feral-controld/contentpath/**', 'components/feral-controld/playerlink/**', 'components/feral-controld/playercontrol/**', '!components/feral-display/docs/**', '!components/feral-display/README.md', '.github/workflows/build-player.yaml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-player-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Linux toolchain image
+        run: docker build -t ff-native-build components/feral-display
+      - name: Build and test Cage host, CEF and native media workers
+        run: |
+          docker run --rm -v "$PWD/components:/workspace/components" -w /workspace/components/feral-display ff-native-build sh tools/build-ff1.sh
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: components/feral-controld/go.sum
+      - name: Verify Go and C++ protocol interoperability
+        # The core links against the pinned build image libc. Run Go tests in that
+        # same image, not the older Ubuntu runner's dynamic loader/libraries.
+        run: |
+          docker run --rm -v "$PWD:/workspace" -v "$(go env GOROOT):/opt/go:ro" \
+            -w /workspace/components/feral-controld \
+            -e PATH=/opt/go/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
+            -e FF_NATIVE_CORE=/workspace/components/feral-display/build-ff1/build/ff-player-core \
+            ff-native-build go test ./playerlink ./playercontrol
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feral-display-linux-x86_64
+          path: |
+            components/feral-display/build-ff1/feral-display-linux.tar.gz
+            components/feral-display/build-ff1/SHA256SUMS
+            components/feral-display/build-ff1/installed-executables.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feral-display-ui-fixtures
+          path: components/feral-display/build-ff1/build/ui-evidence/*.png
+          if-no-files-found: error

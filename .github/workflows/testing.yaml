@@ -12,23 +12,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  coverage-context:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      promotion: ${{ steps.promotion.outputs.number }}
+    steps:
+      - name: Find the staging PR for this develop commit
+        id: promotion
+        if: github.ref_name == 'develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base staging --head develop \
+            --json number,headRefOid,isCrossRepository --jq             'map(select(.isCrossRepository == false and .headRefOid == env.GITHUB_SHA)) | .[0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
   test-controld:
     name: Test Controld
+    needs: coverage-context
     uses: ./.github/workflows/test-controld.yaml
     with:
       upload-coverage: true
+      coverage-pr: ${{ needs.coverage-context.outputs.promotion }}
     secrets: inherit
 
   test-sys-monitord:
     name: Test Sys Monitord
+    needs: coverage-context
     uses: ./.github/workflows/test-sys-monitord.yaml
     with:
       upload-coverage: true
+      coverage-pr: ${{ needs.coverage-context.outputs.promotion }}
     secrets: inherit
 
   test-watchdog:
     name: Test Watchdog
+    needs: coverage-context
     uses: ./.github/workflows/test-watchdog.yaml
     with:
       upload-coverage: true
+      coverage-pr: ${{ needs.coverage-context.outputs.promotion }}
     secrets: inherit

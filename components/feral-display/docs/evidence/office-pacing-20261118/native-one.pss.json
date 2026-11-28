@@ -1,0 +1,103 @@
+{
+  "unit": "ff-native-runtime-test.service",
+  "atNs": 1794972084941972783,
+  "processes": [
+    {
+      "pid": 977832,
+      "name": "ff-player-nativ",
+      "Pss": 344081,
+      "Rss": 540040,
+      "Private_Clean": 54244,
+      "Private_Dirty": 186500,
+      "SwapPss": 0
+    },
+    {
+      "pid": 977844,
+      "name": "ff-player-nativ",
+      "Pss": 18692,
+      "Rss": 73528,
+      "Private_Clean": 16,
+      "Private_Dirty": 712,
+      "SwapPss": 0
+    },
+    {
+      "pid": 977845,
+      "name": "ff-player-nativ",
+      "Pss": 13442,
+      "Rss": 73772,
+      "Private_Clean": 24,
+      "Private_Dirty": 144,
+      "SwapPss": 0
+    },
+    {
+      "pid": 977847,
+      "name": "ff-player-nativ",
+      "Pss": 3307,
+      "Rss": 19516,
+      "Private_Clean": 0,
+      "Private_Dirty": 240,
+      "SwapPss": 0
+    },
+    {
+      "pid": 977886,
+      "name": "ff-player-nativ",
+      "Pss": 99910,
+      "Rss": 222152,
+      "Private_Clean": 8100,
+      "Private_Dirty": 14384,
+      "SwapPss": 0
+    },
+    {
+      "pid": 977888,
+      "name": "ff-player-nativ",
+      "Pss": 40038,
+      "Rss": 107764,
+      "Private_Clean": 3120,
+      "Private_Dirty": 18560,
+      "SwapPss": 0
+    },
+    {
+      "pid": 977890,
+      "name": "ff-player-nativ",
+      "Pss": 8390,
+      "Rss": 47400,
+      "Private_Clean": 0,
+      "Private_Dirty": 1348,
+      "SwapPss": 0
+    },
+    {
+      "pid": 978102,
+      "name": "ff-player-nativ",
+      "Pss": 22444,
+      "Rss": 73776,
+      "Private_Clean": 312,
+      "Private_Dirty": 6816,
+      "SwapPss": 0
+    },
+    {
+      "pid": 978103,
+      "name": "ff-player-nativ",
+      "Pss": 83167,
+      "Rss": 148744,
+      "Private_Clean": 34692,
+      "Private_Dirty": 24212,
+      "SwapPss": 0
+    },
+    {
+      "pid": 978432,
+      "name": "ff-player-nativ",
+      "Pss": 30918,
+      "Rss": 68224,
+      "Private_Clean": 16356,
+      "Private_Dirty": 8100,
+      "SwapPss": 0
+    }
+  ],
+  "totalsKiB": {
+    "Pss": 664389,
+    "Rss": 1374916,
+    "Private_Clean": 116864,
+    "Private_Dirty": 261016,
+    "SwapPss": 0
+  }
+}

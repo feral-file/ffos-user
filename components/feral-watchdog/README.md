@@ -2,109 +2,37 @@
 
 The Feral Watchdog daemon monitors system health and takes corrective actions when issues are detected.
 
-## CDP Monitor
+## Native player health and recovery
 
-The CDP Monitor is responsible for monitoring the health of the Chromium browser using Chrome DevTools Protocol.
+The watchdog probes the native host's private Unix socket every five seconds,
+using version negotiation and `health.get`. It validates socket ownership,
+peer UID, bounded frames, correlation and host identity. A renderer failure is
+not a host failure: the C++ host owns three bounded renderer retries and keeps
+its command interface and error UI alive. No CDP connection or `/json/version`
+is used by production watchdog control. Old metric/type names and the
+`chromium-kiosk.service` name are retained for operational continuity.
 
-### Monitoring Logic
+The recovery policy is unchanged: 90 seconds before first connection or after
+a restart, 20 seconds of failure after a successful probe, at most three kiosk
+restarts within five minutes, then the existing 15-minute Plymouth fallback
+hold. One fallback reboot is allowed across boots before parking. A successful
+native command-loop probe supplies both host and control-path health; no
+controld CDP report is needed to forgive that reboot budget.
 
-- Checks Chromium health via CDP every 5 seconds (`GET /json/version`).
-- Treats Chromium/CDP as a recoverable runtime dependency during startup,
-  kiosk restart, OTA, and crash recovery; the watchdog stays alive and retries
-  CDP access instead of exiting on a single refused connection.
-- Hang detection uses two different budgets depending on whether Chromium
-  has spoken to the watchdog yet:
-  - **Pre-connect (cold boot or post-restart):** until we receive the first
-    `200` from `/json/version`, sustained failures are tolerated for up to
-    **90 seconds** (`CHROMIUM_STARTUP_GRACE`). This budget covers
-    `feral-player.service` (`TimeoutStartSec=45s`) plus
-    `chromium-kiosk.service` (`RestartSec=5`) plus Chromium's own bring-up.
-  - **Post-connect (steady state):** once we have seen a success, silence
-    beyond **20 seconds** (`CHROMIUM_HANG_THRESHOLD`) is treated as a real
-    renderer hang and triggers a kiosk restart.
-- Before escalating, the monitor consults `systemctl --user is-active
-  chromium-kiosk.service`. If the kiosk is already in `activating` (e.g.
-  systemd's own `Restart=always` is between attempts, OTA is mid-restart,
-  or an operator just ran `systemctl restart`), the monitor defers rather
-  than piling a redundant restart on top.
-- After issuing a restart the monitor returns to pre-connect mode so the
-  next 90 seconds of failed checks do not pile a second restart onto the
-  in-progress one. Without this reset, the 20 s hang threshold would trip
-  again ~25 s into Chromium's cold start and exhaust the restart budget on
-  healthy devices.
-- Recovery action: `systemctl --user restart chromium-kiosk.service`.
-- If 3 restarts occur within 5 minutes the restart budget is exhausted. The
-  monitor then stops `chromium-kiosk.service`, starts the ffos system unit
-  `feral-kiosk-fallback.service` (plymouth on the free DRM device: black
-  screen, spinner, "Something went wrong...") via `sudo -n systemctl start`,
-  and **holds for 15 minutes** (`CHROMIUM_FALLBACK_HOLD`) before rebooting.
-  During the hold every failed check is expected and quiet. The reboot stays
-  the self-heal rail (a fresh boot clears transient faults and the nightly
-  updaters need boots), but the customer sees a stable error screen instead
-  of a black screen every ~5 minutes. The reboot is capped across boots
-  (ffos-user#254): the hold's reboot is recorded in
-  `/home/feralfile/.state/watchdog-chromium-fallback.json` before it is
-  issued, and once `CHROMIUM_MAX_FALLBACK_REBOOTS` (1) consecutive boots have
-  ended that way, the next expired hold **parks** on the fallback screen
-  with no further reboot, so the device stops cycling and stays reachable
-  (LAN hub/AP, updater timer) for diagnosis or an OTA. An unreadable or
-  corrupt record reads as zero and a failed write still reboots: both fail
-  toward the old self-heal, never toward parking. A power cycle still retries
-  the restart ladder but ends parked. If a check succeeds during the hold (an
-  operator restarted the kiosk, an OTA fixed the bundle), the hold is dropped
-  and the restart history reset; any successful check also deletes the
-  persisted record; `chromium-kiosk.service` stops the fallback unit in
-  its `ExecStartPre`, so any kiosk start clears the screen. If the fallback
-  unit cannot be started (older image without it, sudo refused) or the
-  kiosk stop itself fails, the monitor reboots immediately instead of
-  holding on a black or frozen screen; if a RAM/GPU
-  kiosk restart happens to hold the kiosk lock at that moment nothing is
-  stopped and the next tick retries. Inside the hold
-  the two exemptions below still apply: a display unplugged during the hold
-  abandons it and forgets the exhausted budget (no reboot; once a display
-  returns the reconnect grace restarts the kiosk), and a developer on
-  another VT defers the reboot until tty1 is active again, and so does an
-  update in progress (see below). RAM/GPU-triggered
-  kiosk restarts are refused while the error screen is deliberately up.
-- **Developer console is exempt.** cage runs with `-s`, so a developer with a
-  keyboard can Ctrl+Alt+F2 to the password-protected `getty@tty2`.
-  `start-kiosk.sh` (`wait_for_vt1`) refuses to launch cage while the active VT
-  is not `tty1` (seatd would hand cage the developer's VT), so Chromium is
-  legitimately absent. While `/sys/class/tty/tty0/active` is not `tty1` the
-  monitor suppresses escalation exactly like headless (no restart, no
-  restart-history accumulation, no fallback, no reboot) and logs the
-  transition once; returning to `tty1` re-arms the startup grace. The gate
-  fails open when the file is unreadable. The two predicates MUST stay
-  identical.
-- **Updates are exempt (ffos#124).** While ffos's `feral-updater.sh` holds
-  `/run/feral-updater.lock` (nightly timer and boot OTA gate alike, for the
-  whole full-image or pacman update, until it has requested its reboot), the
-  monitor suppresses escalation like the developer console and re-arms the
-  startup grace when the update ends. The update's rsync/mkinitcpio IO storm
-  can starve `/json/version` long enough to walk the ladder, and a reboot
-  then throws the update away. The lock is detected by reading `/proc/locks`,
-  never by taking it: a probe that took the lock, even briefly, could make
-  the updater's `flock -n` fail, and the updater would then skip that
-  night's update. The kernel drops the entry when the updater dies, so a
-  crashed update cannot leave recovery suppressed. A live but wedged updater
-  is capped instead: one updater process (holder PID) may suppress recovery
-  for at most `UPDATE_GATE_MAX_HOLD` (8 h), after which the gate fails open
-  with one Error. Any read error counts as "no update" (fail open to the
-  normal ladder). This replaces controld's boot gate stopping and restarting
-  the watchdog around the update, which was removed.
-- **Headless devices are exempt.** On a device with no monitor, the kiosk
-  intentionally waits for a display before launching Chromium, so a missing
-  `/json/version` is expected, not a failure. Escalation is suppressed (no
-  kiosk restart, no restart-history accumulation, no reboot) while no
-  `/sys/class/drm/card*-*/status` connector reads `connected`. A `disconnected`
-  or `unknown` reading both count as no-display: FF1's amdgpu persistently
-  reports `unknown` on empty connectors, and treating that as "connected" kept
-  escalation live on genuinely headless devices (restart storm; see
-  start-kiosk.sh's matching display wait). Detection **fails open** only when
-  no connector status is readable at all (absent or unrecognized sysfs
-  layout), so escalation is never silently disabled on unknown environments.
-  When a display is (re)connected, the startup grace is re-armed from scratch
-  before escalation resumes.
+Headless, developer-VT, active-update and already-activating-unit gates remain.
+DRM counts only `connected`, failing open only when no status is readable.
+Returning from a gate re-arms the startup grace. Updater holds are capped at
+eight hours. The watchdog alone owns process escalation; controld never
+restarts the player to repair a command connection.
+
+CPU protection sends a level-triggered `health.set {thermal:true}` after ten
+seconds at or above 93 C. This releases artwork backends without replacing the
+playlist; below 88 C it clears the hold. Reaffirming the level covers a host
+restart during heat. Systemd monitoring reports `serviceFailure` for kiosk,
+controld and sys-monitord failures; clearing it does not navigate or reset
+playback. The intentional controld OTA-stop exemption remains tied to both the
+marker and updater lock. Screenshots are compositor observations, not health
+probes or evidence that an arbitrary artwork rendered correctly.
 
 ## Resource Monitoring (RAM, GPU, DISK)
 
@@ -147,9 +75,6 @@ Add vmagent configuration to `/home/feralfile/.config/watchdog.json`:
 
 ```json
 {
-  "cdp": {
-    "endpoint": "http://localhost:9222"
-  },
   "vmagent": {
     "url": "http://0.0.0.0:9431/api/v1/import/prometheus"
   }
@@ -157,6 +82,10 @@ Add vmagent configuration to `/home/feralfile/.config/watchdog.json`:
 ```
 
 The `vmagent.url` field is optional. If not provided, the default URL `http://0.0.0.0:9431/api/v1/import/prometheus` will be used.
+
+The socket defaults to `$XDG_RUNTIME_DIR/ff-player/player.sock`; `FF_PLAYER_SOCKET`
+overrides it for isolated tests. The former `cdp.endpoint` config is ignored by
+the native health probe.
 
 ### Metrics Sent
 

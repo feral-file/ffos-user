@@ -241,3 +241,11 @@ func (c fakeCmd) Wait() error                     { return nil }
 func (c fakeCmd) Output() ([]byte, error)         { return nil, c.exec.errFor(c.line) }
 func (c fakeCmd) CombinedOutput() ([]byte, error) { return nil, c.exec.errFor(c.line) }
 func (c fakeCmd) Pid() int                        { return 0 }
+
+func (h *fakeHTTP) GetContext(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return h.Do(req)
+}

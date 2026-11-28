@@ -121,30 +121,41 @@ The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `
 
 ### External transport: WebSocket relayer
 
-`feral-controld` maintains a persistent WebSocket connection to the remote relayer endpoint. Remote commands from the mobile app arrive over this connection. `feral-controld` routes them locally to either the device executor (device-control commands) or Chromium via CDP (web/playback commands). No other service connects to the relayer.
+`feral-controld` maintains a persistent WebSocket connection to the remote relayer endpoint. Remote commands from the mobile app arrive over this connection. `feral-controld` routes them locally to either the device executor (device-control commands) or the native host over Unix IPC (playback/presentation commands). No other service connects to the relayer.
 
 There are two relayers, independent of each other: the legacy topic relayer (`relayer.endpoint`) and relay v2 (`relayV2.endpoint`, `docs/ff1-control-v1.md` §10), on which the device holds two sockets, one on the keyed channel `thumb(devSig)` and one on the device-ID channel. The legacy one is optional (feral-file#3551 G3). In G3 a missing `relayer` block or an empty endpoint means no legacy relayer, and images from the 3.0.0 LAN-open build on ship **no `relayer` block** (the release operator deleted it from every environment's `FERAL_CONTROLD_CONFIG_JSON`; a pre-G3 controld would crash-loop on such a config, so no image is built from an older ffos-user ref, `docs/ff1-control-v1.md` §15.4). A legacy topic a device stored before that OTA is inert. On an image that still configures one, any permanent legacy dial error (404/410 handshake, NXDOMAIN, bad URL) latches it retired (`ErrLegacyRetired`) instead of exiting the daemon: every permanent class survives a restart, so exiting fixed nothing. While latched it dials only on an escalating probe (1 min doubling to 1 h; a successful dial clears the latch) and once per offline→online edge (`AllowRetiredProbe`, from the mediator), because a captive portal or filtering resolver also returns a non-temporary DNS failure and a legacy-claimed device must heal when the network does. A probe that meets a transient error runs the ordinary retry loop; only a permanent error re-latches. v2 is dialed only with a control authority, which a device without control state gets only from `control.enabled`, so a G3 image ships `control.enabled=true` with `relayV2.endpoint` (`docs/ff1-control-v1.md` §7.2, §15.4). The netlog probe host follows the v2 endpoint first, then the legacy one, then the support-logs host. Pre-G3 firmware exits instead and redials on every heartbeat, which is why the legacy host's shutdown waits for the fleet (`docs/ff1-control-v1.md` §15.4).
 
-### UI control: Chrome DevTools Protocol (CDP)
+### Native player control and recovery
 
-Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-controld` forwards web commands from the relayer to Chromium via CDP, and drives the on-screen **setup narration** through the player's `setupDisplay` CDP contract (see `setupui`, below). `feral-watchdog` monitors Chromium health via HTTP polling of `/json/version` and uses CDP navigation to steer Chromium back to the player during recovery. Neither daemon embeds a web server for UI assets.
+The ordinary kiosk is `components/feral-display`, a C++ host with CEF software rendering
+and an isolated libmpv media worker. Controld preserves external authentication,
+source admission, verification and device operations; the host owns playback,
+presentation, scheduling and durable state. Their boundary is the versioned,
+bounded Unix protocol in `components/feral-display/protocol/README.md`, not JavaScript.
+Artwork documents are top-level unprivileged content, independent of device UI.
 
-**Narrow exception:** `feral-controld`'s offline-cache feature (see `docs/offline-artwork-capture.md`) runs a small `net/http` server bound only to a loopback address (`offlineCache.staticServerAddr`, default `127.0.0.1:8082`, coerced to loopback if misconfigured) to stream oversized cached artwork blobs (>~200MB) back to the kiosk Chromium via a `Fetch.fulfillRequest` redirect, with real HTTP `Range` support — CDP's own body-fulfillment path cannot carry assets that large over the DevTools WebSocket. It is not reachable off-device, serves no UI assets, and does not change the general principle above for any other daemon.
+`playercontrol.Native` maps normal casts and policy/overlay commands. Refresher
+fetches carry the pre-fetch instance/generation fence, and must not target an
+outgoing presentation from another cast. The host executes displayAt and boot
+intent; Go no longer runs competing playlist timers. `playerlink.Reconciler`
+observes runtime instances and replays only device-owned intent. Artwork changes
+never trigger reconnection/recast. Reaffirming awake state is idempotent.
 
-`feral-player.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`. The kiosk boots the bundled player at `http://127.0.0.1:8080/`.
+Setup narration uses typed `overlay.setup.v1` and its own owner arbitration.
+Pairing/session trust remains in controld. Overlay replay survives host restart;
+no renderer navigation can remove its command interface. Watchdog probes the
+native command loop and retains bounded process escalation with display/VT/OTA
+suppression. Renderer retries belong to the host; whole-process/GPU recovery
+belongs to watchdog/systemd. Thermal/service warnings never navigate playback.
 
-### Player page authority: `playersession.Session`
-
-`feral-controld`'s `playersession` package is the single cross-cutting authority over the CDP-connected page: which document is currently live (**generation**, bumped on CDP connect, a session-executed navigation, or a document-stamp mismatch detected via the status poller's 5s round-trip — the last catches a feral-watchdog or player-initiated reload the session did not itself drive), per-generation readiness barriers (`AwaitStage(StageHandler)` / `StageStatus`, positive-only cached, never latching a negative so a slow cold boot re-polls instead of hanging a consumer forever), screen-overlay coordination between narrators (`RegisterOverlayOwner`), and the one recovery-navigation primitive, `NavigateHome` / `NavigateHomeInline` (navigate-to-entry, never reload-in-place — the static export is flat files only, so a client-route reload 404s; sleep- and error-page-aware, and can carry a cache purge). Off-lane producers — `setupui` narration, `mediator` connectivity, `qrdisplay`/`mintpairing` display, `sleep_schedule`, `commandrouter` — keep their own queues/locks but consult the session's generation counter and readiness barrier rather than driving the page directly, register as generation-ready reconcilers (`RegisterReconciler`) for work that must re-run on every document replacement — with one deliberate exception: work that needs NO page JS and must be armed before the reloaded document issues its first request stays inline on the CDP connect callback. Two producers qualify today, both arming CDP `Fetch` interception on their own socket: the offline cache's `KioskReplay.AttachOnReconnect` (its page-dependent half — re-applying the item scope — is a reconciler instead) and `uarewrite.Interceptor.AttachOnReconnect`, which rewrites the outgoing User-Agent for configured artwork origins. The rewrite is a PURE inline case with no reconciler half at all: it needs nothing from the page, only that `Fetch` is armed before the document's first asset request. Both re-arm here because a kiosk restart mints a new target, and both own a socket independent of the primary CDP client, so each needs its own answer for a failure that kills only that socket: `uarewrite` runs a supervisor loop, while replay relies on `SyncPlaylist` being called periodically by `playlist-refresher` — an external caller, not self-recovery, which is precisely why the rewrite had to bring a supervisor of its own (see the disposition table in `docs/player-session-recovery.md` §4). Neither participates in navigation parking: they arm `Fetch` on their own sockets and issue no page sends. Off-lane producers, by contrast, park their own sends while `NavigationPending()` is true so a push cannot race a recovery navigation underneath it (bounded by a timeout so a wedged page cannot park narration for the process). `devicectl`'s boot player recovery state machine and `commandrouter`'s dead-page repair both escalate through this same primitive rather than reload-in-place or an independent CDP navigate. See `docs/player-session-recovery.md` for the full design — the generation/stamp contract, navigation gates and park semantics, the boot-recovery classification table as implemented, the OTA narrator's claim-primary policy, the four-value sleep tracker, and the controld↔ff-player paired-rollout contract.
-
-### On-screen setup narration: `setupDisplay` (CDP → ff-player)
-
-`feral-controld`'s `setupui` package pushes setup progress to the bundled player through a single CDP command, `setupDisplay`, delivered via `window.handleCDPRequest(...)` over `Runtime.evaluate`. The contract is:
-
-- **Manifest-gated.** `setupui` reads the player capability manifest at `/opt/feral/feral-player/ffos-player-contract.json` and only narrates if `contracts.setupDisplay` (version `1`) is present. An older player yields a permanent no-narration fallback; there is no separate setup page.
-- **Fire-and-forget.** Pushes never block, never return a fatal error, and never panic. A burst collapses to at most one trailing send; the last state is re-pushed on CDP reconnect.
-- **Namespace-extensible.** New narration states can be added without breaking older players (e.g. `factory_reset` is an extension state outside the contract's required set), which is what keeps the v2 pairing-approval overlay additive. One deliberate exception to "older players safely render nothing": `connecting` (the provisioned-device offline narration) must never silently disappear — it is the only thing between a relocated offline device and a black screen — so `setupui` re-checks the manifest's state list at send time (re-read every resolution, never latched: the bundle is OTA-replaced under a running controld) and downgrades it to `join_failed` on players that predate it. See `docs/setup-flow.md` for the narration semantics.
-- **Navigation-aware.** The narration worker registers with `playersession.Session` as an overlay owner (so a recovery navigation never erases live narration) and parks queued sends while `NavigationPending()` is true, delivering once the new generation's document handler is confirmed installed rather than evaluating into a document mid-teardown.
+`chromium-kiosk.service` retains its operational name but launches the native
+host under Cage. It does not require `feral-player.service`. The ready target
+observes the host socket; controld starts independently for headless provisioning.
+Old CDP session/readiness/static-server paths are explicit rollback/fixture code,
+not normal playback dependencies. Historical CDP incident discussions elsewhere
+in this document do not authorize restoring that architecture. The isolated
+offline capture browser remains separate; native cache replay/onchfs bridging is
+still an explicit acceptance gap, not a hidden kiosk CDP dependency.
 
 ### Local device control: LAN hub (port 1111)
 
@@ -167,6 +178,8 @@ First-run and offline-recovery provisioning is done over a NetworkManager Wi-Fi 
 ---
 
 ## Kiosk and Daemon Logic Ownership
+
+The FF1 native player uses CEF for web works and libmpv for standalone media across live, downloaded and signed capsule playback. A capsule supplies verified offline assets. Its engine pin describes the publisher’s reference render and does not select a device executable.
 
 The boundary between kiosk/UI code and daemon logic:
 

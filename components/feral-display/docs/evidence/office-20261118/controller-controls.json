@@ -1,0 +1,291 @@
+{
+  "startedAt": "2026-11-18T03:45:15.681Z",
+  "physicalOutputVerified": false,
+  "before": {
+    "composition": {
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "occurrence": "8865b0fb-48f3-4203-b606-5d22baf2a3e5",
+      "revision": 1
+    },
+    "context": "curated",
+    "generation": 2,
+    "host": "responsive",
+    "instance": "1933dc14-09c5-493d-9020-1c8c08f750aa",
+    "loop": "playlist",
+    "media": null,
+    "mediaPaused": false,
+    "online": false,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "controld-controls-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "First"
+        },
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "Second"
+        }
+      ]
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "error": "",
+      "exhibition": "",
+      "generation": 2,
+      "id": "8865b0fb-48f3-4203-b606-5d22baf2a3e5",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:18990/input.html",
+        "title": "First"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "controld-controls-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "First"
+        },
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "Second"
+        }
+      ]
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "presented",
+    "revision": 10,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#000000",
+        "loop": true,
+        "margin": 0,
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 1,
+      "error": "",
+      "exhibition": "",
+      "generation": 2,
+      "id": "8865b0fb-48f3-4203-b606-5d22baf2a3e5",
+      "index": 0,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:18990/input.html",
+        "title": "First"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "off",
+      "transitionMs": 0,
+      "volume": 0.25
+    },
+    "shuffle": false,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  },
+  "goTest": "=== RUN   TestNativeControlsDevice\n    native_controls_test.go:197: saved settings, loop/shuffle, same-URL occurrence selection, stale preview rejection, composed preview, invalid host parameter and duration reset passed\n--- PASS: TestNativeControlsDevice (0.52s)\nPASS\nok  \tgithub.com/feral-file/ffos-user/components/feral-controld/commandrouter\t0.739s\n",
+  "after": {
+    "composition": {
+      "display": {
+        "autoPlay": true,
+        "background": "#112233",
+        "loop": true,
+        "margin": "10%",
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 3,
+      "occurrence": "a11e01ba-bc75-4049-8fcd-798620b7b35f",
+      "revision": 6
+    },
+    "context": "curated",
+    "generation": 2,
+    "host": "responsive",
+    "instance": "1933dc14-09c5-493d-9020-1c8c08f750aa",
+    "loop": "one",
+    "media": null,
+    "mediaPaused": false,
+    "online": false,
+    "overlay": null,
+    "paused": false,
+    "pendingUpdate": null,
+    "playlist": {
+      "id": "controld-controls-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "First"
+        },
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "Second"
+        }
+      ]
+    },
+    "playlistUrl": "",
+    "presentationFailure": null,
+    "presented": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#112233",
+        "loop": true,
+        "margin": "10%",
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 3,
+      "error": "",
+      "exhibition": "",
+      "generation": 2,
+      "id": "a11e01ba-bc75-4049-8fcd-798620b7b35f",
+      "index": 1,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:18990/input.html",
+        "title": "Second"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "presentedPlaylist": {
+      "id": "controld-controls-test",
+      "items": [
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "First"
+        },
+        {
+          "duration": 0,
+          "source": "http://127.0.0.1:18990/input.html",
+          "title": "Second"
+        }
+      ]
+    },
+    "presentedPlaylistUrl": "",
+    "recovery": {
+      "attempt": 0,
+      "exhausted": false,
+      "failedOccurrence": "",
+      "lastError": "",
+      "limit": 3,
+      "pending": false,
+      "retryDelayMs": 0
+    },
+    "renderer": "presented",
+    "revision": 26,
+    "schedule": null,
+    "scheduleOutcome": null,
+    "selected": {
+      "context": "curated",
+      "curator": "",
+      "display": {
+        "autoPlay": true,
+        "background": "#112233",
+        "loop": true,
+        "margin": "10%",
+        "scaling": "fit",
+        "userOverrides": true
+      },
+      "displayRevision": 3,
+      "error": "",
+      "exhibition": "",
+      "generation": 2,
+      "id": "a11e01ba-bc75-4049-8fcd-798620b7b35f",
+      "index": 1,
+      "item": {
+        "duration": 0,
+        "source": "http://127.0.0.1:18990/input.html",
+        "title": "Second"
+      },
+      "navigationCommitted": true,
+      "stage": "presented"
+    },
+    "settings": {
+      "background": "#000000",
+      "durationSeconds": null,
+      "framing": "artwork",
+      "margin": 0,
+      "muted": true,
+      "rotation": 0,
+      "scaling": "fit",
+      "tombstone": "on",
+      "transitionMs": 0,
+      "volume": 0.25
+    },
+    "shuffle": true,
+    "sleeping": false,
+    "stopped": false,
+    "storage": {
+      "error": "",
+      "health": "available"
+    },
+    "updateOutcome": null
+  },
+  "result": "passed",
+  "finishedAt": "2026-11-18T03:45:17.973Z"
+}

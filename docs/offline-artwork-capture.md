@@ -1017,6 +1017,30 @@ alone does not repair a fielded device's existing records.
 
 ---
 
+### Receiving a replay capsule
+
+`displayCapsule` accepts an owner-authenticated LAN command with three fields.
+`capsule` is the base64-encoded `.dp1c` archive, `signature` is its detached
+signature JSON object, and `signer` is the expected Ed25519 `did:key`.
+The archive limit is 1.5 MiB compressed and 32 MiB expanded. A capsule contains one static playlist item. Replay-mode archives carry a
+complete original-URL capture. Files-mode archives carry a named asset tree.
+The native player mounts each verified tree at a separate, archive-derived
+HTTPS origin under `capsule.invalid`, preserving the entry path and query.
+The signed playlist and its original source remain in the retained archive. The signer authorizes the archived response headers. Offline caching
+must be enabled on the device.
+
+Controld verifies the signature, archive structure, and asset digests before
+publishing the record. The archive and its signature are retained with that
+record. An import for an already-cached source succeeds when its captured
+responses match and refuses to replace a different capture.
+
+Controld submits the playlist through its normal content policy and display
+path. The native player checks that its offline capture still matches the
+requested archive digest. The player replays capsule assets offline through
+the same CEF and libmpv paths as other artwork. The engine pin and reference
+PNG remain available in the signed archive for off-device reproduction.
+Browser status reports the CEF version actually running on the FF1.
+
 ## 5. On-disk format (simplified, no redundancy)
 
 Root: `offlineCache.rootDir` (default

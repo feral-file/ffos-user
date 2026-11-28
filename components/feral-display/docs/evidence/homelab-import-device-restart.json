@@ -1,0 +1,28 @@
+{
+  "result": "passed",
+  "runs": [
+    {
+      "instance": "3c0b94d5-133c-4523-8e7d-be68d1456d1c",
+      "generation": 1,
+      "renderer": "loading",
+      "selectedIndex": 49,
+      "presented": null,
+      "playlistItems": 100,
+      "historyRecords": 50,
+      "settingsPreserved": true,
+      "intentPreserved": true
+    },
+    {
+      "instance": "0fd60f0f-182a-42a2-8271-e4f334e690e5",
+      "generation": 1,
+      "renderer": "loading",
+      "selectedIndex": 49,
+      "presented": null,
+      "playlistItems": 100,
+      "historyRecords": 50,
+      "settingsPreserved": true,
+      "intentPreserved": true
+    }
+  ],
+  "sourceSHA256": "41f4ee2d418c807ae30cf85a852ddb669e3c9ccd9f80abef2132e0b8745bfd1e"
+}

@@ -67,6 +67,9 @@ type Command struct {
 	// Populated only by UnmarshalJSON (both ingress paths decode through it);
 	// nil for commands built in-process, which have no wire form.
 	RawArguments json.RawMessage `json:"-"`
+	// OfflineCapsuleID is set only by controld after verifying and storing a
+	// capsule. It fences the local player to that exact offline capture.
+	OfflineCapsuleID string `json:"-"`
 	// Ambiguous is set by UnmarshalJSON when the message's top level repeats
 	// a member name, exactly or in another letter case ("request" twice, or
 	// "request" and "Request"). encoding/json resolves such a document
@@ -203,6 +206,7 @@ const (
 	CMD_DEVICE_STATUS              Type = "getDeviceStatus"
 	CMD_UPDATE_TO_LATEST           Type = "updateToLatestVersion"
 	CMD_DISPLAY_PLAYLIST           Type = "displayPlaylist"
+	CMD_DISPLAY_CAPSULE            Type = "displayCapsule"
 	CMD_FACTORY_RESET              Type = "factoryReset"
 	CMD_UPLOAD_LOGS                Type = "uploadLogs"
 	CMD_SET_VOLUME                 Type = "setVolume"

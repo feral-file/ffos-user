@@ -1,0 +1,6 @@
+<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden}</style><canvas></canvas>
+<script>
+const canvas=document.querySelector('canvas');canvas.width=innerWidth;canvas.height=innerHeight;
+const context=canvas.getContext('2d');let frame=0;
+function tick(){context.fillStyle=`hsl(${frame++%360} 65% 45%)`;context.fillRect(0,0,canvas.width,canvas.height);requestAnimationFrame(tick);}requestAnimationFrame(tick);
+</script>

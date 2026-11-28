@@ -1,0 +1,22 @@
+{
+  "startedAt": "2026-11-17T15:20:14.927Z",
+  "checks": [
+    {
+      "name": "duplicate slot refresh retains decoded occurrence and history",
+      "occurrence": "6d09ef59-7d4f-432c-9bba-57b57e96fd87",
+      "worker": 2262172,
+      "index": 2
+    },
+    {
+      "name": "native media EOF applies deferred software playlist",
+      "updateId": "c6a9caba-9f6d-4b12-ab13-84009c1c20d3",
+      "occurrence": "7631c693-c093-4e33-8e74-2a73e6adf16f"
+    },
+    {
+      "name": "fresh blocked labels retire presentation and expose outcome",
+      "updateId": "e298f423-e631-4c27-8f05-6c94d278d3dd"
+    }
+  ],
+  "result": "passed",
+  "finishedAt": "2026-11-17T15:20:16.391Z"
+}

@@ -1,0 +1,7 @@
+{
+  "archiveSha256": "b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7",
+  "archiveExecutableSha256": "1bcad71ad1bff85955db13c6d8dd9f32374934d5a5cb079b526c46fb51f9bd97",
+  "installedExecutableSha256": "1bcad71ad1bff85955db13c6d8dd9f32374934d5a5cb079b526c46fb51f9bd97",
+  "executableMatchesPublicArchive": true
+}
+chromium: 276 total files, 0 altered files

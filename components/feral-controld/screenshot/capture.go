@@ -413,6 +413,10 @@ func decodeScreenshot(encoded string, bounds Bounds) (*Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode base64: %w", ErrInvalidImage, err)
 	}
+	return validatePNG(data, bounds)
+}
+
+func validatePNG(data []byte, bounds Bounds) (*Image, error) {
 	if len(data) > maxScreenshotBytes {
 		return nil, fmt.Errorf("%w: image exceeds %d bytes", ErrInvalidImage, maxScreenshotBytes)
 	}

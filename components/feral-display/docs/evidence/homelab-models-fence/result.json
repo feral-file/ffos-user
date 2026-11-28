@@ -1,0 +1,87 @@
+{
+  "startedAt": "2026-11-17T14:26:09.471Z",
+  "checks": [
+    {
+      "name": "box",
+      "occurrence": "b563845d-8a0c-475c-993f-592831c51a4d",
+      "observed": {
+        "loaded": true,
+        "attributes": {
+          "id": "art",
+          "autoplay": "",
+          "camera-controls": "",
+          "crossorigin": "anonymous",
+          "exposure": "1",
+          "loading": "eager",
+          "reveal": "auto",
+          "shadow-intensity": "1",
+          "ar-status": "not-presenting",
+          "style": "object-fit: contain;"
+        },
+        "camera": "0rad 1.3089969389957472rad 3.5133684756987935m",
+        "resources": [
+          "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Binary/Box.glb"
+        ],
+        "draco": "ff-render://bundle/draco/",
+        "basis": "ff-render://bundle/basis/"
+      },
+      "cameraAfterDrag": "-0.6544984694978736rad 1.3089969389957472rad 3.5133684756987935m"
+    },
+    {
+      "name": "draco",
+      "occurrence": "1811dd11-1514-41c5-a97e-c6db798b1c3b",
+      "observed": {
+        "loaded": true,
+        "attributes": {
+          "id": "art",
+          "autoplay": "",
+          "camera-controls": "",
+          "crossorigin": "anonymous",
+          "exposure": "1",
+          "loading": "eager",
+          "reveal": "auto",
+          "shadow-intensity": "1",
+          "ar-status": "not-presenting",
+          "style": "object-fit: contain;"
+        },
+        "camera": "0rad 1.3089969389957472rad 3.5133684756987935m",
+        "resources": [
+          "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Draco/Box.gltf",
+          "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Draco/Box.bin"
+        ],
+        "draco": "ff-render://bundle/draco/",
+        "basis": "ff-render://bundle/basis/"
+      },
+      "cameraAfterDrag": "-0.6544984694978736rad 1.3089969389957472rad 3.5133684756987935m"
+    },
+    {
+      "name": "draco-ktx2",
+      "occurrence": "6abf53cc-155a-4e95-aa28-24190d608be0",
+      "observed": {
+        "loaded": true,
+        "attributes": {
+          "id": "art",
+          "autoplay": "",
+          "camera-controls": "",
+          "crossorigin": "anonymous",
+          "exposure": "1",
+          "loading": "eager",
+          "reveal": "auto",
+          "shadow-intensity": "1",
+          "ar-status": "not-presenting",
+          "style": "object-fit: contain;"
+        },
+        "camera": "0.03797993681288182rad 1.3089969389957472rad 2.051849641265034m",
+        "resources": [
+          "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/ABeautifulGame/glTF-Binary-KTX-ETC1S-Draco/ABeautifulGame.glb"
+        ],
+        "draco": "ff-render://bundle/draco/",
+        "basis": "ff-render://bundle/basis/"
+      },
+      "cameraAfterDrag": "-0.8321346645905354rad 1.3089969389957472rad 2.051849641265034m"
+    }
+  ],
+  "fixtureBase": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/",
+  "result": "passed",
+  "finishedAt": "2026-11-17T14:26:49.770Z"
+}

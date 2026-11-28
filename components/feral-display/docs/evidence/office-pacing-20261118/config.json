@@ -1,0 +1,9 @@
+{
+  "chromiumVersion": "156.0.8078.80",
+  "viewport": [
+    3840,
+    2160,
+    1
+  ],
+  "renderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon Graphics (RADV REMBRANDT) (0x00001681)), radv)"
+}

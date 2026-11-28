@@ -130,7 +130,7 @@ func TestResourceTransfer_StalledBodyIsCutOffPromptly(t *testing.T) {
 	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	start := time.Now()
-	_, _, err := c.fetchAndStoreBody(context.Background(), srv.URL+"/wedged.bin", go_http.MethodGet, 0)
+	_, _, err := c.fetchAndStoreBody(context.Background(), &Resource{URL: srv.URL + "/wedged.bin"}, go_http.MethodGet, 0)
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "an origin that goes silent mid-body must fail, not hang")
@@ -151,9 +151,38 @@ func TestResourceTransfer_CeilingBoundsATrickleThatNeverStalls(t *testing.T) {
 	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	start := time.Now()
-	_, _, err := c.fetchAndStoreBody(context.Background(), srv.URL+"/trickle.bin", go_http.MethodGet, 0)
+	_, _, err := c.fetchAndStoreBody(context.Background(), &Resource{URL: srv.URL + "/trickle.bin"}, go_http.MethodGet, 0)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
 	assert.Less(t, elapsed, 3*time.Second, "the ceiling must bound a never-stalling trickle")
+}
+
+func TestPausedWorkerCapturedAtOriginalURL(t *testing.T) {
+	srv := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, req *go_http.Request) {
+		if req.URL.Path == "/redirect" {
+			go_http.Redirect(w, req, "/worker", go_http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'")
+		_, _ = w.Write([]byte("self.onmessage=()=>{}"))
+	}))
+	defer srv.Close()
+	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t)), logger: zaptest.NewLogger(t)}
+	tr := newCaptureTracker()
+	worker := srv.URL + "/worker"
+	tr.trackRequest("first", worker, "GET")
+	tr.recordWorkerScript(worker)
+	tr.recordWorkerScript(worker)
+	tr.recordWorkerScript("blob:https://example.com/local")
+	tr.recordWorkerScript(srv.URL + "/redirect")
+	rows, coverage := c.resolveResources(context.Background(), context.Background(), tr, newCaptureDiskBudget(0, true))
+	require.Len(t, rows, 1)
+	assert.Equal(t, worker, rows[0].URL)
+	assert.Equal(t, 2, rows[0].BrowserPolicyVersion)
+	assert.Contains(t, rows[0].HeaderFields, HeaderField{"Content-Security-Policy", "default-src 'self'"})
+	assert.NotEmpty(t, rows[0].SHA256)
+	assert.Contains(t, coverage.Reason, "fetch_failed:"+srv.URL+"/redirect")
+	assert.NotContains(t, coverage.Reason, "unresolved_at_deadline:"+worker)
 }

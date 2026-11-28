@@ -1,0 +1,23 @@
+Test project /Users/anhnguyen/Documents/projects/ff-player-native/build-core
+    Start 1: migration
+1/9 Test #1: migration ........................   Passed    0.30 sec
+    Start 2: core
+2/9 Test #2: core .............................   Passed    2.24 sec
+    Start 3: server
+3/9 Test #3: server ...........................   Passed    0.02 sec
+    Start 4: input
+4/9 Test #4: input ............................   Passed    0.01 sec
+    Start 5: scheduling
+5/9 Test #5: scheduling .......................   Passed    1.16 sec
+    Start 6: recovery
+6/9 Test #6: recovery .........................   Passed    0.03 sec
+    Start 7: modes
+7/9 Test #7: modes ............................   Passed    0.03 sec
+    Start 8: playlist-update
+8/9 Test #8: playlist-update ..................   Passed    1.16 sec
+    Start 9: overlay
+9/9 Test #9: overlay ..........................   Passed    0.01 sec
+
+100% tests passed out of 9
+
+Total Test time (real) =   4.96 sec

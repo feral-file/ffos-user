@@ -20,10 +20,6 @@ import (
 // macRegex validates MAC address format (XX:XX:XX:XX:XX:XX where X is hex digit)
 var macRegex = regexp.MustCompile(`^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$`)
 
-type CDPConfig struct {
-	Endpoint string `json:"endpoint"`
-}
-
 // RelayV2Config is optional and never replaces legacy relayer configuration.
 type RelayV2Config struct {
 	Endpoint string `json:"endpoint"`
@@ -368,7 +364,6 @@ type NetlogConfig struct {
 
 // Configuration for all components
 type Config struct {
-	CDPConfig         *CDPConfig         `json:"cdp"`
 	RelayV2           *RelayV2Config     `json:"relayV2,omitempty"`
 	RelayerConfig     *RelayerConfig     `json:"relayer"`
 	MintPairingConfig *MintPairingConfig `json:"mintPairing"`
@@ -950,7 +945,6 @@ func (m *defaultConfigManager) Get() *Config {
 
 	if m.config == nil {
 		m.config = &Config{
-			CDPConfig:         &CDPConfig{},
 			RelayerConfig:     &RelayerConfig{},
 			MintPairingConfig: &MintPairingConfig{},
 			LogStreaming:      nil,

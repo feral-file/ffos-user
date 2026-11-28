@@ -1,0 +1,11 @@
+{
+  "checks": [
+    "setup over presented artwork creates no decorative renderer",
+    "covered video keeps first frame paused for 65 seconds without false presentation or timeout",
+    "uncover starts video, then EOF advances to next occurrence and retires backdrop"
+  ],
+  "physicalOutputVerified": false,
+  "startedAt": "2026-11-18T01:23:00.689Z",
+  "result": "passed",
+  "finishedAt": "2026-11-18T01:24:13.684Z"
+}

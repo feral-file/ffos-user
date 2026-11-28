@@ -1,0 +1,2 @@
+# Keep command output byte-for-byte; compiler/package logs contain whitespace.
+docs/evidence/** -whitespace

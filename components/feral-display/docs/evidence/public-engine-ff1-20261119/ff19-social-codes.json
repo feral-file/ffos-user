@@ -1,0 +1,12 @@
+{
+  "startedAt": "2026-11-19T04:19:11.040Z",
+  "source": "https://feed.feralfile.com/api/v1/playlists/1bbefbc9-0226-439a-921b-12c6cf6a809e",
+  "physicalOutputVerified": false,
+  "selectionMs": 6390.223125,
+  "cliCompletedMs": 6398.3195,
+  "hostCompositionMs": 8843.048874999999,
+  "playlistId": "1bbefbc9-0226-439a-921b-12c6cf6a809e",
+  "itemCount": 10,
+  "presentedSource": "https://ipfs.feralfile.com/ipfs/QmcLtLzmEpbwgQDW2rVJ1d9hwjFs3vHLTR1v1WCCvknDNS?edition_number=0&blockchain=bitmark",
+  "result": "passed"
+}

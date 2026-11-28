@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+
 	minter "github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
@@ -62,8 +64,7 @@ func TestLiveHandoffRelayerAndBrokerFlow(t *testing.T) {
 		},
 		realBrokerStarter{client: minter.NewClient(&http.Client{Timeout: wrapper.HTTPClientTimeout})},
 		NewRelayerSessionCreator(liveRelayerHTTPBaseURL, liveRelayerAPIKey, wrapper.NewHTTPClient(), wrapper.NewJSON()),
-		capturedRelayer,
-		&liveNoopCDP{},
+		capturedRelayer, mocks.CommandSender{CDP: &liveNoopCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
