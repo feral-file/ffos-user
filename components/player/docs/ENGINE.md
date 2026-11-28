@@ -1,10 +1,33 @@
 # Engine ownership and update procedure
 
-The normal player now uses the separate public Chromium adapter. Its exact pin
-is Chrome for Testing 158.0.8127.36; `dependencies.json` records archive and
-executable hashes, and `maintenance/public-engine-update.json` records the
-156-to-158 integration rehearsal. [PUBLIC-ENGINE.md](PUBLIC-ENGINE.md) is the
-current architecture and qualification record. The separate [homelab CEF Views trial](HOMELAB-PARITY.md) uses the same native Wayland host with a codec-enabled windowed CEF worker. The off-screen CEF builds described below provide the earlier trial and rollback history.
+## FF1 runtime
+
+The FF1 player uses a windowed CEF Views worker for SVG, web and software
+artwork and for the bundled glTF/GLB renderer. Standalone video and audio use
+the separate libmpv/FFmpeg worker. See the [player README](../README.md) for
+the rendering paths and [FF1 playback evidence](HOMELAB-PARITY.md) for
+decoder and presentation checks.
+
+[maintenance/cef-ff1.json](../maintenance/cef-ff1.json) pins the Linux x86-64
+CEF archive and SHA-256 consumed by [tools/build-ff1.sh](../tools/build-ff1.sh).
+The interim pin is [obs-rust release 8078](https://github.com/obs-rust/cef/releases/tag/8078),
+built from upstream CEF 156.0.8 and Chromium 156.0.8078.48 with H.264/AAC
+enabled and without the fork's OBS-specific patches. The 4K30 H.264 fixture
+used VA-API on FF1. The 4096×4096 H.264 fixture used software decoding.
+
+The intended replacement is an in-house upstream CEF build on a dedicated
+Linux runner, with the recipe, pinned inputs and any patches published so
+others can rebuild it. Before production distribution, confirm how the
+dependency fits Canon's display-path licensing rule, audit required notices
+and source availability, and verify H.264/AAC patent coverage for the finished
+device and its updates. Those checks also apply to an in-house build.
+
+## Public Chromium comparison build
+
+[PUBLIC-ENGINE.md](PUBLIC-ENGINE.md) records the separate public Chromium
+adapter. Its comparison pin is Chrome for Testing 158.0.8127.36 in
+`dependencies.json`. The 156-to-158 rehearsal is recorded in
+`maintenance/public-engine-update.json`.
 
 For a public-engine update:
 
@@ -29,20 +52,18 @@ For a public-engine update:
    checks remain release qualification work. Prepare a coordinated full-image
    release; promotion and publication remain human operated.
 
-## Earlier CEF trial and rollback record
-
+## Earlier off-screen CEF trial
 
 This is an implementation/maintenance record, not security-update acceptance.
 The previous-stable/current-stable build rehearsal passed both eleven-test Linux suites. Full portfolio qualification remains pending. The Transparent Grit host scheduling/buffer regression and its verification are recorded in BENCHMARK.md.
 
-`dependencies.json` is the source of exact engine/library versions, download
-locations and SHA-256 hashes. The CEF pin is 156.0.30, Chromium 156.0.8078.96,
-Linux x86-64. Direct video/audio use the separately pinned libmpv/FFmpeg worker;
+`dependencies.json` records the separate off-screen trial pin, CEF 156.0.30
+with Chromium 156.0.8078.96 for Linux x86-64. Direct video/audio use the separately pinned libmpv/FFmpeg worker;
 an engine update must not silently move those files back into browser media.
 Video inside an artist's software document retains that document's browser
 semantics. Its codec coverage is a separate outstanding corpus check.
 
-## Current engine-specific constraints
+## Engine constraints from the off-screen trial
 
 | Constraint | Purpose and evidence | Removal/update test |
 |---|---|---|
@@ -60,18 +81,15 @@ fixture and retirement condition in an adjacent manifest. Apply with `git apply
 --check` against the exact pinned source before building. Never regenerate a
 patch against a different engine and assume its behavior survived.
 
-## Update sequence
+## FF1 CEF update sequence
 
 1. Record the old source bundle hash, engine pin, installed package hashes and
    isolated-state backup. Save the current device baseline and per-work results.
-2. Select a supported upstream release from the official CEF build index. Record
-   Chromium/CEF versions and API hashes. Fetch into a new directory and verify
-   the archive hash. A beta binary can be used for diagnosis; it is not silently
-   substituted for the production stable pin.
-3. Review upstream security/release changes, API changes and each local patch or
-   workaround. Carry or retire each explicitly. Review codec coverage separately
-   from WebGL/WebGPU and Wayland composition. Update `dependencies.json` and the
-   toolchain/dependency lock together where the new engine requires it.
+2. Select and record the upstream CEF and Chromium revisions, build recipe,
+   codec flags and archive hash. Verify the archive before extraction.
+3. Review upstream security and API changes and retest each local workaround.
+   Update `maintenance/cef-ff1.json` and any affected toolchain or dependency
+   locks. Verify decoder selection separately from graphics and composition.
 4. Build a new source bundle and pacman package in the pinned FFOS environment.
    Run core, protocol/schema, Go/C++ interoperability, migration, media IPC and
    decode tests. Retain `.BUILDINFO`, source manifest, build log and packages.
@@ -88,8 +106,8 @@ patch against a different engine and assume its behavior survived.
 
 ## Diagnostics and licenses
 
-Native host/library debug packages are emitted by makepkg. The current upstream
-minimal CEF archive references DWO objects absent from that archive; a successful
+Native host/library debug packages are emitted by makepkg. The off-screen
+trial’s upstream minimal CEF archive references DWO objects absent from that archive; a successful
 debug-package build does **not** establish complete CEF symbols. The retained build index lists no separate symbol archive for this pin. Obtain
 matching symbols from a reproducible source build (or a verified upstream
 artifact if one is published) before release qualification. Record build
@@ -98,9 +116,7 @@ IDs with crash reports so symbols cannot be matched by filename alone.
 CEF's bundled license, model-viewer/Draco/Basis notices, FFmpeg LGPL, libmpv LGPL
 and copyright notices, libplacebo and the JSON-header notice are installed with
 the runtime. Runtime/system dependencies still require a complete distribution
-license/source-offer audit. The new host repository's license declaration has
-not been selected; the private development package must not be represented as
-having a completed public-distribution license audit.
+license and source-offer audit.
 
 ### WebGPU composition on the installed FFOS session
 
