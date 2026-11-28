@@ -177,6 +177,19 @@ int main(){
             "A future label must immediately retire a blocked outgoing frame");
     }
     {
+      ff::Store store(path+".explicit-eligible"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist(); source["items"][0]["duration"] = 0;
+      p.command("playback.replace", {{"playlist",source}});
+      auto current = p.desired()->id; p.committed(current); p.presented(current);
+      const auto eligible = source["items"][1];
+      auto future = eligible; future["source"] = "https://example.org/later";
+      p.command("playback.update", {{"items",{eligible,future}},{"activationTimes",{nullptr,60000}}});
+      p.command("playback.select", {{"index",1}});
+      check(p.desired() && p.desired()->item == eligible && p.desired()->index == 0,
+            "Explicit selection of an eligible old slot must resolve against the refreshed playlist");
+    }
+    {
       ff::Store store(path+".future-refresh");ff::Playback p(store);
       p.tick(1,3000);
       p.system_boot("first");

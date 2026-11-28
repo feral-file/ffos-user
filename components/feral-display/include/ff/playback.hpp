@@ -135,7 +135,7 @@ class Playback {
   static void refresh_boot(Json& next, const Json& old_playlist, const Json& refreshed,
                            const std::string& context, const Json& plan);
   Json update_playlist(const Json& params,const Json& plan = nullptr);
-  bool apply_pending_update();
+  bool apply_pending_update(std::optional<int> requested_slot = std::nullopt);
   void update_order(Json& next, int index) const;
   void refresh_display(Occurrence& occurrence);
   bool allowed(const Json& item, const Json& state) const;

@@ -630,9 +630,12 @@ Json Playback::command(std::string_view method, const Json& p) {
     fields(p, {"index"}); require(!next["playlist"].is_null() && p.contains("index") && p["index"].is_number_integer(), "invalid_params", "Missing playlist or index");
     require(p["index"] >= 0 && p["index"] <= 4096, "invalid_params", "Invalid playlist index");
     int index = p["index"].get<int>();
-    require(!waiting_for_refresh_activation() || index == next["index"], "invalid_params",
-            "Only the outgoing artwork is eligible before the scheduled refresh");
     require(index >= 0 && index < static_cast<int>(next["playlist"]["items"].size()), "invalid_params", "Index out of bounds");
+    if (waiting_for_refresh_activation() && index != next["index"]) {
+      require(apply_pending_update(index), "invalid_params", "Selected work is outside the eligible cohort");
+      return {{"outcome",selected_ ? "accepted" : "applied"},{"generation",generation_},{"revision",revision_},
+              {"occurrence",selected_ ? Json(selected_->id) : Json(nullptr)}};
+    }
     require(allowed(next["playlist"]["items"][index], next) && !held_slot_blocked(next["playlist"], index, next),
             "content_blocked", "Selected work is blocked");
     next["index"] = index; next["stopped"] = false; reselection = true;

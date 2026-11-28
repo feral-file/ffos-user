@@ -156,7 +156,7 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
     {"revision",revision_},{"occurrence",selected_?Json(selected_->id):Json(nullptr)},{"updateId",id}};
 }
 
-bool Playback::apply_pending_update(){
+bool Playback::apply_pending_update(std::optional<int> requested_slot){
   const auto pending=state_.value("pendingUpdate",Json(nullptr));
   if(pending.is_null())return false;
   auto next=state_;next["playlist"]=pending["playlist"];next["context"]=pending["context"];
@@ -164,7 +164,15 @@ bool Playback::apply_pending_update(){
   next["updateOutcome"]={{"id",pending["id"]},{"outcome","applied"},{"contentBlocked",false}};
   const auto& items=next["playlist"]["items"];
   bool any=items.empty();int index=0;
-  for(size_t n=0;n<items.size();++n)if(allowed(items[n],next)){any=true;index=static_cast<int>(n);break;}
+  if (requested_slot) {
+    // Controller indices refer to the visible cast; resolve its slot in the eligible projection.
+    index = match_slot(state_["playlist"]["items"], *requested_slot, items);
+    require(index >= 0, "invalid_params", "Selected work is outside the eligible cohort");
+    require(allowed(items[index], next), "content_blocked", "Selected work is blocked");
+    any = true;
+  } else {
+    for(size_t n=0;n<items.size();++n)if(allowed(items[n],next)){any=true;index=static_cast<int>(n);break;}
+  }
   if(!any){
     // A later policy change can invalidate the queued projection. Expose that
     // terminal result; never repeatedly try the same invalid update each tick.
