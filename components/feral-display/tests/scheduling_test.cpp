@@ -99,6 +99,121 @@ int main(){
     }
 
     {
+      ff::Store store(path+".first-timed-refresh");
+      ff::Playback p(store);
+      p.tick(1, 1000);
+      p.system_boot("first");
+      ff::Json policy = {{"version",1},{"showMatureContent",true},{"strictPersonal",false},{"blockUnratedCurated",false}};
+      p.command("policy.set", policy);
+      auto source = playlist();
+      source["items"][0]["display"] = {{"loop", false}};
+      const std::string url = "https://example.org/exhibition";
+      p.command("playback.replace", {{"playlist",source},{"playlistUrl",url},{"boot",true}});
+      const auto current = p.desired()->id;
+      p.committed(current);
+      p.presented(current);
+      p.tick(1002, 2001);
+      const auto in_flight = p.desired()->id;
+      check(in_flight != current, "Fixture needs an incoming slot while the first is still visible");
+      const auto replacement = source["items"][1];
+      auto relabeled = source["items"][0];
+      relabeled["contentRating"] = "mature";
+      const ff::Json refresh = {{"items",{replacement, relabeled}}, {"activationTimes",{60000, 70000}}};
+      p.command("playback.update", refresh);
+      p.committed(in_flight);
+      p.presented(in_flight);
+      p.tick(2001, 3000);
+      check(p.desired()->id == current, "Slot duration must not start a future work early");
+      p.ended(current);
+      p.tick(2002, 3001);
+      check(p.desired()->id == current, "End of media must not start a future work early");
+      try {
+        p.command("playback.select", {{"index", 1}});
+        throw std::runtime_error("Future work selected through the old list");
+      } catch (const ff::Error& error) {
+        check(error.code == "invalid_params", "Wrong error for ineligible slot");
+      }
+      p.system_boot("next");
+      check(p.snapshot()["presentedOwnsCast"] == true, "Restoring the same source must retain refresh ownership");
+      p.command("playback.update", refresh);
+      p.tick(59000, 59999);
+      check(p.visible() && p.visible()->id == current && p.desired()->id == current,
+            "First timed refresh must keep the outgoing work until activation");
+      check(p.state()["cohortPlan"]["playlistUrl"] == url &&
+            p.state()["boot"]["activationTimes"] == refresh["activationTimes"],
+            "First timed refresh must preserve the source and refresh boot intent");
+      policy["showMatureContent"] = false;
+      p.command("policy.set", policy);
+      check(!p.desired() && !p.visible(), "Policy must retire the outgoing slot without selecting a future work");
+      p.tick(59001, 60000);
+      check(p.desired() && p.desired()->item == replacement, "First scheduled work must activate on time");
+      p.command("playback.stop", ff::Json::object());
+      try {
+        p.command("playback.update", refresh);
+        throw std::runtime_error("Refresh revived a stopped source");
+      } catch (const ff::Error& error) {
+        check(error.code == "stale_generation", "Stopped source must reject timed refreshes");
+      }
+    }
+    {
+      ff::Store store(path+".mixed-refresh"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist();
+      p.command("playback.replace", {{"playlist",source}});
+      auto current = p.desired()->id; p.committed(current); p.presented(current);
+      auto eligible = source["items"][0]; eligible["source"] = "https://example.org/c";
+      const auto future = source["items"][1];
+      p.command("playback.update", {{"items",{eligible,future}},{"activationTimes",{nullptr,60000}}});
+      try {
+        p.command("playback.select", {{"index",1}});
+        throw std::runtime_error("Future work selected through a deferred mixed cohort");
+      } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong deferred selection error"); }
+      p.tick(1002, 2001);
+      check(p.desired() && p.desired()->item == eligible, "Slot boundary must apply the already eligible work");
+      current = p.desired()->id; p.committed(current); p.presented(current);
+      auto restricted = eligible; restricted["contentRating"] = "mature";
+      p.command("playback.update", {{"items",{restricted,future}},{"activationTimes",{60000,nullptr}}});
+      check(!p.visible() && p.desired() && p.desired()->item == future,
+            "A future label must immediately retire a blocked outgoing frame");
+    }
+    {
+      ff::Store store(path+".explicit-eligible"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist(); source["items"][0]["duration"] = 0;
+      auto duplicate = source["items"][1]; duplicate["duration"] = 3;
+      source["items"].push_back(duplicate);
+      p.command("playback.replace", {{"playlist",source}});
+      auto current = p.desired()->id; p.committed(current); p.presented(current);
+      p.command("playback.update", {{"items",{source["items"][1], duplicate}},{"activationTimes",{60000,nullptr}}});
+      try {
+        p.command("playback.select", {{"index",1}});
+        throw std::runtime_error("Future duplicate passed eligibility through its sibling");
+      } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong duplicate selection error"); }
+      p.command("playback.select", {{"index",2}});
+      check(p.desired() && p.desired()->item == duplicate && p.desired()->index == 0,
+            "Explicit selection of an eligible old slot must resolve against the refreshed playlist");
+    }
+    {
+      ff::Store store(path+".blocked-boundary"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist(); source["items"][0]["duration"] = 1;
+      auto blocked = source["items"][1]; blocked["source"] = "https://example.org/blocked";
+      source["items"].push_back(blocked);
+      p.command("playback.replace", {{"playlist",source}});
+      const auto current = p.desired()->id; p.committed(current); p.presented(current);
+      blocked["contentRating"] = "mature";
+      p.command("playback.update", {{"items",{source["items"][1],blocked}},{"activationTimes",{900,1500}}});
+      p.tick(501,1500);
+      check(p.state()["pendingUpdate"].is_null() && p.state()["updateOutcome"]["contentBlocked"] == true,
+            "Blocked activation must retire the expired pending cohort");
+      try {
+        p.command("playback.select", {{"index",2}});
+        throw std::runtime_error("Selection reused expired cohort after failed activation");
+      } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong expired cohort error"); }
+      p.tick(2001,3000);
+      check(p.desired() && p.desired()->id == current, "Duration expiry must not apply a superseded cohort");
+    }
+    {
       ff::Store store(path+".future-refresh");ff::Playback p(store);
       p.tick(1,3000);
       p.system_boot("first");

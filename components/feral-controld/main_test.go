@@ -1169,6 +1169,7 @@ func TestInitializeApp(t *testing.T) {
 		nil,
 	)
 
+	t.Cleanup(app.Cancel)
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.NotNil(t, app.Ctx)
@@ -1250,6 +1251,7 @@ func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
 		nil,
 	)
 
+	t.Cleanup(app.Cancel)
 	assert.NotNil(t, app)
 	assert.NotNil(t, app.KioskReplay)
 	assert.NotNil(t, app.OfflineCacheService)
@@ -1440,7 +1442,7 @@ func TestInitializeAppGatewayUserAgentDisabled(t *testing.T) {
 		"com.feralfile.test",
 		nil,
 	)
-	defer app.Cancel()
+	t.Cleanup(app.Cancel)
 
 	assert.Nil(t, app.GatewayPolicy)
 }
@@ -1472,7 +1474,7 @@ func TestInitializeAppGatewayUserAgentInvalidHostsDegrades(t *testing.T) {
 		"com.feralfile.test",
 		nil,
 	)
-	defer app.Cancel()
+	t.Cleanup(app.Cancel)
 
 	assert.NotNil(t, app, "invalid host list must not abort startup")
 	// Every entry was unusable, so there is no operator scope left to
@@ -1509,7 +1511,7 @@ func TestInitializeAppGatewayUserAgentKeepsUsableHosts(t *testing.T) {
 		"com.feralfile.test",
 		nil,
 	)
-	defer app.Cancel()
+	t.Cleanup(app.Cancel)
 
 	require.NotNil(t, app)
 	assert.NotNil(t, app.GatewayPolicy, "one bad entry must not disable the whole rewrite")

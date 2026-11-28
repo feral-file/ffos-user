@@ -8,6 +8,7 @@ import (
 	"net/http"
 	go_os "os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -152,7 +153,9 @@ type app struct {
 	// SetupUI is the on-screen setup-narration surface driven by the provisioning
 	// domain. run() re-pushes its last state (Resync) when CDP (re)connects so a
 	// late-loading player catches up. Nil in the test app.
-	SetupUI *setupui.Service
+	SetupUI      *setupui.Service
+	nativePlayer *playerlink.Client
+	kioskUA      *kioskUserAgent
 	// Session is the cross-cutting page-generation/readiness/navigation
 	// authority (design doc §2). run() bumps its generation on every CDP
 	// (re)connect (Session.OnConnect); every off-lane producer that used to
@@ -352,6 +355,17 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	defer func() {
 		_ = app.DBus.Stop()
 	}()
+
+	// Start native display observers with the daemon. Wiring alone must not
+	// subscribe to the player or leave goroutines using a discarded app.
+	if app.nativePlayer != nil {
+		watchCtx, cancel := context.WithCancel(ctx)
+		var watchers sync.WaitGroup
+		watchers.Go(func() { app.SetupUI.Run(watchCtx, app.nativePlayer) })
+		watchers.Go(func() { app.kioskUA.Run(watchCtx) })
+		defer func() { cancel(); watchers.Wait() }()
+		app.Mediator.SetConnectivityPlayer(app.nativePlayer)
+	}
 
 	// Initialize Mediator
 	app.Mediator.Start()
@@ -1337,7 +1351,6 @@ func initializeApp(
 	// The probe sends the kiosk's own User-Agent (kiosk_useragent.go), read
 	// from the kiosk's DevTools endpoint for the app's lifetime.
 	kioskUA := newNativeKioskUserAgent(nativePlayer, logger)
-	go kioskUA.Run(context)
 	mediaHealthSvc, mediaHealthLookahead, mediaHealthPusher := wireMediaHealth(mediaHealthCfg, uaPolicy, uaPolicy != nil, kioskUA.Get, mediaHealthOnline.Load, mediaHealthReplayable, nil, logger)
 	if mediaHealthSvc != nil {
 		nativeCommands.GatewayOverride = mediaHealthSvc.GatewayOverride
@@ -1662,7 +1675,6 @@ func initializeApp(
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("pairing", nativePairingReconciler(mintPairing))
-	go setupNarrator.Run(context, nativePlayer)
 	// Guarded on kioskReplay, not on the refresher. This is not an
 	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
 	// which re-resolves the playlist over the network and re-sends
@@ -1703,7 +1715,6 @@ func initializeApp(
 		sources.Gateway = uaPolicy.ReplacementGateway()
 	}
 	nativePlayer.Sources = sources
-	mediator.SetConnectivityPlayer(nativePlayer)
 	// Generation re-check seams (§4): a moved generation across an
 	// in-flight setSleepMode send or CDP command reply means the ack may not
 	// describe the current document.
@@ -1877,6 +1888,8 @@ func initializeApp(
 		Provisioning:             provMachine,
 		StateLoadKnown:           stateLoadKnown,
 		SetupUI:                  setupNarrator,
+		nativePlayer:             nativePlayer,
+		kioskUA:                  kioskUA,
 		Session:                  session,
 	}
 }

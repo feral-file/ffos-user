@@ -21,13 +21,23 @@ int match_slot(const Json& old_items, int old_index, const Json& items, bool sou
   for(size_t i=0;i<items.size();++i)if(same(items[i])&&ordinal--==0)return static_cast<int>(i);
   return -1;
 }
+
+const Json& refreshed_slot(const Json& old, int index, const Json& items) {
+  int mapped = match_slot(old, index, items);
+  if (mapped < 0) mapped = match_slot(old, index, items, false);
+  return mapped < 0 ? old[index] : items[mapped];
+}
+}
+
+bool Playback::held_slot_blocked(const Json& playlist, int index, const Json& state) const {
+  if (!waiting_for_refresh_activation()) return false;
+  const auto& plan = state["cohortPlan"];
+  return !allowed(refreshed_slot(playlist["items"], index, plan["playlist"]["items"]),
+                  {{"policy", state["policy"]}, {"context", plan["context"]}});
 }
 
 bool Playback::refresh_blocks(const Occurrence& occurrence, const Json& items, const Json& policy) const {
-  const auto& old = occurrence.playlist["items"];
-  int index = match_slot(old, occurrence.index, items);
-  if (index < 0) index = match_slot(old, occurrence.index, items, false);
-  return !allowed(index < 0 ? occurrence.item : items[index], policy);
+  return !allowed(refreshed_slot(occurrence.playlist["items"], occurrence.index, items), policy);
 }
 
 void Playback::refresh_boot(Json& next, const Json& old_playlist, const Json& refreshed,
@@ -85,11 +95,12 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   if(timed_owner)next["playlistUrl"]=previous_plan["playlistUrl"];
  const bool plan_changed=state_.value("cohortPlan",Json(nullptr))!=plan;
  next["cohortPlan"]=plan;
-  const bool retire_selected=selected_&&refresh_blocks(*selected_,items,next);
+  const auto& labels = plan.is_null() ? items : plan["playlist"]["items"];
+  const bool retire_selected=selected_&&refresh_blocks(*selected_,labels,next);
   // An outgoing occurrence from a different cast keeps its own context and
   // labels; this refresh has no authority to relabel that other document.
   const bool same_presented=presented_&&presented_->cast_id==cast_id_;
-  const bool retire_presented=same_presented&&refresh_blocks(*presented_,items,next);
+  const bool retire_presented=same_presented&&refresh_blocks(*presented_,labels,next);
   const bool retire=p.value("retireBlockedCurrent",false)||retire_selected||retire_presented;
   bool any=items.empty();for(const auto& item:items)any|=allowed(item,next);
   // When fresh labels block the current work, retirement must not be undone
@@ -97,7 +108,8 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   require(any||retire,"content_blocked","No refreshed item is allowed; current playback retained");
   int index=match_slot(old_items,state_["index"].get<int>(),items);
   const bool keep=index>=0&&selected_&&!retire&&state_["context"]==context;
-  const bool defer=!items.empty()&&selected_&&!retire&&index<0&&
+  const bool can_finish = plan.is_null() || (presented_ && selected_ && presented_->id == selected_->id);
+  const bool defer=can_finish&&!items.empty()&&selected_&&!retire&&index<0&&
     match_slot(old_items,state_["index"].get<int>(),items,false)<0&&state_["context"]==context;
   auto id=uuid();
   next["pendingUpdate"]=nullptr;
@@ -105,6 +117,7 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   refresh_boot(next, source,
                plan.is_null() ? playlist : plan["playlist"], context, plan);
   if(defer){
+    if (!plan.is_null()) next["cohortPlan"]["started"] = false;
     next["pendingUpdate"]={{"id",id},{"playlist",playlist},{"context",context}};
   }else{
     next["playlist"]=playlist;
@@ -143,7 +156,7 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
     {"revision",revision_},{"occurrence",selected_?Json(selected_->id):Json(nullptr)},{"updateId",id}};
 }
 
-bool Playback::apply_pending_update(){
+bool Playback::apply_pending_update(std::optional<int> requested_slot){
   const auto pending=state_.value("pendingUpdate",Json(nullptr));
   if(pending.is_null())return false;
   auto next=state_;next["playlist"]=pending["playlist"];next["context"]=pending["context"];
@@ -151,7 +164,19 @@ bool Playback::apply_pending_update(){
   next["updateOutcome"]={{"id",pending["id"]},{"outcome","applied"},{"contentBlocked",false}};
   const auto& items=next["playlist"]["items"];
   bool any=items.empty();int index=0;
-  for(size_t n=0;n<items.size();++n)if(allowed(items[n],next)){any=true;index=static_cast<int>(n);break;}
+  if (requested_slot) {
+    // Controller indices refer to the visible cast; resolve its slot in the eligible projection.
+    const auto& plan = state_["cohortPlan"];
+    const int full_index = match_slot(state_["playlist"]["items"], *requested_slot, plan["playlist"]["items"]);
+    const auto& times = plan["activationTimes"];
+    const auto eligible = [&](const Json& time) { return time.is_null() || time == plan["activeAt"]; };
+    require(full_index >= 0 && eligible(times[full_index]), "invalid_params", "Selected work is outside the eligible cohort");
+    index = static_cast<int>(std::count_if(times.begin(), times.begin() + full_index, eligible));
+    require(allowed(items[index], next), "content_blocked", "Selected work is blocked");
+    any = true;
+  } else {
+    for(size_t n=0;n<items.size();++n)if(allowed(items[n],next)){any=true;index=static_cast<int>(n);break;}
+  }
   if(!any){
     // A later policy change can invalidate the queued projection. Expose that
     // terminal result; never repeatedly try the same invalid update each tick.
@@ -159,6 +184,7 @@ bool Playback::apply_pending_update(){
     next["updateOutcome"]={{"id",pending["id"]},{"outcome","failed"},{"contentBlocked",true}};
     persist(std::move(next));return false;
   }
+  if (!next.value("cohortPlan", Json(nullptr)).is_null()) next["cohortPlan"]["started"] = true;
   update_order(next,index);if(items.empty())next["stopped"]=true;
   persist(std::move(next));++generation_;select();return true;
 }

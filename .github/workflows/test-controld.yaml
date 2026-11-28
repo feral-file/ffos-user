@@ -48,10 +48,28 @@ jobs:
         env:
           FFOS_REQUIRE_LOG_BROWSER: "1"
 
+      - name: Build the headless host for protocol coverage
+        if: ${{ inputs.upload-coverage == true }}
+        working-directory: ./components/feral-display
+        run: |
+          python3 tools/fetch-dependencies.py --core-only
+          cmake -S . -B "$RUNNER_TEMP/display-core"
+          cmake --build "$RUNNER_TEMP/display-core" --target ff-player-core --parallel 2
+
       - name: Generate coverage
         if: ${{ inputs.upload-coverage == true }}
         working-directory: ./components/feral-controld
-        run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
+        env:
+          FF_NATIVE_CORE: ${{ runner.temp }}/display-core/ff-player-core
+        run: |
+          # Include calls across package boundaries, including real socket traffic.
+          mapfile -t packages < <(go list ./... | grep -vE '/mocks|/wrapper')
+          cover_packages=$(IFS=,; echo "${packages[*]}")
+          go test -coverprofile="$RUNNER_TEMP/controld.cover" -covermode=atomic -coverpkg="$cover_packages" "${packages[@]}"
+          # Each test binary writes a counter for every instrumented block.
+          # Sum matching counters once to keep the uploaded profile compact.
+          awk 'NR == 1 { print; next } { hits[$1 " " $2] += $3 } END { for (block in hits) print block, hits[block] }' \
+            "$RUNNER_TEMP/controld.cover" > coverage.out
 
       - name: Upload coverage to Codecov
         if: ${{ inputs.upload-coverage == true }}

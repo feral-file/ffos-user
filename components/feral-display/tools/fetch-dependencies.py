@@ -10,6 +10,7 @@ root = pathlib.Path(__file__).resolve().parent.parent
 vendor = root / 'vendor'
 vendor.mkdir(exist_ok=True)
 for name, dependency in json.loads((root / 'dependencies.json').read_text()).items():
+    if "--core-only" in sys.argv and name != "nlohmann_json": continue
     if name=="cef" and "--without-cef" in sys.argv: continue
     target = vendor / dependency['file']
     def matches(path):
