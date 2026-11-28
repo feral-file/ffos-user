@@ -156,6 +156,20 @@ int main(){
       }
     }
     {
+      ff::Store store(path+".blocked-incoming"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist();
+      p.command("playback.replace", {{"playlist",source}});
+      const auto visible = p.desired()->id; p.committed(visible); p.presented(visible);
+      p.command("playback.select", {{"index",1}});
+      const auto incoming = p.desired()->id;
+      source["items"][1]["contentRating"] = "mature";
+      p.command("playback.update", {{"items",source["items"]},{"activationTimes",{60000,70000}}});
+      p.committed(incoming); p.presented(incoming);
+      check(p.visible() && p.visible()->id == visible && p.desired() && p.desired()->id == visible,
+            "Blocking an in-flight work must keep the allowed outgoing frame");
+    }
+    {
       ff::Store store(path+".mixed-refresh"); ff::Playback p(store);
       p.tick(1, 1000);
       auto source = playlist();
