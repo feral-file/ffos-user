@@ -10,6 +10,10 @@ on:
       - 'components/feral-sys-monitord/go.sum'
   workflow_call:
     inputs:
+      coverage-pr:
+        description: 'Open staging promotion for this exact develop SHA'
+        type: string
+        default: ''
       upload-coverage:
         description: 'Whether to upload coverage results'
         required: false
@@ -57,5 +61,6 @@ jobs:
           name: feral-sys-monitord-coverage
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
+          override_pr: ${{ inputs.coverage-pr }}
           override_branch: ${{ github.ref_name }}
           override_build: ${{ github.run_id }}-sys-monitord
