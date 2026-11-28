@@ -1,6 +1,6 @@
 # FF1 display and controls
 
-The comparison target is [shipping ff-player 3.0.1](https://github.com/feral-file/ff-player/tree/978266e9b62109ae3ae52b4221df67e71c84bc39). The FF1 host and all artwork workers live under `components/player`. The host receives controld's commands, manages playback and draws device UI. Cage presents their Wayland surfaces.
+The comparison target is [shipping ff-player 3.0.1](https://github.com/feral-file/ff-player/tree/978266e9b62109ae3ae52b4221df67e71c84bc39). The FF1 host and all artwork workers live under `components/feral-display`. The host receives controld's commands, manages playback and draws device UI. Cage presents their Wayland surfaces.
 
 | Operation | Owner and behavior |
 | --- | --- |

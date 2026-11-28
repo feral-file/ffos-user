@@ -21,7 +21,7 @@ enforced by `scripts/agent-iso-build-guard.sh`).
 
 ## 3.2.0 — full-image Staging build request
 
-The native player, matching daemons, and session scripts ship together.
+The `feral-display` package replaces the native development player in the full image. Its matching daemons and session scripts ship together.
 After promoting both repositories from `develop` to `staging`, the release
 operator dispatches `feral-file/ffos` workflow `build-image-to-cf.yml` on
 `staging` with these inputs.

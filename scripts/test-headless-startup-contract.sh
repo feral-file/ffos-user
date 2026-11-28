@@ -239,7 +239,7 @@ assert_contains "$units_dir/chromium-kiosk.service" \
   'ExecStartPre=-/usr/bin/sudo -n /usr/bin/systemctl stop feral-kiosk-fallback.service'
 
 # The native runtime has no web app bundle cache to purge.
-assert_contains "$kiosk_script" '/usr/lib/ff-player-native/ff-player-native'
+assert_contains "$kiosk_script" '/usr/lib/feral-display/feral-display'
 assert_contains "$kiosk_script" 'signal_player_ready &'
 assert_not_contains "$kiosk_script" 'exec /usr/bin/chromium'
 assert_not_contains "$units_dir/chromium-kiosk.service" 'Requires=feral-player.service'

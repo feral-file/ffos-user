@@ -62,7 +62,7 @@ verify-go-component-test:
 	@cd components/$(GO_COMPONENT) && go test -v -race $$(go list ./... | grep -vE "/mocks|/wrapper")
 
 # verify-scripts pins the user-session shell contracts that ship only on the
-# full-image rail (feral-player static serving + the headless startup contract),
+# full-image rail (native display and headless startup contracts),
 # plus the agent ISO build guard (AGENTS.md "Release guardrail: ISO image
 # builds"). These have no cargo/go test to run them, so they are their own
 # verify target.

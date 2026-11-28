@@ -7,7 +7,7 @@ results, installation paths, rollback and remaining limitations.
 
 ## Current installation and rollback
 
-Runtime: `/usr/lib/ff-player-native`; resources: `/usr/share/ff-player-native`.
+Runtime: `/usr/lib/feral-display`; resources: `/usr/share/feral-display`.
 State: `/home/feralfile/.state/player/state.sqlite`.
 Socket: `/run/user/1000/ff-player/player.sock`.
 `chromium-kiosk.service` now launches Cage and the native host, preserving its
@@ -46,7 +46,7 @@ No persisted rendering success or verification annotation was imported.
 ## Try an artwork through the native protocol
 
 The development SSH tunnel on Anh's Mac exposes the preview socket at
-`/tmp/ff-native-office-preview-v2.sock`. From `components/player`:
+`/tmp/ff-native-office-preview-v2.sock`. From `components/feral-display`:
 
 ```sh
 python3 tools/playerctl.py --socket /tmp/ff-native-office-preview-v2.sock playback.replace \

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(ff_player_native VERSION 0.1.0 LANGUAGES C CXX)
+project(feral_display VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

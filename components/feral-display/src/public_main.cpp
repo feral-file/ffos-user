@@ -63,8 +63,8 @@ extern "C" int ff_host(int argc, char** argv) {
     ff::Protocol protocol(playback, true, true);
     ff::Server server(socket, protocol);
     auto root = std::filesystem::canonical("/proc/self/exe").parent_path();
-    auto worker = (root / "ff-player-native").string(),
-         launcher = (root / "ff-player-native").string();
+    auto worker = (root / "feral-display").string(),
+         launcher = (root / "feral-display").string();
     auto resources = options["--renderer-dir"];
     if (resources.empty()) resources = ff::renderer_directory(root).string();
     std::ifstream engine_manifest(std::filesystem::path(resources).parent_path() /
@@ -82,7 +82,7 @@ extern "C" int ff_host(int argc, char** argv) {
         false, options.contains("--diagnostic-presentation-timing"),
         (std::filesystem::path(resources).parent_path() / "fonts").string());
     std::map<std::string, std::unique_ptr<ff::PublicBrowser>> clients;
-    ff::ArtworkCache artwork_cache((root / "ff-player-native").string());
+    ff::ArtworkCache artwork_cache((root / "feral-display").string());
     std::map<std::string, std::unique_ptr<ff::MediaClient>> media;
     struct Transition {
       std::string outgoing, incoming;
@@ -585,7 +585,7 @@ extern "C" int ff_host(int argc, char** argv) {
     std::cerr << "presentation_metrics " << metrics.dump() << '\n';
     return 0;
   } catch (const std::exception& e) {
-    std::cerr << "ff-player-native: " << e.what() << '\n';
+    std::cerr << "feral-display: " << e.what() << '\n';
     return 1;
   }
 }

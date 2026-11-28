@@ -15,4 +15,4 @@ cmake --build build-ci -j3
 ctest --test-dir build-ci --output-on-failure
 python3 protocol/generate-schema.py --check
 DESTDIR="$PWD/build-ci/stage" cmake --install build-ci
-tar -czf build-ci/ff-player-native-linux.tar.gz -C build-ci/stage .
+tar -czf build-ci/feral-display-linux.tar.gz -C build-ci/stage .

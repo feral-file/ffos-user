@@ -127,11 +127,11 @@ There are two relayers, independent of each other: the legacy topic relayer (`re
 
 ### Native player control and recovery
 
-The ordinary kiosk is `components/player`, a C++ host with CEF software rendering
+The ordinary kiosk is `components/feral-display`, a C++ host with CEF software rendering
 and an isolated libmpv media worker. Controld preserves external authentication,
 source admission, verification and device operations; the host owns playback,
 presentation, scheduling and durable state. Their boundary is the versioned,
-bounded Unix protocol in `components/player/protocol/README.md`, not JavaScript.
+bounded Unix protocol in `components/feral-display/protocol/README.md`, not JavaScript.
 Artwork documents are top-level unprivileged content, independent of device UI.
 
 `playercontrol.Native` maps normal casts and policy/overlay commands. Refresher

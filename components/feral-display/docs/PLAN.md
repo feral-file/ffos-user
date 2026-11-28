@@ -44,8 +44,8 @@ Develop branches only. Build and test the runtime before altering the installed 
 ## Repository ownership update
 
 Anh requested the source move on 2026-11-17. The runtime now lives in
-`ffos-user/components/player`, next to controld; the old sibling contains only
-local build caches. Runtime/package identity remains `ff-player-native`.
+`ffos-user/components/feral-display`, next to controld; the old sibling contains only
+local build caches. Runtime/package identity remains `feral-display`.
 Development CI builds and tests the complete CEF/media runtime without publishing.
 
 ## Progress

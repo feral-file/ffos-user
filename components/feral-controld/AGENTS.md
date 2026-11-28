@@ -55,7 +55,7 @@ recovery or kiosk Fetch interception loops. They remain fixture/rollback code,
 not a fallback. Old CDP-specific incident notes below describe the legacy
 architecture and isolated capture only; do not restore product dependencies.
 Offline replay/onchfs bridging remains an explicit acceptance gap. Current
-contracts/evidence are in docs/native-player-migration.md and player/docs/CUTOVER.md.
+contracts/evidence are in docs/native-player-migration.md and ../feral-display/docs/CUTOVER.md.
 
 ## Architecture
 

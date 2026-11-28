@@ -2,14 +2,14 @@
 
 These notes follow the implementation in chronological order. For the shipped
 process layout, Unix socket boundary, cache ownership and mapping of former CDP
-consumers, see the [native cutover guide](../components/player/docs/MIGRATION.md).
+consumers, see the [native cutover guide](../components/feral-display/docs/MIGRATION.md).
 The [release ledger](../RELEASES.md) records the pinned Development image.
 
 Ordinary casts, source refresh, runtime-instance recovery, setup/pairing,
-sleep, input, history and watchdog now use `components/player` over native IPC.
+sleep, input, history and watchdog now use `components/feral-display` over native IPC.
 The coordinated cutover is installed on FF1-SKYZ2E3A for Anh's testing.
 **Do not deploy controld independently of the player and matching session files.**
-There is no CDP fallback. See player/docs/CUTOVER.md for evidence and remaining gaps.
+There is no CDP fallback. See [the feral-display cutover record](../components/feral-display/docs/CUTOVER.md) for evidence and remaining gaps.
 
 ## Implemented boundary
 
@@ -47,7 +47,7 @@ fixture-only helpers with the rollback paths after native release acceptance.
 - Status tests for incoming/outgoing same-URL occurrences, failed incoming
   renderers, absent presentation after restart/stop, and generation-fenced trust.
 - Full controld tests, vet and changed-diff lint during this stage. Evidence is
-  retained in `components/player/docs/evidence/`.
+  retained in `components/feral-display/docs/evidence/`.
 
 See the sibling tree's `docs/PLAN.md`, `docs/BEHAVIOR.md`, `docs/VERIFICATION.md`
 and `protocol/README.md` for current implementation, device checks and gaps.
@@ -74,7 +74,7 @@ escaping, claim QR and device-name guidance, neutral connecting copy, failures,
 update progress and reset instructions. `ready` clears setup without clearing
 another overlay owner. Native PP Mori, QR layout, tombstone timing and the
 bundled animated setup artwork are implemented. Device regression evidence and
-remaining fidelity/activation limits are in `components/player/docs/DEVICE-UI.md`.
+remaining fidelity/activation limits are in `components/feral-display/docs/DEVICE-UI.md`.
 Normal player control is now activated.
 
 ## Input cutover

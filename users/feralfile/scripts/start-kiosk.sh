@@ -136,8 +136,8 @@ exec cage -s -- /bin/bash -c "
     done
     export SDL_VIDEODRIVER=wayland
     export AMD_DEBUG=nodcc
-    exec /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /usr/lib/ff-player-native/ff-player-native \
+    exec /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /usr/lib/feral-display/feral-display \
       --state-dir=/home/feralfile/.state/player \
       --socket=/run/user/1000/ff-player/player.sock \
-      --renderer-dir=/usr/share/ff-player-native/renderers
+      --renderer-dir=/usr/share/feral-display/renderers
 "

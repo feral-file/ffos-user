@@ -14,7 +14,7 @@
 
 ## Architecture Overview
 
-FFOS-USER provides components and user data to the FFOS build system. Build orchestration lives in the FFOS repo, while this repo focuses on component source and user data. CI workflows here run tests and lint only.
+FFOS-USER provides components and user data to the FFOS build system. Build orchestration lives in the FFOS repo, while this repo focuses on component source and user data. CI builds and tests the [feral-display runtime](components/feral-display/README.md) and verifies the Go daemons.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
@@ -51,6 +51,7 @@ ffos-user/
 │   │   ├── go.mod
 │   │   └── ...
 │   ├── feral-sys-monitord/       # System monitoring
+│   ├── feral-display/           # Native FF1 display component (CEF and libmpv)
 │   ├── feral-watchdog/           # System watchdog
 │   └── player-wrapper-ui/        # Player wrapper UI
 └── users/                        # User data and configurations
@@ -89,9 +90,10 @@ ffos-user/
 
 #### 3. UI Layer
 
-- **player-wrapper-ui**: Media player wrapper interface
+- **feral-display** renders artwork, title cards, and device UI.
+- **player-wrapper-ui** contains the legacy browser wrapper.
 
-The Chromium kiosk is launched by `users/feralfile/scripts/start-kiosk.sh` (unit `chromium-kiosk.service`) at `http://127.0.0.1:8080/`; there is no separate `launcher-ui` process.
+`chromium-kiosk.service` starts `feral-display` under Cage through `users/feralfile/scripts/start-kiosk.sh`. CEF handles web artwork and libmpv handles standalone media. The player socket and persisted playback state keep their existing paths across upgrades.
 
 ### User Data Layer
 
@@ -178,7 +180,7 @@ make verify
 `make verify` is non-mutating for repository files and runs the same component checks that CI calls:
 
 - Go components: `go mod download`, `go vet ./...`, `golangci-lint run ./...`, `gofmt -s -l .`, and `go test -v` for `feral-controld`, `feral-sys-monitord`, and `feral-watchdog`.
-- Startup contract smoke test: `scripts/test-serve-feral-player.sh` validates the `serve-feral-player.sh` static bundle failure path and systemd notify readiness contract with temporary fakes.
+- Startup contract smoke test: `scripts/test-headless-startup-contract.sh` checks the display session and daemon startup contracts.
 
 Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, and `golangci-lint` v2.13.2. Earlier linter releases cannot read Go 1.26 export data. `feral-controld` uses Go 1.26.0 because its mint-pairing handoff minter dependency declares Go 1.26.
 
@@ -204,7 +206,7 @@ make verify-feral-sys-monitord
 make verify-feral-watchdog
 ```
 
-Each target prints deterministic command output suitable for local review or agent evaluation; the smoke test also emits `test-serve-feral-player: OK` when the service-state contract passes.
+The startup contract checks the installed `feral-display` executable and its session script.
 
 ### Sync components to a device (dev)
 
@@ -219,6 +221,4 @@ REMOTE_HOST=ff1-03vdu3x1.local REMOTE_KEY=~/.ssh/id_ed25519 make -C components s
 ```
 
 `sync-all` syncs the whole component source tree. Mint-pairing
-handoff does not ship or sync a dedicated QR page from this repository:
-`feral-controld` keeps Chromium on the bundled player and drives the
-ff-player mint-pairing overlay through the `mintPairingDisplay` CDP command.
+handoff uses the native display socket. `feral-display` renders the device QR overlay.

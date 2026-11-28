@@ -105,7 +105,7 @@ Two fresh-context intermediate reviews found and prompted fixes for scheduling,
 URL admission, pause timing, policy retirement and malformed DP1 IDs. Findings
 and dispositions are recorded in REVIEWS.md; final completion review is pending.
 
-FFOS now contains local source-bundle/pacman tooling under
+The original local source-bundle/pacman tooling lived under
 `packages/ff-player-native`. Two source-preparation runs produced SHA-256
 `0bc68209aa262316308624e0f240c343a61d9719e986f1b514e7aab8174d92b3`.
 This proves deterministic bundling for those inputs, not binary reproducibility.
@@ -236,7 +236,7 @@ and model checks; retained engine evidence is still being collected.
 
 ## Relocation and CI qualification
 
-The runtime source now lives in `ffos-user/components/player`. All nine macOS
+The runtime source now lives in `ffos-user/components/feral-display`. All nine macOS
 core test groups, the 28-exchange protocol schema suite, real C++/Go
 connectivity interop, Go race tests, full controld tests, vet and lint pass.
 The ffos-user script suite passes in Linux; root-only permission cases and the

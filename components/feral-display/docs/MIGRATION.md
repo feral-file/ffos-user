@@ -1,7 +1,7 @@
 # FF1 native player cutover
 
 The kiosk unit starts Cage and a single project executable at
-`/usr/lib/ff-player-native/ff-player-native`. A live change requires the image's
+`/usr/lib/feral-display/feral-display`. A live change requires the image's
 user session files together with the player, controld and watchdog binaries.
 Pacman replaces the old web-player package. The new host resumes an existing
 native SQLite database in `~/.state/player`. During a legacy OTA, candidate promotion reads the shut-down production root's kiosk

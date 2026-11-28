@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 
 TRACE = Path("/sys/kernel/tracing")
-LIB = Path("/usr/lib/ff-player-native/libff_host.so")
+LIB = Path("/usr/lib/feral-display/libff_host.so")
 SOCKET = Path("/run/user/1000/ff-player/player.sock")
 PLAYLIST = "75cba215-484e-4897-ab04-2fec8c44af98"
 ARRELS = "0d31f08d-ca86-49ca-90d3-31a10a5ccd34"

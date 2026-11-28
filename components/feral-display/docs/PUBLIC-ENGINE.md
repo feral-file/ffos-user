@@ -9,7 +9,7 @@ Capsule is deferred. FF1-SKYZ2E3A is the hands-on trial device. The
 
 ## Ownership and isolation
 
-The production `ff-player-native` executable does not link libcef. Each software
+The production `feral-display` executable does not link libcef. Each software
 occurrence gets a separate public Chromium browser process, fresh profile and
 private Wayland server. Chromium can share renderers within that browser; the
 separate browser processes/profiles are the isolation boundary we create and

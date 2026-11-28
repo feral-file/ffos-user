@@ -13,7 +13,7 @@ for _ in range(128):
  pid=pending.pop()
  try:
   args=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
-  if args[0].endswith(b'/ff-player-native') and b'--cef' in args and not any(x.startswith(b'--type=') for x in args):browser=pid;break
+  if args[0].endswith(b'/feral-display') and b'--cef' in args and not any(x.startswith(b'--type=') for x in args):browser=pid;break
   pending.extend(map(int,Path(f'/proc/{pid}/task/{pid}/children').read_text().split()))
  except(FileNotFoundError,ProcessLookupError):pass
 assert browser,'Test browser descendant absent'

@@ -236,5 +236,5 @@ NO_STACK_PROTECTOR int main(int argc,char** argv){
       if(frame_error)std::rethrow_exception(frame_error);
     }
     CefShutdown();return 0;
-  }catch(const std::exception& e){std::cerr<<"ff-player-native: "<<e.what()<<'\n';if(initialized)CefShutdown();return 1;}
+  }catch(const std::exception& e){std::cerr<<"feral-display: "<<e.what()<<'\n';if(initialized)CefShutdown();return 1;}
 }

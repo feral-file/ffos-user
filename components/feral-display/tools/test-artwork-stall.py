@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run on Linux with a disposable Cage display and the installed native runtime.
 
-  python3 tools/test-artwork-stall.py /usr/lib/ff-player-native/ff-player-native --display wayland-test
+  python3 tools/test-artwork-stall.py /usr/lib/feral-display/feral-display --display wayland-test
 
 Uses a private host, socket, state and inline artwork. Run once per presentation
 path. Requires pidfds and visibility of the test host's own sandbox descendants.

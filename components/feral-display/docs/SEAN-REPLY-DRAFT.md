@@ -46,4 +46,4 @@ manifest, but not the engine archive pinned by SHA-256 f0d8ced3…390d400. I hav
 substituted another browser and called it reproduced. Once that image is available,
 we can test its exact harness, signature and reference-frame result on the FF1.
 
-[Trial method, evidence and limits](https://github.com/feral-file/ffos-user/blob/codex/native-player/components/player/docs/SEAN-TRIAL-RESULTS.md)
+[Trial method, evidence and limits](https://github.com/feral-file/ffos-user/blob/codex/native-player/components/feral-display/docs/SEAN-TRIAL-RESULTS.md)

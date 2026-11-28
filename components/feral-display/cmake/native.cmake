@@ -7,12 +7,12 @@ add_custom_target(artwork-egress ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/libff_
 add_test(NAME artwork-egress COMMAND "${GO_EXECUTABLE}" test ./...)
 set_tests_properties(artwork-egress PROPERTIES WORKING_DIRECTORY "${EGRESS_DIR}")
 add_test(NAME artwork-network-namespace COMMAND "${Python3_EXECUTABLE}"
-  "${CMAKE_CURRENT_SOURCE_DIR}/tests/egress_sandbox_test.py" "$<TARGET_FILE:ff-player-native>")
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/egress_sandbox_test.py" "$<TARGET_FILE:feral-display>")
 set_tests_properties(artwork-network-namespace PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
 add_test(NAME artwork-public-route COMMAND bash
-  "${CMAKE_CURRENT_SOURCE_DIR}/tests/egress_public_route_test.sh" "$<TARGET_FILE:ff-player-native>")
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/egress_public_route_test.sh" "$<TARGET_FILE:feral-display>")
 set_tests_properties(artwork-public-route PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 35)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so" DESTINATION lib/ff-player-native)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libff_network.so" DESTINATION lib/feral-display)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 add_library(ff_cache_client src/cache_client.cpp src/profile_gc.cpp)
@@ -36,27 +36,27 @@ target_link_libraries(media-decode-tests PRIVATE PkgConfig::MPV)
 add_test(NAME media-decode COMMAND media-decode-tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/media-h264-aac.mp4)
 set_tests_properties(media-decode PROPERTIES TIMEOUT 25)
 set_target_properties(ff_decode PROPERTIES INSTALL_RPATH "$ORIGIN")
-install(TARGETS ff_decode LIBRARY DESTINATION lib/ff-player-native/media)
+install(TARGETS ff_decode LIBRARY DESTINATION lib/feral-display/media)
 set(FF_MEDIA_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/build-media/prefix" CACHE PATH "Pinned private media libraries")
 execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/prepare-renderers.py
   COMMAND_ERROR_IS_FATAL ANY)
 if(NOT EXISTS "${FF_MEDIA_PREFIX}/lib/libmpv.so")
   message(FATAL_ERROR "Build the pinned private media dependencies with tools/build-ffmpeg.sh and tools/build-media.sh")
 endif()
-install(DIRECTORY "${FF_MEDIA_PREFIX}/lib/" DESTINATION lib/ff-player-native/media
+install(DIRECTORY "${FF_MEDIA_PREFIX}/lib/" DESTINATION lib/feral-display/media
         FILES_MATCHING PATTERN "*.so*" PATTERN pkgconfig EXCLUDE)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/mpv-0.42.0/LICENSE.LGPL"
-        DESTINATION share/licenses/ff-player-native RENAME mpv-LGPL.txt)
+        DESTINATION share/licenses/feral-display RENAME mpv-LGPL.txt)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/mpv-0.42.0/Copyright"
-        DESTINATION share/licenses/ff-player-native RENAME mpv-Copyright.txt)
+        DESTINATION share/licenses/feral-display RENAME mpv-Copyright.txt)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/libplacebo-7.387.0/LICENSE"
-        DESTINATION share/licenses/ff-player-native RENAME libplacebo.txt)
+        DESTINATION share/licenses/feral-display RENAME libplacebo.txt)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ffmpeg/COPYING.LGPLv2.1"
-        DESTINATION share/licenses/ff-player-native RENAME FFmpeg-LGPL.txt)
+        DESTINATION share/licenses/feral-display RENAME FFmpeg-LGPL.txt)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 set(PRESENTATION_XML "${WAYLAND_PROTOCOLS_DIR}/stable/presentation-time/presentation-time.xml")
-install(FILES "${PRESENTATION_XML}" DESTINATION share/licenses/ff-player-native RENAME wayland-presentation-time.xml)
+install(FILES "${PRESENTATION_XML}" DESTINATION share/licenses/feral-display RENAME wayland-presentation-time.xml)
 add_custom_command(OUTPUT presentation-time-client-protocol.h presentation-time-protocol.c
   COMMAND ${WAYLAND_SCANNER} client-header ${PRESENTATION_XML} presentation-time-client-protocol.h
   COMMAND ${WAYLAND_SCANNER} private-code ${PRESENTATION_XML} presentation-time-protocol.c

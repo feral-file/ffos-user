@@ -96,7 +96,7 @@ class PublicBrowser {
   std::map<std::string, Json> mixed_requests_;
   bool loaded_ = false, failed_ = false, offline_ = false, cache_coverage_ = false,
        bundled_ = false;
-  std::string bundle_prefix_, resources_ = "/usr/share/ff-player-native/renderers";
+  std::string bundle_prefix_, resources_ = "/usr/share/feral-display/renderers";
   uint64_t configured_revision_ = 0, configuration_frame_ = 0;
   bool bundled_request(const Json&, const std::string&);
   std::string bundle_root_;

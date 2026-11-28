@@ -27,19 +27,19 @@ stage=$(mktemp -d "$trial/stage.XXXXXX")
 DESTDIR="$stage" cmake --install "$trial/build" --strip
 # The SDK retains static symbols for debugging. Ship only the dynamic
 # symbols needed by the loader. The pinned archive preserves the originals.
-strip --strip-unneeded "$stage/usr/lib/ff-player-native/libcef.so"
+strip --strip-unneeded "$stage/usr/lib/feral-display/libcef.so"
 # The FFOS launch path uses Chromium's root-owned sandbox helper.
-sandbox="$stage/usr/lib/ff-player-native/chrome-sandbox"
+sandbox="$stage/usr/lib/feral-display/chrome-sandbox"
 test "$(stat -c %u:%g "$sandbox")" = 0:0
 chmod 4755 "$sandbox"
-root="$stage/usr/lib/ff-player-native"
+root="$stage/usr/lib/feral-display"
 sh tools/build-cage-client.sh
 install -m644 build-cage-client/target/release/libff_wayland.so "$root/"
 for license in LICENSE-MIT LICENSE-APACHE; do
-  install -Dm644 "build-cage-client/licenses/$license" "$stage/usr/share/licenses/ff-player-native/wl-proxy/$license"
+  install -Dm644 "build-cage-client/licenses/$license" "$stage/usr/share/licenses/feral-display/wl-proxy/$license"
 done
-install -m644 maintenance/ffos-worker-packages.lock "$stage/usr/share/ff-player-native/"
-python3 - "$stage/usr/share/ff-player-native/dependencies.json" "$pin" <<'PYTHON'
+install -m644 maintenance/ffos-worker-packages.lock "$stage/usr/share/feral-display/"
+python3 - "$stage/usr/share/feral-display/dependencies.json" "$pin" <<'PYTHON'
 import json
 from pathlib import Path
 import sys
@@ -57,11 +57,11 @@ PYTHON
 find "$stage/usr" -type f -perm /111 | sort | sed "s|$stage||" > "$trial/installed-executables.txt"
 while IFS= read -r executable; do
   case "$executable" in
-    /usr/lib/ff-player-native/ff-player-native|/usr/lib/ff-player-native/chrome-sandbox|/usr/lib/ff-player-native/chrome_crashpad_handler|*.so|*.so.*) ;;
+    /usr/lib/feral-display/feral-display|/usr/lib/feral-display/chrome-sandbox|/usr/lib/feral-display/chrome_crashpad_handler|*.so|*.so.*) ;;
     *) echo "Unexpected executable: $executable" >&2; exit 1 ;;
   esac
 done < "$trial/installed-executables.txt"
 # Archive only the install tree. mktemp makes the staging root mode 0700,
 # which tar would otherwise apply to the installation prefix.
-tar -czf "$trial/ff-player-cef-linux.tar.gz" -C "$stage" ./usr
-(cd "$trial" && sha256sum ff-player-cef-linux.tar.gz > SHA256SUMS)
+tar -czf "$trial/feral-display-linux.tar.gz" -C "$stage" ./usr
+(cd "$trial" && sha256sum feral-display-linux.tar.gz > SHA256SUMS)

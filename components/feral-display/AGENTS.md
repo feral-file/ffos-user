@@ -1,6 +1,6 @@
-# FF1 native player
+# feral-display
 
-These instructions apply to `components/player/`. The player takes admitted artwork and playback intent from controld, renders it under Cage, and reports what reached the display. Keep device enrollment, controller authentication, provisioning and system-wide recovery in their owning services.
+These instructions apply to `components/feral-display/`. The player takes admitted artwork and playback intent from controld, renders it under Cage, and reports what reached the display. Keep device enrollment, controller authentication, provisioning and system-wide recovery in their owning services.
 
 **Critical: one FF1 display path.** Live, downloaded, and signed capsule artwork use the same player. CEF renders web works, and libmpv renders standalone media. Capsule engine pins are provenance for off-device reproduction. Never install or launch a second display engine for a work.
 

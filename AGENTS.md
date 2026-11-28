@@ -9,7 +9,7 @@ This file defines the repository-wide principles for coding agents. The detailed
 
 ## Core principles
 
-**Critical: one FF1 display path.** Live, downloaded, and signed capsule artwork use the same player. CEF renders web works, and libmpv renders standalone media. Capsule engine pins are provenance for off-device reproduction. Never install or launch a second display engine for a work.
+**Critical: one FF1 display path.** Live, downloaded, and signed capsule artwork use `feral-display`. CEF renders web works, and libmpv renders standalone media. Capsule engine pins are provenance for off-device reproduction. Never install or launch a second display engine for a work.
 - Delete before adding. If the current shape is wrong, prefer removing or replacing it over layering more compatibility code on top.
 - Keep architecture explicit. Components should have narrow responsibilities and communicate through visible boundaries such as D-Bus, files, sockets, or process edges.
 - Prefer small helpers and simple coordinators. Use stateful orchestration only where lifecycle, caching, or recovery logic genuinely needs it.

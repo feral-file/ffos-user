@@ -1,6 +1,6 @@
-# Native player (`components/player`)
+# feral-display
 
-The FF1 runtime uses a C++ playback host under Cage. Controld delivers signed
+`feral-display` is the FF1 display component, pacman package and installed executable. Its C++ host runs under Cage. Controld delivers signed
 DP-1 playlists to the host over its Unix socket. The host owns scheduling,
 SQLite state, labels, device panels, cursor routing and worker recovery.
 
@@ -80,10 +80,10 @@ Use a fresh state directory and a socket directory owned by the runtime UID with
 
 ```sh
 AMD_DEBUG=nodcc SDL_VIDEODRIVER=wayland \
-  /path/to/stage/usr/lib/ff-player-native/ff-player-native \
+  /path/to/stage/usr/lib/feral-display/feral-display \
   --state-dir=/home/feralfile/.state/native-test \
   --socket=/run/user/1000/ff-native-test/player.sock \
-  --renderer-dir=/path/to/stage/usr/share/ff-player-native/renderers \
+  --renderer-dir=/path/to/stage/usr/share/feral-display/renderers \
   --diagnostic-presentation-timing=/tmp/native-presentation.json
 ```
 
@@ -128,7 +128,7 @@ overlay is a host-owned Wayland surface. The compositor applies the physical
 output transform once for every surface. Image EXIF and media orientation
 metadata still apply within each artwork.
 
-The **Build FF1 player** workflow produces `ff-player-native-linux-x86_64`
+The **Build feral-display** workflow produces `feral-display-linux-x86_64`
 with the runtime archive and `SHA256SUMS`. Extracting the archive preserves
 the CEF sandbox helper and the hard-linked engine files. The separate
 Chromium comparison workflow produces `ff-player-chromium-linux-x86_64`.
@@ -137,7 +137,7 @@ CEF has its own FF1 archive digest. FFmpeg and mpv source digests live in
 `dependencies.json`. The Cage relay builds from a verified wl-proxy revision
 and its Cargo.lock. The installed `ffos-worker-packages.lock` records the device
 packages independently. Before qualifying a device image, run this from
-the installed `/usr/share/ff-player-native` directory:
+the installed `/usr/share/feral-display` directory:
 
 ```sh
 pacman -Q $(awk '{print $1}' ffos-worker-packages.lock) | diff -u ffos-worker-packages.lock -

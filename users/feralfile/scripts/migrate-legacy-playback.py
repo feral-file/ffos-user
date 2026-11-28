@@ -107,7 +107,7 @@ def main():
         records = read_profile(source, Path(profile))
         # Publish only after the native host has validated every record and
         # closed SQLite (including its WAL). Failure leaves the old root available for fallback.
-        result = subprocess.run(["/usr/bin/ff-player-native", "--import-legacy", f"--state-dir={stage}"],
+        result = subprocess.run(["/usr/bin/feral-display", "--import-legacy", f"--state-dir={stage}"],
                                 input=records, stdout=subprocess.PIPE, check=True, timeout=30)
         expected = json.loads(result.stdout)
         status = "idle"
