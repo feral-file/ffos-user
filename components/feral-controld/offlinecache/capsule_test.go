@@ -189,3 +189,53 @@ func TestCapsulePlaylistSourceRejectsMalformedItems(t *testing.T) {
 		}
 	}
 }
+
+func TestCapsuleReplayRedirectChain(t *testing.T) {
+	const source = "https://example.org/start"
+	const target = "https://example.org/artwork"
+	public, private, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, public...))
+	archive, _ := capsuleFixture(t, source, "<p>edition</p>", signer, private)
+	files, err := readCapsuleFiles(archive)
+	require.NoError(t, err)
+	const manifest = "meta/capture/resources.json"
+	var capture capsuleCapture
+	require.NoError(t, json.Unmarshal(files[manifest], &capture))
+	artwork := capture.Resources[0]
+	artwork.URL = target
+	redirect := Resource{URL: source, Status: 302, RedirectTo: target, Headers: map[string]string{"Cache-Control": "public", "Content-Length": "0"}}
+	empty := Resource{URL: target + "/empty", Status: 204}
+	for _, tc := range []struct {
+		name      string
+		responses []Resource
+		wantError string
+	}{
+		{"complete", []Resource{redirect, artwork, empty}, ""},
+		{"missing destination", []Resource{redirect}, "incomplete redirect chain"},
+		{"duplicate response", []Resource{redirect, artwork, artwork}, "invalid or unsupported"},
+		{"empty artwork", []Resource{redirect, {URL: target, Status: 200}}, "does not contain artwork bytes"},
+		{"inconsistent redirect status", []Resource{{URL: source, Status: 200, RedirectTo: target}, artwork}, "invalid capsule resource redirect"},
+		{"missing body", []Resource{redirect, {URL: target, Status: 200, SHA256: capsuleDigest([]byte("other"))}}, "unknown asset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture.Resources = tc.responses
+			payload, err := json.Marshal(capture)
+			require.NoError(t, err)
+			files[manifest] = payload
+			_, record, blobs, err := capsuleReplay(capsuleDigest(archive), files)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				require.Nil(t, record)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, source, record.Entry)
+			require.Equal(t, target, record.Resources[0].RedirectTo)
+			require.Contains(t, record.Resources[0].HeaderFields, HeaderField{Name: "Location", Value: target})
+			require.NotContains(t, record.Resources[0].HeaderFields, HeaderField{Name: "Content-Length", Value: "0"})
+			require.Equal(t, []byte("<p>edition</p>"), blobs[artwork.SHA256])
+			require.Equal(t, capsuleDigest(nil), record.Resources[2].SHA256)
+		})
+	}
+}

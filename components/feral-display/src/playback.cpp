@@ -455,9 +455,14 @@ Json Playback::command(std::string_view method, const Json& p) {
   if (method == "playback.update") {
     if(!p.contains("activationTimes"))return update_playlist(p);
     fields(p,{"items","context","retireBlockedCurrent","activationTimes"});
-    require(state_.contains("cohortPlan")&&!state_["cohortPlan"].is_null(),"stale_generation","Timed source no longer owns playback");
-    const auto& previous = state_["cohortPlan"];
-    auto plan=previous;
+    // A live source may publish its first displayAt after the initial cast.
+    // Stopping playback revokes that ownership even though the playlist remains on disk.
+    const bool timed = state_.contains("cohortPlan") && !state_["cohortPlan"].is_null();
+    require(timed || (!state_["playlist"].is_null() && state_["stopped"] == false),
+            "stale_generation", "Timed source no longer owns playback");
+    const auto& previous = timed ? state_["cohortPlan"] : state_;
+    Json plan = {{"playlist", previous["playlist"]}, {"context", previous["context"]},
+                 {"playlistUrl", previous["playlistUrl"]}, {"started", true}};
     require(p.contains("items"),"invalid_params","Missing items");
     if (plan["playlist"]["items"] != p["items"]) {
       plan["playlist"].erase("signature");

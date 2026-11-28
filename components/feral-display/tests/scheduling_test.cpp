@@ -99,6 +99,35 @@ int main(){
     }
 
     {
+      ff::Store store(path+".first-timed-refresh");
+      ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist();
+      const std::string url = "https://example.org/exhibition";
+      p.command("playback.replace", {{"playlist",source},{"playlistUrl",url},{"boot",true}});
+      const auto current = p.desired()->id;
+      p.committed(current);
+      p.presented(current);
+      const auto replacement = source["items"][1];
+      const ff::Json refresh = {{"items",{replacement}}, {"activationTimes",{2000}}};
+      p.command("playback.update", refresh);
+      p.tick(2, 1999);
+      check(p.visible() && p.visible()->id == current && p.desired()->id == current,
+            "First timed refresh must keep the outgoing work until activation");
+      check(p.state()["cohortPlan"]["playlistUrl"] == url &&
+            p.state()["boot"]["activationTimes"] == refresh["activationTimes"],
+            "First timed refresh must preserve the source and refresh boot intent");
+      p.tick(3, 2000);
+      check(p.desired() && p.desired()->item == replacement, "First scheduled work must activate on time");
+      p.command("playback.stop", ff::Json::object());
+      try {
+        p.command("playback.update", refresh);
+        throw std::runtime_error("Refresh revived a stopped source");
+      } catch (const ff::Error& error) {
+        check(error.code == "stale_generation", "Stopped source must reject timed refreshes");
+      }
+    }
+    {
       ff::Store store(path+".future-refresh");ff::Playback p(store);
       p.tick(1,3000);
       p.system_boot("first");
