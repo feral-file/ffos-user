@@ -19,6 +19,27 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
+## 3.2.0 — full-image Staging build request
+
+The native player, matching daemons, and session scripts ship together.
+After promoting both repositories from `develop` to `staging`, the release
+operator dispatches `feral-file/ffos` workflow `build-image-to-cf.yml` on
+`staging` with these inputs.
+
+| Input | Value |
+| --- | --- |
+| version | 3.2.0 |
+| environment | Staging |
+| ffos_user_ref | staging |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | false |
+| update_min_version | false |
+| update_required_version | false |
+| update_recovery_version | false |
+
+The three update flags preserve the existing runtime, upgrade and recovery
+thresholds when publishing this staging candidate.
+
 ## 3.1.4 — full-image Development rebuild after merging develop
 
 The November 28 rebuild reuses the Development download URL from the
