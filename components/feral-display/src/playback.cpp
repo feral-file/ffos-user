@@ -250,6 +250,7 @@ void Playback::select(bool recovering,bool skipping_failure) {
   if(!recovering){clear_recovery();presentation_failure_=nullptr;}
   release_input();
   eos_pending_ = false;
+  const bool previous_autoplay_hold = selected_ && selected_->autoplay_hold;
   selected_.reset();
   media_status_ = nullptr;
   engine_status_ = packaged_engine_;
@@ -270,14 +271,16 @@ void Playback::select(bool recovering,bool skipping_failure) {
   selected_ = Occurrence{uuid(), item, resolve_display(state_["settings"], defaults, item), index, generation_, "loading", "", false,
     defaults,state_["context"].get<std::string>(),state_["playlist"].value("title",""),state_["playlist"].value("curator",""),
     state_["playlist"],state_.value("playlistUrl", ""),cast_id_};
-  if(!recovering)autoplay_hold_ = !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoplay", true);
+  selected_->autoplay_hold = recovering ? previous_autoplay_hold :
+      !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoplay", true);
   selected_at_ = now_;
 }
 bool Playback::media_paused(const std::string& occurrence) const {
   // Decode the first frame while paused, then start only once the host has
   // actually exposed it. Setup may cover the incoming work for minutes.
   const bool waiting=!occurrence.empty()&&(!presented_||presented_->id!=occurrence);
-  return state_["paused"] == true || autoplay_hold_ || waiting;
+  const auto& target = presented_ && occurrence == presented_->id ? presented_ : selected_;
+  return state_["paused"] == true || (target && target->autoplay_hold) || waiting;
 }
 void Playback::replace(Json& next, const Json& p) {
   fields(p, {"playlist", "index", "context", "playlistUrl", "boot", "onlyIfNoPlaylist", "activationTimes"});
@@ -691,7 +694,10 @@ Json Playback::command(std::string_view method, const Json& p) {
     if(!allowed(presented_->item,presented_policy) ||
        (presented_->cast_id == cast_id_ && held_slot_blocked(presented_->playlist, presented_->index, state_))){release_input();presented_.reset();}
   }
-  if (method == "playback.pause") autoplay_hold_ = false;
+  if (method == "playback.pause") {
+    if (selected_) selected_->autoplay_hold = false;
+    if (presented_) presented_->autoplay_hold = false;
+  }
   if (method == "settings.set") {
     if (selected_) refresh_display(*selected_);
     if (presented_) refresh_display(*presented_);

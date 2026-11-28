@@ -155,6 +155,22 @@ int main(){
         check(error.code == "stale_generation", "Stopped source must reject timed refreshes");
       }
     }
+    for (const auto& [autoplay, resumed] : {std::pair{true, false}, std::pair{false, false}, std::pair{false, true}}) {
+      ff::Store store(path + ff::uuid()); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist();
+      source["items"][0]["display"] = {{"autoplay",autoplay}};
+      source["items"][1]["display"] = {{"autoplay",!autoplay}};
+      p.command("playback.replace", {{"playlist",source}});
+      const auto visible = p.desired()->id; p.committed(visible); p.presented(visible);
+      if (resumed) p.command("playback.pause", {{"paused",false}});
+      const bool was_paused = p.media_paused(visible);
+      check(was_paused == (!autoplay && !resumed), "Fixture must reflect outgoing autoplay intent");
+      p.command("playback.select", {{"index",1}});
+      p.command("playback.update", {{"items",source["items"]},{"activationTimes",{60000,70000}}});
+      check(p.desired() && p.desired()->id == visible && p.media_paused(visible) == was_paused,
+            "Restoring an outgoing work must preserve its autoplay and explicit resume");
+    }
     {
       ff::Store store(path+".blocked-incoming"); ff::Playback p(store);
       p.tick(1, 1000);

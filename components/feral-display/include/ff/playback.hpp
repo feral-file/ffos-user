@@ -26,6 +26,7 @@ struct Occurrence {
   bool frame_available = false; // Host capture evidence, never persisted.
   Json adjustment = Json::object();
   uint64_t display_revision = 1;
+  bool autoplay_hold = false;
 };
 
 // Called only on the host event loop. The renderer consumes desired() and
@@ -94,7 +95,6 @@ class Playback {
   Json overlay_ = nullptr;
   bool online_ = false, connectivity_known_ = false;
   bool thermal_hold_ = false, service_failure_ = false;
-  bool autoplay_hold_ = false;
   bool eos_pending_ = false;
   int64_t now_ = 0, selected_at_ = 0, presented_at_ = 0, pause_at_ = 0;
   bool clock_started_ = false;
