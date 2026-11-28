@@ -19,7 +19,30 @@ manual component/player package builds, pacman repo push) and may dispatch a
 explicit user confirmation (AGENTS.md "Release guardrail: ISO image builds",
 enforced by `scripts/agent-iso-build-guard.sh`).
 
-## 3.1.4 — full-image Development OTA qualification
+## 3.1.4 — full-image Development rebuild after merging develop
+
+The November 28 rebuild reuses the Development download URL from the
+November 27 qualification below. Identify the two images by their build
+runs and checksums. The earlier on-device OTA result applies to the
+November 27 image.
+
+| Development dispatch parameter | Value |
+| --- | --- |
+| Repository and workflow | feral-file/ffos, build-image-to-cf.yml |
+| Branch | codex/native-player |
+| ffos revision | 3e432cde645564412fc2a011cd94b5bb27a19219 |
+| ffos_user_ref | 301232351b87a84714a2e957f404bbba70fff568 |
+| version | 3.1.4 |
+| environment | Development |
+| pacman_snapshot | 2026/07/13 |
+| dev_iso | true |
+| update_min_version, update_required_version, update_recovery_version | false, false, false |
+
+The downloaded ISO verified against the FF1 release public key. Its SHA-256 is
+`dc579f68a0c2b4416e3f10b6d129947d6668b4236cc668366b80f309c07e17cf`.
+[November 28 Development build](https://github.com/feral-file/ffos/actions/runs/46096555726).
+
+## 3.1.4 — full-image Development OTA qualification (November 27)
 
 On FF1-BJT8ZQP9, the production 3.0.1 updater installed the signed Development
 image from the branch feed. A two-work playlist cast after the updater took
