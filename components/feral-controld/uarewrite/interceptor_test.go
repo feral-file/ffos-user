@@ -501,19 +501,12 @@ func TestProcessPausedTimeoutRetiresSession(t *testing.T) {
 		t.Fatal("timed out waiting for the wedged session to be closed")
 	}
 
-	// recoverFrom's "go i.tryAttach(...)" accelerator is still running on
-	// its own goroutine at this point — retire() (which closed the session
-	// above) runs before the spawn, not after. Returning without waiting
-	// for it lets that goroutine log through zaptest.NewLogger(t) after
-	// this test has already completed, which zaptest treats as a fatal
-	// race (it writes through *testing.T, which is not safe once the test
-	// has returned). tryAttach's deferred releaseAttach runs strictly
-	// after its own log call, so polling attaching back to false is a
-	// direct wait on "the goroutine's logging is done", not a sleep guess.
+	// Before the recovery goroutine runs, attaching is also false. Wait for
+	// its claim and release so it finishes logging before the test returns.
 	require.Eventually(t, func() bool {
 		i.redialMu.Lock()
 		defer i.redialMu.Unlock()
-		return !i.attaching
+		return !i.lastRedial.IsZero() && !i.attaching
 	}, 2*time.Second, time.Millisecond, "tryAttach's accelerator goroutine must finish before the test returns")
 
 	i.mu.Lock()

@@ -21,19 +21,24 @@ import (
 // instead waits for its context, as a peer that never acknowledges would.
 type fakePeer struct {
 	got      chan []byte
-	block    bool
+	block    atomic.Bool
+	blocked  chan struct{}
 	canceled chan struct{}
 	once     sync.Once
 }
 
 func newFakePeer() *fakePeer {
-	return &fakePeer{got: make(chan []byte, 64), canceled: make(chan struct{})}
+	return &fakePeer{got: make(chan []byte, 64), blocked: make(chan struct{}, 1), canceled: make(chan struct{})}
 }
 
 func (p *fakePeer) Live() bool { return true }
 
 func (p *fakePeer) Send(ctx context.Context, b []byte) error {
-	if p.block {
+	if p.block.Load() {
+		select {
+		case p.blocked <- struct{}{}:
+		default:
+		}
 		<-ctx.Done()
 		if errors.Is(ctx.Err(), context.Canceled) {
 			p.once.Do(func() { close(p.canceled) })
@@ -545,7 +550,7 @@ func TestV2MintPairingNotQueuedWhenOwnerQueueIsFull(t *testing.T) {
 	p := newFakePeer()
 	s := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
 	owner.open(s, r.cast(t, p, s.cast))
-	p.block = true
+	p.block.Store(true)
 	legacy := &toggleRelayer{connected: make(chan struct{})}
 	wrapped := controlgate.WrapRelayer(legacy, r.a, zap.NewNop())
 	wrapped.NotifyV2 = func(typ string, body json.RawMessage, snapshot bool) bool {
@@ -577,7 +582,14 @@ func TestV2SendsNeverBlockProducers(t *testing.T) {
 	p := newFakePeer()
 	s := owner.build(control.OpCmd, "getDeviceStatus", `{}`, "")
 	owner.open(s, r.cast(t, p, s.cast))
-	p.block = true
+	p.block.Store(true)
+	// Revoking before the sender is scheduled legitimately skips Send entirely.
+	r.adapter.Publish("player_status", json.RawMessage(`{"i":0}`), true)
+	select {
+	case <-p.blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sender never entered the blocked send")
+	}
 	start := time.Now()
 	for i := 0; i < 100; i++ {
 		r.adapter.Publish("player_status", json.RawMessage(`{"i":`+strings.Repeat("1", i+1)+`}`), true)
