@@ -363,10 +363,9 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleScreenshot captures Chromium's rendered page. It observes the
-// renderer, not the compositor, HDMI path, or physical panel. width and height
-// are optional bounding-box dimensions; Chromium scales the full viewport
-// uniformly so the result is never cropped or stretched.
+// handleScreenshot returns the bounded capture supplied by the kiosk backend.
+// Native capture includes the compositor's artwork and device UI. It does not
+// prove physical panel output; authorization and invitation-race guards apply.
 func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET method is required", http.StatusMethodNotAllowed)
@@ -403,6 +402,10 @@ func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 
 	invGen := h.screenshotGeneration()
 	image, err := h.capturer.Capture(ctx, bounds)
+	// Enrollment can finish after middleware admission but before invGen was read.
+	if err == nil && h.refuseScreenshotUnlessLegacy(w) {
+		return
+	}
 	if err == nil && h.screenshotRaced(invGen) {
 		h.logger.Warn("Screenshot discarded: an invitation appeared during the capture")
 		writeControlError(w, control.CodeScreenProtected)
@@ -422,7 +425,7 @@ func (h *hub) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Length", strconv.Itoa(len(image.Data)))
-	w.Header().Set("X-FF1-Capture-Source", "chromium-cdp")
+	w.Header().Set("X-FF1-Capture-Source", "wayland-compositor")
 	w.Header().Set("X-FF1-Screenshot-Width", strconv.Itoa(image.Width))
 	w.Header().Set("X-FF1-Screenshot-Height", strconv.Itoa(image.Height))
 	if image.SHA256 != "" {

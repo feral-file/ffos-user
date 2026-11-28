@@ -1,0 +1,35 @@
+{
+  "startedAt": "2026-11-17T14:14:50.603Z",
+  "checks": [
+    {
+      "name": "box",
+      "occurrence": "15fbf13f-a15c-451b-ac8e-f9cc1cce3bfa",
+      "observed": {
+        "loaded": true,
+        "attributes": {
+          "id": "art",
+          "autoplay": "",
+          "camera-controls": "",
+          "crossorigin": "anonymous",
+          "exposure": "1",
+          "loading": "eager",
+          "reveal": "auto",
+          "shadow-intensity": "1",
+          "ar-status": "not-presenting",
+          "style": "object-fit: contain;"
+        },
+        "camera": "0rad 1.3089969389957472rad 3.5133684756987935m",
+        "resources": [
+          "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Binary/Box.glb"
+        ],
+        "draco": "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+        "basis": "https://www.gstatic.com/basis-universal/versioned/2021-04-15-ba1c3e4/"
+      },
+      "cameraAfterDrag": "-0.6544984694978736rad 1.3089969389957472rad 3.5133684756987935m"
+    }
+  ],
+  "fixtureBase": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/",
+  "result": "failed",
+  "error": "AssertionError [ERR_ASSERTION]: no decoder CDN request",
+  "finishedAt": "2026-11-17T14:14:54.608Z"
+}

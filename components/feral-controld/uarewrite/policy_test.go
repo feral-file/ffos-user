@@ -687,19 +687,19 @@ func TestRewriteURL(t *testing.T) {
 		ok   bool
 	}{
 		{name: "cidv0 path", in: "https://ipfs.io/ipfs/" + cidV0,
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0, ok: true},
 		{name: "cidv1 path with remainder", in: "https://dweb.link/ipfs/" + cidV1 + "/frames/001.png",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/frames/001.png", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV1 + "/frames/001.png", ok: true},
 		{name: "query survives byte-for-byte", in: "https://ipfs.io/ipfs/" + cidV1 + "/?fxhash=oo1&display_mode=fit",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/?fxhash=oo1&display_mode=fit", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV1 + "/?fxhash=oo1&display_mode=fit", ok: true},
 		{name: "percent-encoding survives", in: "https://ipfs.io/ipfs/" + cidV0 + "/a%20b.gif",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0 + "/a%20b.gif", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0 + "/a%20b.gif", ok: true},
 		{name: "http source is upgraded to the replacement scheme", in: "http://ipfs.io/ipfs/" + cidV0,
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0, ok: true},
 		{name: "non-default port still matches", in: "https://ipfs.io:8443/ipfs/" + cidV0,
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0, ok: true},
 		{name: "fragment is dropped", in: "https://ipfs.io/ipfs/" + cidV0 + "#unique-3",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0, ok: true},
 		{name: "unlisted host", in: "https://gateway.pinata.cloud/ipfs/" + cidV0},
 		{name: "subdomain of a listed host is not the host", in: "https://" + cidV1 + ".ipfs.dweb.link/"},
 		{name: "ipns is not content-addressed", in: "https://ipfs.io/ipns/example.com/x.png"},
@@ -707,25 +707,25 @@ func TestRewriteURL(t *testing.T) {
 		{name: "gateway static asset", in: "https://ipfs.io/static/logo.png"},
 		{name: "too short to be a cid", in: "https://ipfs.io/ipfs/QmAbc"},
 		{name: "base64url multibase", in: "https://ipfs.io/ipfs/" + cidV1B64,
-			want: "https://ipfs.filebase.io/ipfs/" + cidV1B64, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV1B64, ok: true},
 		{name: "short identity-multihash cid", in: "https://dweb.link/ipfs/" + cidShortIdentity,
-			want: "https://ipfs.filebase.io/ipfs/" + cidShortIdentity, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidShortIdentity, ok: true},
 		{name: "sha1 multihash cid", in: "https://ipfs.io/ipfs/" + cidSha1 + "/x.png",
-			want: "https://ipfs.filebase.io/ipfs/" + cidSha1 + "/x.png", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidSha1 + "/x.png", ok: true},
 		{name: "well-formed alphabet but not a cid", in: "https://ipfs.io/ipfs/" + badLenB32},
 		{name: "percent-encoded byte is not a cid", in: "https://ipfs.io/ipfs/" + cidV0[:45] + "%2F"},
 		{name: "bare ipfs prefix", in: "https://ipfs.io/ipfs/"},
 		{name: "doubled ipfs prefix is collapsed", in: "https://ipfs.io/ipfs/ipfs/" + cidV0,
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0, ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0, ok: true},
 		{name: "tripled ipfs prefix with remainder", in: "https://ipfs.io/ipfs/ipfs/ipfs/" + cidV1 + "/a%20b.png",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/a%20b.png", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV1 + "/a%20b.png", ok: true},
 		{name: "doubled prefix without a cid is left alone", in: "https://ipfs.io/ipfs/ipfs/notacid"},
 		{name: "double slash before the cid is collapsed", in: "https://ipfs.io/ipfs//" + cidV0 + "/17.png",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0 + "/17.png", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0 + "/17.png", ok: true},
 		{name: "slash runs and doubled prefix together", in: "https://ipfs.io//ipfs/ipfs//" + cidV1 + "/a%20b.png",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV1 + "/a%20b.png", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV1 + "/a%20b.png", ok: true},
 		{name: "slash run inside the remainder is kept", in: "https://ipfs.io/ipfs/" + cidV0 + "//x.png",
-			want: "https://ipfs.filebase.io/ipfs/" + cidV0 + "//x.png", ok: true},
+			want: "https://ipfs.raribleuserdata.com/ipfs/" + cidV0 + "//x.png", ok: true},
 		{name: "no host", in: "data:image/gif;base64,R0lGOD"},
 	}
 
@@ -766,20 +766,20 @@ func TestListedReplacementIsSalvagedNeverDisabling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromOperatorHosts: %v", err)
 	}
-	if got, ok := p.RewriteURL("https://dweb.link/ipfs/" + cid); !ok || got != "https://ipfs.filebase.io/ipfs/"+cid {
+	if got, ok := p.RewriteURL("https://dweb.link/ipfs/" + cid); !ok || got != "https://ipfs.raribleuserdata.com/ipfs/"+cid {
 		t.Errorf("dweb.link CID must go to the default, got %q ok=%v", got, ok)
 	}
 	if want := []string{"replacementGateway=https://ipfs.io"}; !reflect.DeepEqual(rejected, want) {
 		t.Errorf("rejected = %v, want %v", rejected, want)
 	}
 
-	// Operator had listed Filebase for the header rule before the URL rule
+	// Operator had listed the default gateway for the header rule before the URL rule
 	// existed, and set no replacement: nothing is left to redirect to.
-	p, rejected, err = NewFromOperatorHosts([]string{"ipfs.io", "ipfs.filebase.io"}, "", "")
+	p, rejected, err = NewFromOperatorHosts([]string{"ipfs.io", "ipfs.raribleuserdata.com"}, "", "")
 	if err != nil {
 		t.Fatalf("NewFromOperatorHosts: %v (must never disable the interceptor)", err)
 	}
-	if got := p.Hosts(); !reflect.DeepEqual(got, []string{"ipfs.filebase.io", "ipfs.io"}) {
+	if got := p.Hosts(); !reflect.DeepEqual(got, []string{"ipfs.io", "ipfs.raribleuserdata.com"}) {
 		t.Errorf("Hosts() = %v, want both operator hosts kept", got)
 	}
 	if _, ok := p.RewriteURL("https://ipfs.io/ipfs/" + cid); ok {
@@ -788,7 +788,7 @@ func TestListedReplacementIsSalvagedNeverDisabling(t *testing.T) {
 	if p.ReplacementGateway() != "" {
 		t.Errorf("ReplacementGateway() = %q, want empty when the URL rule is off", p.ReplacementGateway())
 	}
-	if !p.Matches("https://ipfs.io/ipfs/"+cid) || !p.Matches("https://ipfs.filebase.io/ipfs/"+cid) {
+	if !p.Matches("https://ipfs.io/ipfs/"+cid) || !p.Matches("https://ipfs.raribleuserdata.com/ipfs/"+cid) {
 		t.Error("header rule must still cover every listed host")
 	}
 	if len(rejected) != 1 || !strings.Contains(rejected[0], "CID redirect off") {

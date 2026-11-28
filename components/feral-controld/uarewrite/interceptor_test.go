@@ -180,7 +180,7 @@ func TestProcessPausedSlashesBareCIDSubresource(t *testing.T) {
 	require.Len(t, got, 2)
 	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?v=2", got[0]["url"], "unlisted host: same host, slashed")
 	assert.NotContains(t, got[0], "headers")
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cidV0+"/?v=2", got[1]["url"], "retired host: the replacement gateway, slashed")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cidV0+"/?v=2", got[1]["url"], "retired host: the replacement gateway, slashed")
 	assert.NotContains(t, got[1], "headers")
 }
 
@@ -863,7 +863,7 @@ func TestProcessPausedRedirectsRetiredGatewayCIDPath(t *testing.T) {
 		map[string]string{"User-Agent": "Mozilla/5.0 Chrome/150", "Accept": "image/*"}, nil))
 
 	assert.Equal(t, "req-1", got["requestId"])
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/"+cid+"/sunrise.gif?display_mode=fit", got["url"])
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/"+cid+"/sunrise.gif?display_mode=fit", got["url"])
 	assert.NotContains(t, got, "headers",
 		"a redirected request must keep Chromium's own headers")
 }
@@ -936,7 +936,7 @@ func TestProcessPausedAppliesTheGatewayOverride(t *testing.T) {
 	assert.Equal(t, "https://ar-io.dev/"+tx+"/other.js", got[1]["url"], "a subresource follows its document: the Referer reaches the lookup (header name as the renderer sent it)")
 	assert.NotContains(t, got[2], "url", "no override and no policy match: continued untouched")
 	assert.NotContains(t, got[2], "headers")
-	assert.Equal(t, "https://ipfs.filebase.io/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[3]["url"], "the static policy still applies when the override has no answer")
+	assert.Equal(t, "https://ipfs.raribleuserdata.com/ipfs/QmPChd2hVbrJ6bfo3WBcTW4iZnpHm8TEzWkLHmLpXhF68A", got[3]["url"], "the static policy still applies when the override has no answer")
 	assert.Equal(t, []string{"", "https://arweave.net/" + tx + "/index.html", "", ""}, referrers)
 }
 

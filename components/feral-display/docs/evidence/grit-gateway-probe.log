@@ -1,0 +1,4 @@
+curl: (28) Connection timed out after 15001 milliseconds
+Returns HTTP=000 seconds=15.002085
+Slime HTTP=000 seconds=15.003252
+curl: (28) Connection timed out after 15003 milliseconds

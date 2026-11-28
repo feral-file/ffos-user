@@ -1,0 +1,40 @@
+{
+  "chromiumVersion": "156.0.8078.80",
+  "cefVersion": "156.0.15+gcf671c0+chromium-156.0.8078.80",
+  "chromeUrl": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/linux64/chrome-linux64.zip",
+  "cefUrl": "https://cef-builds.spotifycdn.com/cef_binary_156.0.15+gcf671c0+chromium-156.0.8078.80_linux64_minimal.tar.bz2",
+  "chromeSha256": "b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7",
+  "cefSha256": "6873f975bb047316680ea1839980ed5bd4c33c8cd4ce45761c94211856605388",
+  "cefPublishedSha1": "09235427222e026a4f34399742df27c5d98a4f8a",
+  "runtimeSourceCommit": "9ad0b05a7ddccbc71c612195d9d972aae8a0d71c",
+  "runtimePinUnchanged": "156.0.8078.96",
+  "device": "FF1-SKYZ2E3A",
+  "viewport": [
+    3840,
+    2160,
+    1
+  ],
+  "commonGraphicsFlags": [
+    "--ozone-platform=wayland",
+    "--use-angle=vulkan",
+    "--autoplay-policy=no-user-gesture-required",
+    "--test-type=gpu"
+  ],
+  "commonEnvironment": {
+    "AMD_DEBUG": "nodcc",
+    "WAYLAND_DISPLAY": "wayland-0",
+    "DBUS_SESSION_BUS_ADDRESS": "unset"
+  },
+  "warmupSeconds": 20,
+  "sampleWindows": 6,
+  "sampleWindowSeconds": 10,
+  "memoryMaxBytes": 3221225472,
+  "runOrder": [
+    "chrome-one",
+    "native-one",
+    "native-two",
+    "chrome-two",
+    "views-one"
+  ],
+  "physicalOutputVerified": false
+}

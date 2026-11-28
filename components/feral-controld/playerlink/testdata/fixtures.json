@@ -1,0 +1,419 @@
+{
+  "version": 1,
+  "parse": [
+    {
+      "name": "object",
+      "wire": "{\"v\":1}",
+      "valid": true
+    },
+    {
+      "name": "duplicate member",
+      "wire": "{\"v\":1,\"v\":2}",
+      "valid": false
+    },
+    {
+      "name": "nested duplicate",
+      "wire": "{\"params\":{\"x\":1,\"x\":2}}",
+      "valid": false
+    },
+    {
+      "name": "siblings allowed",
+      "wire": "[{\"x\":1},{\"x\":2}]",
+      "valid": true
+    },
+    {
+      "name": "trailing bytes",
+      "wire": "{}{}",
+      "valid": false
+    },
+    {
+      "name": "NaN forbidden",
+      "wire": "{\"x\":NaN}",
+      "valid": false
+    },
+    {
+      "name": "truncated",
+      "wire": "{",
+      "valid": false
+    },
+    {
+      "name": "UTF8 BOM",
+      "wire": "\ufeff{}",
+      "valid": false
+    },
+    {
+      "name": "high surrogate",
+      "wire": "{\"x\":\"\\ud800\"}",
+      "valid": false
+    },
+    {
+      "name": "low surrogate",
+      "wire": "{\"x\":\"\\udc00\"}",
+      "valid": false
+    },
+    {
+      "name": "surrogate pair",
+      "wire": "{\"x\":\"\\ud83d\\udc31\"}",
+      "valid": true
+    },
+    {
+      "name": "escaped backslash",
+      "wire": "{\"x\":\"\\\\ud800\"}",
+      "valid": true
+    },
+    {
+      "name": "numeric overflow",
+      "wire": "{\"x\":1e9999}",
+      "valid": false
+    },
+    {
+      "name": "64 levels",
+      "wire": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "valid": true
+    },
+    {
+      "name": "65 levels",
+      "wire": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "valid": false
+    }
+  ],
+  "frames": [
+    {
+      "name": "empty object",
+      "body": "{}",
+      "hex": "000000027b7d"
+    },
+    {
+      "name": "zero length forbidden",
+      "hex": "00000000",
+      "error": "frame_size"
+    },
+    {
+      "name": "oversize rejected before body",
+      "hex": "00400001",
+      "error": "frame_size"
+    },
+    {
+      "name": "UTF-8 byte length",
+      "body": "{\"text\":\"\u732b\u00e9\"}",
+      "hex": "000000107b2274657874223a22e78cabc3a9227d"
+    }
+  ],
+  "requests": [
+    {
+      "name": "unknown method",
+      "overrides": {
+        "method": "system.evaluate"
+      },
+      "error": "unknown_method"
+    },
+    {
+      "name": "float envelope version",
+      "overrides": {
+        "v": 1.0
+      },
+      "error": "version_mismatch"
+    },
+    {
+      "name": "unknown envelope field",
+      "overrides": {
+        "extra": true
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "params must be object",
+      "overrides": {
+        "params": []
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "expired deadline",
+      "overrides": {
+        "deadlineMs": 0
+      },
+      "error": "deadline_exceeded"
+    },
+    {
+      "name": "wrong runtime",
+      "overrides": {
+        "method": "playback.stop",
+        "instance": "retired"
+      },
+      "error": "stale_instance"
+    },
+    {
+      "name": "wrong generation",
+      "overrides": {
+        "method": "playback.stop",
+        "generation": 999999
+      },
+      "error": "stale_generation"
+    },
+    {
+      "name": "float generation",
+      "overrides": {
+        "method": "playback.stop",
+        "generation": 1.0
+      },
+      "error": "stale_generation"
+    },
+    {
+      "name": "wrong revision",
+      "overrides": {
+        "method": "playback.stop",
+        "ifRevision": 999999
+      },
+      "error": "stale_revision"
+    },
+    {
+      "name": "unknown setting",
+      "overrides": {
+        "method": "settings.set",
+        "params": {
+          "javascript": "alert(1)"
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "volume overflow",
+      "overrides": {
+        "method": "settings.set",
+        "params": {
+          "volume": 1.01
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "invalid framing",
+      "overrides": {
+        "method": "settings.set",
+        "params": {
+          "framing": true
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "pause requires boolean",
+      "overrides": {
+        "method": "playback.pause",
+        "params": {
+          "paused": 1
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "invalid loop",
+      "overrides": {
+        "method": "playback.mode",
+        "params": {
+          "loop": "forever"
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "index must not narrow",
+      "overrides": {
+        "method": "playback.replace",
+        "params": {
+          "playlist": {
+            "items": []
+          },
+          "index": 4294967296
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "connectivity requires boolean",
+      "overrides": {
+        "method": "connectivity.set",
+        "params": {
+          "online": "true"
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "stale input target",
+      "overrides": {
+        "method": "input.dispatch",
+        "params": {
+          "occurrence": "retired",
+          "kind": "move",
+          "x": 5
+        }
+      },
+      "error": "stale_occurrence"
+    },
+    {
+      "name": "overlay owner boundary",
+      "overrides": {
+        "method": "overlay.set",
+        "params": {
+          "owner": "artist",
+          "state": "claim_qr"
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "policy must be complete",
+      "overrides": {
+        "method": "policy.set",
+        "params": {
+          "version": 1
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "float negotiation version",
+      "overrides": {
+        "method": "hello",
+        "params": {
+          "client": "changed",
+          "versions": [
+            1.0
+          ]
+        }
+      },
+      "error": "version_mismatch"
+    },
+    {
+      "name": "incompatible negotiation",
+      "overrides": {
+        "method": "hello",
+        "params": {
+          "client": "changed",
+          "versions": [
+            999
+          ]
+        }
+      },
+      "error": "version_mismatch"
+    },
+    {
+      "name": "zero default duration",
+      "overrides": {
+        "method": "settings.set",
+        "params": {
+          "durationSeconds": 0
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "numeric item id",
+      "error": "playlist_invalid",
+      "overrides": {
+        "method": "playback.replace",
+        "params": {
+          "playlist": {
+            "items": [
+              {
+                "id": 123,
+                "source": "https://example.org/art"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "numeric playlist id",
+      "error": "playlist_invalid",
+      "overrides": {
+        "method": "playback.replace",
+        "params": {
+          "playlist": {
+            "id": 123,
+            "items": []
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown setup narration rejected",
+      "overrides": {
+        "method": "overlay.set",
+        "params": {
+          "owner": "setup",
+          "state": "future_state"
+        }
+      },
+      "error": "unsupported"
+    },
+    {
+      "name": "setup QR missing SSID",
+      "overrides": {
+        "method": "overlay.set",
+        "params": {
+          "owner": "setup",
+          "state": "softap_qr"
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "setup boolean typing",
+      "overrides": {
+        "method": "overlay.set",
+        "params": {
+          "owner": "setup",
+          "state": "joining",
+          "fields": {
+            "client_attached": "yes"
+          }
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "oversized setup credential",
+      "overrides": {
+        "method": "overlay.set",
+        "params": {
+          "owner": "setup",
+          "state": "softap_qr",
+          "fields": {
+            "ssid": "FF1",
+            "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "presentation requires explicit occurrence",
+      "overrides": {
+        "method": "presentation.set",
+        "params": {
+          "display": {
+            "margin": 10
+          }
+        }
+      },
+      "error": "invalid_params"
+    },
+    {
+      "name": "presentation rejects an unpresented occurrence",
+      "overrides": {
+        "method": "presentation.set",
+        "params": {
+          "occurrence": "retired",
+          "display": {
+            "margin": "10%"
+          }
+        }
+      },
+      "error": "stale_occurrence"
+    }
+  ]
+}

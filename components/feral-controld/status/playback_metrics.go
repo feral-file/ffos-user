@@ -81,6 +81,9 @@ func isArtworkPlaying(playerStatus *PlayerStatus) bool {
 	if playerStatus.IsPaused == nil {
 		return false
 	}
+	if playerStatus.Runtime != nil && playerStatus.Runtime.Presented == nil {
+		return false
+	}
 
 	return !*playerStatus.IsPaused
 }

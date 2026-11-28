@@ -1,0 +1,468 @@
+{
+  "GET https://leanderherzog.ch/2026/holz/": {
+    "status": 200,
+    "headers": [
+      {
+        "name": "date",
+        "value": "Wed, 18 Nov 2026 06:05:04 GMT"
+      },
+      {
+        "name": "content-type",
+        "value": "text/html"
+      },
+      {
+        "name": "x-content-type-options",
+        "value": "nosniff"
+      },
+      {
+        "name": "strict-transport-security",
+        "value": "max-age=31536000; includeSubDomains"
+      },
+      {
+        "name": "referrer-policy",
+        "value": "strict-origin-when-cross-origin"
+      },
+      {
+        "name": "permissions-policy",
+        "value": "camera=(), microphone=(), geolocation=()"
+      },
+      {
+        "name": "content-security-policy",
+        "value": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site"
+      },
+      {
+        "name": "last-modified",
+        "value": "Tue, 17 Nov 2026 04:43:18 GMT"
+      },
+      {
+        "name": "report-to",
+        "value": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=7ONNrQgJ%2BXU52LyJaxxqz0xueUk%2BaM%2FQwmO0IRYEpk0Dk7antqIzfcQDQm5kMUOi9uKJ5dhyyaejm6kj6qoK5OHS3w8pfI5leAF5snDPZ20tFU0tn3BFmsaHN8MsVexi%2BsXo\"}]}"
+      },
+      {
+        "name": "server-timing",
+        "value": "cfCacheStatus;desc=\"DYNAMIC\""
+      },
+      {
+        "name": "server-timing",
+        "value": "cfEdge;dur=207,cfOrigin;dur=11"
+      },
+      {
+        "name": "cache-control",
+        "value": "no-cache"
+      },
+      {
+        "name": "expires",
+        "value": "Wed, 18 Nov 2026 06:15:04 GMT"
+      },
+      {
+        "name": "vary",
+        "value": "Accept-Encoding"
+      },
+      {
+        "name": "server",
+        "value": "cloudflare"
+      },
+      {
+        "name": "nel",
+        "value": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+      },
+      {
+        "name": "cf-cache-status",
+        "value": "DYNAMIC"
+      },
+      {
+        "name": "cf-ray",
+        "value": "a5c4c8074ee0c3e8-HKG"
+      },
+      {
+        "name": "alt-svc",
+        "value": "h3=\":443\"; ma=86400"
+      }
+    ],
+    "sha256": "dd007138018da85598741a233c979257c790c0b8d41c40495cab2bfc6edeba77",
+    "size": 25586
+  },
+  "GET https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092": {
+    "status": 200,
+    "headers": [
+      {
+        "name": "date",
+        "value": "Wed, 18 Nov 2026 06:05:04 GMT"
+      },
+      {
+        "name": "content-type",
+        "value": "text/javascript;charset=UTF-8"
+      },
+      {
+        "name": "access-control-allow-origin",
+        "value": "*"
+      },
+      {
+        "name": "cache-control",
+        "value": "public, max-age=86400"
+      },
+      {
+        "name": "etag",
+        "value": "W/\"2026.10.1\""
+      },
+      {
+        "name": "last-modified",
+        "value": "Thu, 15 Oct 2026 18:26:54 GMT"
+      },
+      {
+        "name": "cross-origin-resource-policy",
+        "value": "cross-origin"
+      },
+      {
+        "name": "server",
+        "value": "cloudflare"
+      },
+      {
+        "name": "cf-ray",
+        "value": "a5c4c8097ccecb25-HKG"
+      }
+    ],
+    "sha256": "637381256384554e1cc3309a62fb238a51b83e7f10b2a56d8ba15dbc73ca762e",
+    "size": 31853
+  },
+  "GET https://leanderherzog.ch/2026/holz/app.mjs": {
+    "status": 200,
+    "headers": [
+      {
+        "name": "date",
+        "value": "Wed, 18 Nov 2026 06:05:05 GMT"
+      },
+      {
+        "name": "content-type",
+        "value": "text/javascript"
+      },
+      {
+        "name": "x-content-type-options",
+        "value": "nosniff"
+      },
+      {
+        "name": "strict-transport-security",
+        "value": "max-age=31536000; includeSubDomains"
+      },
+      {
+        "name": "referrer-policy",
+        "value": "strict-origin-when-cross-origin"
+      },
+      {
+        "name": "permissions-policy",
+        "value": "camera=(), microphone=(), geolocation=()"
+      },
+      {
+        "name": "content-security-policy",
+        "value": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site"
+      },
+      {
+        "name": "last-modified",
+        "value": "Tue, 17 Nov 2026 04:43:18 GMT"
+      },
+      {
+        "name": "etag",
+        "value": "\"6e3e-66071888276ea-gzip\""
+      },
+      {
+        "name": "accept-ranges",
+        "value": "bytes"
+      },
+      {
+        "name": "vary",
+        "value": "Accept-Encoding"
+      },
+      {
+        "name": "cache-control",
+        "value": "public, max-age=300"
+      },
+      {
+        "name": "server",
+        "value": "cloudflare"
+      },
+      {
+        "name": "nel",
+        "value": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+      },
+      {
+        "name": "cf-cache-status",
+        "value": "DYNAMIC"
+      },
+      {
+        "name": "report-to",
+        "value": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=9PEVTCbdu6BDbulyTDfxkM7RAAlEgp%2F1BT1addn4fh0lZJjg1wXcAIvyXRqig1mSMq6wc54lI%2BpDlaKSvvLp4eSnCwmMsf%2BValg38dhanH%2BahxDD3x6IU7yCOVLRYMrIP8nS\"}]}"
+      },
+      {
+        "name": "cf-ray",
+        "value": "a5c4c80919e7c3e8-HKG"
+      },
+      {
+        "name": "alt-svc",
+        "value": "h3=\":443\"; ma=86400"
+      }
+    ],
+    "sha256": "c56c02c4b1ca1bbb3ad850e2ed9f632a412424b8765bd98dac656f9c0b36a2da",
+    "size": 28222
+  },
+  "GET https://leanderherzog.ch/2026/holz/physics.mjs": {
+    "status": 200,
+    "headers": [
+      {
+        "name": "x-content-type-options",
+        "value": "nosniff"
+      },
+      {
+        "name": "strict-transport-security",
+        "value": "max-age=31536000; includeSubDomains"
+      },
+      {
+        "name": "referrer-policy",
+        "value": "strict-origin-when-cross-origin"
+      },
+      {
+        "name": "permissions-policy",
+        "value": "camera=(), microphone=(), geolocation=()"
+      },
+      {
+        "name": "content-security-policy",
+        "value": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site"
+      },
+      {
+        "name": "last-modified",
+        "value": "Mon, 16 Nov 2026 16:34:53 GMT"
+      },
+      {
+        "name": "etag",
+        "value": "\"c03b-660675b8072fa-gzip\""
+      },
+      {
+        "name": "accept-ranges",
+        "value": "bytes"
+      },
+      {
+        "name": "vary",
+        "value": "Accept-Encoding"
+      },
+      {
+        "name": "cache-control",
+        "value": "public, max-age=300"
+      },
+      {
+        "name": "server-timing",
+        "value": "cfExtPri"
+      },
+      {
+        "name": "content-type",
+        "value": "text/javascript"
+      },
+      {
+        "name": "date",
+        "value": "Wed, 18 Nov 2026 06:05:06 GMT"
+      },
+      {
+        "name": "server",
+        "value": "cloudflare"
+      },
+      {
+        "name": "priority",
+        "value": "u=1,i=?0"
+      },
+      {
+        "name": "cf-cache-status",
+        "value": "DYNAMIC"
+      },
+      {
+        "name": "report-to",
+        "value": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=zevKrLPp%2Bs8DPtMNn%2FWqifsgPHxcbze6NasO3iCuaEThUkMxxNZbYf5V7NOTD5gVbvilqO1EYXzquG6zE7dDJcSEiB3uHFZ4dvHWlVvVzQor7hh3%2Bi34jLM0T3GSENqikBGk\"}]}"
+      },
+      {
+        "name": "nel",
+        "value": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+      },
+      {
+        "name": "cf-ray",
+        "value": "a5c4c8124c9fc849-HKG"
+      },
+      {
+        "name": "alt-svc",
+        "value": "h3=\":443\"; ma=86400"
+      }
+    ],
+    "sha256": "a001a93b56f31d86816008bd06d1db7462f5421424e45d6fa429760bc84bb131",
+    "size": 49211
+  },
+  "GET https://leanderherzog.ch/2026/holz/render.mjs": {
+    "status": 200,
+    "headers": [
+      {
+        "name": "x-content-type-options",
+        "value": "nosniff"
+      },
+      {
+        "name": "strict-transport-security",
+        "value": "max-age=31536000; includeSubDomains"
+      },
+      {
+        "name": "referrer-policy",
+        "value": "strict-origin-when-cross-origin"
+      },
+      {
+        "name": "permissions-policy",
+        "value": "camera=(), microphone=(), geolocation=()"
+      },
+      {
+        "name": "content-security-policy",
+        "value": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site"
+      },
+      {
+        "name": "last-modified",
+        "value": "Tue, 17 Nov 2026 04:43:18 GMT"
+      },
+      {
+        "name": "etag",
+        "value": "\"c5c2-66071888282a2-gzip\""
+      },
+      {
+        "name": "accept-ranges",
+        "value": "bytes"
+      },
+      {
+        "name": "vary",
+        "value": "Accept-Encoding"
+      },
+      {
+        "name": "cache-control",
+        "value": "public, max-age=300"
+      },
+      {
+        "name": "server-timing",
+        "value": "cfExtPri"
+      },
+      {
+        "name": "content-type",
+        "value": "text/javascript"
+      },
+      {
+        "name": "date",
+        "value": "Wed, 18 Nov 2026 06:05:05 GMT"
+      },
+      {
+        "name": "server",
+        "value": "cloudflare"
+      },
+      {
+        "name": "priority",
+        "value": "u=1,i=?0"
+      },
+      {
+        "name": "cf-cache-status",
+        "value": "DYNAMIC"
+      },
+      {
+        "name": "report-to",
+        "value": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=8DV%2F3vwlIzxWoKt6yn5SvWEmzMR4uWEkbx6w7%2BKXAoGdYQzatKm9Hf7LHrgSgGrRmc9yopxwOj%2FRgYj8rAXwf%2F2A6Rzb5DKeBNUW6OZBlpZlLMEesqj4%2B8c1fnz2Fv9Fpgjy\"}]}"
+      },
+      {
+        "name": "nel",
+        "value": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+      },
+      {
+        "name": "cf-ray",
+        "value": "a5c4c80ba832c849-HKG"
+      },
+      {
+        "name": "alt-svc",
+        "value": "h3=\":443\"; ma=86400"
+      }
+    ],
+    "sha256": "bfb21488934dd7f3cd4faa8c83c47e11f4f0189d9dd6106c3753f1b5aa56ef0b",
+    "size": 50626
+  },
+  "GET https://leanderherzog.ch/2026/holz/geometry.mjs": {
+    "status": 200,
+    "headers": [
+      {
+        "name": "x-content-type-options",
+        "value": "nosniff"
+      },
+      {
+        "name": "strict-transport-security",
+        "value": "max-age=31536000; includeSubDomains"
+      },
+      {
+        "name": "referrer-policy",
+        "value": "strict-origin-when-cross-origin"
+      },
+      {
+        "name": "permissions-policy",
+        "value": "camera=(), microphone=(), geolocation=()"
+      },
+      {
+        "name": "content-security-policy",
+        "value": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site"
+      },
+      {
+        "name": "last-modified",
+        "value": "Tue, 17 Nov 2026 04:43:18 GMT"
+      },
+      {
+        "name": "etag",
+        "value": "\"12537-6607188827ad2-gzip\""
+      },
+      {
+        "name": "accept-ranges",
+        "value": "bytes"
+      },
+      {
+        "name": "vary",
+        "value": "Accept-Encoding"
+      },
+      {
+        "name": "cache-control",
+        "value": "public, max-age=300"
+      },
+      {
+        "name": "server-timing",
+        "value": "cfExtPri"
+      },
+      {
+        "name": "content-type",
+        "value": "text/javascript"
+      },
+      {
+        "name": "date",
+        "value": "Wed, 18 Nov 2026 06:05:05 GMT"
+      },
+      {
+        "name": "server",
+        "value": "cloudflare"
+      },
+      {
+        "name": "priority",
+        "value": "u=4,i"
+      },
+      {
+        "name": "cf-cache-status",
+        "value": "DYNAMIC"
+      },
+      {
+        "name": "report-to",
+        "value": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=U%2BbWwcOGVq3CXSpGJHilKv5k5vHKRs2226guPNwMAer4ok3REhGghGaYu2DGk8AvXznqq8iet0H0T71fqwq21qNnxxRvCVwlUvnRs2hl8Uy5dnM5olPWUpW23Buea8DdTvNg\"}]}"
+      },
+      {
+        "name": "nel",
+        "value": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}"
+      },
+      {
+        "name": "cf-ray",
+        "value": "a5c4c80e8a20c849-HKG"
+      },
+      {
+        "name": "alt-svc",
+        "value": "h3=\":443\"; ma=86400"
+      }
+    ],
+    "sha256": "1117382c461fdcc4b73833d630e475b977c29399b9363c25804b199df7f1d2ba",
+    "size": 75063
+  }
+}

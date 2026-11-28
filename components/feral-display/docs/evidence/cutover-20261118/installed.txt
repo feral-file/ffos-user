@@ -1,0 +1,8 @@
+active
+active
+active
+active
+VCP D6 SNC x01
+ee7f5e29ff5da7aed4827f8941c824f16d6d617e6b5d0497250757457a5b1e31  /usr/lib/ff-player-native/ff-player-native
+797212c09becbe58b22c7a3e3b39984f8049e4987eb03b10225c3c335137c2d0  /usr/bin/feral-controld
+c8be007bc3a479cbdc067b3851ab820cabdd6a03d7cef0ede33a0beccafd83a9  /usr/bin/feral-watchdog

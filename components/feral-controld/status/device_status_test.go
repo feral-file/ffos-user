@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
@@ -57,7 +56,7 @@ func expectDeviceStatusExecMocks(t *testing.T, mockExec *mocks.MockExec, nmcliCm
 	pamCmd.EXPECT().Output().Return(nil, errors.New("pamixer unavailable")).Times(2)
 }
 
-func TestGetStatus_DisplayURL_FromCDP(t *testing.T) {
+func TestGetStatus_DisplayURL_FromNativeHost(t *testing.T) {
 	t.Parallel()
 
 	ctrl := gomock.NewController(t)
@@ -65,17 +64,17 @@ func TestGetStatus_DisplayURL_FromCDP(t *testing.T) {
 	mockExec := mocks.NewMockExec(ctrl)
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
-	mockCDP := mocks.NewMockCDP(ctrl)
+	player := &fakePresentationSource{}
 	nmcliCmd := mocks.NewMockExecCmd(ctrl)
 	pamCmd := mocks.NewMockExecCmd(ctrl)
 
 	expectDeviceStatusOSMocks(t, mockOS)
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
 
-	wantURL := "file:///opt/feral/ui/launcher/index.html?step=qr"
-	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return(wantURL, nil).Times(1)
+	wantURL := "ff-player://setup/claim_qr?step=qr"
+	player.url, player.err = wantURL, nil
 
-	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, player)
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -83,7 +82,7 @@ func TestGetStatus_DisplayURL_FromCDP(t *testing.T) {
 	assert.Equal(t, wantURL, *resp.DisplayURL)
 }
 
-func TestGetStatus_DisplayURL_OmittedOnCDPError(t *testing.T) {
+func TestGetStatus_DisplayURL_OmittedOnNativeHostError(t *testing.T) {
 	t.Parallel()
 
 	ctrl := gomock.NewController(t)
@@ -91,16 +90,16 @@ func TestGetStatus_DisplayURL_OmittedOnCDPError(t *testing.T) {
 	mockExec := mocks.NewMockExec(ctrl)
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
-	mockCDP := mocks.NewMockCDP(ctrl)
+	player := &fakePresentationSource{}
 	nmcliCmd := mocks.NewMockExecCmd(ctrl)
 	pamCmd := mocks.NewMockExecCmd(ctrl)
 
 	expectDeviceStatusOSMocks(t, mockOS)
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
 
-	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("no debug targets")).Times(1)
+	player.url, player.err = "", errors.New("native player unavailable")
 
-	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, player)
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -115,15 +114,15 @@ func TestGetStatus_SleepSchedule_WhenStateFilePresent(t *testing.T) {
 	mockExec := mocks.NewMockExec(ctrl)
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
-	mockCDP := mocks.NewMockCDP(ctrl)
+	player := &fakePresentationSource{}
 	nmcliCmd := mocks.NewMockExecCmd(ctrl)
 	pamCmd := mocks.NewMockExecCmd(ctrl)
 
 	expectDeviceStatusOSMocksSleepFile(t, mockOS, []byte(`{"enabled":false,"sleepTime":"22:00","wakeTime":"07:30"}`))
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
-	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("no debug targets")).Times(1)
+	player.url, player.err = "", errors.New("native player unavailable")
 
-	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, player)
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -134,7 +133,7 @@ func TestGetStatus_SleepSchedule_WhenStateFilePresent(t *testing.T) {
 	assert.Equal(t, sleepschedule.StateAwake, resp.SleepSchedule.CurrentState)
 }
 
-func TestGetStatus_DisplayURL_OmittedWhenCDPNil(t *testing.T) {
+func TestGetStatus_DisplayURL_OmittedWhenSourceNil(t *testing.T) {
 	t.Parallel()
 
 	ctrl := gomock.NewController(t)
@@ -148,8 +147,8 @@ func TestGetStatus_DisplayURL_OmittedWhenCDPNil(t *testing.T) {
 	expectDeviceStatusOSMocks(t, mockOS)
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
 
-	var nilCDP cdp.CDP
-	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, nilCDP)
+	var nilPlayer status.PresentationSource
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, nilPlayer)
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -168,15 +167,15 @@ func TestGetStatusCarriesContract(t *testing.T) {
 	mockExec := mocks.NewMockExec(ctrl)
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
-	mockCDP := mocks.NewMockCDP(ctrl)
+	player := &fakePresentationSource{}
 	nmcliCmd := mocks.NewMockExecCmd(ctrl)
 	pamCmd := mocks.NewMockExecCmd(ctrl)
 
 	expectDeviceStatusOSMocks(t, mockOS)
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
-	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("cdp down")).Times(1)
+	player.url, player.err = "", errors.New("native player unavailable")
 
-	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, player)
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, status.DeviceStatusContract, resp.Contract)
@@ -205,7 +204,7 @@ func TestGetStatus_DeviceName(t *testing.T) {
 	mockExec := mocks.NewMockExec(ctrl)
 	mockHTTP := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
-	mockCDP := mocks.NewMockCDP(ctrl)
+	player := &fakePresentationSource{}
 	nmcliCmd := mocks.NewMockExecCmd(ctrl)
 	pamCmd := mocks.NewMockExecCmd(ctrl)
 
@@ -217,9 +216,9 @@ func TestGetStatus_DeviceName(t *testing.T) {
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()
 	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
-	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("cdp down")).Times(1)
+	player.url, player.err = "", errors.New("native player unavailable")
 
-	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, player)
 	resp, err := ds.GetStatus(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "Living Room", resp.DeviceName)
@@ -247,4 +246,13 @@ func TestGetStatus_IgnoresRetiredStrictPreference(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &wire))
 	assert.NotContains(t, wire, "signatureVerificationMode")
 	assert.Zero(t, reads, "retired preferences must not be read")
+}
+
+type fakePresentationSource struct {
+	url string
+	err error
+}
+
+func (f *fakePresentationSource) PresentationURL(context.Context) (string, error) {
+	return f.url, f.err
 }

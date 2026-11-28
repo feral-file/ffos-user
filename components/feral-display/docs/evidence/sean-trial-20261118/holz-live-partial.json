@@ -1,0 +1,56 @@
+{
+  "engine": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/156.0.8078.96",
+    "revision": "@2ad9b7f5a86846e0b264090723a6a78964bb84c4",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    "jsVersion": "15.6.75.50"
+  },
+  "page": {
+    "url": "https://leanderherzog.ch/2026/holz/",
+    "origin": "https://leanderherzog.ch",
+    "secure": true,
+    "webgpu": true,
+    "adapter": null,
+    "canvas": [
+      {
+        "width": 2160,
+        "height": 3840
+      }
+    ],
+    "resources": [
+      {
+        "name": "https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092",
+        "duration": 154.29999999701977
+      },
+      {
+        "name": "https://leanderherzog.ch/2026/holz/app.mjs",
+        "duration": 236.30000001192093
+      },
+      {
+        "name": "https://leanderherzog.ch/2026/holz/physics.mjs",
+        "duration": 262.29999999701977
+      },
+      {
+        "name": "https://leanderherzog.ch/2026/holz/render.mjs",
+        "duration": 233.79999999701977
+      },
+      {
+        "name": "https://leanderherzog.ch/cdn-cgi/rum?",
+        "duration": 54
+      },
+      {
+        "name": "https://leanderherzog.ch/2026/holz/geometry.mjs",
+        "duration": -1.800000011920929
+      },
+      {
+        "name": "https://leanderherzog.ch/2026/holz/physics.mjs",
+        "duration": 1.0999999940395355
+      }
+    ],
+    "visibility": "visible"
+  },
+  "workers": [],
+  "frames": [],
+  "errors": []
+}

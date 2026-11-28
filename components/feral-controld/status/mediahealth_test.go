@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediahealth"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -20,9 +19,9 @@ import (
 // controld-owned per-item verdicts, index-aligned with items, and never a
 // player-supplied value for that field.
 func TestPollPlayerStatus_MediaHealthAnnotationAndOutcomeStripping(t *testing.T) {
-	mockCDP := &fakeCDP{
-		pageNavigationURL: constants.WEBAPP_URL,
-		noLogSendResult: map[string]interface{}{
+	mockPlayer := &fakePlayer{
+
+		reply: map[string]interface{}{
 			"message": map[string]interface{}{
 				"ok":          true,
 				"castCommand": "displayPlaylist",
@@ -46,7 +45,7 @@ func TestPollPlayerStatus_MediaHealthAnnotationAndOutcomeStripping(t *testing.T)
 	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
 	mockWS := &fakeWS{}
 	p := &poller{
-		cdp:                     mockCDP,
+		player:                  mockPlayer,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
 		json:                    wrapper.NewJSON(),

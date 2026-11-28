@@ -1,0 +1,678 @@
+{
+  "commit": "7c987a146508d3e77659d3b62212800f8c5fd79a",
+  "run": 44733579346,
+  "archiveSHA256": "26e792144e263f13c7c01e092b5ac6b64aaac8e8df39f40c91b5608789c06982",
+  "device": "homelab FF1, Radeon 680M, FFOS 3.0.0, Linux 6.18.38-2-lts, HDMI-A-1 1920x1920 at 60 Hz",
+  "sourceUI": "ff-player 3.0.1, 978266e9b62109ae3ae52b4221df67e71c84bc39",
+  "rasterMeasurements": {
+    "wifi-1920x1080": {
+      "source": {
+        "rect": [
+          776,
+          397,
+          1144,
+          765
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      },
+      "native": {
+        "rect": [
+          777,
+          398,
+          1143,
+          764
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      }
+    },
+    "wifi-1080x1920": {
+      "source": {
+        "rect": [
+          356,
+          826,
+          724,
+          1193
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      },
+      "native": {
+        "rect": [
+          357,
+          826,
+          723,
+          1192
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      }
+    },
+    "wifi-1920x1920": {
+      "source": {
+        "rect": [
+          718,
+          741,
+          1202,
+          1225
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      },
+      "native": {
+        "rect": [
+          718,
+          741,
+          1202,
+          1225
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      }
+    },
+    "wifi-3840x2160": {
+      "source": {
+        "rect": [
+          1672,
+          858,
+          2168,
+          1353
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      },
+      "native": {
+        "rect": [
+          1673,
+          858,
+          2167,
+          1352
+        ],
+        "payload": "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+      }
+    },
+    "claim-1920x1080": {
+      "source": {
+        "rect": [
+          776,
+          518,
+          1144,
+          886
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      },
+      "native": {
+        "rect": [
+          777,
+          519,
+          1143,
+          885
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      }
+    },
+    "claim-1080x1920": {
+      "source": {
+        "rect": [
+          356,
+          972,
+          724,
+          1339
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      },
+      "native": {
+        "rect": [
+          357,
+          972,
+          723,
+          1339
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      }
+    },
+    "claim-1920x1920": {
+      "source": {
+        "rect": [
+          718,
+          918,
+          1202,
+          1403
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      },
+      "native": {
+        "rect": [
+          718,
+          919,
+          1202,
+          1402
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      }
+    },
+    "claim-3840x2160": {
+      "source": {
+        "rect": [
+          1672,
+          1007,
+          2168,
+          1502
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      },
+      "native": {
+        "rect": [
+          1673,
+          1008,
+          2167,
+          1502
+        ],
+        "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+      }
+    },
+    "tombstone": {
+      "shipping": [
+        0,
+        934,
+        267,
+        1080
+      ],
+      "nativeSize": [
+        267,
+        146
+      ]
+    },
+    "pairingTextRows": {
+      "source": [
+        [
+          324,
+          397
+        ],
+        [
+          474,
+          576
+        ],
+        [
+          653,
+          700
+        ],
+        [
+          708,
+          755
+        ]
+      ],
+      "native": [
+        [
+          325,
+          397
+        ],
+        [
+          475,
+          577
+        ],
+        [
+          655,
+          701
+        ],
+        [
+          710,
+          756
+        ]
+      ]
+    },
+    "verify-0-fill": [
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        35,
+        153,
+        131
+      ]
+    ],
+    "verify-0-fit": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        232,
+        58,
+        84
+      ],
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        34,
+        90,
+        221
+      ]
+    ],
+    "verify-1-fill": [
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        35,
+        153,
+        131
+      ]
+    ],
+    "verify-1-fit": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        232,
+        57,
+        85
+      ],
+      [
+        35,
+        153,
+        131
+      ],
+      [
+        34,
+        90,
+        222
+      ]
+    ],
+    "qual-mouse-0": {
+      "background": [
+        34,
+        68,
+        85
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-1": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 1,
+      "palePixels": 0
+    },
+    "qual-mouse-2": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-3": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-4": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-5": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-6": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-7": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-mouse-end": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 19,
+      "palePixels": 0
+    },
+    "qual-pixels-0": [
+      [
+        238,
+        960
+      ],
+      [
+        34,
+        960
+      ]
+    ],
+    "qual-pixels-1": [
+      [
+        34,
+        764
+      ],
+      [
+        237,
+        540
+      ],
+      [
+        238,
+        420
+      ],
+      [
+        33,
+        196
+      ]
+    ],
+    "qual-qr": {
+      "rect": [
+        718,
+        919,
+        1202,
+        1402
+      ],
+      "payload": "https://example.org/claim?token=SYNTHETIC-TEST"
+    },
+    "qual-web-hidden": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 0,
+      "palePixels": 0
+    },
+    "qual-web-idle": {
+      "background": [
+        34,
+        68,
+        85
+      ],
+      "yellowPixels": 0,
+      "palePixels": 0
+    },
+    "qual-web-moving": {
+      "background": [
+        34,
+        68,
+        85
+      ],
+      "yellowPixels": 82,
+      "palePixels": 0
+    },
+    "qual-web-pressed": {
+      "background": [
+        51,
+        85,
+        68
+      ],
+      "yellowPixels": 11,
+      "palePixels": 52
+    }
+  },
+  "unsupervised": [
+    {
+      "index": 0,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA",
+      "backend": "native-media",
+      "path": "cage",
+      "decoder": "vaapi",
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 1,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Generative Study 1",
+      "backend": "native-media",
+      "path": "cage",
+      "decoder": "vaapi",
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 2,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Fluid Dreams",
+      "backend": "native-media",
+      "path": "cage",
+      "decoder": "vaapi",
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 3,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 A",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 4,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 B",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 5,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 C",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 6,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 D",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 7,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 E",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 8,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 F",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 9,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 G",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 10,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 H",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 11,
+      "title": "Unsupervised \u2014 Machine Hallucinations \u2014 MoMA Dreams \u2014 I",
+      "backend": "native-raster",
+      "path": "cage",
+      "decoder": null,
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    },
+    {
+      "index": 12,
+      "title": "Unsupervised \u2014 Data Universe \u2014 MoMA",
+      "backend": "native-media",
+      "path": "cage",
+      "decoder": "no",
+      "ready": true,
+      "boot": "9a405de1-7981-4697-92ec-db91dfbdbeba"
+    }
+  ],
+  "HEVC": {
+    "Main": {
+      "seconds": 60.72,
+      "hardware": "vaapi",
+      "gpuDecodeSeconds": 12.419,
+      "videoOutputDrops": 0,
+      "decoderDrops": 0
+    },
+    "Main10": {
+      "seconds": 60.72,
+      "hardware": "vaapi",
+      "gpuDecodeSeconds": 4.813,
+      "videoOutputDrops": 0,
+      "decoderDrops": 0
+    }
+  },
+  "bigBuckBunny": [
+    {
+      "title": "bbb-avc.mp4",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 0.339,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 34.21
+    },
+    {
+      "title": "bbb-hevc-main.mp4",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 1.162,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 27.62
+    },
+    {
+      "title": "bbb-main10.mp4",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 0.469,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 45.45
+    },
+    {
+      "title": "bbb-main.mkv",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 1.167,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 27.43
+    },
+    {
+      "title": "bbb-main10.ts",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 0.471,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 45.56
+    },
+    {
+      "title": "bbb-rext.mp4",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "no",
+      "gpuDecodeSeconds": 0.0,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 38.34
+    },
+    {
+      "title": "bbb-vp9.webm",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 0.278,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 44.7
+    },
+    {
+      "title": "bbb-av1.webm",
+      "presented": true,
+      "path": "cage",
+      "hwdec": "vaapi",
+      "gpuDecodeSeconds": 0.21,
+      "voDropDelta": 0,
+      "decoderDropDelta": 0,
+      "captureMeanRGBDelta": 44.95
+    }
+  ]
+}

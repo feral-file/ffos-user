@@ -1,0 +1,9 @@
+{
+  "physicalOutputVerified": false,
+  "checks": [
+    "cursor movement and five-second expiry redraw static artwork",
+    "label settings redraw static artwork",
+    "thirty-second label expiry redraws static artwork"
+  ],
+  "result": "passed"
+}

@@ -3,7 +3,6 @@ set -uo pipefail
 
 # List of services to check
 SERVICES=(
-  "feral-player.service"
   "feral-controld.service"
   "feral-sys-monitord.service"
   "chromium-kiosk.service"
@@ -15,6 +14,7 @@ INTERVAL=10  # Check interval in seconds
 MAX_ATTEMPTS=$((TIMEOUT / INTERVAL))
 CONFIRMATIONS_NEEDED=3
 CONFIRM_COUNT=0
+PLAYBACK_CONFIRMED=0
 
 # Metric endpoint
 VMAGENT_IMPORT_API="http://0.0.0.0:9431/api/v1/import/prometheus"
@@ -42,7 +42,17 @@ check_services() {
       return 1
     fi
   done
-  echo "All services are active"
+  if [[ -e /etc/FF_OS_OTA_EXPECT_PLAYBACK ]]; then
+    if (( PLAYBACK_CONFIRMED )); then
+      # A scheduled or owner cast may legitimately supersede the boot work.
+      python3 /home/feralfile/scripts/player_health.py --showing || return 1
+    else
+      python3 /home/feralfile/scripts/player_health.py --presented /etc/FF_OS_OTA_EXPECT_PLAYBACK || return 1
+      PLAYBACK_CONFIRMED=1
+      echo "Verified the migrated artwork and slot"
+    fi
+  fi
+  echo "All required services and playback checks passed"
   return 0
 }
 

@@ -26,7 +26,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -48,20 +47,6 @@ func newRoutableExecutor(ctrl *gomock.Controller) *mocks.MockExecutor {
 	m := mocks.NewMockExecutor(ctrl)
 	m.EXPECT().ResetStaged().Return(false).AnyTimes()
 	return m
-}
-
-// fakeRecoverySession is a directly-controllable commandrouter.RecoverySession
-// double: err, when set, is what NavigateHomeInline returns.
-type fakeRecoverySession struct {
-	calls int
-	opts  playersession.NavOptions
-	err   error
-}
-
-func (f *fakeRecoverySession) NavigateHomeInline(opts playersession.NavOptions) error {
-	f.calls++
-	f.opts = opts
-	return f.err
 }
 
 type testSetup struct {
@@ -86,7 +71,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller, nil, nil, nil, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -262,7 +247,7 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "started"}
 	mintSvc := &fakeMintPairingService{startResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
@@ -302,7 +287,7 @@ func TestCommandHandler_Process_JoinMintPairingChannelRoutesToMintPairing(t *tes
 	args := map[string]any{"channelId": "ch_1", "pairingToken": "pt_1"}
 	want := map[string]any{"ok": true, "status": "joined"}
 	mintSvc := &fakeMintPairingService{joinResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_JOIN_MINT_PAIRING_CHANNEL,
@@ -343,7 +328,7 @@ func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "closed"}
 	mintSvc := &fakeMintPairingService{closeResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
@@ -365,7 +350,7 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
 	want := map[string]any{"ok": true, "status": "accepted"}
 	mintSvc := &fakeMintPairingService{approvalResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
@@ -547,7 +532,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4", "https://example.com/app.js"}).Return(1, nil).Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -593,7 +578,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	unlock := mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
 	gomock.InOrder(lock, sync, mark, send, unlock)
 
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -630,7 +615,7 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	// guard. The display itself succeeds here, so the failure-path resync
 	// (the only other MarkPlaybackChanged-adjacent caller) never runs.
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -666,7 +651,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(1, nil).Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -713,7 +698,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(1, nil).Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -758,7 +743,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 	}}
 
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
 
 	ts.mockDP1.EXPECT().
 		ProcessPlaylistURLForCast(ts.ctx, playlistURL, gomock.Any()).
@@ -938,7 +923,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 		DoAndReturn(passthroughCastPlan).
 		Times(1)
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
+		newRoutableExecutor(ctrl), mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), logger)
 
 	var playlistMap map[string]interface{}
@@ -986,7 +971,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesInlineManifest(t *testi
 }
 
 // A recent-played replay must not become a side channel to CanvasService. The
-// second CDP call below is the ordinary displayPlaylist command, so it keeps
+// cast below is the ordinary displayPlaylist command, so it keeps
 // the scheduler, offline-replay scope, validation and future policy seam that
 // every other display request uses. The controller-only request contains an opaque id;
 // only the device-internal resolver ever sees the retained source.
@@ -1006,21 +991,11 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_ReentersDisplayPlaylist(t *te
 		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
+		newRoutableExecutor(ctrl), mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	var displayExpression string
-	mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
-			expr := params["expression"].(string)
-			assert.Contains(t, expr, "resolveRecentlyPlayed")
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok", "item": map[string]interface{}{
-					"id": "retained-work", "source": "https://example.test/retained", "license": "open",
-				},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, handler, "rp-42", map[string]any{"id": "retained-work", "source": "https://example.test/retained", "license": "open"}, "curated")
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -1058,22 +1033,14 @@ func TestCommandHandler_Process_PlayRecentlyPlayed_LongItemTitleStillReplays(t *
 		DoAndReturn(passthroughCastPlan).
 		AnyTimes()
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mockDP1, mockStatusPoller,
+		newRoutableExecutor(ctrl), mocks.CommandSender{CDP: mockCDP}, mockDP1, mockStatusPoller,
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	var displayExpression string
-	mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
-			expr := params["expression"].(string)
-			assert.Contains(t, expr, "resolveRecentlyPlayed")
-			return map[string]interface{}{"message": map[string]interface{}{
-				"ok": true, "status": "ok", "item": map[string]interface{}{
-					"id": "retained-work", "source": "https://example.test/retained", "license": "open",
-					"title": strings.Repeat("é", 300),
-				},
-			}}, nil
-		}).Times(1)
+	setHistoryRecord(t, handler, "rp-42", map[string]any{
+		"id": "retained-work", "source": "https://example.test/retained", "license": "open",
+		"title": strings.Repeat("é", 300),
+	}, "curated")
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -1114,35 +1081,6 @@ func firstCastItem(t *testing.T, expression string) map[string]interface{} {
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSuffix(strings.TrimPrefix(expression, prefix), ")")), &payload))
 	require.Len(t, payload.Request.DP1Call.Items, 1)
 	return payload.Request.DP1Call.Items[0]
-}
-
-func TestCommandHandler_Process_RefreshArtwork(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(playerOkResponse(), nil).
-		Times(1)
-
-	ts.mockStatusPoller.EXPECT().
-		ForceRefresh().
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T) {
@@ -1445,82 +1383,6 @@ func TestCommandHandler_SendCDPRequest_GenerationStable_ReturnsReply(t *testing.
 	assert.Equal(t, cdpResult, result)
 }
 
-// TestCommandHandler_SendCDPRequest_GenerationMovedDuringSend_LoudError pins
-// design doc §2.4: unlike devicectl's sleep apply, a command reply answered
-// while the page generation moved must surface loudly to the relayer/hub
-// caller instead of reporting the reply as delivered — a display request or control
-// command silently landing on a torn-down page must not read as success.
-func TestCommandHandler_SendCDPRequest_GenerationMovedDuringSend_LoudError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	gen := uint64(1)
-	commandrouter.SetSessionGeneration(ts.handler, func() uint64 { return gen }, ts.logger)
-
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
-			gen = 2 // the page navigated away while the send was in flight
-			return map[string]interface{}{"result": "success"}, nil
-		}).
-		Times(1)
-	// No ForceRefresh: Process returns the error before reaching it.
-
-	result, err := ts.handler.Process(ts.ctx, commands.Command{
-		Type:      commands.Type("someCustomCommand"),
-		Arguments: map[string]interface{}{"key": "value"},
-	})
-
-	require.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "generation")
-	assert.ErrorIs(t, err, commandrouter.ErrGenerationRace)
-}
-
-// TestCommandHandler_Process_RefreshArtwork_GenerationRace_NoEscalation pins
-// M5: a generation-race failure on refreshArtwork's own send must NOT
-// escalate into NavigateHomeInline — the send itself succeeded and merely
-// raced an UNRELATED page-generation change (a connectivity reconciler
-// bump, a stamp-mismatch bump, ...), which is not evidence the page is
-// broken. Escalating it would visibly restart a healthy page for no reason;
-// the ErrGenerationRace error must instead reach the relayer so the caller
-// retries.
-func TestCommandHandler_Process_RefreshArtwork_GenerationRace_NoEscalation(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	sess := &fakeRecoverySession{}
-	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
-	gen := uint64(1)
-	commandrouter.SetSessionGeneration(ts.handler, func() uint64 { return gen }, ts.logger)
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	// The evaluate itself SUCCEEDS, but the generation moves while it is in
-	// flight — a healthy page racing an unrelated bump, not a dead page.
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
-			gen = 2
-			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
-		}).
-		Times(1)
-	// No ForceRefresh: Process returns the error before reaching it.
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	require.Error(t, err)
-	assert.Nil(t, result)
-	assert.ErrorIs(t, err, commandrouter.ErrGenerationRace)
-	assert.Equal(t, 0, sess.calls, "a generation-race failure must never escalate to NavigateHomeInline")
-}
-
 // TestSetSessionGeneration_GatedHandlerIsNoOp guards the documented caveat:
 // wiring it against the storm-protection gate (not the raw handler
 // commandrouter.New returns) must degrade to a harmless no-op, never a panic,
@@ -1735,122 +1597,6 @@ func TestCommandHandler_Metrics_NonPlaybackCommand_NoMetrics(t *testing.T) {
 	assert.Equal(t, beforeAttempts, status.PlaybackStartTotal(), "non-playback command should not increment attempt counter")
 }
 
-// refreshArtwork must survive a dead player page: the evaluate path needs
-// window.handleCDPRequest, which is exactly what's missing when Chromium is
-// serving a stale/broken bundle (#234) — the situation a refresh exists to
-// fix. Cache clear + a session NavigateHomeInline (navigate-to-entry, never
-// reload-in-place — design doc §5) is the recovery.
-func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaNavigate(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	sess := &fakeRecoverySession{}
-	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	// Page evaluate fails — no live player app.
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(nil, errors.New("evaluate failed: handleCDPRequest is not defined")).
-		Times(1)
-
-	ts.mockStatusPoller.EXPECT().
-		ForceRefresh().
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.NoError(t, err)
-	assert.True(t, isPlayerResponseOkForTest(result))
-	assert.Equal(t, 1, sess.calls, "the dead evaluate must escalate to exactly one NavigateHomeInline")
-	assert.True(t, sess.opts.PurgeCache, "the recovery navigation must purge the cache")
-}
-
-// When both the evaluate and the navigate escalation fail, the command must
-// report the original failure — a dead CDP connection is not recoverable
-// here.
-func TestCommandHandler_Process_RefreshArtwork_NavigateAlsoFails(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	sess := &fakeRecoverySession{err: errors.New("no CDP connection")}
-	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	evalErr := errors.New("evaluate failed")
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(nil, evalErr).
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.Error(t, err)
-	assert.Equal(t, evalErr, err)
-	assert.Nil(t, result)
-	assert.Equal(t, 1, sess.calls)
-}
-
-// With no session wired (a build wired before Phase 2b, or a test double),
-// the escalation must degrade to the original failure rather than panicking.
-func TestCommandHandler_Process_RefreshArtwork_NoSessionWiredReportsOriginalFailure(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	command := commands.Command{
-		Type:      commands.CMD_REFRESH_ARTWORK,
-		Arguments: map[string]interface{}{},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send("Network.clearBrowserCache", map[string]interface{}{}).
-		Return(nil, nil).
-		Times(1)
-
-	evalErr := errors.New("evaluate failed")
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(nil, evalErr).
-		Times(1)
-
-	result, err := ts.handler.Process(ts.ctx, command)
-
-	assert.Error(t, err)
-	assert.Equal(t, evalErr, err)
-	assert.Nil(t, result)
-}
-
-// Non-refresh commands must NOT get the reload fallback — a failed
-// displayPlaylist evaluate is a real failure the caller needs to see.
-func isPlayerResponseOkForTest(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	msg, ok := m["message"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	okVal, _ := msg["ok"].(bool)
-	return okVal
-}
-
 // --- staged factory reset (the command-surface guard) ------------------------
 
 // stagedResetHandler builds a router whose device is mid-factory-reset. Every
@@ -1868,7 +1614,7 @@ func stagedResetHandler(t *testing.T) (commandrouter.Handler, *gomock.Controller
 	// answer a nil collaborator with their own {ok:false, code:disabled|...}
 	// map and a NIL error, so requiring an error below proves the guard fired
 	// rather than the nil-guard.
-	return commandrouter.New(ex, mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+	return commandrouter.New(ex, mocks.CommandSender{CDP: mocks.NewMockCDP(ctrl)}, mocks.NewMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil,
 		mocks.NewMockJSON(ctrl), logger), ctrl
 }
@@ -1915,7 +1661,7 @@ func TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly(t *testing.T) 
 
 	ex := mocks.NewMockExecutor(ctrl)
 	ex.EXPECT().ResetStaged().Return(true).AnyTimes()
-	h := commandrouter.New(ex, mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+	h := commandrouter.New(ex, mocks.CommandSender{CDP: mocks.NewMockCDP(ctrl)}, mocks.NewMockDP1(ctrl),
 		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, mocks.NewMockJSON(ctrl), logger)
 
 	for _, cmd := range []commands.Type{
@@ -1938,7 +1684,7 @@ func TestCommandHandler_Process_SetMediaHealthIsInternal(t *testing.T) {
 	defer ctrl.Finish()
 	mockCDP := mocks.NewMockCDP(ctrl) // no EXPECT: any Send fails the test
 	handler := commandrouter.New(
-		newRoutableExecutor(ctrl), mockCDP, mocks.NewMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
+		newRoutableExecutor(ctrl), mocks.CommandSender{CDP: mockCDP}, mocks.NewMockDP1(ctrl), mocks.NewMockStatusPoller(ctrl),
 		nil, nil, nil, nil, wrapper.NewJSON(), zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	result, err := handler.Process(context.Background(), commands.Command{
 		Type: commands.CMD_SET_MEDIA_HEALTH,
@@ -1962,7 +1708,7 @@ func TestCommandHandler_Process_GetMintPairingSession(t *testing.T) {
 			want := map[string]any{"ok": true, "status": "none", "active": false}
 			mintSvc := &fakeMintPairingService{getResult: want}
 			if enabled {
-				ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
+				ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 			}
 			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: commands.CMD_GET_MINT_PAIRING_SESSION})
 			require.NoError(t, err)

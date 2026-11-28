@@ -32,7 +32,7 @@ func TestSetPushObserver_RunsAfterAcceptedPush(t *testing.T) {
 	).AnyTimes()
 	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
 
-	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+	sched := playlistschedule.New(context.Background(), mocks.CommandSender{CDP: cdpMock}, clock, func() *time.Location {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	defer sched.Stop()

@@ -1,0 +1,16 @@
+{
+  "sourceRepository": "ff-player",
+  "revision": "07805905f85d16a143bc9f409cb41a8df14c356e",
+  "originalURL": "https://generator.artblocks.io/1/0x0000000c687daed0fba60d1dba4e5f6149e8b894/55",
+  "transformation": "Move two inline script bodies unchanged into same-origin files for CSP; keep token seed, p5 and artwork code unchanged.",
+  "originalSha256": {
+    "index.html": "cc8b084ef50c1843c500508a085352afe58439a6260966666e3e2d3a82007f5e",
+    "p5.min.js": "726ac96626b93f5bcaff83a910b6c60d3a9728f063e0eb73b5d0819ffc356915"
+  },
+  "bundledSha256": {
+    "artwork-1.js": "a9f5e37a95115ac398856a4878ff03b2ac52af3dd41765518943f24bee8c18b7",
+    "index.html": "74c7e058a311c4876e95194d3e3beab411ac348a14a7aa398c513b38afa10e96",
+    "artwork-0.js": "b81850ff6755fef0804c8929ab97d044f6376b6ffa9401383e809c3ab3c4f8bc",
+    "p5.min.js": "726ac96626b93f5bcaff83a910b6c60d3a9728f063e0eb73b5d0819ffc356915"
+  }
+}

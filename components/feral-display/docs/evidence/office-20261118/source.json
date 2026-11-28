@@ -1,0 +1,31 @@
+{
+  "checks": [
+    {
+      "path": "opaque-video",
+      "decoder": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "hwdec": "vaapi",
+      "frames": 34
+    },
+    {
+      "path": "opaque-video-head-rejected",
+      "decoder": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "hwdec": "vaapi",
+      "frames": 23
+    },
+    {
+      "path": "opaque-redirect",
+      "decoder": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "hwdec": "vaapi",
+      "frames": 25
+    },
+    {
+      "name": "superseded slow probe cannot replace the newer artwork"
+    },
+    {
+      "name": "probe timeout produces an incoming failure, not false presentation",
+      "elapsedMs": 3084.5170830000006
+    }
+  ],
+  "physicalOutputVerified": false,
+  "result": "passed"
+}

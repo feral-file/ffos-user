@@ -1,0 +1,67 @@
+{
+  "startedAt": "2026-11-18T02:24:16.191Z",
+  "capture": "Cage compositor, not physical panel",
+  "checks": [
+    {
+      "state": "softap_qr",
+      "capture": "00-softap_qr.png",
+      "host": "responsive"
+    },
+    {
+      "state": "softap_qr",
+      "capture": "01-softap_qr.png",
+      "host": "responsive"
+    },
+    {
+      "state": "claim_qr",
+      "capture": "02-claim_qr.png",
+      "host": "responsive"
+    },
+    {
+      "state": "scanning",
+      "capture": "03-scanning.png",
+      "host": "responsive"
+    },
+    {
+      "state": "joining",
+      "capture": "04-joining.png",
+      "host": "responsive"
+    },
+    {
+      "state": "finalizing",
+      "capture": "05-finalizing.png",
+      "host": "responsive"
+    },
+    {
+      "state": "connecting",
+      "capture": "06-connecting.png",
+      "host": "responsive"
+    },
+    {
+      "state": "join_failed",
+      "capture": "07-join_failed.png",
+      "host": "responsive"
+    },
+    {
+      "state": "setup_error",
+      "capture": "08-setup_error.png",
+      "host": "responsive"
+    },
+    {
+      "state": "updating",
+      "capture": "09-updating.png",
+      "host": "responsive"
+    },
+    {
+      "state": "factory_reset",
+      "capture": "10-factory_reset.png",
+      "host": "responsive"
+    },
+    {
+      "state": "ready",
+      "cleared": true
+    }
+  ],
+  "result": "passed",
+  "finishedAt": "2026-11-18T02:24:31.998Z"
+}

@@ -83,7 +83,7 @@ func newRig(t *testing.T, fsys *control.MemFS) *rig {
 	}).AnyTimes()
 	dbus := mocks.NewMockDBus(ctrl)
 	dbus.EXPECT().OnBusSignal(gomock.Any())
-	m := mediator.New(context.Background(), rel, dbus, mocks.NewMockCDP(ctrl), handler, mocks.NewMockExecutor(ctrl),
+	m := mediator.New(context.Background(), rel, dbus, handler, mocks.NewMockExecutor(ctrl),
 		mocks.NewMockRefresher(ctrl), wrapper.NewJSON(), logger)
 	m.(interface{ SetControl(mediator.ControlGate) }).SetControl(gate)
 	m.Start()

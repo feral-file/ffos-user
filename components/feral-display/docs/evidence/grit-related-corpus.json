@@ -1,0 +1,1922 @@
+{
+  "source": "https://github.com/feral-file/canon/blob/main/raw/sessions/2026-11-16-display-prototype/playlist.json",
+  "blobSHA": "6d1d9183ae3a1857cfa66a72c7ee0daa6f319fd0",
+  "startedAt": "2026-11-17T23:28:28.636Z",
+  "checks": [
+    {
+      "index": 0,
+      "title": "Leander Herzog \u2014 holz",
+      "source": "https://leanderherzog.ch/2026/holz/",
+      "startedAt": "2026-11-17T23:28:28.780Z",
+      "responses": [
+        {
+          "url": "https://leanderherzog.ch/2026/holz/",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "no-cache",
+            "cf-cache-status": "DYNAMIC",
+            "cf-ray": "a5c283159b6cfd8d-SIN",
+            "content-encoding": "zstd",
+            "content-security-policy": "frame-ancestors 'self' https://nguyenwahed.com https://www.nguyenwahed.com https://nguyenwahedgrid.cargo.site",
+            "content-type": "text/html",
+            "date": "Tue, 17 Nov 2026 23:28:29 GMT",
+            "expires": "Tue, 17 Nov 2026 23:38:29 GMT",
+            "last-modified": "Tue, 17 Nov 2026 04:43:18 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "permissions-policy": "camera=(), microphone=(), geolocation=()",
+            "referrer-policy": "strict-origin-when-cross-origin",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=YN%2B2YieY8ORF9zjwtTHGLmqGnt8IUv4gneRDhMRFMjLI9%2B3NeFzcIH5Nb3fgfJ5arl%2BHj6opF1t3cYX0rd%2FJ7nSzfEj2vHAhF0AHegYNoV%2FJatoDWxJ%2FIRPx8tD2cNBswYP3\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfCacheStatus;desc=\"DYNAMIC\"\ncfEdge;dur=176,cfOrigin;dur=11",
+            "strict-transport-security": "max-age=31536000; includeSubDomains",
+            "vary": "Accept-Encoding",
+            "x-content-type-options": "nosniff"
+          }
+        },
+        {
+          "url": "https://leanderherzog.ch/2026/holz/app.mjs",
+          "status": 200,
+          "type": "Script"
+        },
+        {
+          "url": "https://leanderherzog.ch/2026/holz/render.mjs",
+          "status": 200,
+          "type": "Script"
+        },
+        {
+          "url": "https://leanderherzog.ch/2026/holz/physics.mjs",
+          "status": 200,
+          "type": "Script"
+        }
+      ],
+      "exceptions": [],
+      "loadingFailures": [
+        {
+          "requestId": "232530.2",
+          "timestamp": 8132.370138,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "receipt": {
+        "generation": 19,
+        "occurrence": "18b744f1-4b27-4589-836b-9dacf916ef25",
+        "outcome": "accepted",
+        "revision": 289
+      },
+      "initialState": {
+        "context": "curated",
+        "generation": 19,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-0",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "holz"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://leanderherzog.ch/2026/holz/",
+              "title": "holz"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 19,
+          "id": "18b744f1-4b27-4589-836b-9dacf916ef25",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-0",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "holz"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://leanderherzog.ch/2026/holz/",
+            "title": "holz"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-0",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "holz"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://leanderherzog.ch/2026/holz/",
+              "title": "holz"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "",
+          "lastError": "",
+          "limit": 3,
+          "pending": false,
+          "retryDelayMs": 0
+        },
+        "renderer": "presented",
+        "revision": 292,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 19,
+          "id": "18b744f1-4b27-4589-836b-9dacf916ef25",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-0",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "holz"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://leanderherzog.ch/2026/holz/",
+            "title": "holz"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "after": {
+        "context": "curated",
+        "generation": 19,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-0",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "holz"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://leanderherzog.ch/2026/holz/",
+              "title": "holz"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 19,
+          "id": "18b744f1-4b27-4589-836b-9dacf916ef25",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-0",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "holz"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://leanderherzog.ch/2026/holz/",
+            "title": "holz"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-0",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "holz"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://leanderherzog.ch/2026/holz/",
+              "title": "holz"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "",
+          "lastError": "",
+          "limit": 3,
+          "pending": false,
+          "retryDelayMs": 0
+        },
+        "renderer": "presented",
+        "revision": 292,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 19,
+          "id": "18b744f1-4b27-4589-836b-9dacf916ef25",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-0",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "holz"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://leanderherzog.ch/2026/holz/",
+            "title": "holz"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://leanderherzog.ch/2026/holz/",
+          "title": "holz",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 1920,
+              "height": 1920
+            }
+          ],
+          "bodyText": "54 FPS\u2003\u200329 OBJ\u2003\u20036.8k PTS\u2003\u20030:09",
+          "webgpu": true,
+          "resourceCount": 6
+        }
+      },
+      "observation": "host_presented_needs_visual_review",
+      "finalState": {
+        "context": "curated",
+        "generation": 19,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-0",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "holz"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://leanderherzog.ch/2026/holz/",
+              "title": "holz"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 19,
+          "id": "18b744f1-4b27-4589-836b-9dacf916ef25",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-0",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "holz"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://leanderherzog.ch/2026/holz/",
+            "title": "holz"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-0",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "holz"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://leanderherzog.ch/2026/holz/",
+              "title": "holz"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "",
+          "lastError": "",
+          "limit": 3,
+          "pending": false,
+          "retryDelayMs": 0
+        },
+        "renderer": "presented",
+        "revision": 292,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 19,
+          "id": "18b744f1-4b27-4589-836b-9dacf916ef25",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-0",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "holz"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://leanderherzog.ch/2026/holz/",
+            "title": "holz"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "cgroup": "MemoryCurrent=713723904\nMemoryPeak=874491904\nCPUUsageNSec=95176550000\nTasksCurrent=155\n",
+      "finishedAt": "2026-11-17T23:28:43.617Z"
+    },
+    {
+      "index": 6,
+      "title": "Sage Jenson \u2014 36 Points #25",
+      "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+      "startedAt": "2026-11-17T23:28:43.618Z",
+      "responses": [
+        {
+          "url": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+          "status": 200,
+          "type": "Document",
+          "headers": {
+            "access-control-allow-origin": "*",
+            "access-control-expose-headers": "Access-Control-Allow-Origin, Access-Control-Request-Headers, Access-Control-Request-Method, Origin, Content-Length, Content-Range, ETag",
+            "alt-svc": "h3=\":443\"; ma=86400",
+            "cache-control": "public, max-age=300, s-maxage=300",
+            "cf-ray": "a5c283720fd76ae2-SIN",
+            "content-encoding": "zstd",
+            "content-type": "text/html; charset=utf-8",
+            "date": "Tue, 17 Nov 2026 23:28:43 GMT",
+            "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+            "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=PSQ4Wj%2BDAwa8sHxY9885GEgtMBNJt4FgjSpS%2BhMlnfezY1INuDF3c67i8T6PtpmsGBElhB5a1wSke9702wNrvBm7RJMCsmOtTxNEQXCof6OOKI8F%2Blqiavog6N4FVajofKnr9%2Bb9uVbdWQ%3D%3D\"}]}",
+            "server": "cloudflare",
+            "server-timing": "cfEdge;dur=13,cfOrigin;dur=0,cfWorker;dur=124",
+            "vary": "Accept-Encoding"
+          }
+        },
+        {
+          "url": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/main.js",
+          "status": 200,
+          "type": "Script"
+        },
+        {
+          "url": "https://cdn.feralfileassets.com/favicon.ico",
+          "status": 403,
+          "type": "Other"
+        }
+      ],
+      "exceptions": [],
+      "loadingFailures": [
+        {
+          "requestId": "233081.3",
+          "timestamp": 8147.132675,
+          "type": "Script",
+          "errorText": "net::ERR_NAME_NOT_RESOLVED",
+          "canceled": false
+        }
+      ],
+      "receipt": {
+        "generation": 20,
+        "occurrence": "f13bb527-a9ba-427c-98f5-686decc463b7",
+        "outcome": "accepted",
+        "revision": 294
+      },
+      "initialState": {
+        "context": "curated",
+        "generation": 20,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "",
+          "lastError": "",
+          "limit": 3,
+          "pending": false,
+          "retryDelayMs": 0
+        },
+        "renderer": "presented",
+        "revision": 297,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "after": {
+        "context": "curated",
+        "generation": 20,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "",
+          "lastError": "",
+          "limit": 3,
+          "pending": false,
+          "retryDelayMs": 0
+        },
+        "renderer": "presented",
+        "revision": 297,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "document": {
+        "type": "object",
+        "value": {
+          "url": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html#25_circular_consolidation",
+          "title": "36 Points \u2014 Sage Jenson",
+          "readyState": "complete",
+          "topLevel": true,
+          "canvases": [
+            {
+              "width": 2160,
+              "height": 1080
+            }
+          ],
+          "bodyText": "",
+          "webgpu": true,
+          "resourceCount": 3
+        }
+      },
+      "observation": "host_presented_needs_visual_review",
+      "finalState": {
+        "context": "curated",
+        "generation": 20,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "",
+          "lastError": "",
+          "limit": 3,
+          "pending": false,
+          "retryDelayMs": 0
+        },
+        "renderer": "presented",
+        "revision": 297,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "cgroup": "MemoryCurrent=602075136\nMemoryPeak=874491904\nCPUUsageNSec=103456211000\nTasksCurrent=148\n",
+      "finishedAt": "2026-11-17T23:28:59.765Z"
+    },
+    {
+      "index": 15,
+      "title": "Leander Herzog \u2014 Returns",
+      "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+      "startedAt": "2026-11-17T23:28:59.766Z",
+      "responses": [],
+      "exceptions": [],
+      "loadingFailures": [],
+      "receipt": {
+        "generation": 21,
+        "occurrence": "5894eaf0-52c3-46b9-8743-32fda4cf876f",
+        "outcome": "accepted",
+        "revision": 299
+      },
+      "initialState": {
+        "context": "curated",
+        "generation": 21,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-15",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "Returns"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+              "title": "Returns"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "5894eaf0-52c3-46b9-8743-32fda4cf876f",
+          "lastError": "Artwork produced no presentable frame within 60 seconds",
+          "limit": 3,
+          "pending": true,
+          "retryDelayMs": 1000
+        },
+        "renderer": "failed",
+        "revision": 300,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "Artwork produced no presentable frame within 60 seconds",
+          "exhibition": "Living Code",
+          "generation": 21,
+          "id": "5894eaf0-52c3-46b9-8743-32fda4cf876f",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-15",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "Returns"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+            "title": "Returns"
+          },
+          "navigationCommitted": false,
+          "stage": "failed"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "observation": "not_presented",
+      "finalState": {
+        "context": "curated",
+        "generation": 21,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-15",
+              "label": {
+                "artist": "Leander Herzog",
+                "title": "Returns"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Leander Herzog"
+                  }
+                ]
+              },
+              "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+              "title": "Returns"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "5894eaf0-52c3-46b9-8743-32fda4cf876f",
+          "lastError": "Artwork produced no presentable frame within 60 seconds",
+          "limit": 3,
+          "pending": true,
+          "retryDelayMs": 1000
+        },
+        "renderer": "failed",
+        "revision": 300,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "Artwork produced no presentable frame within 60 seconds",
+          "exhibition": "Living Code",
+          "generation": 21,
+          "id": "5894eaf0-52c3-46b9-8743-32fda4cf876f",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-15",
+            "label": {
+              "artist": "Leander Herzog",
+              "title": "Returns"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Leander Herzog"
+                }
+              ]
+            },
+            "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+            "title": "Returns"
+          },
+          "navigationCommitted": false,
+          "stage": "failed"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "cgroup": "MemoryCurrent=576651264\nMemoryPeak=874491904\nCPUUsageNSec=127014868000\nTasksCurrent=160\n",
+      "finishedAt": "2026-11-17T23:30:01.008Z"
+    },
+    {
+      "index": 16,
+      "title": "jjjjjohn \u2014 Slime Skelly",
+      "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+      "startedAt": "2026-11-17T23:30:01.009Z",
+      "responses": [],
+      "exceptions": [],
+      "loadingFailures": [],
+      "receipt": {
+        "generation": 22,
+        "occurrence": "daf6e90f-795d-427b-8ff0-dc6beec48bfe",
+        "outcome": "accepted",
+        "revision": 303
+      },
+      "initialState": {
+        "context": "curated",
+        "generation": 22,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-16",
+              "label": {
+                "artist": "jjjjjohn",
+                "title": "Slime Skelly"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "jjjjjohn"
+                  }
+                ]
+              },
+              "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+              "title": "Slime Skelly"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "daf6e90f-795d-427b-8ff0-dc6beec48bfe",
+          "lastError": "Artwork produced no presentable frame within 60 seconds",
+          "limit": 3,
+          "pending": true,
+          "retryDelayMs": 1000
+        },
+        "renderer": "failed",
+        "revision": 304,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "Artwork produced no presentable frame within 60 seconds",
+          "exhibition": "Living Code",
+          "generation": 22,
+          "id": "daf6e90f-795d-427b-8ff0-dc6beec48bfe",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-16",
+            "label": {
+              "artist": "jjjjjohn",
+              "title": "Slime Skelly"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "jjjjjohn"
+                }
+              ]
+            },
+            "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+            "title": "Slime Skelly"
+          },
+          "navigationCommitted": false,
+          "stage": "failed"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "observation": "not_presented",
+      "finalState": {
+        "context": "curated",
+        "generation": 22,
+        "host": "responsive",
+        "instance": "27df1abd-d196-4b63-be5e-dc7ab34557e6",
+        "loop": "playlist",
+        "media": null,
+        "mediaPaused": false,
+        "online": true,
+        "overlay": null,
+        "paused": false,
+        "pendingUpdate": null,
+        "playlist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-16",
+              "label": {
+                "artist": "jjjjjohn",
+                "title": "Slime Skelly"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "jjjjjohn"
+                  }
+                ]
+              },
+              "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+              "title": "Slime Skelly"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "playlistUrl": "",
+        "presentationFailure": null,
+        "presented": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "",
+          "exhibition": "Living Code",
+          "generation": 20,
+          "id": "f13bb527-a9ba-427c-98f5-686decc463b7",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-6",
+            "label": {
+              "artist": "Sage Jenson",
+              "title": "36 Points #25"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "Sage Jenson"
+                }
+              ]
+            },
+            "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+            "title": "36 Points #25"
+          },
+          "navigationCommitted": true,
+          "stage": "presented"
+        },
+        "presentedPlaylist": {
+          "id": "living-code-corpus",
+          "items": [
+            {
+              "duration": 0,
+              "id": "corpus-6",
+              "label": {
+                "artist": "Sage Jenson",
+                "title": "36 Points #25"
+              },
+              "metadata": {
+                "artists": [
+                  {
+                    "name": "Sage Jenson"
+                  }
+                ]
+              },
+              "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+              "title": "36 Points #25"
+            }
+          ],
+          "title": "Living Code"
+        },
+        "presentedPlaylistUrl": "",
+        "recovery": {
+          "attempt": 0,
+          "exhausted": false,
+          "failedOccurrence": "daf6e90f-795d-427b-8ff0-dc6beec48bfe",
+          "lastError": "Artwork produced no presentable frame within 60 seconds",
+          "limit": 3,
+          "pending": true,
+          "retryDelayMs": 1000
+        },
+        "renderer": "failed",
+        "revision": 304,
+        "schedule": null,
+        "scheduleOutcome": null,
+        "selected": {
+          "context": "curated",
+          "curator": "",
+          "display": {
+            "autoPlay": true,
+            "background": "#000000",
+            "loop": true,
+            "margin": 0,
+            "scaling": "fit",
+            "userOverrides": true
+          },
+          "error": "Artwork produced no presentable frame within 60 seconds",
+          "exhibition": "Living Code",
+          "generation": 22,
+          "id": "daf6e90f-795d-427b-8ff0-dc6beec48bfe",
+          "index": 0,
+          "item": {
+            "duration": 0,
+            "id": "corpus-16",
+            "label": {
+              "artist": "jjjjjohn",
+              "title": "Slime Skelly"
+            },
+            "metadata": {
+              "artists": [
+                {
+                  "name": "jjjjjohn"
+                }
+              ]
+            },
+            "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+            "title": "Slime Skelly"
+          },
+          "navigationCommitted": false,
+          "stage": "failed"
+        },
+        "settings": {
+          "background": "#000000",
+          "durationSeconds": null,
+          "framing": "artwork",
+          "margin": 0,
+          "muted": true,
+          "rotation": 0,
+          "scaling": "fit",
+          "tombstone": "on",
+          "transitionMs": 650,
+          "volume": 0.5
+        },
+        "shuffle": false,
+        "sleeping": false,
+        "stopped": false,
+        "storage": {
+          "error": "",
+          "health": "available"
+        },
+        "updateOutcome": null
+      },
+      "cgroup": "MemoryCurrent=562196480\nMemoryPeak=874491904\nCPUUsageNSec=149633165000\nTasksCurrent=139\n",
+      "finishedAt": "2026-11-17T23:31:02.085Z"
+    }
+  ],
+  "physicalDisplayVerified": false,
+  "visualReviewComplete": false,
+  "finishedAt": "2026-11-17T23:31:02.086Z",
+  "reviewNotes": {
+    "0": "Compositor capture shows blue simulated logs and separate native label; top-level 200 response with original CSP recorded.",
+    "6": "Compositor capture shows granular circular forms and separate native label.",
+    "15": "Navigation never committed; no presentable frame within 60 seconds. Not qualified.",
+    "16": "Navigation never committed; no presentable frame within 60 seconds. Not qualified. Native compositor capture shows a device-owned readable failure explanation."
+  },
+  "captureManifest": [
+    {
+      "path": "00-renderer-1.png",
+      "sha256": "49c83b5bf891adcd378e3b147b3551ee975791e7451ef4537bc6d48a84f7468c"
+    },
+    {
+      "path": "00-renderer-0.png",
+      "sha256": "1cdc17c287d06a4dc96742fdeb60f014cbe78161fe0322581a4f3ff9447b8c57"
+    },
+    {
+      "path": "16-compositor.png",
+      "sha256": "7067f38bcf16c66c907b1147068d5447536bf2598c1bf627568cf46e43d6110d"
+    },
+    {
+      "path": "06-renderer-0.png",
+      "sha256": "3b3f80f837861bf043bd75ff49b5d2a03f6efad426d8cb60c4024d653486572e"
+    },
+    {
+      "path": "06-renderer-1.png",
+      "sha256": "686a558017325e9dd50b693cf7f421195fc6d17834972f951136177e34eea386"
+    },
+    {
+      "path": "06-compositor.png",
+      "sha256": "cd032b9a80c0bb7c0793ae04e8dc3787fad05f1a79325d2a7fc62a7a1de17b67"
+    },
+    {
+      "path": "00-compositor.png",
+      "sha256": "7575fb89835c91d1b4f4554dd33005427762a06d0606dbdccedf4c03ed7ad1f6"
+    },
+    {
+      "path": "15-compositor.png",
+      "sha256": "7067f38bcf16c66c907b1147068d5447536bf2598c1bf627568cf46e43d6110d"
+    }
+  ],
+  "reviewedCompositorIndexes": [
+    0,
+    6,
+    16
+  ]
+}

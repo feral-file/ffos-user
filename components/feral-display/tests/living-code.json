@@ -1,0 +1,175 @@
+{
+  "source": "https://github.com/feral-file/canon/blob/main/raw/sessions/2026-11-16-display-prototype/playlist.json",
+  "blobSHA": "6d1d9183ae3a1857cfa66a72c7ee0daa6f319fd0",
+  "observedAt": "2026-11-17",
+  "playlist": {
+    "title": "Living Code",
+    "curators": [
+      "Sean Moss-Pultz"
+    ],
+    "items": [
+      {
+        "title": "Leander Herzog — holz",
+        "source": "https://leanderherzog.ch/2026/holz/",
+        "duration": 240,
+        "label": {
+          "artist": "Leander Herzog",
+          "title": "holz"
+        }
+      },
+      {
+        "title": "Casey Reas — Pre-Process",
+        "source": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/383000000",
+        "duration": 240,
+        "label": {
+          "artist": "Casey Reas",
+          "title": "Pre-Process"
+        }
+      },
+      {
+        "title": "Casey Reas — Network C",
+        "source": "https://generator.artblocks.io/1/0x0a1bbd57033f57e7b6743621b79fcb9eb2ce3676/6000000",
+        "duration": 240,
+        "label": {
+          "artist": "Casey Reas",
+          "title": "Network C"
+        }
+      },
+      {
+        "title": "Casey Reas — METASOTO",
+        "source": "https://cdn.feralfileassets.com/previews/9e8992c9-91f0-48c7-a7c7-6ca7bcff9d6a/1668537579/?edition_number=0&blockchain=ethereum&contract=0x2A86C5466f088caEbf94e071a77669BAe371CD87&token_id=15042014439770355205730296321097090521853295916950766059900103364979980239529&token_id_hash=0x762a02a969817d1b1c4995b5585cdf86acc21fe62b286da95ed1dc7d986a41b4",
+        "duration": 240,
+        "label": {
+          "artist": "Casey Reas",
+          "title": "METASOTO"
+        }
+      },
+      {
+        "title": "Zach Lieberman — horizon(te)s #1",
+        "source": "https://dweb.link/ipfs/QmePX7dqW9WFdm1rvNc5hmVmyJ2JdWbKxpCGzyEFPTCuRT?fxhash=onk8XxSXiM7BVmrKwsDDw3y4RyVAJXroRFP5jSVd8DuXZh2Sw5r",
+        "duration": 240,
+        "label": {
+          "artist": "Zach Lieberman",
+          "title": "horizon(te)s #1"
+        }
+      },
+      {
+        "title": "Iskra Velitchkova — horizon(te)s #2",
+        "source": "https://dweb.link/ipfs/QmePX7dqW9WFdm1rvNc5hmVmyJ2JdWbKxpCGzyEFPTCuRT?fxhash=op2xuuGYoCNYd4Ub5j5YU6xJ62HrrZEWvDE3qFGyx8QcgfAYif3",
+        "duration": 240,
+        "label": {
+          "artist": "Iskra Velitchkova",
+          "title": "horizon(te)s #2"
+        }
+      },
+      {
+        "title": "Sage Jenson — 36 Points #25",
+        "source": "https://cdn.feralfileassets.com/previews/7e92539c-65ce-426b-a243-9b043d0defda/1725624330/index.html",
+        "duration": 240,
+        "label": {
+          "artist": "Sage Jenson",
+          "title": "36 Points #25"
+        }
+      },
+      {
+        "title": "Dmitri Cherniak — Transparent Grit",
+        "source": "https://cdn.feralfileassets.com/previews/2a727b17-7890-4464-913d-3fe5ad2af4ae/1615474528/?edition_number=38&blockchain=bitmark",
+        "duration": 240,
+        "label": {
+          "artist": "Dmitri Cherniak",
+          "title": "Transparent Grit"
+        }
+      },
+      {
+        "title": "Rafaël Rozendaal — Infinite Entropy 7",
+        "source": "https://cdn.feralfileassets.com/previews/4ac90d22-2b94-4dad-8685-3df950746010/1646913274/?edition_number=1&blockchain=bitmark",
+        "duration": 240,
+        "label": {
+          "artist": "Rafaël Rozendaal",
+          "title": "Infinite Entropy 7"
+        }
+      },
+      {
+        "title": "Rafaël Rozendaal — Infinite Entropy 10",
+        "source": "https://cdn.feralfileassets.com/previews/11b4449b-e435-4737-bd14-81cd3366ac89/1646913406/?edition_number=1&blockchain=bitmark",
+        "duration": 240,
+        "label": {
+          "artist": "Rafaël Rozendaal",
+          "title": "Infinite Entropy 10"
+        }
+      },
+      {
+        "title": "Travess Smalley — CRAWL",
+        "source": "https://cdn.feralfileassets.com/previews/82dcf3d9-56ba-40bf-b57d-3a631bbdb7d5/1719374496/_unique-previews/0/",
+        "duration": 240,
+        "label": {
+          "artist": "Travess Smalley",
+          "title": "CRAWL"
+        }
+      },
+      {
+        "title": "Kim Asendorf — Cargo",
+        "source": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/426000000",
+        "duration": 240,
+        "label": {
+          "artist": "Kim Asendorf",
+          "title": "Cargo"
+        }
+      },
+      {
+        "title": "Golan Levin — Cytographia",
+        "source": "https://generator.artblocks.io/1/0x99a9b7c1116f9ceeb1652de04d5969cce509b069/487000000",
+        "duration": 240,
+        "label": {
+          "artist": "Golan Levin",
+          "title": "Cytographia"
+        }
+      },
+      {
+        "title": "Anna Carreras — Arrels",
+        "source": "https://cdn.feralfileassets.com/previews/43c29566-9fad-42ce-aab9-1c4947164d94/1615728457/?edition_number=1&blockchain=bitmark",
+        "duration": 240,
+        "label": {
+          "artist": "Anna Carreras",
+          "title": "Arrels"
+        }
+      },
+      {
+        "title": "Matt Kane — Gazers",
+        "source": "https://generator.artblocks.io/1/0xa7d8d9ef8d8ce8992df33d8b8cf4aebabd5bd270/215000000",
+        "duration": 240,
+        "label": {
+          "artist": "Matt Kane",
+          "title": "Gazers"
+        }
+      },
+      {
+        "title": "Leander Herzog — Returns",
+        "source": "https://ipfs.io/ipfs/QmZ3ZWUmLDNwAHGR8bSDwCeznAhxeZXYn9cfQqeWoUtnnK?fxhash=oo7Q55bKn6Ukzo9ZhbTrdpAmhrxJziXVxXZ42e2aUDVXr2XYRPE",
+        "duration": 240,
+        "label": {
+          "artist": "Leander Herzog",
+          "title": "Returns"
+        }
+      },
+      {
+        "title": "jjjjjohn — Slime Skelly",
+        "source": "https://ipfs.io/ipfs/QmbjdQd9rhXy33RGptu5x4wbbNUAA1qX2bCheFoBUqkx1x",
+        "duration": 120,
+        "label": {
+          "artist": "jjjjjohn",
+          "title": "Slime Skelly"
+        }
+      },
+      {
+        "title": "ertdfgcvb — POST 1",
+        "source": "https://cdn.feralfileassets.com/previews/5d7e9132-059f-44d9-a6a9-3c8a9b688965/1632387593/?edition_number=17&blockchain=bitmark",
+        "duration": 240,
+        "label": {
+          "artist": "ertdfgcvb",
+          "title": "POST 1"
+        }
+      }
+    ]
+  }
+}

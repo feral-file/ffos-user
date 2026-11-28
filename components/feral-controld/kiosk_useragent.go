@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 )
 
 // kioskUserAgent keeps the kiosk Chromium's own User-Agent, read from its
@@ -20,6 +22,7 @@ import (
 // one, and it changes only when Chromium is upgraded, so it is re-read on
 // an interval and the last good value is kept through a kiosk restart.
 type kioskUserAgent struct {
+	native     *playerlink.Client
 	versionURL string
 	client     *http.Client
 	logger     *zap.Logger
@@ -66,7 +69,25 @@ func (k *kioskUserAgent) Run(ctx context.Context) {
 	}
 }
 
+func newNativeKioskUserAgent(player *playerlink.Client, logger *zap.Logger) *kioskUserAgent {
+	k := &kioskUserAgent{native: player, logger: logger}
+	k.value.Store("")
+	return k
+}
 func (k *kioskUserAgent) read(ctx context.Context) bool {
+	if k.native != nil {
+		var state struct {
+			Engine struct {
+				UserAgent string `json:"userAgent"`
+			} `json:"engine"`
+		}
+		if err := k.native.Call(ctx, "state.get", map[string]any{}, &state, nil); err != nil || state.Engine.UserAgent == "" {
+			return false
+		}
+		k.value.Store(state.Engine.UserAgent)
+		return true
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, k.versionURL, nil)
 	if err != nil {
 		return false

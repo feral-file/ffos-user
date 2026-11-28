@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +22,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/playercontrol"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
@@ -107,7 +109,8 @@ type Executor interface {
 
 type executor struct {
 	sync.Mutex
-	cdp          cdp.CDP
+	cdp          cdp.CDP // Retired boot-recovery tests only; never wired by the runtime.
+	player       playercontrol.Sender
 	deviceStatus status.DeviceStatus
 	logger       *zap.Logger
 
@@ -173,13 +176,7 @@ type executor struct {
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
 
-	// Mouse position tracking
-	cursorPositionX   float64
-	cursorPositionY   float64
-	screenWidth       float64
-	screenHeight      float64
-	screenInitialized bool
-	movingScaleFactor float64
+	input *nativeInput
 
 	// Deps
 	json  wrapper.JSON
@@ -576,7 +573,7 @@ type executor struct {
 }
 
 func New(
-	cdp cdp.CDP,
+	player playercontrol.Sender,
 	deviceStatus status.DeviceStatus,
 	statusPoller status.Poller,
 	panelDDC ddc.PanelDDC,
@@ -588,7 +585,7 @@ func New(
 	l *zap.Logger,
 ) Executor {
 	return &executor{
-		cdp:          cdp,
+		player:       player,
 		deviceStatus: deviceStatus,
 		statusPoller: statusPoller,
 		logger:       l,
@@ -933,20 +930,11 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.connect(ctx, bytes)
 	case commands.CMD_SHOW_PAIRING_QR_CODE:
 		result, err = e.showPairingQRCode(ctx, bytes)
-	case commands.CMD_KEYBOARD_EVENT:
-		result, err = e.handleKeyboardEvent(bytes)
-	case commands.CMD_MOUSE_DRAG_EVENT:
-		result, err = e.handleMouseMoveEvent(bytes)
-	case commands.CMD_MOUSE_TAP_EVENT:
-		result, err = e.handleMouseTapEvent(bytes)
-	case commands.CMD_MOUSE_DOUBLE_TAP_EVENT:
-		result, err = e.handleMouseDoubleTapEvent(bytes)
-	case commands.CMD_MOUSE_LONG_PRESS_EVENT:
-		result, err = e.handleMouseLongPressEvent(ctx, bytes)
-	case commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT:
-		result, err = e.handleMouseClickAndDragEvent(bytes)
-	case commands.CMD_ZOOM_GESTURE:
-		result, err = e.handleZoomGestureEvent(ctx, bytes)
+	case commands.CMD_KEYBOARD_EVENT, commands.CMD_MOUSE_DRAG_EVENT,
+		commands.CMD_MOUSE_TAP_EVENT, commands.CMD_MOUSE_DOUBLE_TAP_EVENT,
+		commands.CMD_MOUSE_LONG_PRESS_EVENT, commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		commands.CMD_ZOOM_GESTURE:
+		result, err = e.handleNativeInput(ctx, cmd.Type, bytes)
 	case commands.CMD_PROFILE:
 		result, err = e.getSysMetrics()
 	case commands.CMD_SCREEN_ROTATION:
@@ -1078,59 +1066,29 @@ func (e *executor) connect(ctx context.Context, args []byte) (interface{}, error
 // before the claim), and a force push would visibly restart it. The player
 // treats the flag as "make sure something is playing" and no-ops otherwise.
 func (e *executor) sendDisplayDefaultPlaylist() error {
-	if e.cdp == nil {
-		return fmt.Errorf("cdp client is not configured")
+	if e.player == nil {
+		return fmt.Errorf("native player unavailable")
 	}
-
-	send := func() (interface{}, error) {
-		command := commands.Command{
-			Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-			Arguments: map[string]any{
-				"onlyIfNoPlaylist": true,
-			},
-		}
-		payload, err := command.JSON()
-		if err != nil {
-			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
-		}
-
-		// This send bypasses commandrouter, so it must do what
-		// commandrouter does before every replacing send: drop the
-		// attested signature verdict. From the moment the send lands the
-		// player may be showing its own default content — bytes controld
-		// never verified — and a status round in that window must omit,
-		// never re-attest, the previous playlist's verdict
-		// (feral-file/ffos-user#307). Inside the push section, before the
-		// send, like every other producer.
-		e.sleepApplyMu.Lock()
-		invalidate := e.verdictInvalidator
-		e.sleepApplyMu.Unlock()
-		if invalidate != nil {
-			invalidate()
-		}
-
-		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
-		}
-		return result, nil
-	}
-
-	e.sleepApplyMu.Lock()
-	withPlayerPush := e.withPlayerPush
-	e.sleepApplyMu.Unlock()
-
+	var result interface{}
 	var err error
-	if withPlayerPush != nil {
-		withPlayerPush(func() {
-			_, err = send()
-		})
+	send := func() {
+		if e.verdictInvalidator != nil {
+			e.verdictInvalidator()
+		}
+		result, err = e.player.Send(context.Background(), commands.Command{Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST, Arguments: map[string]any{"onlyIfNoPlaylist": true}})
+	}
+	if e.withPlayerPush != nil {
+		e.withPlayerPush(send)
+	} else {
+		send()
+	}
+	if err != nil {
 		return err
 	}
-	_, err = send()
-	return err
+	if !playerresponse.OK(result) {
+		return fmt.Errorf("native player rejected default playback")
+	}
+	return nil
 }
 
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {
@@ -1389,12 +1347,12 @@ type setupNarrator interface {
 	ShowConnectingIfShowing(message string, states ...string)
 }
 
-// setupUI lazily builds the setup-narration surface from the executor's CDP
-// seam. Built once; tests may pre-set e.setupNarrator to a spy.
+// setupUI is a defensive fallback for standalone executors. Production injects
+// the shared native narrator before any setup operation; tests may supply a spy.
 func (e *executor) setupUI() setupNarrator {
 	e.setupNarratorOnce.Do(func() {
 		if e.setupNarrator == nil {
-			e.setupNarrator = setupui.New(e.cdp, "", e.logger)
+			e.setupNarrator = setupui.New(playerlink.New(playerlink.SocketPath()), e.logger)
 		}
 	})
 	return e.setupNarrator
@@ -2267,8 +2225,6 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 		zap.String("output", outputName),
 		zap.String("rotation", newRotation))
 
-	e.screenInitialized = false
-
 	// Force refresh status poller
 	e.statusPoller.ForceRefresh()
 
@@ -2288,781 +2244,6 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 		zap.String("orientation_reply", orientationReplyMsg))
 
 	return map[string]string{"orientation": orientationReplyMsg}, nil
-}
-
-func (e *executor) handleKeyboardEvent(args []byte) (interface{}, error) {
-	var cmdArgs struct {
-		Code int `json:"code"`
-	}
-
-	err := e.json.Unmarshal(args, &cmdArgs)
-	if err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	// The remote keyboard payload uses a constrained numeric code set:
-	// standard phone-keyboard characters plus a small special-key subset.
-	keyEvent := e.keyboardEventForCode(cmdArgs.Code)
-	if keyEvent == nil {
-		return nil, fmt.Errorf("unsupported keyboard event code: %d", cmdArgs.Code)
-	}
-
-	e.logger.Info("Keyboard event",
-		zap.Int("code", cmdArgs.Code),
-		zap.String("key", keyEvent.key),
-		zap.String("code_name", keyEvent.code))
-
-	keyDownParams := map[string]interface{}{
-		"type":                  "keyDown",
-		"windowsVirtualKeyCode": cmdArgs.Code,
-		"nativeVirtualKeyCode":  cmdArgs.Code,
-		"key":                   keyEvent.key,
-		"code":                  keyEvent.code,
-	}
-	if keyEvent.text != "" {
-		keyDownParams["text"] = keyEvent.text
-		keyDownParams["unmodifiedText"] = keyEvent.text
-	}
-
-	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyDownParams)
-	if err != nil {
-		e.logger.Error("Failed to send key via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to send keyboard event: %w", err)
-	}
-
-	keyUpParams := map[string]interface{}{
-		"type":                  "keyUp",
-		"windowsVirtualKeyCode": cmdArgs.Code,
-		"nativeVirtualKeyCode":  cmdArgs.Code,
-		"key":                   keyEvent.key,
-		"code":                  keyEvent.code,
-	}
-	if keyEvent.text != "" {
-		keyUpParams["text"] = keyEvent.text
-		keyUpParams["unmodifiedText"] = keyEvent.text
-	}
-
-	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyUpParams)
-	if err != nil {
-		e.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
-	}
-
-	return CmdOK, nil
-}
-
-type keyboardEvent struct {
-	key  string
-	code string
-	text string
-}
-
-// keyboardEventForCode translates the remote command's numeric code into the
-// browser-facing values Chromium expects. This is intentionally a CDP-level
-// approximation of keyboard input, not an OS/kernel keyboard injection path.
-func (e *executor) keyboardEventForCode(keyCode int) *keyboardEvent {
-	switch keyCode {
-	case 32:
-		return &keyboardEvent{key: " ", code: "Space", text: " "}
-	case 9:
-		return &keyboardEvent{key: "Tab", code: "Tab"}
-	case 13:
-		return &keyboardEvent{key: "Enter", code: "Enter"}
-	case 27:
-		return &keyboardEvent{key: "Escape", code: "Escape"}
-	case 8:
-		return &keyboardEvent{key: "Backspace", code: "Backspace"}
-	}
-
-	if keyCode < 32 || keyCode > 126 {
-		e.logger.Warn("Unhandled keyboard event code", zap.Int("code", keyCode))
-		return nil
-	}
-
-	key, code, text := printableASCIIKeyEvent(keyCode)
-	if code == "" {
-		e.logger.Warn("Unhandled printable keyboard event code", zap.Int("code", keyCode))
-		return nil
-	}
-	return &keyboardEvent{key: key, code: code, text: text}
-}
-
-func printableASCIIKeyEvent(keyCode int) (key string, code string, text string) {
-	switch keyCode {
-	case 32:
-		return " ", "Space", " "
-	case 33:
-		return "!", "Digit1", "!"
-	case 34:
-		return "\"", "Quote", "\""
-	case 35:
-		return "#", "Digit3", "#"
-	case 36:
-		return "$", "Digit4", "$"
-	case 37:
-		return "%", "Digit5", "%"
-	case 38:
-		return "&", "Digit7", "&"
-	case 39:
-		return "'", "Quote", "'"
-	case 40:
-		return "(", "Digit9", "("
-	case 41:
-		return ")", "Digit0", ")"
-	case 42:
-		return "*", "Digit8", "*"
-	case 43:
-		return "+", "Equal", "+"
-	case 44:
-		return ",", "Comma", ","
-	case 45:
-		return "-", "Minus", "-"
-	case 46:
-		return ".", "Period", "."
-	case 47:
-		return "/", "Slash", "/"
-	case 48, 49, 50, 51, 52, 53, 54, 55, 56, 57:
-		return string(rune(keyCode)), "Digit" + string(rune(keyCode)), string(rune(keyCode))
-	case 58:
-		return ":", "Semicolon", ":"
-	case 59:
-		return ";", "Semicolon", ";"
-	case 60:
-		return "<", "Comma", "<"
-	case 61:
-		return "=", "Equal", "="
-	case 62:
-		return ">", "Period", ">"
-	case 63:
-		return "?", "Slash", "?"
-	case 64:
-		return "@", "Digit2", "@"
-	case 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
-		75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
-		85, 86, 87, 88, 89, 90:
-		return string(rune(keyCode)), "Key" + string(rune(keyCode)), string(rune(keyCode))
-	case 91:
-		return "[", "BracketLeft", "["
-	case 92:
-		return "\\", "Backslash", "\\"
-	case 93:
-		return "]", "BracketRight", "]"
-	case 94:
-		return "^", "Digit6", "^"
-	case 95:
-		return "_", "Minus", "_"
-	case 96:
-		return "`", "Backquote", "`"
-	case 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-		107, 108, 109, 110, 111, 112, 113, 114, 115, 116,
-		117, 118, 119, 120, 121, 122:
-		upper := strings.ToUpper(string(rune(keyCode)))
-		return string(rune(keyCode)), "Key" + upper, string(rune(keyCode))
-	case 123:
-		return "{", "BracketLeft", "{"
-	case 124:
-		return "|", "Backslash", "|"
-	case 125:
-		return "}", "BracketRight", "}"
-	case 126:
-		return "~", "Backquote", "~"
-	default:
-		return "", "", ""
-	}
-}
-
-type mouseButtonWire string
-
-const (
-	mouseButtonLeft   mouseButtonWire = "left"
-	mouseButtonRight  mouseButtonWire = "right"
-	mouseButtonMiddle mouseButtonWire = "middle"
-)
-
-func (e *executor) parseMouseButton(args []byte) (button string, buttons int, err error) {
-	var cmdArgs struct {
-		Button string `json:"button"`
-	}
-	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
-		return "", 0, fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	wire := mouseButtonWire(cmdArgs.Button)
-	if wire == "" {
-		wire = mouseButtonLeft
-	}
-	switch wire {
-	case mouseButtonLeft:
-		return "left", 1, nil
-	case mouseButtonRight:
-		return "right", 2, nil
-	case mouseButtonMiddle:
-		return "middle", 4, nil
-	default:
-		return "", 0, fmt.Errorf("invalid arguments: unknown mouse button: %s", cmdArgs.Button)
-	}
-}
-
-func (e *executor) initializeScreenDimensions() {
-	if e.screenInitialized {
-		return
-	}
-
-	// Get screen dimensions using CDP's Runtime.evaluate
-	evalParams := map[string]interface{}{
-		"expression":    "({width: window.innerWidth, height: window.innerHeight})",
-		"returnByValue": true,
-	}
-
-	result, err := e.cdp.Send("Runtime.evaluate", evalParams)
-	if err != nil {
-		e.logger.Error("Failed to get screen dimensions", zap.Error(err))
-		// Use default values
-		e.screenWidth = 1920
-		e.screenHeight = 1080
-	} else if result != nil {
-		if dimensions, ok := result.(map[string]interface{}); ok {
-			if width, ok := dimensions["width"].(float64); ok {
-				e.screenWidth = width
-			} else {
-				e.screenWidth = 1920
-			}
-			if height, ok := dimensions["height"].(float64); ok {
-				e.screenHeight = height
-			} else {
-				e.screenHeight = 1080
-			}
-		}
-	}
-
-	// Initialize cursor at the center of the screen
-	e.cursorPositionX = e.screenWidth / 2
-	e.cursorPositionY = e.screenHeight / 2
-	e.screenInitialized = true
-	e.movingScaleFactor = e.screenWidth / 1920
-
-	e.logger.Info("Screen dimensions initialized",
-		zap.Float64("width", e.screenWidth),
-		zap.Float64("height", e.screenHeight),
-		zap.Float64("cursorX", e.cursorPositionX),
-		zap.Float64("cursorY", e.cursorPositionY))
-}
-
-func (e *executor) handleMouseMoveEventWithButtons(
-	args []byte,
-	pressedButtons int,
-) (interface{}, error) {
-	// Initialize screen dimensions if not done already
-	e.initializeScreenDimensions()
-
-	// Parse cursor offsets
-	var cursorArgs struct {
-		MessageID     string `json:"messageID"`
-		CursorOffsets []struct {
-			DX float64 `json:"dx"`
-			DY float64 `json:"dy"`
-		} `json:"cursorOffsets"`
-	}
-
-	err := e.json.Unmarshal(args, &cursorArgs)
-	if err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	// Convert relative positions to absolute positions
-	absolutePositions := make([]map[string]float64, 0, len(cursorArgs.CursorOffsets))
-
-	for i, offset := range cursorArgs.CursorOffsets {
-		// Calculate the magnitude of this offset
-		magnitude := e.math.Sqrt(offset.DX*offset.DX + offset.DY*offset.DY)
-
-		var clampedDX, clampedDY float64
-
-		// Only clamp obvious outliers (very large jumps)
-		if magnitude > 150 {
-			// This is likely a catch-up jump, clamp aggressively
-			maxOffset := 25.0
-			clampedDX = e.math.Max(-maxOffset, e.math.Min(maxOffset, offset.DX))
-			clampedDY = e.math.Max(-maxOffset, e.math.Min(maxOffset, offset.DY))
-
-			e.logger.Debug("Clamping outlier offset",
-				zap.Int("index", i),
-				zap.Float64("magnitude", magnitude),
-				zap.Float64("originalDX", offset.DX),
-				zap.Float64("originalDY", offset.DY),
-				zap.Float64("clampedDX", clampedDX),
-				zap.Float64("clampedDY", clampedDY))
-		} else {
-			// Normal movement, use original values
-			clampedDX = offset.DX
-			clampedDY = offset.DY
-		}
-
-		// Update cursor position with the offset
-		e.cursorPositionX += (clampedDX * e.movingScaleFactor)
-		e.cursorPositionY += (clampedDY * e.movingScaleFactor)
-
-		// Ensure position stays within screen bounds
-		e.cursorPositionX = e.math.Max(0, e.math.Min(e.cursorPositionX, e.screenWidth))
-		e.cursorPositionY = e.math.Max(0, e.math.Min(e.cursorPositionY, e.screenHeight))
-
-		// Add to absolute positions array
-		absolutePositions = append(absolutePositions, map[string]float64{
-			"x": e.cursorPositionX,
-			"y": e.cursorPositionY,
-		})
-	}
-
-	// Skip if there are no positions
-	if len(absolutePositions) == 0 {
-		return CmdOK, nil
-	}
-
-	// 1. Pass the entire array of absolute positions to JavaScript via CDP
-	positionsJSON, err := e.json.Marshal(map[string]interface{}{
-		"messageID": cursorArgs.MessageID,
-		"message": map[string]interface{}{
-			"command": "cursorUpdate",
-			"request": map[string]interface{}{
-				"positions": absolutePositions,
-			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal positions: %w", err)
-	}
-
-	// Call JavaScript function to process all positions
-	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(positionsJSON)),
-	})
-	if err != nil {
-		e.logger.Error("Failed to execute JavaScript cursor positions", zap.Error(err))
-		return nil, fmt.Errorf("failed to process cursor positions: %w", err)
-	}
-
-	// 2. Send the final mouse event to actually move the cursor
-	moveParams := map[string]interface{}{
-		"type":       "mouseMoved",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     "none",
-		"buttons":    pressedButtons,
-		"clickCount": 0,
-	}
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", moveParams)
-	if err != nil {
-		e.logger.Error("Failed to move mouse via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to move mouse: %w", err)
-	}
-
-	e.logger.Info("Mouse moved to final position",
-		zap.Float64("x", e.cursorPositionX),
-		zap.Float64("y", e.cursorPositionY))
-
-	return CmdOK, nil
-}
-
-func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
-	return e.handleMouseMoveEventWithButtons(args, 0)
-}
-
-func (e *executor) handleMouseTapEvent(args []byte) (interface{}, error) {
-	// Initialize screen dimensions if not done already
-	e.initializeScreenDimensions()
-
-	button, pressedButtons, err := e.parseMouseButton(args)
-	if err != nil {
-		return nil, err
-	}
-
-	e.logger.Info("Mouse tap event at current position",
-		zap.Float64("x", e.cursorPositionX),
-		zap.Float64("y", e.cursorPositionY))
-
-	if err := e.dispatchMouseClick(button, pressedButtons, 1); err != nil {
-		return nil, err
-	}
-
-	return CmdOK, nil
-}
-
-func (e *executor) dispatchMouseClick(button string, pressedButtons int, clickCount int) (err error) {
-	downParams := map[string]interface{}{
-		"type":       "mousePressed",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     button,
-		"buttons":    pressedButtons,
-		"clickCount": clickCount,
-	}
-	upParams := map[string]interface{}{
-		"type":       "mouseReleased",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     button,
-		"buttons":    0,
-		"clickCount": clickCount,
-	}
-
-	pressed := false
-	defer func() {
-		if !pressed {
-			return
-		}
-		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
-		if releaseErr != nil {
-			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
-		}
-	}()
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
-	if err != nil {
-		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
-		return fmt.Errorf("failed to press mouse button: %w", err)
-	}
-	pressed = true
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
-	if err != nil {
-		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
-		return fmt.Errorf("failed to release mouse button: %w", err)
-	}
-	pressed = false
-
-	return nil
-}
-
-func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
-	e.initializeScreenDimensions()
-
-	button, pressedButtons, err := e.parseMouseButton(args)
-	if err != nil {
-		return nil, err
-	}
-
-	e.logger.Info("Mouse double tap event at current position",
-		zap.Float64("x", e.cursorPositionX),
-		zap.Float64("y", e.cursorPositionY))
-
-	// Chromium's dblclick handling is sequence-sensitive: a single press/release
-	// pair with clickCount=2 can still collapse to a plain click on targets that
-	// inspect the full click sequence. Emit two clicks so the second one carries
-	// the double-click count expected by dblclick/double-tap handlers.
-	for clickCount := 1; clickCount <= 2; clickCount++ {
-		if err := e.dispatchMouseClick(button, pressedButtons, clickCount); err != nil {
-			return nil, err
-		}
-	}
-
-	return CmdOK, nil
-}
-
-func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (result interface{}, err error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	e.initializeScreenDimensions()
-
-	button, pressedButtons, err := e.parseMouseButton(args)
-	if err != nil {
-		return nil, err
-	}
-
-	e.logger.Info("Mouse long press event at current position",
-		zap.Float64("x", e.cursorPositionX),
-		zap.Float64("y", e.cursorPositionY))
-
-	downParams := map[string]interface{}{
-		"type":       "mousePressed",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     button,
-		"buttons":    pressedButtons,
-		"clickCount": 1,
-	}
-	upParams := map[string]interface{}{
-		"type":       "mouseReleased",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     button,
-		"buttons":    0,
-		"clickCount": 1,
-	}
-
-	pressed := false
-	defer func() {
-		if !pressed {
-			return
-		}
-		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
-		pressed = false
-		if releaseErr != nil {
-			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
-			// Join with any return err (e.g. ctx cancel during hold vs CDP stuck-button cleanup failure).
-			cleanupErr := fmt.Errorf("failed to release mouse button during cleanup: %w", releaseErr)
-			if err != nil {
-				err = errors.Join(err, cleanupErr)
-				return
-			}
-			err = cleanupErr
-		}
-	}()
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
-	if err != nil {
-		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to press mouse button: %w", err)
-	}
-	pressed = true
-
-	// Hold duration must respect ctx so teardown can unwind without waiting the full second
-	// while the button is still logically down in Chromium.
-	if err = e.clock.SleepContext(ctx, 1*time.Second); err != nil {
-		return nil, err
-	}
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
-	if err != nil {
-		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to release mouse button: %w", err)
-	}
-	pressed = false
-
-	return CmdOK, nil
-}
-
-func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}, err error) {
-	e.initializeScreenDimensions()
-
-	// Parse cursor offsets to decide whether we should press/move/release.
-	var cursorArgs struct {
-		CursorOffsets []struct {
-			DX float64 `json:"dx"`
-			DY float64 `json:"dy"`
-		} `json:"cursorOffsets"`
-	}
-	if err := e.json.Unmarshal(args, &cursorArgs); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if len(cursorArgs.CursorOffsets) == 0 {
-		return CmdOK, nil
-	}
-	if len(cursorArgs.CursorOffsets) > maxClickAndDragCursorOffsets {
-		return nil, fmt.Errorf("invalid arguments: cursorOffsets exceeds maximum of %d", maxClickAndDragCursorOffsets)
-	}
-
-	e.logger.Info("Mouse click-and-drag event at current position",
-		zap.Float64("x", e.cursorPositionX),
-		zap.Float64("y", e.cursorPositionY))
-
-	downParams := map[string]interface{}{
-		"type":       "mousePressed",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     "left",
-		"buttons":    1,
-		"clickCount": 1,
-	}
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
-	if err != nil {
-		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to press mouse button: %w", err)
-	}
-	// Each click-and-drag batch is press + move + release. If the move step fails, we still
-	// must release the button; otherwise the page can keep a stuck mouse-down in Chromium
-	// until a later event clears it. Failed cleanup releases are always surfaced: alone when
-	// the move succeeded, or joined with the move error so a stuck-button cleanup failure is
-	// not dropped when the move path already failed.
-	defer func() {
-		up := map[string]interface{}{
-			"type":       "mouseReleased",
-			"x":          e.cursorPositionX,
-			"y":          e.cursorPositionY,
-			"button":     "left",
-			"buttons":    0,
-			"clickCount": 1,
-		}
-		if _, relErr := e.cdp.Send("Input.dispatchMouseEvent", up); relErr != nil {
-			e.logger.Error("click-and-drag: best-effort release after batch failed", zap.Error(relErr))
-			releaseErr := fmt.Errorf("failed to release mouse button during cleanup: %w", relErr)
-			if err == nil {
-				err = releaseErr
-			} else {
-				err = errors.Join(err, releaseErr)
-			}
-			result = nil
-		}
-	}()
-
-	_, err = e.handleMouseMoveEventWithButtons(args, 1)
-	if err != nil {
-		return nil, err
-	}
-
-	return CmdOK, nil
-}
-
-// handleZoomGestureEvent dispatches non-Ctrl wheel input at the CDP boundary.
-// This avoids Chromium page zoom while still giving artwork a zoom-like input.
-func (e *executor) handleZoomGestureEvent(ctx context.Context, args []byte) (interface{}, error) {
-	e.initializeScreenDimensions()
-
-	var in struct {
-		MessageID  string    `json:"messageID"`
-		ScaleSteps []float64 `json:"scaleSteps"`
-	}
-	if err := e.json.Unmarshal(args, &in); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if len(in.ScaleSteps) == 0 {
-		return CmdOK, nil
-	}
-	if len(in.ScaleSteps) > maxZoomGestureSteps {
-		return nil, fmt.Errorf("invalid arguments: scaleSteps exceeds maximum of %d", maxZoomGestureSteps)
-	}
-
-	for _, step := range in.ScaleSteps {
-		if step <= 0 {
-			return nil, fmt.Errorf("invalid arguments: scaleSteps must be positive: %v", step)
-		}
-	}
-
-	for _, step := range in.ScaleSteps {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		x, y := e.zoomGesturePoint(step)
-		if err := e.sendZoomWheelGesture(step, x, y); err != nil {
-			e.logger.Error("Failed to dispatch zoom wheel gesture", zap.Error(err))
-			return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
-		}
-	}
-
-	return CmdOK, nil
-}
-
-func (e *executor) zoomGesturePoint(scaleFactor float64) (float64, float64) {
-	viewportX, viewportY, viewportWidth, viewportHeight := e.currentVisualViewport()
-	return e.innerToVisualViewport(e.cursorPositionX, e.cursorPositionY, viewportX, viewportY, viewportWidth, viewportHeight)
-}
-
-func (e *executor) innerToVisualViewport(x, y, viewportX, viewportY, viewportWidth, viewportHeight float64) (float64, float64) {
-	visualX := x - viewportX
-	visualY := y - viewportY
-	return e.clampToViewport(visualX, visualY, 0, 0, viewportWidth, viewportHeight)
-}
-
-func (e *executor) currentVisualViewport() (float64, float64, float64, float64) {
-	viewportX, viewportY := 0.0, 0.0
-	viewportWidth, viewportHeight := e.screenWidth, e.screenHeight
-
-	evalParams := map[string]interface{}{
-		"expression": `
-			(() => {
-				const vv = window.visualViewport;
-				return vv ? {
-					offsetLeft: vv.offsetLeft,
-					offsetTop: vv.offsetTop,
-					width: vv.width,
-					height: vv.height
-				} : null;
-			})()`,
-		"returnByValue": true,
-	}
-
-	result, err := e.cdp.Send("Runtime.evaluate", evalParams)
-	if err != nil {
-		e.logger.Warn("Failed to get visual viewport; using screen bounds", zap.Error(err))
-		return viewportX, viewportY, viewportWidth, viewportHeight
-	}
-
-	if result == nil {
-		return viewportX, viewportY, viewportWidth, viewportHeight
-	}
-
-	viewport, ok := result.(map[string]interface{})
-	if !ok {
-		return viewportX, viewportY, viewportWidth, viewportHeight
-	}
-
-	if offsetLeft, ok := viewport["offsetLeft"].(float64); ok {
-		viewportX = offsetLeft
-	}
-	if offsetTop, ok := viewport["offsetTop"].(float64); ok {
-		viewportY = offsetTop
-	}
-	if width, ok := viewport["width"].(float64); ok && width > 0 {
-		viewportWidth = width
-	}
-	if height, ok := viewport["height"].(float64); ok && height > 0 {
-		viewportHeight = height
-	}
-
-	return viewportX, viewportY, viewportWidth, viewportHeight
-}
-
-func (e *executor) clampToViewport(x, y, viewportX, viewportY, viewportWidth, viewportHeight float64) (float64, float64) {
-	minX := viewportX
-	maxX := viewportX + viewportWidth
-	minY := viewportY
-	maxY := viewportY + viewportHeight
-
-	if x < minX {
-		x = minX
-	} else if x > maxX {
-		x = maxX
-	}
-
-	if y < minY {
-		y = minY
-	} else if y > maxY {
-		y = maxY
-	}
-
-	return x, y
-}
-
-func (e *executor) sendZoomWheelGesture(scaleFactor, x, y float64) error {
-	if scaleFactor == 1 {
-		return nil
-	}
-
-	deltaY := zoomWheelDeltaY(scaleFactor)
-	if scaleFactor > 1 {
-		deltaY = -deltaY
-	}
-
-	params := map[string]interface{}{
-		"type":      "mouseWheel",
-		"x":         x,
-		"y":         y,
-		"deltaX":    0,
-		"deltaY":    deltaY,
-		"button":    "none",
-		"buttons":   0,
-		"modifiers": 0,
-	}
-
-	_, err := e.cdp.Send("Input.dispatchMouseEvent", params)
-	if err != nil {
-		return fmt.Errorf("dispatch wheel gesture: %w", err)
-	}
-
-	return nil
-}
-
-func zoomWheelDeltaY(scaleFactor float64) float64 {
-	magnitude := math.Abs(math.Log2(scaleFactor))
-	steps := math.Round(magnitude * 8)
-	if steps < 1 {
-		steps = 1
-	}
-	return 120.0 * steps
 }
 
 func (e *executor) shutdown(ctx context.Context) (interface{}, error) {

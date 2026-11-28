@@ -1,0 +1,7 @@
+build*/
+vendor/
+node_modules/
+*.core
+__pycache__/
+*.pyc
+docs/evidence/device/

@@ -1,0 +1,52 @@
+Nov 18 10:15:33 FF1-SKYZ2E3A systemd[874]: Started [systemd-run] /usr/bin/make verify-scripts.
+Nov 18 10:15:37 FF1-SKYZ2E3A make[953295]: test-serve-feral-player: OK
+Nov 18 10:15:49 FF1-SKYZ2E3A make[953546]: test-headless-startup-contract: OK
+Nov 18 10:15:49 FF1-SKYZ2E3A make[954124]: WARN: enable-wake-on-lan: enp2s0 does not advertise magic-packet wake support
+Nov 18 10:15:49 FF1-SKYZ2E3A make[954110]: test-enable-wake-on-lan: OK
+Nov 18 10:15:53 FF1-SKYZ2E3A make[954147]: test-wifi-reading: OK
+Nov 18 10:15:56 FF1-SKYZ2E3A make[957682]: grep: warning: stray \ before /
+Nov 18 10:15:59 FF1-SKYZ2E3A make[959885]: grep: warning: stray \ before /
+Nov 18 10:16:02 FF1-SKYZ2E3A make[954429]: test-agent-iso-build-guard: OK
+Nov 18 10:16:53 FF1-SKYZ2E3A make[965266]: grep: warning: stray \ before /
+Nov 18 10:17:24 FF1-SKYZ2E3A make[971396]: grep: warning: stray \ before /
+Nov 18 10:17:25 FF1-SKYZ2E3A make[971917]: grep: warning: stray \ before /
+Nov 18 10:17:25 FF1-SKYZ2E3A make[971917]: grep: warning: stray \ before /
+Nov 18 10:17:25 FF1-SKYZ2E3A make[971917]: grep: warning: stray \ before /
+Nov 18 10:17:32 FF1-SKYZ2E3A make[975203]: grep: warning: stray \ before /
+Nov 18 10:17:32 FF1-SKYZ2E3A make[975268]: grep: warning: stray \ before /
+Nov 18 10:17:32 FF1-SKYZ2E3A make[975268]: grep: warning: stray \ before /
+Nov 18 10:17:32 FF1-SKYZ2E3A make[975268]: grep: warning: stray \ before /
+Nov 18 10:17:38 FF1-SKYZ2E3A systemd[874]: Stopping [systemd-run] /usr/bin/make verify-scripts...
+Nov 18 10:17:38 FF1-SKYZ2E3A make[953293]: make: *** [Makefile:76: verify-scripts] Terminated
+Nov 18 10:17:38 FF1-SKYZ2E3A systemd[874]: Stopped [systemd-run] /usr/bin/make verify-scripts.
+Nov 18 10:17:38 FF1-SKYZ2E3A systemd[874]: ff-native-script-check.service: Consumed 34.449s CPU time over 2min 4.823s wall clock time, 23.9M memory peak.
+Nov 18 10:31:27 FF1-SKYZ2E3A systemd[874]: Started [systemd-run] /usr/bin/make verify-scripts.
+Nov 18 10:31:29 FF1-SKYZ2E3A make[986825]: test-serve-feral-player: OK
+Nov 18 10:31:42 FF1-SKYZ2E3A make[987303]: test-headless-startup-contract: OK
+Nov 18 10:31:42 FF1-SKYZ2E3A make[987869]: WARN: enable-wake-on-lan: enp2s0 does not advertise magic-packet wake support
+Nov 18 10:31:42 FF1-SKYZ2E3A make[987855]: test-enable-wake-on-lan: OK
+Nov 18 10:31:46 FF1-SKYZ2E3A make[987892]: test-wifi-reading: OK
+Nov 18 10:31:49 FF1-SKYZ2E3A make[991378]: grep: warning: stray \ before /
+Nov 18 10:31:52 FF1-SKYZ2E3A make[993519]: grep: warning: stray \ before /
+Nov 18 10:31:52 FF1-SKYZ2E3A make[993620]: grep: warning: stray \ before /
+Nov 18 10:31:55 FF1-SKYZ2E3A make[988141]: test-agent-iso-build-guard: OK
+Nov 18 10:33:13 FF1-SKYZ2E3A make[1004775]: grep: warning: stray \ before /
+Nov 18 10:33:14 FF1-SKYZ2E3A make[1005035]: grep: warning: stray \ before /
+Nov 18 10:33:14 FF1-SKYZ2E3A make[1005035]: grep: warning: stray \ before /
+Nov 18 10:33:14 FF1-SKYZ2E3A make[1005035]: grep: warning: stray \ before /
+Nov 18 10:33:15 FF1-SKYZ2E3A make[1005982]: grep: warning: stray \ before /
+Nov 18 10:33:15 FF1-SKYZ2E3A make[1005982]: grep: warning: stray \ before /
+Nov 18 10:33:15 FF1-SKYZ2E3A make[1005982]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008468]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008533]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008533]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008533]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008573]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008678]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008678]: grep: warning: stray \ before /
+Nov 18 10:33:17 FF1-SKYZ2E3A make[1008678]: grep: warning: stray \ before /
+Nov 18 10:33:18 FF1-SKYZ2E3A make[1009269]: grep: warning: stray \ before /
+Nov 18 10:33:18 FF1-SKYZ2E3A make[1009346]: grep: warning: stray \ before /
+Nov 18 10:33:29 FF1-SKYZ2E3A make[1010111]: grep: warning: stray \ before /
+Nov 18 10:33:41 FF1-SKYZ2E3A make[996874]: test-agent-branch-flow-guard: OK
+Nov 18 10:33:41 FF1-SKYZ2E3A systemd[874]: ff-native-script-check.service: Consumed 27.844s CPU time over 2min 13.934s wall clock time, 17.1M memory peak.

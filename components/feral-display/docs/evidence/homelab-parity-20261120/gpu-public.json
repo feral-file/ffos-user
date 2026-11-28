@@ -1,0 +1,35 @@
+{
+  "browser": "Chrome/158.0.8127.36",
+  "devices": [
+    {
+      "vendorId": 0,
+      "deviceId": 0,
+      "vendorString": "Google Inc. (AMD)",
+      "deviceString": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon Graphics (RADV REMBRANDT) (0x00001681)), radv-26.1.4)",
+      "driverVendor": "AMD",
+      "driverVersion": "26.1.4"
+    }
+  ],
+  "featureStatus": {
+    "2d_canvas": "enabled",
+    "direct_rendering_display_compositor": "disabled_off_ok",
+    "gpu_compositing": "enabled",
+    "multiple_raster_threads": "enabled_on",
+    "opengl": "enabled_on",
+    "rasterization": "enabled",
+    "skia_graphite": "disabled_off",
+    "trees_in_viz": "disabled_off",
+    "video_decode": "enabled",
+    "video_encode": "disabled_software",
+    "vulkan": "enabled_on",
+    "webgl": "enabled",
+    "webgpu": "enabled",
+    "webgpu_on_vk_via_gl_interop": "disabled_off",
+    "webnn": "disabled_off"
+  },
+  "aux": {
+    "glRenderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon Graphics (RADV REMBRANDT) (0x00001681)), radv-26.1.4)",
+    "glVendor": "Google Inc. (AMD)"
+  },
+  "videoDecoding": []
+}

@@ -6,8 +6,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
-
 	"go.uber.org/zap"
 )
 
@@ -18,7 +16,7 @@ const (
 
 var (
 	systemdServices = map[string]bool{
-		"feral-player.service":       true,
+		"chromium-kiosk.service":     true,
 		"feral-controld.service":     true,
 		"feral-sys-monitord.service": true,
 	}
@@ -49,7 +47,7 @@ func controldStopExpected() bool {
 
 // SystemdMonitor monitors systemd services
 type SystemdMonitor struct {
-	cdpClient               *cdp.Client
+	notify                  func(context.Context, bool) error
 	logger                  *zap.Logger
 	commandHandler          *CommandHandler
 	vmagentClient           *VmagentClient
@@ -58,9 +56,9 @@ type SystemdMonitor struct {
 }
 
 // NewSystemdMonitor creates a new Chromium monitor instance
-func NewSystemdMonitor(cdpClient *cdp.Client, logger *zap.Logger, commandHandler *CommandHandler, vmagentClient *VmagentClient) *SystemdMonitor {
+func NewSystemdMonitor(notify func(context.Context, bool) error, logger *zap.Logger, commandHandler *CommandHandler, vmagentClient *VmagentClient) *SystemdMonitor {
 	return &SystemdMonitor{
-		cdpClient:               cdpClient,
+		notify:                  notify,
 		logger:                  logger,
 		commandHandler:          commandHandler,
 		vmagentClient:           vmagentClient,
@@ -138,16 +136,8 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			if hasRecovered {
 				m.logger.Info("Systemd: Service recovered, resume playlist",
 					zap.String("service", service))
-				if m.cdpClient != nil {
-					if err := m.cdpClient.Navigate(ctx, cdp.DISPLAY_FERALFILE_URL); err != nil {
-						m.logger.Error("Systemd: Failed to resume playlist after service recovery",
-							zap.String("service", service),
-							zap.Error(err))
-					} else {
-						m.logger.Info("Systemd: Playlist resumed after service recovery",
-							zap.String("service", service))
-					}
-				}
+				// Native playback state survives independent service recovery.
+
 			} else {
 				m.logger.Debug("Systemd: Service is active",
 					zap.String("service", service))
@@ -199,15 +189,13 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 		}
 	}
 
-	if hasFailedService && !m.failureIncidentReported {
-		if m.cdpClient != nil {
-			if err := m.cdpClient.SendServiceFailedEvent(ctx); err != nil {
-				m.logger.Error("Systemd: Failed to send service failed to start notification via CDP",
-					zap.Error(err))
-			} else {
-				m.logger.Info("Systemd: Sent service failed to start notification via CDP")
-			}
+	if m.notify != nil {
+		if err := m.notify(ctx, hasFailedService); err != nil {
+			m.logger.Warn("Native service-health notification failed", zap.Error(err))
 		}
+	}
+
+	if hasFailedService && !m.failureIncidentReported {
 
 		if m.vmagentClient != nil {
 			m.vmagentClient.SendServiceFailedIncidentMetric(ctx)

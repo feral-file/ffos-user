@@ -184,6 +184,7 @@ const (
 // Detail is the side-channel context published alongside a State change: enough
 // for a narration UI to explain WHY the state changed without re-deriving it.
 type Detail struct {
+	Passive bool // Automatic AP invitation; an offline work may keep the screen.
 	// SSID is the AP SSID (APActive, once the AP is up) or the target join SSID
 	// (Joining/failed).
 	SSID string
@@ -2517,6 +2518,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// first successful raise, whose softap_qr announcement repaints.
 	if m.setupErrorLatch == "" {
 		m.notify(StateAPActive, Detail{
+			Passive: m.sessionPolicy != sessionUser,
 			Reason:  "scanning",
 			Message: "Looking for nearby Wi-Fi networks",
 		})
@@ -2669,6 +2671,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		PSK:         info.PSK,
 		PortalURL:   info.PortalURL,
 		JoinFailure: joinFailure,
+		Passive:     m.sessionPolicy != sessionUser && joinFailure == "",
 		Reason:      "ap-active",
 		Message:     "Scan the QR code to set up Wi-Fi",
 	})

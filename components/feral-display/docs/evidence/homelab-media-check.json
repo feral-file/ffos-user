@@ -1,0 +1,167 @@
+{
+  "checks": [
+    {
+      "name": "4K H.264 hardware decode and host import",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 2,
+      "renderer": "presented",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 6.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 29,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 0.8666666666666667,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654039
+      },
+      "selected": "ac3a1a39-6ff4-4d60-998b-dcdc51a4c2ca"
+    },
+    {
+      "name": "pause and exact seek preserve presented occurrence",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 2,
+      "renderer": "presented",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 6.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 35,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 2.0,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654039
+      },
+      "selected": "ac3a1a39-6ff4-4d60-998b-dcdc51a4c2ca"
+    },
+    {
+      "name": "resume advances media position",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 2,
+      "renderer": "presented",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 6.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 59,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 2.8333333333333335,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654039
+      },
+      "selected": "ac3a1a39-6ff4-4d60-998b-dcdc51a4c2ca"
+    },
+    {
+      "name": "decoder termination leaves host and command interface responsive",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 2,
+      "renderer": "failed",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 6.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 59,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 2.8333333333333335,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654039
+      },
+      "selected": "ac3a1a39-6ff4-4d60-998b-dcdc51a4c2ca"
+    },
+    {
+      "name": "4096-square H.264 software fallback",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 3,
+      "renderer": "presented",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 3.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "no",
+        "importedFrames": 5,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 0.5,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654352
+      },
+      "selected": "e01dd340-1aa5-4274-85f8-cc04a8984c1c"
+    },
+    {
+      "name": "autoPlay false holds first frame",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 4,
+      "renderer": "presented",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 4.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 4,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 0.0,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654421
+      },
+      "selected": "e1d6a3c9-93dc-4402-ae38-109d4eb1f3f4"
+    },
+    {
+      "name": "explicit resume releases autoPlay hold",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 4,
+      "renderer": "presented",
+      "media": {
+        "decoder-frame-drop-count": 0,
+        "duration": 4.0,
+        "eof-reached": false,
+        "frame-drop-count": 0,
+        "hwdec-current": "vaapi",
+        "importedFrames": 18,
+        "seekable": true,
+        "surfaceHeight": 1920,
+        "surfaceWidth": 1920,
+        "time-pos": 0.5,
+        "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "workerPid": 1654421
+      },
+      "selected": "e1d6a3c9-93dc-4402-ae38-109d4eb1f3f4"
+    },
+    {
+      "name": "EOF advances to a distinct occurrence with identical URL",
+      "instance": "d0f3ea34-c1e0-4a02-88f7-bd2e2b60f096",
+      "generation": 5,
+      "renderer": "presented",
+      "media": {
+        "importedFrames": 0,
+        "surfaceHeight": 0,
+        "surfaceWidth": 0,
+        "workerPid": 1654579
+      },
+      "selected": "9c8de117-b8ca-40f8-b0d4-ccef6eba591a"
+    }
+  ],
+  "startedAt": 1794915491.1408894,
+  "result": "passed",
+  "finishedAt": 1794915502.6067784
+}

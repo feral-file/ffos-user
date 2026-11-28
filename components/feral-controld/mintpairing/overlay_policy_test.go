@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -60,8 +62,7 @@ func newSharedOverlayService(t *testing.T, starter brokerStarter, cdp *fakeCDP, 
 		},
 		starter,
 		nil,
-		nil,
-		cdp,
+		nil, mocks.CommandSender{CDP: cdp},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -219,8 +220,7 @@ func TestAutomaticRefresh_RejectedByClaimQRLogsNoWarning(t *testing.T) {
 		},
 		starter,
 		nil,
-		nil,
-		cdpClient,
+		nil, mocks.CommandSender{CDP: cdpClient},
 		wrapper.NewJSON(),
 		zap.New(core),
 	).(*service)

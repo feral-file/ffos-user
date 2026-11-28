@@ -1,0 +1,142 @@
+{
+  "direct1": {
+    "seconds": 60.059219636,
+    "swaps": 1796,
+    "swapMeanMs": 33.42603621169916,
+    "p95Ms": 33.334,
+    "p99Ms": 33.354,
+    "maxMs": 50.001,
+    "over50_5ms": 0,
+    "cpuPercent": 11.967914407751563,
+    "meanMemoryMiB": 228.11941964285714,
+    "decodeEngineSeconds": 10.455652551,
+    "dropDeltas": {
+      "frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "decoder-frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "captureRGBMeanAbsoluteDifferences": [
+      1.2103602430555556,
+      1.2058116319444445,
+      1.4773307291666666
+    ]
+  },
+  "host1": {
+    "seconds": 60.096570334,
+    "swaps": 1799,
+    "swapMeanMs": 33.41661902113459,
+    "p95Ms": 50.0,
+    "p99Ms": 50.0,
+    "maxMs": 66.667,
+    "over50_5ms": 3,
+    "cpuPercent": 17.416910718577647,
+    "meanMemoryMiB": 246.27120535714286,
+    "decodeEngineSeconds": 9.942055866,
+    "dropDeltas": {
+      "frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "decoder-frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "captureRGBMeanAbsoluteDifferences": [
+      1.2665104166666667,
+      1.3889756944444445,
+      1.7400564236111111
+    ]
+  },
+  "host2": {
+    "seconds": 60.135060572,
+    "swaps": 1800,
+    "swapMeanMs": 33.416574763757644,
+    "p95Ms": 50.0,
+    "p99Ms": 50.0,
+    "maxMs": 66.667,
+    "over50_5ms": 2,
+    "cpuPercent": 17.59353345513414,
+    "meanMemoryMiB": 281.81138392857144,
+    "decodeEngineSeconds": 10.298248654,
+    "dropDeltas": {
+      "frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "decoder-frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "captureRGBMeanAbsoluteDifferences": [
+      1.4550086805555555,
+      1.5153602430555555,
+      1.8514496527777777
+    ]
+  },
+  "direct2": {
+    "seconds": 60.030095471,
+    "swaps": 1795,
+    "swapMeanMs": 33.42610033444816,
+    "p95Ms": 33.334,
+    "p99Ms": 50.0,
+    "maxMs": 66.667,
+    "over50_5ms": 2,
+    "cpuPercent": 11.142272800867456,
+    "meanMemoryMiB": 224.63448660714286,
+    "decodeEngineSeconds": 10.494293967,
+    "dropDeltas": {
+      "frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "decoder-frame-drop-count": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "captureRGBMeanAbsoluteDifferences": [
+      1.2528472222222222,
+      1.2414453125,
+      1.5045008680555556
+    ]
+  }
+}

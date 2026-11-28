@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+
 	minter "github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -97,7 +99,7 @@ func newDisplayRig(t *testing.T) *displayRig {
 	t.Helper()
 	r := &displayRig{ch: &fakeBrokerChannel{}, creator: &recordingSessionCreator{}, issuer: &fakeDisplayGrantIssuer{},
 		relayer: &fakeRelayer{sent: make(chan relayer.Response, 4)}}
-	r.s = newService(Options{RelayerBaseURL: "https://relayer.example"}, nil, r.creator, r.relayer, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+	r.s = newService(Options{RelayerBaseURL: "https://relayer.example"}, nil, r.creator, r.relayer, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop()).(*service)
 	r.s.SetDisplayGrants(r.issuer, "wss://relay.example")
 	return r
 }
@@ -366,7 +368,7 @@ func TestSendApprovalRequest_MarksDisplayRequests(t *testing.T) {
 		{minter.MintRequest{ChannelID: "ch_1"}, nil},
 	} {
 		relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
-		s := newService(Options{}, nil, nil, relayerClient, nil, wrapper.NewJSON(), zap.NewNop()).(*service)
+		s := newService(Options{}, nil, nil, relayerClient, mocks.CommandSender{CDP: nil}, wrapper.NewJSON(), zap.NewNop()).(*service)
 		display := isDisplayRequest(&fakeBrokerChannel{}, tc.request)
 		require.NoError(t, s.sendApprovalRequest(context.Background(), "mpa_1", "topic-1", tc.request, minter.PublicJWK{}, time.Now().Add(time.Minute), display))
 		msg := (<-relayerClient.sent).Message.(map[string]any)
@@ -393,7 +395,7 @@ func TestWaitForBrowserAndApproval_RefusesAnUnservableDisplayRequestBeforeAsking
 			creator := &recordingSessionCreator{}
 			relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
 			s := newService(Options{Enabled: true, BrokerBaseURL: "https://broker.example", ApprovalTimeout: time.Minute, PollInterval: time.Millisecond},
-				&fakeBrokerStarter{channel: ch}, creator, relayerClient, &fakeCDP{}, wrapper.NewJSON(), zap.NewNop()).(*service)
+				&fakeBrokerStarter{channel: ch}, creator, relayerClient, mocks.CommandSender{CDP: &fakeCDP{}}, wrapper.NewJSON(), zap.NewNop()).(*service)
 			tc.wire(s)
 			s.Start(context.Background())
 			defer s.Stop()
@@ -502,8 +504,7 @@ func newDisplayJoinTestService(t *testing.T, joiner *fakeBrokerJoiner, relayerCl
 		},
 		nil,
 		fakeSessionCreator{},
-		relayerClient,
-		&fakeCDP{},
+		relayerClient, mocks.CommandSender{CDP: &fakeCDP{}},
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)

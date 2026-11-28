@@ -37,6 +37,9 @@ const (
 	CmdEnvelope = "ff1Envelope"
 )
 
+// CmdCaptureScreenshot requests an encrypted compositor preview over the LAN.
+const CmdCaptureScreenshot = "captureScreenshot"
+
 // commandTiers is THE tier table (§7.1). It is the only place a command's
 // tier is decided. tiers_test.go cross-checks it against every command
 // constant in commands/types.go, every literal command name commandrouter
@@ -45,6 +48,7 @@ const (
 // cannot ship untiered.
 var commandTiers = map[string]Tier{
 	// --- owner: device ownership, setup, remote shell, input injection ---
+	string(commands.CMD_DISPLAY_CAPSULE):            TierOwner,
 	string(commands.CMD_SSH_ACCESS):                 TierOwner,
 	string(commands.CMD_FACTORY_RESET):              TierOwner,
 	string(commands.CMD_START_WIFI_SETUP):           TierOwner,
@@ -81,6 +85,7 @@ var commandTiers = map[string]Tier{
 	CmdRegisterController: TierOwner,
 	CmdReleaseOwnership:   TierOwner,
 	CmdSetLanControl:      TierOwner,
+	CmdCaptureScreenshot:  TierOwner,
 	// Player CastCommand names that reach the player over the CDP
 	// fallthrough. cursorUpdate is pointer injection like the gestures;
 	// disconnect tears down the player's command session.

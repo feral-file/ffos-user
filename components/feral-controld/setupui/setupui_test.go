@@ -4,204 +4,55 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-controld/overlay"
-	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerlink"
 )
 
-// validContract is the player manifest the on-device player ships. Tests write
-// it (or a stripped variant) to a temp file to exercise the manifest gate.
-const validContract = `{
-  "contracts": {
-    "setupDisplay": {
-      "version": 1,
-      "requestKey": "request",
-      "states": ["softap_qr","joining","join_failed","updating","claim_qr","ready","hidden"],
-      "acceptedResponse": {"ok": true}
-    }
-  }
-}`
-
-// contractWithConnecting is the SHIPPING player manifest, loaded verbatim
-// from testdata/ffos-player-contract.json — a byte-for-byte copy of
-// ff-player `public/ffos-player-contract.json` on main, kept in lockstep by
-// `cp`, the same convention as the DRM display-connected
-// predicate's mirrored copies (an inlined Go string cannot be byte-faithful:
-// the manifest's notes contain backticks). Deliberately the full file, not a
-// trimmed extract: the point is that the manifest these tests gate on is the
-// manifest the player actually ships, so cross-repo drift (e.g. the player
-// renaming a state) breaks these tests instead of leaving both repos green
-// while the state no-ops on screen. ff-player's own custom_event.test.ts
-// pins the other half (its enum ↔ that manifest). validContract above
-// deliberately predates the connecting state, so the pair exercises
-// ShowConnecting's downgrade gate.
-var contractWithConnecting = func() string {
-	raw, err := os.ReadFile(filepath.Join("testdata", "ffos-player-contract.json"))
-	if err != nil {
-		panic("shipping player manifest fixture missing: " + err.Error())
-	}
-	return string(raw)
-}()
-
-// contractWithoutSetupDisplay models an older player that predates the contract.
-const contractWithoutSetupDisplay = `{
-  "contracts": {
-    "mintPairingDisplay": {
-      "version": 1,
-      "requestKey": "request",
-      "states": ["pairing_code","request_received","creating_token","hidden"],
-      "acceptedResponse": {"ok": true}
-    }
-  }
-}`
-
-// fakeCDP records every setupDisplay request it is asked to send and signals a
-// waiter after each call so tests can synchronize with the background worker.
-type fakeCDP struct {
+type fakePlayer struct {
 	mu       sync.Mutex
 	err      error
 	requests []map[string]any
-	methods  []string
 	calls    int
+	gate     chan struct{}
 	signal   chan struct{}
-	// gate, when non-nil, is received from at the START of every NoLogSend so
-	// tests can hold the worker inside a send and control interleaving.
-	gate chan struct{}
-	// navigating models the document-replacement window a playersession
-	// recovery navigation (Page.navigate) opens: while set, narration
-	// evaluates execute in the DYING context — they are counted in
-	// lostEvaluates and fail, never reaching requests. It is set by a
-	// Page.navigate send and cleared once readyAfterProbes readiness probes
-	// have been answered (the probe that crosses the threshold observes the
-	// replacement document).
-	navigating       bool
-	readyAfterProbes int
-	probeCount       int
-	lostEvaluates    int
-	// stampedNonce is the navigation nonce the stamp evaluate wrote into the
-	// "old document"; while navigating, a probe reads false only when it
-	// carries THIS value (a probe with a different or absent nonce is fooled
-	// by the old document — the HIGH-severity hazard the nonce exists to
-	// prevent).
-	stampedNonce string
 }
 
-func newFakeCDP() *fakeCDP {
-	return &fakeCDP{signal: make(chan struct{}, 64)}
-}
-
-// NoLogSend mimics the REAL cdp client's post-processed contract, not the raw
-// wire envelope: evaluate results arrive already decoded (a JSON-string
-// expression comes back as its unmarshaled map), and shapes the client cannot
-// decode are errors. Divergence here previously let an on-device-inert
-// readiness probe pass a green suite — keep this fake honest against
-// cdp.send's switch when adding evaluate shapes.
-func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
+func newFakePlayer() *fakePlayer { return &fakePlayer{signal: make(chan struct{}, 64)} }
+func (f *fakePlayer) SetOverlay(ctx context.Context, owner, state string, fields map[string]any) error {
 	if f.gate != nil {
-		<-f.gate
-	}
-	f.mu.Lock()
-	f.calls++
-	f.methods = append(f.methods, method)
-	if method == "Page.navigate" {
-		f.navigating = true
-	}
-	var result interface{} = map[string]any{"ok": true}
-	err := f.err
-	if method == cdp.METHOD_EVALUATE {
-		expression, _ := params["expression"].(string)
-		switch {
-		case !strings.HasPrefix(expression, "JSON.stringify(") &&
-			!strings.HasPrefix(expression, "window.handleCDPRequest("):
-			// Structural guard, not just documentation: cdp.send decodes only
-			// type:"string" (JSON-unmarshaled) and type:"object" evaluate
-			// results and ERRORS on everything else, so any expression this
-			// package sends must evaluate to a JSON string or an object. A
-			// bare-boolean probe — the exact on-device-inert defect a prior
-			// round shipped — fails here instead of passing green.
-			err = errors.New("CDP response type mismatch: boolean")
-		case strings.HasPrefix(expression, "JSON.stringify({nonce:"):
-			// The reload nonce stamp: record what the "old document" now holds
-			// so probes can be answered the way a real dying document would.
-			if start := strings.Index(expression, `= "`); start >= 0 {
-				rest := expression[start+len(`= "`):]
-				if end := strings.Index(rest, `"`); end >= 0 {
-					f.stampedNonce = rest[:end]
-				}
-			}
-			result = map[string]any{"nonce": f.stampedNonce}
-		case strings.Contains(expression, "typeof window.handleCDPRequest"):
-			// Readiness probe. The dying document runs the SAME player app, so
-			// it answers handler-presence questions too: while navigating, a
-			// probe reads false only when it carries the exact stamped nonce —
-			// a probe with a different or absent nonce is fooled by the old
-			// document and reports ready, which downstream assertions surface
-			// as lost narration.
-			f.probeCount++
-			if f.navigating && f.probeCount > f.readyAfterProbes {
-				f.navigating = false // navigation commits; replacement document answers now
-			}
-			ready := true
-			if f.navigating {
-				ready = f.stampedNonce == "" || !strings.Contains(expression, f.stampedNonce)
-			}
-			result = map[string]any{"ready": ready}
-		case f.navigating:
-			// A narration evaluate landed in the document being torn down: it
-			// never reaches the replacement page's handler.
-			f.lostEvaluates++
-			err = errors.New("Execution context was destroyed")
-		default:
-			if req, ok := parseSetupRequest(params); ok {
-				f.requests = append(f.requests, req)
-			}
+		select {
+		case <-f.gate:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
+	if owner != "setup" {
+		return errors.New("wrong owner")
+	}
+	raw, _ := json.Marshal(fields)
+	var req map[string]any
+	_ = json.Unmarshal(raw, &req)
+	req["state"] = state
+	f.mu.Lock()
+	f.calls++
+	f.requests = append(f.requests, req)
+	err := f.err
 	f.mu.Unlock()
-
 	select {
 	case f.signal <- struct{}{}:
 	default:
 	}
-
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
+	return err
 }
-
-// Initialized satisfies playersession.CDPSender for the setupui↔playersession
-// integration test; this fake is always "connected".
-func (f *fakeCDP) Initialized() bool { return true }
-
-func (f *fakeCDP) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.calls
-}
-
-func (f *fakeCDP) sentMethods() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]string, len(f.methods))
-	copy(out, f.methods)
-	return out
-}
-
-func (f *fakeCDP) lastRequest() map[string]any {
+func (f *fakePlayer) callCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.calls }
+func (f *fakePlayer) lastRequest() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.requests) == 0 {
@@ -209,91 +60,22 @@ func (f *fakeCDP) lastRequest() map[string]any {
 	}
 	return f.requests[len(f.requests)-1]
 }
-
-// waitForCalls blocks until at least n CDP calls have happened, or fails the test.
-func (f *fakeCDP) waitForCalls(t *testing.T, n int) {
+func (f *fakePlayer) waitForCalls(t *testing.T, n int) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for f.callCount() < n {
 		select {
 		case <-f.signal:
 		case <-deadline:
-			t.Fatalf("timed out waiting for %d CDP calls, got %d", n, f.callCount())
+			t.Fatalf("waited for %d calls, got %d", n, f.callCount())
 		}
 	}
 }
 
-func parseSetupRequest(params map[string]interface{}) (map[string]any, bool) {
-	expression, _ := params["expression"].(string)
-	if !strings.HasPrefix(expression, "window.handleCDPRequest(") {
-		return nil, false
-	}
-	raw := strings.TrimPrefix(expression, "window.handleCDPRequest(")
-	raw = strings.TrimSuffix(raw, ")")
-	var payload struct {
-		Command string         `json:"command"`
-		Request map[string]any `json:"request"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return nil, false
-	}
-	if payload.Command != setupDisplayCommand {
-		return nil, false
-	}
-	return payload.Request, true
-}
+type fakeListener struct{}
 
-func writeContract(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ffos-player-contract.json")
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-	return path
-}
-
-func newTestService(t *testing.T, sender CDPSender, contract string) *Service {
-	t.Helper()
-	svc := New(sender, writeContract(t, contract), nil)
-	// Hermetic: a host that happens to carry the real FF1 config file must not
-	// add a version field to payloads the tests compare field by field.
-	svc.readBuild = func() (ff1config.Build, error) { return ff1config.Build{}, os.ErrNotExist }
-	return svc
-}
-
-// TestPushesCarryInstalledVersion: every visible setup state carries the
-// installed version read from the FF1 config file, so the screen shows which
-// build is running; the read is cached, so an OTA rewriting the file mid-run
-// does not relabel the screen; and a missing file omits the field.
-func TestPushesCarryInstalledVersion(t *testing.T) {
-	t.Run("visible states carry the version, cached once read", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-		installed := "3.0.1"
-		svc.readBuild = func() (ff1config.Build, error) { return ff1config.Build{Version: installed}, nil }
-
-		svc.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1")
-		sender.waitForCalls(t, 1)
-		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
-
-		installed = "3.0.2" // an OTA rewrote the descriptor before the restart
-		svc.ShowUpdating(10)
-		sender.waitForCalls(t, 2)
-		assert.Equal(t, "3.0.1", sender.lastRequest()["version"])
-	})
-
-	t.Run("missing config omits the field", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowJoining()
-		sender.waitForCalls(t, 1)
-		_, present := sender.lastRequest()["version"]
-		assert.False(t, present)
-	})
-}
-
-// TestTypedMethodsEmitContractPayloads asserts each typed method produces the
-// correct setupDisplay state and the field presence the contract requires.
+func (fakeListener) OnOverride(overlay.Overlay) {}
+func (fakeListener) OnClose()                   {}
 func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -304,7 +86,7 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 	}{
 		{
 			name:      "softap qr with password",
-			call:      func(s *Service) { s.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1") },
+			call:      func(s *Service) { s.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1", false) },
 			wantState: stateSoftAPQR,
 			wantFields: map[string]any{
 				"ssid": "FF1-abc", "password": "secret123", "portal_url": "http://10.42.0.1",
@@ -312,7 +94,7 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 		},
 		{
 			name:       "softap qr omits blank optional fields",
-			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "") },
+			call:       func(s *Service) { s.ShowSoftAPQR("FF1-abc", "", "", false) },
 			wantState:  stateSoftAPQR,
 			wantFields: map[string]any{"ssid": "FF1-abc"},
 			absent:     []string{"password", "portal_url", "client_attached"},
@@ -340,7 +122,7 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 		},
 		{
 			name:      "scanning",
-			call:      func(s *Service) { s.ShowScanning() },
+			call:      func(s *Service) { s.ShowScanning(false) },
 			wantState: stateScanning,
 			absent:    []string{"reason", "ssid", "url", "progress"},
 		},
@@ -406,8 +188,8 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sender := newFakeCDP()
-			svc := newTestService(t, sender, validContract)
+			sender := newFakePlayer()
+			svc := New(sender, nil)
 
 			tt.call(svc)
 			sender.waitForCalls(t, 1)
@@ -426,328 +208,10 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 	}
 }
 
-// TestShowConnectingManifestGate: ShowConnecting emits the connecting state
-// when the player manifest lists it and downgrades to join_failed when the
-// manifest predates it — the downgrade (not a renders-nothing no-op) is what
-// keeps the M-0/M-1 offline narration visible on older fielded players.
-func TestShowConnectingManifestGate(t *testing.T) {
-	t.Run("manifest lists connecting", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting)
-
-		svc.ShowConnecting("Checking the network connection…")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateConnecting, req["state"])
-		assert.Equal(t, "Checking the network connection…", req["reason"])
-	})
-
-	t.Run("blank message omits reason", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting)
-
-		svc.ShowConnecting(" ")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateConnecting, req["state"])
-		_, present := req["reason"]
-		assert.False(t, present, "blank message must omit the reason field")
-	})
-
-	t.Run("older manifest downgrades to join_failed", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowConnecting("Checking the network connection…")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateJoinFailed, req["state"])
-		assert.Equal(t, "Checking the network connection…", req["reason"])
-	})
-
-	// The boot-race regression: the hedge fires seconds after daemon start,
-	// while the player bundle can be unreadable (boot ordering, OTA
-	// mid-replace). The push must defer UN-downgraded, so that once the
-	// manifest lands and CDP reconnects, the Resync replay delivers the
-	// neutral state — a Show-time downgrade frozen into the retained intent
-	// would replay the false join_failed flash this state exists to remove.
-	t.Run("unreadable manifest defers; replay delivers connecting once readable", func(t *testing.T) {
-		sender := newFakeCDP()
-		path := filepath.Join(t.TempDir(), "contract.json")
-		svc := New(sender, path, nil) // manifest does not exist yet
-
-		svc.ShowConnecting("Looking for your Wi-Fi network…")
-		time.Sleep(50 * time.Millisecond)
-		assert.Zero(t, sender.callCount(), "no push while the contract is unreadable")
-
-		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
-		svc.Resync()
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateConnecting, req["state"])
-		assert.Equal(t, "Looking for your Wi-Fi network…", req["reason"])
-	})
-
-	// The player bundle (and its manifest) is OTA-replaced without a controld
-	// restart, so the capability verdict must never latch for the process
-	// lifetime. Both staleness directions:
-	t.Run("bundle upgrade after a downgrade verdict delivers connecting on replay", func(t *testing.T) {
-		sender := newFakeCDP()
-		path := filepath.Join(t.TempDir(), "contract.json")
-		require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
-		svc := New(sender, path, nil)
-
-		svc.ShowConnecting("Checking the network connection…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
-
-		// The bundle updates in place; a latched supportNo would keep
-		// downgrading on the upgraded player until a daemon restart.
-		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
-		svc.Resync()
-		sender.waitForCalls(t, 2)
-		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
-	})
-
-	t.Run("unreadable manifest after an old-player verdict keeps the downgrade", func(t *testing.T) {
-		sender := newFakeCDP()
-		path := filepath.Join(t.TempDir(), "contract.json")
-		require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
-		svc := New(sender, path, nil)
-
-		svc.ShowConnecting("Checking the network connection…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
-
-		// narrationSupported's overall verdict latched supportYes on the push
-		// above, so the send path stays open when the manifest then goes
-		// unreadable (OTA mid-replace). The replay must fall back to the last
-		// verdict read from a real manifest — an un-downgraded connecting
-		// would be a renders-nothing no-op on the old player still on screen.
-		require.NoError(t, os.Remove(path))
-		svc.Resync()
-		sender.waitForCalls(t, 2)
-		assert.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
-	})
-
-	t.Run("malformed manifest after a supported verdict keeps connecting", func(t *testing.T) {
-		sender := newFakeCDP()
-		path := filepath.Join(t.TempDir(), "contract.json")
-		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
-		svc := New(sender, path, nil)
-
-		svc.ShowConnecting("Checking the network connection…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
-
-		// A torn mid-OTA write leaves partial JSON: readable but
-		// undecodable. That proves nothing about the player, so the replay
-		// must keep the last real verdict — treating it as "unsupported"
-		// would repaint the false join_failed title on a player that renders
-		// connecting fine.
-		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
-		svc.Resync()
-		sender.waitForCalls(t, 2)
-		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
-	})
-
-	// The reviewer-named killer for latching decode failures at the MAIN
-	// gate: a torn write present at the very first push. narrationSupported
-	// used to latch supportNo off it, killing ALL narration for the daemon
-	// lifetime — stateUnsupported's tolerant handling never ran because
-	// the earlier gate refused to send at all.
-	t.Run("malformed initial manifest defers; replay delivers connecting once valid", func(t *testing.T) {
-		sender := newFakeCDP()
-		path := filepath.Join(t.TempDir(), "contract.json")
-		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
-		svc := New(sender, path, nil)
-
-		svc.ShowConnecting("Looking for your Wi-Fi network…")
-		time.Sleep(50 * time.Millisecond)
-		assert.Zero(t, sender.callCount(), "no push while the manifest is undecodable")
-
-		// The valid bundle lands: narration must recover without a daemon
-		// restart, exactly like the unreadable case.
-		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
-		svc.Resync()
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateConnecting, req["state"])
-	})
-
-	t.Run("manifest without setupDisplay contract keeps the prior verdict", func(t *testing.T) {
-		sender := newFakeCDP()
-		path := filepath.Join(t.TempDir(), "contract.json")
-		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
-		svc := New(sender, path, nil)
-
-		svc.ShowConnecting("Checking the network connection…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
-
-		// Decodes fine, but is not a setupDisplay v1 contract: no more
-		// capability evidence than a torn write. The replay must keep the
-		// last real verdict rather than flipping to a downgrade off the
-		// missing contract's empty state list.
-		require.NoError(t, os.WriteFile(path, []byte(`{"contracts":{}}`), 0o600))
-		svc.Resync()
-		sender.waitForCalls(t, 2)
-		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
-	})
-}
-
-// TestShowCallersDoNotBlockOnInitialManifestRead is the un-latched
-// (supportUnknown) sibling of TestShowCallersDoNotBlockOnManifestRead: the
-// process's FIRST push — which on a real device is the boot narration — hits
-// narrationSupported's initial capability read. With that read stuck (FIFO
-// with no writer), Hide must still return immediately; under the old
-// read-under-mutex shape this is exactly the hung-first-read-at-boot case the
-// latch could never bound, because the latch only helps after a successful
-// read.
-func TestShowCallersDoNotBlockOnInitialManifestRead(t *testing.T) {
-	sender := newFakeCDP()
-	path := filepath.Join(t.TempDir(), "contract.json")
-	require.NoError(t, syscall.Mkfifo(path, 0o600))
-	svc := New(sender, path, nil)
-
-	svc.ShowJoining()
-	// Give the worker time to enter the blocking read.
-	time.Sleep(50 * time.Millisecond)
-
-	done := make(chan struct{})
-	go func() {
-		svc.Hide()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Hide blocked behind the initial manifest read")
-	}
-
-	// Unblock the worker with a real manifest; the queued states then drain
-	// in order (joining, then hidden — no further manifest read once the
-	// verdict latches).
-	writer, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // Test-owned FIFO under t.TempDir.
-	require.NoError(t, err)
-	_, err = writer.Write([]byte(validContract))
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
-	sender.waitForCalls(t, 2)
-	assert.Equal(t, stateHidden, sender.lastRequest()["state"])
-}
-
-// TestShippingManifestDeclaresProsePayloads pins the controller-side payload
-// contract into the verbatim fixture: ShowConnecting and ShowJoinFailed send
-// their prose as the `reason` field, so the shipping manifest must keep
-// declaring that field for both states — a player change that keeps a state
-// but renames its prose field would otherwise leave this repo green while
-// the prose silently stops rendering. Decoded ad hoc here rather than in the
-// production manifest model on purpose: stateFields stays player-side
-// validation config, not a controld runtime input.
-func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
-	var manifest struct {
-		Contracts struct {
-			SetupDisplay struct {
-				States      []string `json:"states"`
-				StateFields map[string]struct {
-					Optional []string `json:"optional"`
-				} `json:"stateFields"`
-				CommonFields struct {
-					Optional []string `json:"optional"`
-				} `json:"commonFields"`
-			} `json:"setupDisplay"`
-		} `json:"contracts"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(contractWithConnecting), &manifest))
-	assert.Contains(t, manifest.Contracts.SetupDisplay.States, stateConnecting)
-	for _, state := range []string{stateConnecting, stateJoinFailed} {
-		fields, ok := manifest.Contracts.SetupDisplay.StateFields[state]
-		require.True(t, ok, "shipping manifest missing stateFields for %q", state)
-		assert.Contains(t, fields.Optional, "reason",
-			"state %q must declare the reason payload ShowConnecting/ShowJoinFailed send", state)
-	}
-	softAPFields, ok := manifest.Contracts.SetupDisplay.StateFields[stateSoftAPQR]
-	require.True(t, ok, "shipping manifest missing stateFields for %q", stateSoftAPQR)
-	assert.Contains(t, softAPFields.Optional, "portal_url",
-		"softap_qr must declare the direct portal fallback ShowSoftAPQR sends")
-	assert.Contains(t, softAPFields.Optional, "client_attached",
-		"softap_qr must declare the attached-phase flag ShowSoftAPPortalQR sends")
-	assert.Contains(t, softAPFields.Optional, "reason",
-		"softap_qr must declare the failure line ShowSoftAPQRRetry sends")
-	assert.Contains(t, manifest.Contracts.SetupDisplay.CommonFields.Optional, "version",
-		"every state must accept the installed version withVersion sends")
-}
-
-// TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking
-// contract against the send-time capability read: with the narration worker
-// stuck inside a manifest read (a hung filesystem, modeled by a FIFO that has
-// no writer yet), every Show*/Hide call must still return immediately — the
-// read runs OUTSIDE the queue mutex, so a stalled resolution delays delivery,
-// never callers. The call that matters operationally is the online Hide that
-// ends the boot narration; under the old read-under-mutex shape it would have
-// waited on disk here.
-func TestShowCallersDoNotBlockOnManifestRead(t *testing.T) {
-	sender := newFakeCDP()
-	path := filepath.Join(t.TempDir(), "contract.json")
-	require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
-	svc := New(sender, path, nil)
-
-	// Latch narrationSupported's overall verdict with a normal push so the
-	// next delivery reaches the connecting resolution at all.
-	svc.ShowJoining()
-	sender.waitForCalls(t, 1)
-
-	// Swap the manifest for a FIFO: the worker's next resolution blocks in
-	// os.ReadFile until a writer appears.
-	require.NoError(t, os.Remove(path))
-	require.NoError(t, syscall.Mkfifo(path, 0o600))
-
-	svc.ShowConnecting("Checking the network connection…")
-	// Give the worker time to enter the blocking read.
-	time.Sleep(50 * time.Millisecond)
-
-	done := make(chan struct{})
-	go func() {
-		svc.Hide()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Hide blocked behind the worker's manifest read")
-	}
-
-	// Unblock the worker with a real manifest so the test does not leak a
-	// stuck goroutine; the queued states then drain in order (connecting,
-	// then hidden).
-	writer, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // Test-owned FIFO under t.TempDir.
-	require.NoError(t, err)
-	_, err = writer.Write([]byte(contractWithConnecting))
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
-	sender.waitForCalls(t, 3)
-	assert.Equal(t, stateHidden, sender.lastRequest()["state"])
-}
-
-// TestDownCDPDoesNotBlockOrPanic verifies fire-and-forget semantics against a
-// player whose CDP send always fails: the caller returns immediately, nothing
-// panics, and the next state change still produces a fresh push (retry-on-next-
-// change). This stands in for the setup state-machine caller.
-func TestDownCDPDoesNotBlockOrPanic(t *testing.T) {
-	sender := newFakeCDP()
+func TestDownPlayerDoesNotBlockOrPanic(t *testing.T) {
+	sender := newFakePlayer()
 	sender.err = errors.New("cdp down")
-	svc := newTestService(t, sender, validContract)
+	svc := New(sender, nil)
 
 	// Each push must return promptly even though every send errors.
 	done := make(chan struct{})
@@ -760,10 +224,10 @@ func TestDownCDPDoesNotBlockOrPanic(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Show* calls blocked on a down CDP")
+		t.Fatal("Show* calls blocked on a down player socket")
 	}
 
-	// The last state change must still have been attempted against CDP.
+	// The last state change must still have been attempted against player socket.
 	sender.waitForCalls(t, 1)
 
 	// A subsequent change re-pushes (a new send attempt) despite prior failures.
@@ -774,20 +238,18 @@ func TestDownCDPDoesNotBlockOrPanic(t *testing.T) {
 	assert.Eventually(t, func() bool {
 		last := sender.lastRequest()
 		return last != nil && last["state"] == stateReady
-	}, 2*time.Second, 10*time.Millisecond, "ready state never reached CDP")
+	}, 2*time.Second, 10*time.Millisecond, "ready state never reached player socket")
 }
 
-// TestResyncRepushesLastStateWhenCDPReturns models CDP being down for the first
-// push and coming back: Resync re-sends the last intended state.
-func TestResyncRepushesLastStateWhenCDPReturns(t *testing.T) {
-	sender := newFakeCDP()
+func TestResyncRepushesLastStateWhenPlayerReturns(t *testing.T) {
+	sender := newFakePlayer()
 	sender.err = errors.New("cdp down")
-	svc := newTestService(t, sender, validContract)
+	svc := New(sender, nil)
 
 	svc.ShowUpdating(75)
 	sender.waitForCalls(t, 1) // failed attempt
 
-	// CDP comes back.
+	// player socket comes back.
 	sender.mu.Lock()
 	sender.err = nil
 	sender.mu.Unlock()
@@ -802,29 +264,19 @@ func TestResyncRepushesLastStateWhenCDPReturns(t *testing.T) {
 	assert.Equal(t, float64(75), last["progress"])
 }
 
-// TestResyncBeforeAnyStateIsNoop guards the empty-history path.
 func TestResyncBeforeAnyStateIsNoop(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
+	sender := newFakePlayer()
+	svc := New(sender, nil)
 
 	svc.Resync()
-	// Give any erroneously-spawned worker a chance to call CDP.
+	// Give any erroneously-spawned worker a chance to call player socket.
 	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, 0, sender.callCount())
 }
 
-// TestResync_DoesNotReclaimAfterConcurrentOwner pins round 5 review's F3
-// directly: a setup overlay this service shows (ShowFinalizing) can lose the
-// screen to a newer owner (a browser-pairing request) before the "CDP
-// reconnected" trigger calls Resync. The pre-fix Resync read Current() and
-// then unconditionally re-Showed that stale snapshot with Owner priority,
-// clobbering whoever had taken over since. Controller.Replay closes that gap
-// by re-checking ownership under its own single lock acquisition instead of a
-// separate snapshot step, so Resync must leave the newer owner's overlay
-// alone here.
 func TestResync_DoesNotReclaimAfterConcurrentOwner(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.ShowFinalizing()
 	fake.waitForCalls(t, 1)
@@ -844,18 +296,9 @@ func TestResync_DoesNotReclaimAfterConcurrentOwner(t *testing.T) {
 	assert.Equal(t, other.Kind, cur.Kind, "Resync must not reclaim the screen from a newer owner")
 }
 
-// TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter guards
-// against the gap review found in the first version of this fix: this
-// file's own test controller (newTestService's overlay.New(setupPainter{s:
-// s})) routes Hide by ignoring its Overlay argument entirely, so a Kind-less
-// delivery passes here regardless. main.go instead wires setupui and
-// mintpairing behind a shared overlay.Router, which routes STRICTLY by Kind
-// prefix — a delivery carrying the zero-value Overlay{} (Kind=="") matches no
-// prefix and is silently dropped. Resync's hidden-intent replay must still
-// reach the player when wired exactly as production does.
 func TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 	svc.SetController(overlay.New(overlay.NewRouter(map[string]overlay.Painter{
 		"setup:": setupPainter{s: svc},
 	})))
@@ -870,17 +313,9 @@ func TestResync_ReplayedHiddenIntentRoutesThroughTheProductionRouter(t *testing.
 	assert.Equal(t, stateHidden, fake.lastRequest()["state"])
 }
 
-// TestResync_ReplaysHiddenIntentAfterHide pins the fix for round 5 review's
-// F2: a plain Hide() clears the overlay controller's current overlay to
-// nothing, which setupui cannot tell apart from "the clear's own CDP send
-// failed" without blocking the caller to find out (its contract is never
-// block). So Resync must replay the hidden intent unconditionally on every
-// reconnect, exactly as it already does for a shown state (see
-// TestResyncRepushesLastStateWhenCDPReturns) — not silently assume the last
-// clear got through, which is what the pre-fix no-op here actually did.
 func TestResync_ReplaysHiddenIntentAfterHide(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.ShowReady()
 	svc.Hide()
@@ -892,28 +327,16 @@ func TestResync_ReplaysHiddenIntentAfterHide(t *testing.T) {
 	assert.Equal(t, stateHidden, fake.lastRequest()["state"])
 }
 
-// fakeListener is a minimal overlay.Listener for tests that need some OTHER
-// owner to hold the screen, without caring what happens when it is replaced.
-type fakeListener struct{}
-
-func (fakeListener) OnOverride(overlay.Overlay) {}
-func (fakeListener) OnClose()                   {}
-
-// TestResync_HiddenIntentDoesNotClobberANewerOwner guards the other half: the
-// replay above must re-check ownership at commit time (round 5 review, F3's
-// same reasoning applied to the hidden-intent path), not blindly clear
-// whatever is current. If a different overlay owner has taken the screen
-// since this service's own last Hide(), Resync must leave it alone.
 func TestResync_HiddenIntentDoesNotClobberANewerOwner(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.ShowReady()
 	svc.Hide()
 	fake.waitForCalls(t, 2)
 
 	// A different listener takes the screen after setupui hid itself. Asserted
-	// on the controller's own decision (Current), not a CDP call count: this
+	// on the controller's own decision (Current), not a player socket call count: this
 	// test's svc.ctrl has no router splitting owners onto separate painters
 	// the way production wiring does, so any Show on it — including this
 	// other listener's — reaches the same fake sender setupui's own narration
@@ -931,12 +354,9 @@ func TestResync_HiddenIntentDoesNotClobberANewerOwner(t *testing.T) {
 	assert.Equal(t, other.Kind, cur.Kind, "a newer owner's overlay must survive a stale hidden-intent replay")
 }
 
-// TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: Resync's
-// original job (catch a reconnected/new document up to the current intent)
-// still applies when something is current.
 func TestResync_ReEnqueuesLastWhenPendingEmpty(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.ShowReady()
 	fake.waitForCalls(t, 1) // queue drains empty
@@ -946,168 +366,9 @@ func TestResync_ReEnqueuesLastWhenPendingEmpty(t *testing.T) {
 	assert.Equal(t, stateReady, fake.lastRequest()["state"])
 }
 
-// TestManifestWithoutSetupDisplayDisablesNarration verifies the permanent
-// no-narration fallback: an older player yields zero CDP sends, and the typed
-// methods still return immediately (narration-disabled is indistinguishable
-// from narration-working to the caller).
-func TestManifestWithoutSetupDisplayDisablesNarration(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, contractWithoutSetupDisplay)
-
-	svc.ShowSoftAPQR("FF1-abc", "secret123", "http://10.42.0.1")
-	svc.ShowJoining()
-	svc.ShowReady()
-	svc.Resync()
-
-	// The worker resolves the manifest once and short-circuits; give it room to
-	// run and confirm it never reached CDP.
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, 0, sender.callCount(), "no CDP sends when setupDisplay is unsupported")
-}
-
-// TestMissingManifestDisablesNarration covers a wholly absent contract file.
-func TestMissingManifestDisablesNarration(t *testing.T) {
-	sender := newFakeCDP()
-	svc := New(sender, filepath.Join(t.TempDir(), "does-not-exist.json"), nil)
-
-	svc.ShowReady()
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, 0, sender.callCount())
-}
-
-// TestFactoryResetIsSafeAgainstCurrentManifest proves the extension-state
-// contract: a manifest listing only the 7 required states (predating
-// factory_reset, which the shipping manifest lists today) still passes the
-// gate, and ShowFactoryReset is delivered to CDP anyway. Requiring
-// factory_reset in the gate would instead disable ALL narration on any
-// fielded player whose manifest predates it, so this guards against that
-// regression.
-func TestFactoryResetIsSafeAgainstCurrentManifest(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract) // validContract models a manifest predating the factory_reset extension state
-
-	svc.ShowFactoryReset()
-	sender.waitForCalls(t, 1)
-
-	last := sender.lastRequest()
-	require.NotNil(t, last)
-	assert.Equal(t, stateFactoryReset, last["state"])
-
-	// And ordinary narration still works through the same gate.
-	before := sender.callCount()
-	svc.ShowReady()
-	sender.waitForCalls(t, before+1)
-	assert.Equal(t, stateReady, sender.lastRequest()["state"])
-}
-
-// TestValidatePlayerStatusContract pins the sibling exported validator (design
-// doc §4.3 / §8 housekeeping): same unreadable-vs-absent distinction as
-// validateSetupDisplayContract, exposed for devicectl's capability fuse.
-func TestValidatePlayerStatusContract(t *testing.T) {
-	t.Run("valid", func(t *testing.T) {
-		body := `{"contracts":{"playerStatus":{"version":1}}}`
-		require.NoError(t, ValidatePlayerStatusContract(writeContract(t, body)))
-	})
-	t.Run("missing playerStatus", func(t *testing.T) {
-		err := ValidatePlayerStatusContract(writeContract(t, contractWithoutSetupDisplay))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "missing contracts.playerStatus")
-		assert.NotErrorIs(t, err, ErrPlayerContractUnreadable, "a READ manifest lacking the contract is absent, not unreadable")
-	})
-	t.Run("wrong version", func(t *testing.T) {
-		body := `{"contracts":{"playerStatus":{"version":2}}}`
-		err := ValidatePlayerStatusContract(writeContract(t, body))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "version must be 1")
-	})
-	t.Run("unreadable manifest", func(t *testing.T) {
-		err := ValidatePlayerStatusContract(filepath.Join(t.TempDir(), "does-not-exist.json"))
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
-	})
-	// Same unreadable classification for decode failures as the setupDisplay
-	// validator: devicectl's boot-recovery fuse re-checks unreadable instead
-	// of permanently latching conservative mode off a torn write.
-	t.Run("undecodable manifest classifies as unreadable", func(t *testing.T) {
-		err := ValidatePlayerStatusContract(writeContract(t, `{"contracts": {"playerSta`))
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
-	})
-}
-
-func TestValidateSetupDisplayContract(t *testing.T) {
-	t.Run("valid", func(t *testing.T) {
-		require.NoError(t, validateSetupDisplayContract(writeContract(t, validContract)))
-	})
-	t.Run("missing setupDisplay", func(t *testing.T) {
-		err := validateSetupDisplayContract(writeContract(t, contractWithoutSetupDisplay))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "missing contracts.setupDisplay")
-	})
-	t.Run("missing a required state", func(t *testing.T) {
-		body := `{"contracts":{"setupDisplay":{"version":1,"requestKey":"request","states":["softap_qr","joining"],"acceptedResponse":{"ok":true}}}}`
-		err := validateSetupDisplayContract(writeContract(t, body))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "states missing")
-	})
-	t.Run("wrong version", func(t *testing.T) {
-		body := `{"contracts":{"setupDisplay":{"version":2,"requestKey":"request","states":["softap_qr","joining","join_failed","updating","claim_qr","ready","hidden"],"acceptedResponse":{"ok":true}}}}`
-		err := validateSetupDisplayContract(writeContract(t, body))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "version must be 1")
-	})
-	// Decode failures classify as UNREADABLE (a torn mid-OTA write is
-	// byte-garbage, not evidence): every capability fuse keyed on
-	// ErrPlayerContractUnreadable must defer and re-check, never latch off.
-	t.Run("undecodable manifest classifies as unreadable", func(t *testing.T) {
-		err := validateSetupDisplayContract(writeContract(t, `{"contracts": {"setupDis`))
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
-	})
-}
-
-// TestSendRejectionIsNonFatal ensures an {ok:false} player response is swallowed
-// (logged, not returned) and does not wedge subsequent narration.
-func TestSendRejectionIsNonFatal(t *testing.T) {
-	sender := &rejectingCDP{signal: make(chan struct{}, 8)}
-	svc := New(sender, writeContract(t, validContract), nil)
-
-	svc.ShowReady()
-	select {
-	case <-sender.signal:
-	case <-time.After(2 * time.Second):
-		t.Fatal("rejecting CDP was never called")
-	}
-	// No panic, no hang: reaching here is the assertion.
-}
-
-type rejectingCDP struct {
-	signal chan struct{}
-}
-
-func (r *rejectingCDP) NoLogSend(string, map[string]interface{}) (interface{}, error) {
-	select {
-	case r.signal <- struct{}{}:
-	default:
-	}
-	return map[string]any{
-		"result": map[string]any{
-			"result": map[string]any{"type": "string", "value": `{"ok":false,"error":"overlay busy"}`},
-		},
-	}, nil
-}
-
-// The production CDP client must satisfy the narrow CDPSender seam so main can
-// wire it directly.
-var _ CDPSender = cdp.CDP(nil)
-
-// TestReadyThenHideDeliversBoth is the claim-flow ordering regression: the
-// show=false claim path calls ShowReady() then Hide() back-to-back, and the
-// player must receive BOTH (in order). The old single-slot newest-intent-wins
-// queue let Hide overwrite the still-pending Ready.
 func TestReadyThenHideDeliversBoth(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.ShowReady()
 	svc.Hide()
@@ -1120,18 +381,9 @@ func TestReadyThenHideDeliversBoth(t *testing.T) {
 	assert.Equal(t, stateHidden, fake.requests[1]["state"])
 }
 
-// TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing is round 3
-// review's F1 end to end, through the real production call path: the
-// auto-claim loop's ShowFinalizing() (Owner) followed by its own
-// ShowClaimQRAutomatic() must not find "something current" and reject,
-// because that something is this same Service's own earlier overlay. Before
-// the overlay package's fix, every one of this flow's claim-QR repaints after
-// the first would have silently failed, stranding an unclaimed device on
-// "Finalizing" until an unrelated narrator or an explicit cloud command
-// repainted the screen.
 func TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.ShowFinalizing()
 	fake.waitForCalls(t, 1)
@@ -1146,14 +398,9 @@ func TestShowClaimQRAutomatic_NotStarvedByItsOwnEarlierFinalizing(t *testing.T) 
 	assert.Equal(t, stateClaimQR, fake.requests[1]["state"], "the claim QR must not be starved by this service's own earlier overlay")
 }
 
-// Hide() with no setup narration current sends nothing — there is no "clear an
-// empty screen" bypass any more (see the overlay package doc and
-// SweepStaleOverlay, the one legitimate case of painting without the owner
-// having asked). Hiding something another owner painted, not setup, is the
-// same no-op for the same reason: a plain Hide clears only setup's own overlay.
 func TestHide_NothingCurrentSendsNothing(t *testing.T) {
-	fake := newFakeCDP()
-	svc := newTestService(t, fake, validContract)
+	fake := newFakePlayer()
+	svc := New(fake, nil)
 
 	svc.Hide()
 
@@ -1161,147 +408,10 @@ func TestHide_NothingCurrentSendsNothing(t *testing.T) {
 	assert.Zero(t, fake.callCount(), "nothing was shown, so there is nothing to clear")
 }
 
-// The coalescing and ordering rules (a contiguous same-state burst collapses
-// to its newest payload; a repeat after intervening states appends instead of
-// replacing a buried entry) moved to the overlay package's own delivery queue
-// along with the queue itself — see
-// overlay.TestDelivery_CoalescesTrailingSameKindButKeepsDistinctStates. They
-// are no longer setupui-internal state to poke directly; TestReadyThenHideDeliversBoth
-// above is the black-box proof at this package's own level that distinct
-// states still both arrive, in order.
-
-// TestUnreadableContractDefersWithoutLatching: a read failure (boot ordering,
-// OTA mid-replace of the player bundle) must NOT latch narration off for the
-// process — the next push re-checks and recovers once the manifest appears.
-func TestUnreadableContractDefersWithoutLatching(t *testing.T) {
-	sender := newFakeCDP()
-	path := filepath.Join(t.TempDir(), "contract.json")
-	svc := New(sender, path, nil) // file does not exist yet
-
-	svc.ShowJoining()
-	time.Sleep(50 * time.Millisecond)
-	assert.Zero(t, sender.callCount(), "no push while the contract is unreadable")
-
-	// The player bundle lands: the very next push must recover without a
-	// daemon restart.
-	require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
-	svc.ShowJoining()
-	sender.waitForCalls(t, 1)
-}
-
-// TestNavigationSetupUIIntegration_SkipsWhenOverlayOwnsScreen is half of the
-// setupui↔playersession integration coverage the deleted RequestPageReload
-// atomicity tests provided (design doc §5): with setupui registered as a
-// REAL playersession.Session overlay owner, a navigation attempted while
-// narration is up must be pre-nav-skipped — the narration racing the
-// navigation's own gate check is exactly the case a caller-side
-// probe-then-navigate pattern could lose.
-func TestNavigationSetupUIIntegration_SkipsWhenOverlayOwnsScreen(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	session := playersession.New(context.Background(), sender, nil, nil, zap.NewNop())
-	svc.SetSession(session)
-	session.RegisterOverlayOwner("setupui", svc.Narrating)
-
-	svc.ShowUpdating(10)
-	sender.waitForCalls(t, 1)
-
-	err := session.NavigateHomeInline(playersession.NavOptions{})
-	assert.ErrorIs(t, err, playersession.ErrNavSkippedOverlay)
-	assert.NotContains(t, sender.sentMethods(), "Page.navigate",
-		"the overlay gate must stop the navigation before it ever sends")
-}
-
-// TestNavigationSetupUIIntegration_RacingNarrationDeliveredPostNavigation is
-// the other half: with no overlay up, a navigation is allowed to run, and a
-// narration push that races in WHILE it is executing (NavigationPending)
-// must park (setupui.SetSession) and be delivered only once the navigation's
-// own generation-ready worker confirms the replacement document's handler is
-// installed — never lost by evaluating into the dying pre-navigation
-// document. This is exactly the atomicity the old single-worker
-// RequestPageReload lane provided, now reproduced across the two real
-// components instead of asserted against one.
-func TestNavigationSetupUIIntegration_RacingNarrationDeliveredPostNavigation(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	svc.navigationParkPollInterval = 5 * time.Millisecond
-	svc.navigationParkTimeout = 2 * time.Second
-
-	session := playersession.New(context.Background(), sender, nil, nil, zap.NewNop())
-	svc.SetSession(session)
-	session.RegisterOverlayOwner("setupui", svc.Narrating)
-
-	// [M2] Establish a REAL, already-ready OLD generation before triggering
-	// the navigation below, so the pre-bump window is genuine: without this,
-	// session.Generation() starts at 0 (no generation ever established), and
-	// the pre-fix parkForNavigation (StageReady alone, no generation check)
-	// would accidentally behave correctly for the wrong reason — there is no
-	// stale-ready generation for a false positive to come from, so this test
-	// would pass whether or not the M2 bug was present.
-	session.OnConnect()
-	require.Eventually(t, func() bool { return session.StageReady(playersession.StageHandler) }, time.Second, time.Millisecond)
-
-	sender.readyAfterProbes = 3 // the replacement document answers on the 4th probe
-
-	navDone := make(chan playersession.NavResult, 1)
-	session.NavigateHome(playersession.NavOptions{}, func(res playersession.NavResult) {
-		navDone <- res
-	})
-
-	// Race a narration push in while the navigation is executing. Wait for
-	// Page.navigate to have actually been SENT (not just NavigationPending —
-	// which flips true at the very top of navigateAndVerify, before its own
-	// overlay gate check) so ShowUpdating's synchronous s.last write cannot
-	// race that gate check itself: this test targets the park mechanism
-	// during the post-navigate transition window, not the overlay gate
-	// (TestNavigationSetupUIIntegration_SkipsWhenOverlayOwnsScreen covers
-	// that separately).
-	require.Eventually(t, func() bool {
-		for _, m := range sender.sentMethods() {
-			if m == "Page.navigate" {
-				return true
-			}
-		}
-		return false
-	}, time.Second, time.Millisecond)
-	svc.ShowUpdating(10)
-
-	select {
-	case res := <-navDone:
-		assert.Equal(t, playersession.NavExecuted, res.Outcome)
-		assert.NoError(t, res.Err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("navigation never completed")
-	}
-
-	// The racing push must still reach the screen — delivered into the
-	// REPLACEMENT document, never lost into the dying one.
-	deadline := time.After(2 * time.Second)
-	for {
-		if last := sender.lastRequest(); last != nil && last["state"] == "updating" {
-			break
-		}
-		select {
-		case <-sender.signal:
-		case <-deadline:
-			t.Fatalf("updating overlay never reached the replacement document; lostEvaluates=%d", sender.lostEvaluates)
-		}
-	}
-	sender.mu.Lock()
-	lost := sender.lostEvaluates
-	sender.mu.Unlock()
-	assert.Equal(t, 0, lost, "no narration may evaluate into the dying document")
-}
-
-// TestSweepStaleOverlay pins the boot-reconciliation sweep's atomicity with
-// live narration: it hides only when THIS process has no narration intent
-// yet, and both race directions with a concurrent narrator preserve the
-// narration (the reviewer's cross-flow hazard: the claim flow's sweep and
-// the startup OTA gate run as unordered goroutines on the same transition).
 func TestSweepStaleOverlay(t *testing.T) {
 	t.Run("no intent yet: sweeps the previous life's overlay", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.SweepStaleOverlay()
 		sender.waitForCalls(t, 1)
@@ -1309,8 +419,8 @@ func TestSweepStaleOverlay(t *testing.T) {
 	})
 
 	t.Run("narration first, sweep delayed: narration stays authoritative", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowUpdating(40)
 		sender.waitForCalls(t, 1)
@@ -1322,8 +432,8 @@ func TestSweepStaleOverlay(t *testing.T) {
 	})
 
 	t.Run("sweep first, narration racing in behind: screen ends on narration", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.SweepStaleOverlay()
 		svc.ShowUpdating(10) // queued behind the hide on the same lane
@@ -1333,24 +443,9 @@ func TestSweepStaleOverlay(t *testing.T) {
 	})
 }
 
-// TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedRace
-// pins round 4 review's F2. Every setupui push shares one controller listener
-// (s), so between an Owner show's commit and showOwned's own "s.narrated =
-// true" flip (two separate locks: the controller's and s.mu), the sweep can
-// read narrated == false while a live Owner overlay from this same Service
-// is already current. The controller's same-listener exemption — added so
-// ShowClaimQRAutomatic may replace its own earlier ShowFinalizing — would
-// read that live overlay as "this listener's own earlier show" and let the
-// sweep's Automatic hide through anyway, erasing a live narration (e.g.
-// ShowUpdating mid-OTA) the sweep was never meant to touch. This reproduces
-// the exact window deterministically: it commits the show through the
-// controller directly, the same call showOwned makes, without going through
-// showOwned itself — so narrated is left false exactly as it would be
-// mid-race — then invokes the production SweepStaleOverlay and asserts the
-// live overlay survives.
 func TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedRace(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
+	sender := newFakePlayer()
+	svc := New(sender, nil)
 
 	live := overlay.Overlay{
 		Kind:    setupKind(stateUpdating),
@@ -1374,27 +469,9 @@ func TestSweepStaleOverlay_DoesNotExploitSameListenerExemptionDuringTheNarratedR
 	assert.Equal(t, 1, sender.callCount(), "no hide may be delivered while the live overlay stands")
 }
 
-// TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent pins
-// round 6 review's F4: showOwned and hideIf used to write s.narrated /
-// s.hiddenIntent AFTER ShowIf/HideIf returned. Nothing in setupui's own
-// contract serializes two of ITS OWN decisions any more (the overlay
-// package doc explains why the old internal queue, which used to do that,
-// was removed), so a push racing a hide could commit in one order but
-// return — and so write these two fields — in the other, leaving
-// hiddenIntent describing whichever call returned last rather than
-// whichever decision actually committed last. The fix moved both writes
-// into the CommitHook, which runs under the controller's own decision lock
-// in true commit order (see overlay.CommitHook's doc), so this no longer
-// depends on which goroutine happens to resume first. This drives many
-// concurrent shows and hides on the same Service and checks, after every
-// batch, that hiddenIntent agrees with whether anything is actually
-// current — nothing current must mean hiddenIntent is true (the last
-// commit was a hide), something current must mean it is false (the last
-// commit was a show) — with the race detector run alongside to catch any
-// write this ordering guarantee fails to fence.
 func TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
+	sender := newFakePlayer()
+	svc := New(sender, nil)
 
 	const workers = 8
 	const rounds = 50
@@ -1427,14 +504,10 @@ func TestShowOwnedAndHideIf_ConcurrentDecisionsKeepHiddenIntentConsistent(t *tes
 	}
 }
 
-// TestHideIfShowing pins the owned-narration clear: a flow may hide the
-// overlay it painted (finalizing) but must never erase a concurrent
-// narrator's (updating), and with no intent at all it must not push a
-// spurious hide.
 func TestHideIfShowing(t *testing.T) {
 	t.Run("hides its own narration", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowFinalizing()
 		svc.HideIfShowing(StateFinalizing)
@@ -1444,8 +517,8 @@ func TestHideIfShowing(t *testing.T) {
 	})
 
 	t.Run("yields to a concurrent narrator", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowFinalizing()
 		svc.ShowUpdating(20) // another narrator took the screen mid-flow
@@ -1457,213 +530,12 @@ func TestHideIfShowing(t *testing.T) {
 	})
 
 	t.Run("no intent: no spurious hide", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.HideIfShowing(StateFinalizing)
 		assert.Equal(t, 0, sender.callCount())
 		assert.False(t, svc.Narrating())
-	})
-}
-
-// TestRefreshClaimQRName pins the rename repaint: while the claim QR is the
-// current intent a refresh re-pushes claim_qr with the cached url and the
-// resolved name; any other intent (or none) is left alone and the resolver
-// never runs — the factory-reset clear reaches this path with the screen on
-// factory_reset and must not read the serial for nothing.
-// TestCurrentNarrationState pins the general overlay-state signal the app
-// now reads from player_status (sibling of mintpairing's
-// DisplayActive/OverlayStatus): "", false before anything is shown, the
-// exact painted state (e.g. "claim_qr", "updating") once something is,
-// false once hidden, and it reflects whichever state most recently replaced
-// another.
-func TestCurrentNarrationState(t *testing.T) {
-	t.Run("nothing before anything is shown", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		state, ok := svc.CurrentNarrationState()
-		assert.False(t, ok)
-		assert.Empty(t, state)
-	})
-
-	t.Run("reports claim_qr once the claim QR is painted", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
-		sender.waitForCalls(t, 1)
-
-		state, ok := svc.CurrentNarrationState()
-		assert.True(t, ok)
-		assert.Equal(t, stateClaimQR, state)
-	})
-
-	t.Run("reflects a different narration state once it replaces claim_qr", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
-		sender.waitForCalls(t, 1)
-		state, ok := svc.CurrentNarrationState()
-		require.True(t, ok)
-		require.Equal(t, stateClaimQR, state)
-
-		svc.ShowUpdating(40)
-		sender.waitForCalls(t, 2)
-
-		state, ok = svc.CurrentNarrationState()
-		assert.True(t, ok)
-		assert.Equal(t, stateUpdating, state)
-	})
-
-	t.Run("nothing once hidden", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
-		sender.waitForCalls(t, 1)
-		svc.Hide()
-		sender.waitForCalls(t, 2)
-
-		state, ok := svc.CurrentNarrationState()
-		assert.False(t, ok)
-		assert.Empty(t, state)
-	})
-}
-
-// TestCurrentNarrationStateReportsResolvedDisplay pins the one deliberate
-// difference between this signal and Narrating(): it reports what the player
-// actually renders, not the neutral intent the controller retains for Resync
-// replay (see resolveExtensionState). On a manifest that predates a state the
-// two genuinely differ, and reporting the intent advertised an `overlay` on
-// checkStatus/player_status after the screen had already returned to artwork
-// — persistently, not for a sampling window (feralfile-bot F1 on PR #389).
-//
-// Every outcome the send-time downgrade table can produce is covered here, so
-// a later state added to sendFallbacks cannot reintroduce the skew for one
-// shape only: the hide override, a different-state fallback, a supporting
-// manifest (no downgrade at all), a retained hidden intent, and narration
-// disabled outright.
-func TestCurrentNarrationStateReportsResolvedDisplay(t *testing.T) {
-	t.Run("hide downgrade omits the overlay", func(t *testing.T) {
-		sender := newFakeCDP()
-		// validContract predates `connecting`, so the ap-recheck push
-		// downgrades to a HIDE while the retained intent stays "connecting".
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateHidden, sender.lastRequest()["state"])
-
-		state, ok := svc.CurrentNarrationState()
-		assert.False(t, ok, "the screen is back on artwork; no overlay may be advertised")
-		assert.Empty(t, state)
-	})
-
-	t.Run("reports the fallback state, not the intent", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		// No hide marker: the table's own fallback paints join_failed.
-		svc.ShowConnecting("Reconnecting…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
-
-		state, ok := svc.CurrentNarrationState()
-		assert.True(t, ok)
-		assert.Equal(t, stateJoinFailed, state,
-			"the viewer is looking at join_failed, so that is what the status must say")
-	})
-
-	t.Run("supporting manifest reports the neutral state unchanged", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting)
-
-		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
-		sender.waitForCalls(t, 1)
-		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
-
-		state, ok := svc.CurrentNarrationState()
-		assert.True(t, ok)
-		assert.Equal(t, stateConnecting, state)
-	})
-
-	t.Run("a retained hidden intent is nothing showing", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
-
-		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
-		sender.waitForCalls(t, 1)
-		svc.Hide()
-		sender.waitForCalls(t, 2)
-		// Resync's ReplayHide path is what can leave a setup:hidden Kind
-		// current; it must never surface as an overlay whose state is the
-		// literal string "hidden".
-		svc.Resync()
-
-		state, ok := svc.CurrentNarrationState()
-		assert.False(t, ok)
-		assert.Empty(t, state)
-	})
-
-	// scanning/finalizing/factory_reset are extension states with NO entry in
-	// sendFallbacks: an older manifest accepts them with {ok:true} and
-	// renders nothing, so the send deliberately goes out unresolved (see
-	// resolvedState's last paragraph) and the screen does not change. Tracking
-	// manifest support for only the two downgradeable states left these three
-	// permanently supportUnknown, which read as "supported" — so the report
-	// claimed an overlay nobody could see, for the whole duration of the
-	// state (round 2 review, F1).
-	for _, tc := range []struct {
-		state string
-		show  func(*Service)
-	}{
-		{stateScanning, func(s *Service) { s.ShowScanning() }},
-		{stateFinalizing, func(s *Service) { s.ShowFinalizing() }},
-		{stateFactoryReset, func(s *Service) { s.ShowFactoryReset() }},
-	} {
-		t.Run("a no-fallback extension state the manifest lacks omits the overlay: "+tc.state, func(t *testing.T) {
-			sender := newFakeCDP()
-			// validContract predates all three.
-			svc := newTestService(t, sender, validContract)
-
-			tc.show(svc)
-			sender.waitForCalls(t, 1)
-			require.Equal(t, tc.state, sender.lastRequest()["state"],
-				"the send must still go out unresolved — the player no-ops it, and guessing a hide would clear a newer player's render")
-
-			state, ok := svc.CurrentNarrationState()
-			assert.False(t, ok, "this player renders nothing for %q, so no overlay may be advertised", tc.state)
-			assert.Empty(t, state)
-		})
-
-		t.Run("the same state is reported on a manifest that lists it: "+tc.state, func(t *testing.T) {
-			sender := newFakeCDP()
-			svc := newTestService(t, sender, contractWithConnecting)
-
-			tc.show(svc)
-			sender.waitForCalls(t, 1)
-
-			state, ok := svc.CurrentNarrationState()
-			assert.True(t, ok)
-			assert.Equal(t, tc.state, state)
-		})
-	}
-
-	t.Run("narration disabled outright omits the overlay", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithoutSetupDisplay)
-
-		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
-		// The worker resolves the manifest once and short-circuits; nothing
-		// reaches CDP, so there is no send to synchronize on.
-		time.Sleep(100 * time.Millisecond)
-		require.Equal(t, 0, sender.callCount())
-
-		state, ok := svc.CurrentNarrationState()
-		assert.False(t, ok, "no setup overlay ever reached the screen on this player")
-		assert.Empty(t, state)
 	})
 }
 
@@ -1676,11 +548,11 @@ func TestRefreshClaimQRName(t *testing.T) {
 	}
 
 	t.Run("rewrites the name of a showing claim QR", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
-		// Let the paint reach CDP first: a refresh queued behind an unsent
+		// Let the paint reach player socket first: a refresh queued behind an unsent
 		// claim_qr coalesces into it (trailing same-state rule), which is
 		// also correct but would make the second delivery unobservable.
 		sender.waitForCalls(t, 1)
@@ -1696,8 +568,8 @@ func TestRefreshClaimQRName(t *testing.T) {
 	})
 
 	t.Run("carries the url a concurrent repaint installed", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowClaimQR("https://claim.example/old-topic", "FF1-8EVTK3RE")
 		sender.waitForCalls(t, 1)
@@ -1711,7 +583,7 @@ func TestRefreshClaimQRName(t *testing.T) {
 		assert.Eventually(t, func() bool {
 			last := sender.lastRequest()
 			return last != nil && last["device_name"] == "Living Room"
-		}, 2*time.Second, 10*time.Millisecond, "refreshed name never reached CDP")
+		}, 2*time.Second, 10*time.Millisecond, "refreshed name never reached player socket")
 
 		last := sender.lastRequest()
 		assert.Equal(t, stateClaimQR, last["state"])
@@ -1719,8 +591,8 @@ func TestRefreshClaimQRName(t *testing.T) {
 	})
 
 	t.Run("yields to a concurrent narrator", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowClaimQR("https://claim.example/x", "FF1-8EVTK3RE")
 		svc.ShowUpdating(20) // OTA took the screen before the rename landed
@@ -1734,8 +606,8 @@ func TestRefreshClaimQRName(t *testing.T) {
 	})
 
 	t.Run("no intent: no push, no resolve", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		ran := false
 		svc.RefreshClaimQRName(resolveTo("Living Room", &ran))
@@ -1746,263 +618,10 @@ func TestRefreshClaimQRName(t *testing.T) {
 	})
 }
 
-// fakeNavigationSession is a minimal, directly-controllable NavigationSession
-// double: tests flip pending/ready/generation to drive the worker's park loop
-// without a real playersession.Session.
-type fakeNavigationSession struct {
-	mu      sync.Mutex
-	pending bool
-	ready   bool
-	gen     uint64
-	target  uint64
-}
-
-func (f *fakeNavigationSession) NavigationPending() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.pending
-}
-
-func (f *fakeNavigationSession) StageReady(playersession.Stage) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.ready
-}
-
-func (f *fakeNavigationSession) Generation() uint64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.gen
-}
-
-func (f *fakeNavigationSession) NavigationTargetGeneration() uint64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.target
-}
-
-func (f *fakeNavigationSession) setPending(v bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.pending = v
-}
-
-func (f *fakeNavigationSession) setReady(v bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ready = v
-}
-
-func (f *fakeNavigationSession) setGeneration(v uint64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.gen = v
-}
-
-func (f *fakeNavigationSession) setTarget(v uint64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.target = v
-}
-
-// TestParkForNavigation_NoSessionWired guards that every pre-session build
-// (and every OTHER test in this file, none of which call SetSession) sees the
-// worker never park: nil session must be indistinguishable from "no pending
-// navigation" behavior-wise.
-func TestParkForNavigation_NoSessionWired(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-
-	start := time.Now()
-	svc.ShowReady()
-	sender.waitForCalls(t, 1)
-	assert.Less(t, time.Since(start), time.Second)
-}
-
-// TestParkForNavigation_DeliversAfterNavigationPendingClears pins the primary
-// exit: a push queued while a navigation is pending waits, then delivers the
-// instant NavigationPending flips false — well before the park timeout.
-func TestParkForNavigation_DeliversAfterNavigationPendingClears(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	nav := &fakeNavigationSession{pending: true}
-	svc.SetSession(nav)
-	svc.navigationParkPollInterval = 5 * time.Millisecond
-	svc.navigationParkTimeout = 2 * time.Second
-
-	svc.ShowReady()
-	// Give the worker a chance to observe the pending flag and start parking.
-	time.Sleep(30 * time.Millisecond)
-	assert.Equal(t, 0, sender.callCount(), "must park while NavigationPending is true")
-
-	nav.setPending(false)
-	sender.waitForCalls(t, 1)
-	assert.Equal(t, stateReady, sender.lastRequest()["state"])
-}
-
-// TestParkForNavigation_ExitsWhenStageReady pins the second exit: the
-// navigation's TARGET generation reaching StageHandler ends the park even
-// while NavigationPending is still (momentarily) true. target must be
-// non-zero AND match Generation() for StageReady to count [Park predicate
-// fix] — setting ready alone, with target still 0 (pre-bump), must NOT exit
-// (see the sibling pre-bump test below).
-func TestParkForNavigation_ExitsWhenStageReady(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	nav := &fakeNavigationSession{pending: true}
-	svc.SetSession(nav)
-	svc.navigationParkPollInterval = 5 * time.Millisecond
-	svc.navigationParkTimeout = 2 * time.Second
-
-	svc.ShowReady()
-	time.Sleep(30 * time.Millisecond)
-	assert.Equal(t, 0, sender.callCount())
-
-	// pending stays true; the target generation reaching StageReady must
-	// still end the park.
-	nav.setGeneration(1)
-	nav.setTarget(1)
-	nav.setReady(true)
-	sender.waitForCalls(t, 1)
-	assert.Equal(t, stateReady, sender.lastRequest()["state"])
-}
-
-// TestParkForNavigation_PreBumpStageReady_DoesNotExit pins the pre-bump half
-// of the park predicate fix directly: StageReady answering against a stale,
-// already-ready OLD generation while the navigation hasn't bumped one yet
-// (target == 0) must never end the park. Before the ORIGINAL M2 fix, a bare
-// StageReady(StageHandler) check made this a production no-op: the park
-// exited immediately against the stale positive, delivering narration into a
-// document about to be torn down.
-func TestParkForNavigation_PreBumpStageReady_DoesNotExit(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	nav := &fakeNavigationSession{pending: true, ready: true} // gen 0, target 0 (pre-bump), already "ready"
-	svc.SetSession(nav)
-	svc.navigationParkPollInterval = 5 * time.Millisecond
-	svc.navigationParkTimeout = 60 * time.Millisecond
-
-	start := time.Now()
-	svc.ShowReady()
-	sender.waitForCalls(t, 1)
-	elapsed := time.Since(start)
-
-	// It must have taken (roughly) the full park timeout, not exited early
-	// against the stale, pre-bump StageReady.
-	assert.GreaterOrEqual(t, elapsed, 55*time.Millisecond,
-		"a pre-bump (target==0) StageReady must not exit the park early")
-	assert.Equal(t, stateReady, sender.lastRequest()["state"])
-}
-
-// TestParkForNavigation_ExitsPromptlyWhenEnteredPostBump pins finding 1
-// directly: a park entered AFTER the navigation's bump already happened
-// (Generation() and the navigation's target generation are already the
-// SAME value when this park starts — a real, common timing since
-// NavigationPending stays true for the navigation's entire verifyCap window
-// while awaitRouteSettled keeps polling) must exit PROMPTLY once that
-// target generation is handler-ready, not stall for the full park timeout.
-// A Generation()-snapshot-at-entry comparison (the pre-fix approach) cannot
-// tell this case apart from "no bump happened yet" — the snapshot IS
-// already the new generation — so it stalled here for the full timeout.
-func TestParkForNavigation_ExitsPromptlyWhenEnteredPostBump(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	nav := &fakeNavigationSession{pending: true, gen: 1, target: 1, ready: true}
-	svc.SetSession(nav)
-	svc.navigationParkPollInterval = 5 * time.Millisecond
-	svc.navigationParkTimeout = 2 * time.Second
-
-	start := time.Now()
-	svc.ShowReady()
-	sender.waitForCalls(t, 1)
-	elapsed := time.Since(start)
-
-	assert.Less(t, elapsed, 200*time.Millisecond,
-		"a park entered post-bump must exit promptly, not stall for the full timeout")
-	assert.Equal(t, stateReady, sender.lastRequest()["state"])
-}
-
-// TestParkForNavigation_TimesOutAndDeliversBestEffort pins the third exit: a
-// navigation that never resolves (page never installs its handler) must not
-// park narration for the process.
-func TestParkForNavigation_TimesOutAndDeliversBestEffort(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract)
-	nav := &fakeNavigationSession{pending: true}
-	svc.SetSession(nav)
-	svc.navigationParkPollInterval = 5 * time.Millisecond
-	svc.navigationParkTimeout = 30 * time.Millisecond
-
-	svc.ShowReady()
-	sender.waitForCalls(t, 1)
-	assert.Equal(t, stateReady, sender.lastRequest()["state"])
-}
-
-// TestShowSetupErrorManifestGate pins the §4.6 escalation state's contract
-// posture: setup_error is an EXTENSION state (absent from the required
-// validation set, so older manifests still pass the narration gate), rendered
-// natively when the manifest lists it and downgraded to join_failed — through
-// the same fallback table as connecting — when a decoded manifest provably
-// lacks it. Degraded title, never a dark or lying screen.
-func TestShowSetupErrorManifestGate(t *testing.T) {
-	t.Run("manifest lists setup_error", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting) // shipping fixture
-
-		svc.ShowSetupError("The frame could not start setup mode. (FF1-TEST)")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateSetupError, req["state"])
-		assert.Equal(t, "The frame could not start setup mode. (FF1-TEST)", req["reason"])
-	})
-
-	t.Run("older manifest downgrades to join_failed with the prose intact", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract) // required set only
-
-		svc.ShowSetupError("The frame could not start setup mode. (FF1-TEST)")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateJoinFailed, req["state"])
-		assert.Equal(t, "The frame could not start setup mode. (FF1-TEST)", req["reason"])
-	})
-
-	t.Run("required set does not grow", func(t *testing.T) {
-		// The delivery-skew posture: growing the required set would latch
-		// narration off entirely on every device that takes the controld
-		// package before the player bundle. validContract predates both
-		// downgradeable states and must still pass the gate.
-		assert.NoError(t, validateSetupDisplayManifest(mustDecodeManifest(t, validContract)))
-	})
-
-	t.Run("one fallback mechanism covers both states", func(t *testing.T) {
-		// The §4.6 downgrade table is the single mechanism; a second bespoke
-		// copy of the resolution path is the regression this pins against.
-		assert.Contains(t, sendFallbacks, stateConnecting)
-		assert.Contains(t, sendFallbacks, stateSetupError)
-	})
-}
-
-func mustDecodeManifest(t *testing.T, raw string) playerContractManifest {
-	t.Helper()
-	var m playerContractManifest
-	require.NoError(t, json.Unmarshal([]byte(raw), &m))
-	return m
-}
-
-// TestShowConnectingIfShowing pins the conditional paint's race safety (the
-// §4.6 topic-wait expiry fix): the connecting narration lands only when the
-// current intent is one of the named states — a concurrently painted
-// softap_qr (a link drop raised the setup AP during the 60s topic wait) must
-// survive untouched, exactly like HideIfShowing's guarantee.
 func TestShowConnectingIfShowing(t *testing.T) {
 	t.Run("paints over the named state", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
 		svc.ShowFinalizing()
 		sender.waitForCalls(t, 1)
@@ -2016,10 +635,10 @@ func TestShowConnectingIfShowing(t *testing.T) {
 	})
 
 	t.Run("a concurrently painted softap_qr survives", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting)
+		sender := newFakePlayer()
+		svc := New(sender, nil)
 
-		svc.ShowSoftAPQR("FF1-TEST", "12345678", "http://10.42.0.1")
+		svc.ShowSoftAPQR("FF1-TEST", "12345678", "http://10.42.0.1", false)
 		sender.waitForCalls(t, 1)
 		svc.ShowConnectingIfShowing("Connected by cable, but no internet.", StateFinalizing)
 
@@ -2029,39 +648,86 @@ func TestShowConnectingIfShowing(t *testing.T) {
 		assert.Equal(t, stateSoftAPQR, sender.lastRequest()["state"])
 	})
 }
+func TestStatusRequiresHostObservation(t *testing.T) {
+	sender := newFakePlayer()
+	s := New(sender, nil)
+	sender.err = errors.New("host absent")
+	s.ShowClaimQR("https://example.org/claim", "FF1")
+	sender.waitForCalls(t, 1)
+	state, ok := s.CurrentNarrationState()
+	require.False(t, ok)
+	require.Empty(t, state)
+	require.True(t, s.Narrating(), "intent remains for replay")
+	s.Observe(playerlink.Snapshot{Overlay: &playerlink.Overlay{Owner: "setup", State: "claim_qr"}})
+	state, ok = s.CurrentNarrationState()
+	require.True(t, ok)
+	require.Equal(t, "claim_qr", state)
+	s.Observe(playerlink.Snapshot{Overlay: &playerlink.Overlay{Owner: "pairing", State: "pairing_code"}})
+	_, ok = s.CurrentNarrationState()
+	require.False(t, ok)
+}
+func TestSlowHostDoesNotBlockProvisioning(t *testing.T) {
+	sender := newFakePlayer()
+	sender.gate = make(chan struct{})
+	s := New(sender, nil)
+	done := make(chan struct{})
+	go func() { s.ShowConnecting("Checking the network"); s.Hide(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("provisioning blocked behind display")
+	}
+	close(sender.gate)
+	sender.waitForCalls(t, 2)
+}
 
-// TestShowConnectingOrHideDowngradesToHide pins the delivery-skew hide-blink
-// rule: the recurring ap-recheck push downgrades to a HIDE — never
-// join_failed, and never a skipped push that strands the stale QR — on a
-// manifest that provably lacks `connecting`, while a manifest that lists it
-// renders the neutral state as usual (with the internal marker never reaching
-// the wire).
-func TestShowConnectingOrHideDowngradesToHide(t *testing.T) {
-	t.Run("older manifest downgrades to hide, not join_failed", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, validContract)
+type scriptedWatch struct {
+	connected  chan func(playerlink.SnapshotDelivery)
+	disconnect chan struct{}
+}
 
-		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateHidden, req["state"],
-			"the recurring blink must clear the screen, never flash a false failure")
-	})
-
-	t.Run("supporting manifest renders connecting without the marker", func(t *testing.T) {
-		sender := newFakeCDP()
-		svc := newTestService(t, sender, contractWithConnecting)
-
-		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
-		sender.waitForCalls(t, 1)
-
-		req := sender.lastRequest()
-		require.NotNil(t, req)
-		assert.Equal(t, stateConnecting, req["state"])
-		assert.Equal(t, "Checking for your Wi-Fi network…", req["reason"])
-		_, leaked := req[fallbackHideKey]
-		assert.False(t, leaked, "the queue marker must never reach the wire")
-	})
+func (w *scriptedWatch) Watch(ctx context.Context, deliver func(playerlink.SnapshotDelivery)) error {
+	select {
+	case w.connected <- deliver:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-w.disconnect:
+		return errors.New("host disconnected")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func TestHostReconnectReplaysIntentAndClearsUnobservedStatus(t *testing.T) {
+	sender := newFakePlayer()
+	s := New(sender, nil)
+	s.ShowConnecting("Checking the network")
+	sender.waitForCalls(t, 1)
+	watcher := &scriptedWatch{connected: make(chan func(playerlink.SnapshotDelivery)), disconnect: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { s.Run(ctx, watcher); close(done) }()
+	callback := <-watcher.connected
+	callback(playerlink.SnapshotDelivery{Initial: true, Snapshot: playerlink.Snapshot{Overlay: &playerlink.Overlay{Owner: "setup", State: "connecting"}}})
+	sender.waitForCalls(t, 2)
+	_, visible := s.CurrentNarrationState()
+	require.True(t, visible)
+	watcher.disconnect <- struct{}{}
+	require.Eventually(t, func() bool { _, showing := s.CurrentNarrationState(); return !showing }, time.Second, time.Millisecond)
+	select {
+	case callback = <-watcher.connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch did not reconnect")
+	}
+	callback(playerlink.SnapshotDelivery{Initial: true, Snapshot: playerlink.Snapshot{}})
+	sender.waitForCalls(t, 3)
+	require.Equal(t, "connecting", sender.lastRequest()["state"])
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watch failed to stop")
+	}
 }

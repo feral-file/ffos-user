@@ -1,0 +1,138 @@
+{
+  "base": "../device/pacing",
+  "physicalOutputVerified": false,
+  "captures": [
+    {
+      "file": "images/animated-gif-2.png",
+      "sha256": "22e9642d168c0b108a690a8a9830f6f89faef79f934085d4654af48bfad7f404"
+    },
+    {
+      "file": "images/animated-gif-3.png",
+      "sha256": "c413907d7f1e1eb1de86e2cae53e3acb0a2f3e448560237f272082164c6b04d7"
+    },
+    {
+      "file": "images/animated-gif-1.png",
+      "sha256": "22e9642d168c0b108a690a8a9830f6f89faef79f934085d4654af48bfad7f404"
+    },
+    {
+      "file": "images/animated-gif-0.png",
+      "sha256": "c413907d7f1e1eb1de86e2cae53e3acb0a2f3e448560237f272082164c6b04d7"
+    },
+    {
+      "file": "images/animated-gif-4.png",
+      "sha256": "22e9642d168c0b108a690a8a9830f6f89faef79f934085d4654af48bfad7f404"
+    },
+    {
+      "file": "images/animated-gif-5.png",
+      "sha256": "c413907d7f1e1eb1de86e2cae53e3acb0a2f3e448560237f272082164c6b04d7"
+    },
+    {
+      "file": "images/alpha-png-0.png",
+      "sha256": "308f0e8ac9df37042daea8dfd264372b605d447cb1e9688225238a032c14e6a0"
+    },
+    {
+      "file": "images/exif-rotate-6-0.png",
+      "sha256": "3422e96963b8058f84c7a4655bb252a306bccb01b8cd041b26fa424babd5fcc6"
+    },
+    {
+      "file": "render-loop/compositor-0.png",
+      "sha256": "d173dfb327e9529ea9b61a43b4c46f37bec3a417e8184acd4cf3cbf443a7b839"
+    },
+    {
+      "file": "render-loop/compositor-1.png",
+      "sha256": "5e688c2ed3ff28628148ad0630e6a657d351c5a232b8d9358fae92d1f592ad8f"
+    },
+    {
+      "file": "setup/06-connecting.png",
+      "sha256": "9259e445456eb23673d9b36bab79155e05f8433e1bb73d72f3aa33a86212daec"
+    },
+    {
+      "file": "setup/04-joining.png",
+      "sha256": "cdd9a87662f2baa481dae6c93d199f8f3dbfa1f890cefd1409bf8b0347160a91"
+    },
+    {
+      "file": "setup/00-softap_qr.png",
+      "sha256": "92a00aed668b6bd3786721c78e053f0e5af559791ec009027b10a863d8d243f0"
+    },
+    {
+      "file": "setup/03-scanning.png",
+      "sha256": "48c66c9b618de306e1698ccc11bdc2012fbae80712e841418f19d5c88d82f3e6"
+    },
+    {
+      "file": "setup/08-setup_error.png",
+      "sha256": "3cab008d31e702e3a78d9b4f3b4700014af7cfaf647e87ac537c2cb5b5300614"
+    },
+    {
+      "file": "setup/09-updating.png",
+      "sha256": "1a4823e1f52aa2b3b3c91e0a1008ca98d35309e17568e6665f56ff32d76a3def"
+    },
+    {
+      "file": "setup/05-finalizing.png",
+      "sha256": "53dd3359d3a215d8029f18b60ef31c927a5c292566847620714b4da4da7a0c94"
+    },
+    {
+      "file": "setup/07-join_failed.png",
+      "sha256": "7c9037d713c5fc902e854a58ee2ee7126f9efd7fd5f69490f5b0e4759c06921c"
+    },
+    {
+      "file": "setup/01-softap_qr.png",
+      "sha256": "1d57a2ea89779452672cc8676d28838b27743f47d42685d996a912b0715103f1"
+    },
+    {
+      "file": "setup/02-claim_qr.png",
+      "sha256": "11ea8ccafb8cb22db5646e49549d0f8ca3daf71bbb53f3e3658414f106d34381"
+    },
+    {
+      "file": "setup/10-factory_reset.png",
+      "sha256": "f5824847f44cea2850946887d87305655fba51e71504f1591884f423c2244e18"
+    },
+    {
+      "file": "models/draco-ktx2.png",
+      "sha256": "b4d5959cfc8cc07029f2b8acf4a26fc3a8aed537130424aaabe8063291005280"
+    },
+    {
+      "file": "models/draco.png",
+      "sha256": "7bbfef1edbf3254a11cb40df7a2fe89b70585eac01494a89ca6704ba54da78d4"
+    },
+    {
+      "file": "models/box.png",
+      "sha256": "7bbfef1edbf3254a11cb40df7a2fe89b70585eac01494a89ca6704ba54da78d4"
+    },
+    {
+      "file": "presentation/label-expired.png",
+      "sha256": "4b9c6de3c943a97fa431bb4cad20b837ce5b4642fb5f1c22f3cc91b608c1f68c"
+    },
+    {
+      "file": "presentation/label.png",
+      "sha256": "05e9874a981b1e415f7a35ce41bcd7a290c4db5b28401f97e3d5508c493bd3e1"
+    },
+    {
+      "file": "presentation/pointer.png",
+      "sha256": "f7f076d4869c58885059517c807d4fe6e4fc2b790cfd5ef1903eb77e8cfa026a"
+    },
+    {
+      "file": "presentation/initial.png",
+      "sha256": "4b9c6de3c943a97fa431bb4cad20b837ce5b4642fb5f1c22f3cc91b608c1f68c"
+    },
+    {
+      "file": "presentation/label-hidden.png",
+      "sha256": "4b9c6de3c943a97fa431bb4cad20b837ce5b4642fb5f1c22f3cc91b608c1f68c"
+    },
+    {
+      "file": "presentation/label-timed.png",
+      "sha256": "05e9874a981b1e415f7a35ce41bcd7a290c4db5b28401f97e3d5508c493bd3e1"
+    },
+    {
+      "file": "presentation/pointer-expired.png",
+      "sha256": "4b9c6de3c943a97fa431bb4cad20b837ce5b4642fb5f1c22f3cc91b608c1f68c"
+    }
+  ],
+  "visuallyReviewed": [
+    "render-loop/compositor-0.png",
+    "setup/02-claim_qr.png"
+  ],
+  "automatedPixelChecks": [
+    "presentation/*.png",
+    "images/*.png"
+  ]
+}

@@ -1,0 +1,697 @@
+Nov 17 22:55:00 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.050286:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.050956:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.051004:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.051995:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328804]: [2328804:2328804:1117/225501.103076:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.118536:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/550ea29d-1772-452a-b5ed-4e7f84927786
+Nov 17 22:55:01 homelab ff-player-native[2328754]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 22:55:01 homelab env[2328754]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.228379:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.228478:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.228480:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.228554:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.228628:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.232038:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.232136:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.234289:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.234552:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.234609:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.235615:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.236340:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.236400:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.236412:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.239169:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328778:1117/225501.239231:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:55:01 homelab env[2328754]: [2328754:2328754:1117/225501.241028:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:55:02 homelab env[2328754]: bundled_decoder /draco/draco_wasm_wrapper.js
+Nov 17 22:55:02 homelab env[2328754]: bundled_decoder /draco/draco_decoder.wasm
+Nov 17 22:55:02 homelab env[2328754]: bundled_decoder /basis/basis_transcoder.js
+Nov 17 22:55:02 homelab env[2328754]: bundled_decoder /basis/basis_transcoder.wasm
+Nov 17 22:56:11 homelab env[2328804]: [2328804:2328804:1117/225611.666796:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 22:56:29 homelab env[2328754]: [2328754:2328778:1117/225629.604718:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:56:29 homelab env[2328754]: [2328754:2328754:1117/225629.608349:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:56:29 homelab env[2328754]: [2328754:2328778:1117/225629.608514:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:56:29 homelab env[2328754]: [2328754:2328754:1117/225629.657947:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:57:12 homelab env[2328804]: [2328804:2328804:1117/225712.779477:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 22:58:14 homelab env[2328804]: [2328804:2328804:1117/225814.796166:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 22:58:17 homelab systemd[928]: Stopping [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224...
+Nov 17 22:58:17 homelab env[2328754]: presentation_metrics {"copyMilliseconds":36.114084000000005,"cpuCopies":0,"gpuCopies":23,"producerBusyFrames":1743,"swaps":4206}
+Nov 17 22:58:17 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2328767 (ff-player-nativ) with signal SIGKILL.
+Nov 17 22:58:17 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2328768 (ff-player-nativ) with signal SIGKILL.
+Nov 17 22:58:17 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2328770 (ff-player-nativ) with signal SIGKILL.
+Nov 17 22:58:17 homelab systemd[928]: Stopped [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 22:58:17 homelab systemd[928]: ff-native-runtime-test.service: Consumed 56.079s CPU time over 3min 16.920s wall clock time, 542.5M memory peak.
+Nov 17 22:58:31 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 22:58:31 homelab env[2335539]: [1117/225831.899699:ERROR:base/i18n/icu_util.cc:237] Invalid file descriptor to ICU data received.
+Nov 17 22:58:33 homelab systemd-coredump[2335542]: Process 2335539 (ff-player-nativ) of user 1000 dumped core.
+                                                   
+                                                   Stack trace of thread 2335539:
+                                                   #0  0x00007fa124a1cdfb _ZN4base4i18n13InitializeICUEv (libcef.so + 0x9e1cdfb)
+                                                   #1  0x00007fa123585ed3 _ZN7content21ContentMainRunnerImpl10InitializeENS_17ContentMainParamsE (libcef.so + 0x8985ed3)
+                                                   #2  0x00007fa1235841e9 _ZN7content21ContentMainInitializeENS_17ContentMainParamsEPNS_17ContentMainRunnerE (libcef.so + 0x89841e9)
+                                                   #3  0x00007fa11e03b8e6 _ZN13CefMainRunner21ContentMainInitializeERK11CefMainArgsPvPib (libcef.so + 0x343b8e6)
+                                                   #4  0x00007fa11e03b6df _ZN13CefMainRunner10InitializeEP13CefStructBaseI17CefSettingsTraitsE13scoped_refptrI6CefAppERK11CefMainArgsPvPbN4base12OnceCallbackIFvvEEE (libcef.so + 0x343b6df)
+                                                   #5  0x00007fa11e022af3 _ZN10CefContext10InitializeERK11CefMainArgsRK13CefStructBaseI17CefSettingsTraitsE13scoped_refptrI6CefAppEPv (libcef.so + 0x3422af3)
+                                                   #6  0x00007fa11e022758 _Z13CefInitializeRK11CefMainArgsRK13CefStructBaseI17CefSettingsTraitsE13scoped_refptrI6CefAppEPv (libcef.so + 0x3422758)
+                                                   #7  0x00007fa11df4cfd6 cef_initialize (libcef.so + 0x334cfd6)
+                                                   #8  0x000055d05107d0c9 _Z13CefInitializeRK11CefMainArgsRK13CefStructBaseI17CefSettingsTraitsE13scoped_refptrI6CefAppEPv (ff-player-native + 0xd80c9)
+                                                   #9  0x000055d050ff1455 main (ff-player-native + 0x4c455)
+                                                   #10 0x00007fa11a227741 n/a (libc.so.6 + 0x27741)
+                                                   #11 0x00007fa11a227879 __libc_start_main (libc.so.6 + 0x27879)
+                                                   #12 0x000055d050ff3a45 _start (ff-player-native + 0x4ea45)
+                                                   ELF object binary architecture: AMD x86-64
+Nov 17 22:58:33 homelab systemd[928]: ff-native-runtime-test.service: Main process exited, code=dumped, status=5/TRAP
+Nov 17 22:58:33 homelab systemd[928]: ff-native-runtime-test.service: Failed with result 'core-dump'.
+Nov 17 22:58:33 homelab systemd[928]: ff-native-runtime-test.service: Consumed 126ms CPU time over 1.311s wall clock time, 166M memory peak.
+Nov 17 22:59:51 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.570217:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.571132:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.571266:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.572653:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337960]: [2337960:2337960:1117/225951.636942:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.655330:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/93097f54-7fcc-4b20-ab71-ba7c9e485ae2
+Nov 17 22:59:51 homelab ff-player-native[2337911]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 22:59:51 homelab env[2337911]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.773035:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.773132:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.773150:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.773182:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.773323:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.776131:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.776219:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.778088:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.778246:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.778315:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.778978:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.779695:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.779752:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.779916:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.781535:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337934:1117/225951.781591:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 22:59:51 homelab env[2337911]: [2337911:2337911:1117/225951.783705:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 22:59:52 homelab env[2337911]: document_ready d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=0
+Nov 17 22:59:52 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:52 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:53 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:54 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:55 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:56 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:57 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:58 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 22:59:59 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:00 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:01 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:02 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:03 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:04 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:05 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:06 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:07 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:08 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:09 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:10 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:11 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:12 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:13 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:14 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:15 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:16 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:17 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:18 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:19 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:20 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:21 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:22 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:23 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:24 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:25 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:26 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:27 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:28 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:29 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:30 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:31 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:32 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:33 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:34 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:35 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:36 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:37 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:38 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:39 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:40 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:41 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:41 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:41 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:41 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:41 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:42 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:43 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:44 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:45 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:46 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:47 homelab env[2337911]: frame_admission d3bdae8b-d3d6-4c32-b269-750201e2b582 frames=1 ready=1 after=0
+Nov 17 23:00:47 homelab systemd[928]: Stopping [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224...
+Nov 17 23:00:47 homelab env[2337960]: [2337960:2337960:1117/230047.283219:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 23:00:48 homelab env[2337911]: presentation_metrics {"copyMilliseconds":50.280703,"cpuCopies":0,"gpuCopies":1,"producerBusyFrames":514,"swaps":1015}
+Nov 17 23:00:48 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2337922 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:00:48 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2337923 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:00:48 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2337925 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:00:48 homelab systemd[928]: Stopped [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 23:00:48 homelab systemd[928]: ff-native-runtime-test.service: Consumed 14.754s CPU time over 56.878s wall clock time, 265.3M memory peak.
+Nov 17 23:01:07 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.185368:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.186217:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.186267:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.186909:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340600]: [2340600:2340600:1117/230108.255203:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.270182:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/eed34ddb-17aa-420a-be6f-a5c138c76cd6
+Nov 17 23:01:08 homelab ff-player-native[2340548]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 23:01:08 homelab env[2340548]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.414978:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.415063:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.415124:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.415150:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.415228:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.418975:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.419061:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.422266:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.422528:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.422732:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.423318:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.424517:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.424590:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.424662:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.426872:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340572:1117/230108.426939:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:01:08 homelab env[2340548]: [2340548:2340548:1117/230108.428352:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:02:08 homelab env[2340600]: [2340600:2340600:1117/230208.729662:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 23:03:10 homelab env[2340600]: [2340600:2340600:1117/230310.122332:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 23:03:12 homelab systemd[928]: Stopping [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224...
+Nov 17 23:03:13 homelab env[2340600]: [2340600:2340600:1117/230313.040583:ERROR:gpu/command_buffer/service/shared_image/shared_image_manager.cc:260] SharedImageManager::ProduceSkia: Trying to Produce a Skia representation from a non-existent mailbox.
+Nov 17 23:03:13 homelab env[2340548]: presentation_metrics {"copyMilliseconds":0.0,"cpuCopies":0,"gpuCopies":0,"producerBusyFrames":1138,"swaps":2374}
+Nov 17 23:03:13 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2340561 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:03:13 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2340562 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:03:13 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2340564 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:03:13 homelab systemd[928]: Stopped [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 23:03:13 homelab systemd[928]: ff-native-runtime-test.service: Consumed 29.163s CPU time over 2min 5.974s wall clock time, 355.7M memory peak.
+Nov 17 23:03:30 homelab systemd[928]: Started [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.220367:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.220954:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.220986:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.222341:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345403]: [2345403:2345403:1117/230330.290315:ERROR:ui/ozone/platform/wayland/gpu/wayland_surface_factory.cc:249] '--ozone-platform=wayland' is not compatible with Vulkan. Consider switching to '--ozone-platform=x11' or disabling Vulkan
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.299560:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: DevTools listening on ws://127.0.0.1:9224/devtools/browser/6d59ebf7-14fa-4ea6-ad3e-cdea04e4248c
+Nov 17 23:03:30 homelab ff-player-native[2345292]: gtk_disable_setlocale() must be called before gtk_init()
+Nov 17 23:03:30 homelab env[2345292]: presentation driver=wayland renderer=AMD Radeon Graphics (radeonsi, rembrandt, ACO, DRM 3.64, 6.18.38-2-lts) size=1920x1920
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.431749:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.431847:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.431848:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.431920:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.432029:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.434137:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.434201:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.436793:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.436957:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.437005:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.437634:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.438583:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.438650:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.438656:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.441204:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345314:1117/230330.441269:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+Nov 17 23:03:30 homelab env[2345292]: [2345292:2345292:1117/230330.442663:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type:
+Nov 17 23:04:22 homelab systemd[928]: Stopping [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224...
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: State 'stop-sigterm' timed out. Killing.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345292 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345303 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345304 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345306 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345403 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345406 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345482 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345670 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Killing process 2345671 (ff-player-nativ) with signal SIGKILL.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Main process exited, code=killed, status=9/KILL
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Failed with result 'timeout'.
+Nov 17 23:04:30 homelab systemd[928]: Stopped [systemd-run] /usr/bin/env -u DBUS_SESSION_BUS_ADDRESS /home/feralfile/ff-native-stage-engine/usr/lib/ff-player-native/ff-player-native --state-dir=/home/feralfile/.state/native-homelab-test --socket=/run/user/1000/ff-native-test/player.sock --renderer-dir=/home/feralfile/ff-native-stage-engine/usr/share/ff-player-native/renderers --use-angle=gl-egl --enable-features=Vulkan --enable-unsafe-webgpu --remote-debugging-port=9224.
+Nov 17 23:04:30 homelab systemd[928]: ff-native-runtime-test.service: Consumed 13.734s CPU time over 1min 472ms wall clock time, 262.4M memory peak.

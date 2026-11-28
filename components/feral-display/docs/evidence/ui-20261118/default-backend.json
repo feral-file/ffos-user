@@ -1,0 +1,12 @@
+{
+  "launchOverride": false,
+  "frames": 1123,
+  "renderer": "ANGLE (AMD, Vulkan 1.4.354 (AMD Radeon Graphics (RADV REMBRANDT) (0x00001681)), radv)",
+  "pixels": [
+    27003,
+    133476
+  ],
+  "compositorQR": [
+    "https://example.org/claim?token=SYNTHETIC-TEST"
+  ]
+}

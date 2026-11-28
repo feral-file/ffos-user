@@ -30,10 +30,10 @@ func TestPlayerCastWakeGate_FailedWakeKeepsCastEligible(t *testing.T) {
 				failNext = false
 				return nil, assert.AnError
 			}
-			return map[string]any{"result": map[string]any{}}, nil
+			return map[string]any{"message": map[string]any{"ok": true}}, nil
 		}).AnyTimes()
 
-	e := &executor{cdp: mockCDP, logger: zaptest.NewLogger(t)}
+	e := &executor{cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}, logger: zaptest.NewLogger(t)}
 	ctx := context.Background()
 	needsWake := PlayerCastWakeGate(e)
 	navBlocked := PlayerSleepGate(e)

@@ -48,23 +48,19 @@ func narrationOf(cur overlay.Overlay, has bool) map[string]any {
 // setupPainter is the transport the controller delivers setup overlays
 // through. It is called only from the controller's own worker goroutine (see
 // the overlay package doc), never from a caller of Show/Hide/ShowClaimQR/etc,
-// so parking for a pending navigation and the blocking CDP send below cannot
+// so the bounded socket send cannot
 // stall anything else — ordering and coalescing of the actual sends are the
 // controller's own queue's job now, not this type's.
 type setupPainter struct {
 	s *Service
 }
 
-func (p setupPainter) Show(_ context.Context, o overlay.Overlay) error {
-	p.s.parkForNavigation()
-	p.s.trySend(payloadOf(o))
-	return nil
+func (p setupPainter) Show(ctx context.Context, o overlay.Overlay) error {
+	return p.s.trySend(ctx, payloadOf(o))
 }
 
-func (p setupPainter) Hide(_ context.Context, _ overlay.Overlay) error {
-	p.s.parkForNavigation()
-	p.s.trySend(map[string]any{"state": stateHidden})
-	return nil
+func (p setupPainter) Hide(ctx context.Context, _ overlay.Overlay) error {
+	return p.s.trySend(ctx, map[string]any{"state": stateHidden})
 }
 
 // Painter returns the setup transport for a shared overlay controller. The
@@ -93,7 +89,7 @@ func (s *Service) OnClose() {}
 // screen; see SweepStaleOverlay for the one legitimate case of painting
 // without the owner having asked (a stale overlay from an earlier process). A
 // hide that actually commits marks this service's intent as hidden, so Resync
-// can replay it on reconnect even if its own CDP send failed — see
+// can replay it on reconnect even if its own socket send failed — see
 // hiddenIntent's doc.
 //
 // The write runs inside the CommitHook, under the controller's own decision

@@ -587,23 +587,22 @@ The player rejects `displayPlaylist` without a known DP1 action
 5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
 default.
 
-When the resolved playlist contains item-level `displayAt` values, controld
-computes an active set
-(`max(displayAt <= now)` items plus items without `displayAt`) and sends only
-that filtered playlist to Chromium. Timezone-less `displayAt` values use device
-local time; values with `Z`/offset are absolute. Date-only (`YYYY-MM-DD`) is
-rejected per DP-1 §3.5.2 (not evergreen). If no playlist item has `displayAt`,
-controld forwards the full playlist unchanged. Controld keeps the resolved full
-playlist in memory while displaying, persists only its refreshable source identity
-after the player accepts the filtered request, and uses the in-memory playlist to
-arm the next `displayAt` transition and to recompute after wake or CDP
-reconnect. After a controld-only restart, the refresher must fetch the source
-again before scheduler cutovers resume; if that fetch fails, controld leaves the
-current player artwork alone and retries later. Static inline player status
-contains only the filtered active set and no stable full-playlist identity, so
-controld does not restart-resume a persisted static inline schedule from player
-status alone.
-Initial display requests and timed / wake / reconnect pushes are force displays
+When a resolved playlist contains `displayAt`, controld validates and compiles
+its dates into a parallel native `activationTimes` array. Timezone-less values
+use device local time, Z/offset values are absolute, and date-only values are
+rejected. It sends the complete source and times to the native host. The host
+persists the plan and executes the newest due cohort plus evergreen works.
+Future-only casts retain the current artwork until activation, but supersede
+older scheduled/pending casts. A later accepted schedule_play survives earlier
+cohort boundaries. Controld restart requires no refetch to resume host timers.
+
+Native refresh updates the full source/plan atomically and retains unchanged
+current occurrences. Refresh commands retain their pre-fetch generation fence.
+Host restart restores current playback; an OS boot applies saved boot intent
+once. Reconnect/wake does not force-recast a playlist. The former Go scheduler
+and document-session behavior below is historical, superseded by this contract.
+
+Legacy implementation (not active in the native session): initial casts and timed / wake / reconnect pushes were force casts
 (`intent.action=now_display`
 without `refresh`) so the player applies the playlist immediately even if the
 current artwork still has remaining duration; the 5-minute URL/dynamic

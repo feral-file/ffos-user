@@ -1,0 +1,675 @@
+[
+  {
+    "file": "shipping.json",
+    "arm": "shipping",
+    "outputIntervals": {
+      "count": 1164,
+      "meanMs": 53.49367783505155,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 66.667,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1123,
+      "meanMs": 53.50231522707033,
+      "medianMs": 50,
+      "p95Ms": 66.70000000000437,
+      "p99Ms": 66.70000000001164,
+      "standardDeviationMs": 6.787698656737907,
+      "over50ms": 236
+    },
+    "callbackDelivery": {
+      "count": 1123,
+      "meanMs": 53.503739982179944,
+      "medianMs": 50.10000002384186,
+      "p95Ms": 67.09999999403954,
+      "p99Ms": 67.60000002384186
+    },
+    "cpuPercentOneCore": 17.129716340132564,
+    "cgroupMemoryMiB": 290.43359375,
+    "cgroupPeakMiB": 297.01171875
+  },
+  {
+    "file": "shipping-repeat.json",
+    "arm": "shipping",
+    "outputIntervals": {
+      "count": 1154,
+      "meanMs": 54.28888821490468,
+      "medianMs": 50.0,
+      "p95Ms": 66.666,
+      "p99Ms": 66.666,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1112,
+      "meanMs": 54.181115107913676,
+      "medianMs": 50,
+      "p95Ms": 66.70000000000437,
+      "p99Ms": 66.79999999999563,
+      "standardDeviationMs": 7.225246966060407,
+      "over50ms": 279
+    },
+    "callbackDelivery": {
+      "count": 1112,
+      "meanMs": 54.181564748206796,
+      "medianMs": 50.19999998807907,
+      "p95Ms": 67.2999999821186,
+      "p99Ms": 67.80000001192093
+    },
+    "cpuPercentOneCore": 17.955879304062197,
+    "cgroupMemoryMiB": 263.640625,
+    "cgroupPeakMiB": 269.55078125
+  },
+  {
+    "file": "chrome.json",
+    "arm": "chrome",
+    "outputIntervals": {
+      "count": 1151,
+      "meanMs": 54.41625716768028,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 66.667,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1108,
+      "meanMs": 54.40712996389889,
+      "medianMs": 50,
+      "p95Ms": 66.79999999999563,
+      "p99Ms": 100,
+      "standardDeviationMs": 12.385373115661828,
+      "over50ms": 317
+    },
+    "callbackDelivery": {
+      "count": 1108,
+      "meanMs": 54.40523465701281,
+      "medianMs": 50.20000001788139,
+      "p95Ms": 67.2999999821186,
+      "p99Ms": 67.90000000596046
+    },
+    "cpuPercentOneCore": 15.063539994718782,
+    "cgroupMemoryMiB": 263.953125,
+    "cgroupPeakMiB": 287.484375
+  },
+  {
+    "file": "standalone-repeat.json",
+    "arm": "chrome",
+    "outputIntervals": {
+      "count": 1148,
+      "meanMs": 54.688712543554004,
+      "medianMs": 50.0,
+      "p95Ms": 66.666,
+      "p99Ms": 66.666,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1104,
+      "meanMs": 54.588768115942045,
+      "medianMs": 50,
+      "p95Ms": 66.79999999999563,
+      "p99Ms": 100,
+      "standardDeviationMs": 13.005488693764065,
+      "over50ms": 326
+    },
+    "callbackDelivery": {
+      "count": 1104,
+      "meanMs": 54.58813405798181,
+      "medianMs": 50.20000001788139,
+      "p95Ms": 67.2000000178814,
+      "p99Ms": 67.90000000596046
+    },
+    "cpuPercentOneCore": 14.615715525120182,
+    "cgroupMemoryMiB": 273.9296875,
+    "cgroupPeakMiB": 305.01953125
+  },
+  {
+    "file": "before.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 939,
+      "meanMs": 66.95056549520767,
+      "medianMs": 83.333,
+      "p95Ms": 116.667,
+      "p99Ms": 133.333,
+      "over100ms": 428
+    },
+    "rafTimestamps": {
+      "count": 900,
+      "meanMs": 66.90733333333321,
+      "medianMs": 83.39999999999782,
+      "p95Ms": 116.70000000001164,
+      "p99Ms": 133.39999999999418,
+      "standardDeviationMs": 49.282688774952994,
+      "over50ms": 451
+    },
+    "callbackDelivery": {
+      "count": 900,
+      "meanMs": 66.90255555553568,
+      "medianMs": 81.89999997615814,
+      "p95Ms": 119.59999999403954,
+      "p99Ms": 135.30000001192093
+    },
+    "cpuPercentOneCore": 22.346761801347036,
+    "cgroupMemoryMiB": 348.86328125,
+    "cgroupPeakMiB": 592.36328125,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 2781,
+      "cpuCopies": 0,
+      "coalescedFrames": 6
+    }
+  },
+  {
+    "file": "after.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 1063,
+      "meanMs": 58.99956255879586,
+      "medianMs": 66.666,
+      "p95Ms": 66.667,
+      "p99Ms": 83.334,
+      "over100ms": 7
+    },
+    "rafTimestamps": {
+      "count": 1019,
+      "meanMs": 58.99587831207056,
+      "medianMs": 50.10000000000582,
+      "p95Ms": 66.80000000000291,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 15.482427998573897,
+      "over50ms": 506
+    },
+    "callbackDelivery": {
+      "count": 1019,
+      "meanMs": 59.00058881252624,
+      "medianMs": 54.19999998807907,
+      "p95Ms": 71.89999997615814,
+      "p99Ms": 113.59999999403954
+    },
+    "cpuPercentOneCore": 26.93204472170436,
+    "cgroupMemoryMiB": 327.30859375,
+    "cgroupPeakMiB": 543.19921875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 1520,
+      "cpuCopies": 0,
+      "coalescedFrames": 6
+    }
+  },
+  {
+    "file": "cef-final.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 995,
+      "meanMs": 62.679909547738696,
+      "medianMs": 66.666,
+      "p95Ms": 66.667,
+      "p99Ms": 116.666,
+      "over100ms": 11
+    },
+    "rafTimestamps": {
+      "count": 961,
+      "meanMs": 62.49989594172745,
+      "medianMs": 62.5,
+      "p95Ms": 62.599999999998545,
+      "p99Ms": 62.60000000000218,
+      "standardDeviationMs": 0.04527623154175225,
+      "over50ms": 961
+    },
+    "callbackDelivery": {
+      "count": 961,
+      "meanMs": 62.50104058278835,
+      "medianMs": 62.5,
+      "p95Ms": 63.30000001192093,
+      "p99Ms": 63.80000001192093
+    },
+    "cpuPercentOneCore": 12.678733988972102,
+    "cgroupMemoryMiB": 629.83203125,
+    "cgroupPeakMiB": 631.21875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 1342,
+      "cpuCopies": 0,
+      "coalescedFrames": 43
+    }
+  },
+  {
+    "file": "public-final.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 888,
+      "meanMs": 70.11989864864864,
+      "medianMs": 66.667,
+      "p95Ms": 83.334,
+      "p99Ms": 116.666,
+      "over100ms": 9
+    },
+    "rafTimestamps": {
+      "count": 859,
+      "meanMs": 70.15855646100115,
+      "medianMs": 66.69999999999709,
+      "p95Ms": 116.69999999999709,
+      "p99Ms": 150,
+      "standardDeviationMs": 23.086161551719663,
+      "over50ms": 632
+    },
+    "callbackDelivery": {
+      "count": 859,
+      "meanMs": 70.16542491268224,
+      "medianMs": 67.09999999403954,
+      "p95Ms": 114,
+      "p99Ms": 151.5
+    },
+    "cpuPercentOneCore": 21.96344022794489,
+    "cgroupMemoryMiB": 368.6953125,
+    "cgroupPeakMiB": 598.66796875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 1310,
+      "cpuCopies": 0,
+      "coalescedFrames": 6
+    }
+  },
+  {
+    "file": "views.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1057,
+      "meanMs": 58.79786849574267,
+      "medianMs": 50.0,
+      "p95Ms": 83.332,
+      "p99Ms": 83.333,
+      "over100ms": 4
+    },
+    "rafTimestamps": {
+      "count": 1025,
+      "meanMs": 58.77980487804865,
+      "medianMs": 50.099999999998545,
+      "p95Ms": 83.40000000000146,
+      "p99Ms": 116.70000000000073,
+      "standardDeviationMs": 15.90495526284649,
+      "over50ms": 452
+    },
+    "callbackDelivery": {
+      "count": 1025,
+      "meanMs": 58.78829268286868,
+      "medianMs": 53.29999998211861,
+      "p95Ms": 87.30000001192093,
+      "p99Ms": 115.7000000178814
+    },
+    "cpuPercentOneCore": 29.97022079735058,
+    "cgroupMemoryMiB": 666.16796875,
+    "cgroupPeakMiB": 780.1796875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 1471,
+      "cpuCopies": 0,
+      "coalescedFrames": 6
+    }
+  },
+  {
+    "file": "e98-views.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1077,
+      "meanMs": 58.093001857010215,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 5
+    },
+    "rafTimestamps": {
+      "count": 1036,
+      "meanMs": 58.0916988416987,
+      "medianMs": 50.099999999998545,
+      "p95Ms": 66.80000000000291,
+      "p99Ms": 116.60000000000582,
+      "standardDeviationMs": 14.778733828099574,
+      "over50ms": 462
+    },
+    "callbackDelivery": {
+      "count": 1036,
+      "meanMs": 58.086293436270424,
+      "medianMs": 51.60000002384186,
+      "p95Ms": 70.39999997615814,
+      "p99Ms": 110.09999999403954
+    },
+    "cpuPercentOneCore": 34.208684971104326,
+    "cgroupMemoryMiB": 530.5859375,
+    "cgroupPeakMiB": 573.9609375,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 1491,
+      "cpuCopies": 0,
+      "coalescedFrames": 5
+    }
+  },
+  {
+    "file": "import-views.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1060,
+      "meanMs": 58.86752358490566,
+      "medianMs": 66.66550000000001,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1022,
+      "meanMs": 58.87113502935408,
+      "medianMs": 50.10000000000218,
+      "p95Ms": 99.90000000000146,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 17.791454953361544,
+      "over50ms": 492
+    },
+    "callbackDelivery": {
+      "count": 1022,
+      "meanMs": 58.87661448138567,
+      "medianMs": 53.70000001788139,
+      "p95Ms": 95.60000002384186,
+      "p99Ms": 108.5
+    },
+    "cpuPercentOneCore": 30.68842735979137,
+    "cgroupMemoryMiB": 408.765625,
+    "cgroupPeakMiB": 546.83203125,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 7,
+      "directTextureImports": 1575
+    }
+  },
+  {
+    "file": "import-public.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 1094,
+      "meanMs": 57.23609689213894,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1052,
+      "meanMs": 57.27148288973383,
+      "medianMs": 50,
+      "p95Ms": 83.39999999999418,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 16.41874405538291,
+      "over50ms": 431
+    },
+    "callbackDelivery": {
+      "count": 1052,
+      "meanMs": 57.26340304184776,
+      "medianMs": 50.900000005960464,
+      "p95Ms": 73.39999997615814,
+      "p99Ms": 107
+    },
+    "cpuPercentOneCore": 27.87814504969614,
+    "cgroupMemoryMiB": 357.6953125,
+    "cgroupPeakMiB": 538.70703125,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 4,
+      "directTextureImports": 1504
+    }
+  },
+  {
+    "file": "import-views-repeat.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1091,
+      "meanMs": 57.225472043996334,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1051,
+      "meanMs": 57.246622264509966,
+      "medianMs": 50,
+      "p95Ms": 83.39999999999418,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 16.161045938075716,
+      "over50ms": 422
+    },
+    "callbackDelivery": {
+      "count": 1051,
+      "meanMs": 57.23529971454055,
+      "medianMs": 51.599999994039536,
+      "p95Ms": 70.2999999821186,
+      "p99Ms": 105.2999999821186
+    },
+    "cpuPercentOneCore": 35.32181091722917,
+    "cgroupMemoryMiB": 440.90234375,
+    "cgroupPeakMiB": 463.44921875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 7,
+      "directTextureImports": 1516
+    }
+  },
+  {
+    "file": "pipe-public.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 1050,
+      "meanMs": 59.60288571428571,
+      "medianMs": 50.0,
+      "p95Ms": 116.666,
+      "p99Ms": 116.667,
+      "over100ms": 124
+    },
+    "rafTimestamps": {
+      "count": 1021,
+      "meanMs": 59.02693437806074,
+      "medianMs": 50,
+      "p95Ms": 116.70000000000437,
+      "p99Ms": 166.59999999999854,
+      "standardDeviationMs": 36.51999746432009,
+      "over50ms": 452
+    },
+    "callbackDelivery": {
+      "count": 1021,
+      "meanMs": 59.04025465223745,
+      "medianMs": 57.29999998211861,
+      "p95Ms": 118,
+      "p99Ms": 161.19999998807907
+    },
+    "cpuPercentOneCore": 22.00642224806659,
+    "cgroupMemoryMiB": 353.1796875,
+    "cgroupPeakMiB": 580.07421875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 6,
+      "directTextureImports": 1532
+    }
+  },
+  {
+    "file": "pipe-views.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1098,
+      "meanMs": 57.34642167577413,
+      "medianMs": 50.0,
+      "p95Ms": 116.666,
+      "p99Ms": 116.667,
+      "over100ms": 70
+    },
+    "rafTimestamps": {
+      "count": 1060,
+      "meanMs": 56.93367924528301,
+      "medianMs": 50,
+      "p95Ms": 116.69999999999709,
+      "p99Ms": 150,
+      "standardDeviationMs": 35.80203177078058,
+      "over50ms": 436
+    },
+    "callbackDelivery": {
+      "count": 1060,
+      "meanMs": 56.9289622641397,
+      "medianMs": 55.69999998807907,
+      "p95Ms": 113.59999999403954,
+      "p99Ms": 150.90000000596046
+    },
+    "cpuPercentOneCore": 26.566885114524197,
+    "cgroupMemoryMiB": 353.25390625,
+    "cgroupPeakMiB": 470.41015625,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 5,
+      "directTextureImports": 1537
+    }
+  },
+  {
+    "file": "chosen-public.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 1090,
+      "meanMs": 57.2936256880734,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.334,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1049,
+      "meanMs": 57.29285033365098,
+      "medianMs": 50,
+      "p95Ms": 83.39999999999418,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 15.878886713427546,
+      "over50ms": 429
+    },
+    "callbackDelivery": {
+      "count": 1049,
+      "meanMs": 57.28732125834696,
+      "medianMs": 51,
+      "p95Ms": 91.09999999403954,
+      "p99Ms": 107.09999999403954
+    },
+    "cpuPercentOneCore": 27.830868316012452,
+    "cgroupMemoryMiB": 331.1875,
+    "cgroupPeakMiB": 516.80078125,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 5,
+      "directTextureImports": 1501
+    }
+  },
+  {
+    "file": "chosen-views.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1087,
+      "meanMs": 57.283,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1052,
+      "meanMs": 57.2875475285171,
+      "medianMs": 50,
+      "p95Ms": 83.40000000000146,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 16.291466743734116,
+      "over50ms": 415
+    },
+    "callbackDelivery": {
+      "count": 1052,
+      "meanMs": 57.278897338380375,
+      "medianMs": 51.5,
+      "p95Ms": 73.5,
+      "p99Ms": 105.7000000178814
+    },
+    "cpuPercentOneCore": 31.170618388348174,
+    "cgroupMemoryMiB": 380.6328125,
+    "cgroupPeakMiB": 494.2734375,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 6,
+      "directTextureImports": 1501
+    }
+  },
+  {
+    "file": "delivered-public.json",
+    "arm": "native",
+    "outputIntervals": {
+      "count": 1072,
+      "meanMs": 57.94455597014925,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 3
+    },
+    "rafTimestamps": {
+      "count": 1038,
+      "meanMs": 57.99605009633898,
+      "medianMs": 50.099999999998545,
+      "p95Ms": 83.29999999999563,
+      "p99Ms": 116.59999999999854,
+      "standardDeviationMs": 14.843768724531861,
+      "over50ms": 449
+    },
+    "callbackDelivery": {
+      "count": 1038,
+      "meanMs": 57.99036608857456,
+      "medianMs": 51.30000001192093,
+      "p95Ms": 91.90000000596046,
+      "p99Ms": 108.90000000596046
+    },
+    "cpuPercentOneCore": 28.214672112493407,
+    "cgroupMemoryMiB": 344.21484375,
+    "cgroupPeakMiB": 530.0078125,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 1473,
+      "cpuCopies": 0,
+      "coalescedFrames": 5,
+      "directTextureImports": 0
+    }
+  },
+  {
+    "file": "delivered-views.json",
+    "arm": "cef",
+    "outputIntervals": {
+      "count": 1083,
+      "meanMs": 57.29441920590951,
+      "medianMs": 50.0,
+      "p95Ms": 66.667,
+      "p99Ms": 83.333,
+      "over100ms": 0
+    },
+    "rafTimestamps": {
+      "count": 1050,
+      "meanMs": 57.301523809523815,
+      "medianMs": 50,
+      "p95Ms": 83.40000000000146,
+      "p99Ms": 116.69999999999709,
+      "standardDeviationMs": 16.95198141423229,
+      "over50ms": 431
+    },
+    "callbackDelivery": {
+      "count": 1050,
+      "meanMs": 57.28866666666099,
+      "medianMs": 51,
+      "p95Ms": 90.40000000596046,
+      "p99Ms": 107.69999998807907
+    },
+    "cpuPercentOneCore": 31.950277840120933,
+    "cgroupMemoryMiB": 404.109375,
+    "cgroupPeakMiB": 487.54296875,
+    "wholeRunCopiesIncludingWarmup": {
+      "gpuCopies": 0,
+      "cpuCopies": 0,
+      "coalescedFrames": 5,
+      "directTextureImports": 1495
+    }
+  }
+]

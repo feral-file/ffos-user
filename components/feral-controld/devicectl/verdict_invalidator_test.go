@@ -40,7 +40,7 @@ func TestSendDisplayDefaultPlaylist_InvalidatesVerdictBeforeSend(t *testing.T) {
 		Times(1)
 
 	pushed := 0
-	e := &executor{logger: zap.NewNop(), cdp: mockCDP}
+	e := &executor{logger: zap.NewNop(), cdp: mockCDP, player: mocks.CommandSender{CDP: mockCDP}}
 	e.setWithPlayerPush(func(fn func()) { pushed++; fn() })
 	SetVerdictInvalidator(e, active.ClearCurrent, zap.NewNop())
 

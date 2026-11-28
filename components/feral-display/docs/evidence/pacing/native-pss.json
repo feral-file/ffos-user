@@ -1,0 +1,121 @@
+{
+  "unit": "ff-native-runtime-test.service",
+  "atNs": 1794961439085196607,
+  "processes": [
+    {
+      "pid": 341618,
+      "name": "ff-player-nativ",
+      "Pss": 276402,
+      "Rss": 472772,
+      "Private_Clean": 50192,
+      "Private_Dirty": 120948,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341630,
+      "name": "ff-player-nativ",
+      "Pss": 20606,
+      "Rss": 77776,
+      "Private_Clean": 24,
+      "Private_Dirty": 712,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341631,
+      "name": "ff-player-nativ",
+      "Pss": 15196,
+      "Rss": 77780,
+      "Private_Clean": 0,
+      "Private_Dirty": 156,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341633,
+      "name": "ff-player-nativ",
+      "Pss": 4269,
+      "Rss": 21692,
+      "Private_Clean": 0,
+      "Private_Dirty": 228,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341667,
+      "name": "ff-player-nativ",
+      "Pss": 131052,
+      "Rss": 251536,
+      "Private_Clean": 11096,
+      "Private_Dirty": 41368,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341669,
+      "name": "ff-player-nativ",
+      "Pss": 41270,
+      "Rss": 108344,
+      "Private_Clean": 3404,
+      "Private_Dirty": 19048,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341751,
+      "name": "ff-player-nativ",
+      "Pss": 9923,
+      "Rss": 49720,
+      "Private_Clean": 64,
+      "Private_Dirty": 1432,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341780,
+      "name": "bwrap",
+      "Pss": 170,
+      "Rss": 1980,
+      "Private_Clean": 12,
+      "Private_Dirty": 48,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341781,
+      "name": "bwrap",
+      "Pss": 166,
+      "Rss": 1196,
+      "Private_Clean": 0,
+      "Private_Dirty": 80,
+      "SwapPss": 0
+    },
+    {
+      "pid": 341782,
+      "name": "glycin-svg",
+      "Pss": 8471,
+      "Rss": 19188,
+      "Private_Clean": 4512,
+      "Private_Dirty": 2116,
+      "SwapPss": 0
+    },
+    {
+      "pid": 342027,
+      "name": "ff-player-nativ",
+      "Pss": 24301,
+      "Rss": 78512,
+      "Private_Clean": 0,
+      "Private_Dirty": 6744,
+      "SwapPss": 0
+    },
+    {
+      "pid": 342031,
+      "name": "ff-player-nativ",
+      "Pss": 80881,
+      "Rss": 148184,
+      "Private_Clean": 31800,
+      "Private_Dirty": 23292,
+      "SwapPss": 0
+    }
+  ],
+  "totalsKiB": {
+    "Pss": 612707,
+    "Rss": 1308680,
+    "Private_Clean": 101104,
+    "Private_Dirty": 216172,
+    "SwapPss": 0
+  }
+}

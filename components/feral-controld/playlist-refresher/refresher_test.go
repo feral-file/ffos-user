@@ -94,7 +94,7 @@ func setupWithLogger(t *testing.T, logger *zap.Logger) *testSetup {
 	stubPassthroughCastPlan(mockDP1)
 	mockClock := mocks.NewMockClock(ctrl)
 
-	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), nil, mockClock, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -516,7 +516,7 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 		Return(map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -566,7 +566,7 @@ func TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidR
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	mockClock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)).AnyTimes()
 
-	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+	sched := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, logger)
 
 	playlistURL := "http://example.com/playlist.json"
 	mockPlaylist := createMockPlaylist()
@@ -588,7 +588,7 @@ func TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidR
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), sched, mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -694,7 +694,7 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 		Return(map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -771,7 +771,7 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 		}).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	defer r.Stop()
 
@@ -875,7 +875,7 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 		Return(map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockOfflineCache, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, mockOfflineCache, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -937,7 +937,7 @@ func TestRefresher_ProcessPlayingPlaylist_NoCachedFallbackReturnsOriginalError(t
 	// retry pacing before the first success.
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, mockOfflineCache, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, mockOfflineCache, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 
 	select {
@@ -1007,7 +1007,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 		Return(map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -1117,7 +1117,7 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(
 		}).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 
 	select {
@@ -1207,7 +1207,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
 			Return(1, nil),
 	)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	time.Sleep(150 * time.Millisecond)
 	r.Stop()
@@ -1367,7 +1367,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 	// to re-resolve, and it must not be re-sent to CDP on every refresh
 	// pass (gomock fails the test if either occurs).
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -2176,7 +2176,7 @@ func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) 
 		Return(nil, json.RawMessage(nil), &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(200 * time.Millisecond)
@@ -2206,7 +2206,7 @@ func TestRefresher_SchedulerOwnedFutureSourceDoesNotUseStalePlayerStatus(t *test
 			return timerCtx.Err()
 		},
 	).AnyTimes()
-	scheduler := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC },
+	scheduler := playlistschedule.New(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC },
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	// Seed B exactly as the accepted display path does. Its first item is future-only,
 	// so the player remains on stale A and the scheduler owns B's source.
@@ -2232,7 +2232,7 @@ func TestRefresher_SchedulerOwnedFutureSourceDoesNotUseStalePlayerStatus(t *test
 		AnyTimes()
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), scheduler, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), scheduler, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	select {
@@ -2277,7 +2277,7 @@ func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T)
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(200 * time.Millisecond)
@@ -2314,7 +2314,7 @@ func TestRefresher_TransientURLError_WithoutCache_SurfacesError(t *testing.T) {
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(200 * time.Millisecond)
@@ -2355,7 +2355,7 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(200 * time.Millisecond)
@@ -2427,7 +2427,7 @@ func TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection(
 		}).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 
@@ -2478,7 +2478,7 @@ func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
 		Return(map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -2531,7 +2531,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 		AnyTimes()
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	<-resolveStarted
@@ -2591,7 +2591,7 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 		AnyTimes()
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	<-statusReadStarted
@@ -2651,7 +2651,7 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 		}).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -2699,7 +2699,7 @@ func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *t
 
 	persistedURL := "https://example.com/persisted-b.json"
 	store := &sourceStore{source: playlistschedule.Source{PlaylistURL: persistedURL}}
-	scheduler := playlistschedule.NewWithStore(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, store,
+	scheduler := playlistschedule.NewWithStore(ctx, mocks.CommandSender{CDP: mockCDP}, mockClock, func() *time.Location { return time.UTC }, store,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	require.True(t, scheduler.RestoredPending())
 	require.False(t, scheduler.HasCache(), "restored startup state has a source but no in-memory full playlist")
@@ -2723,7 +2723,7 @@ func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *t
 		}).
 		Times(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), scheduler, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), scheduler, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	require.Eventually(t, func() bool {
@@ -2820,7 +2820,7 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -2875,7 +2875,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -2922,7 +2922,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -2977,7 +2977,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -3030,7 +3030,7 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 		Times(0)
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -3078,7 +3078,7 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 		AnyTimes()
 	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -3134,7 +3134,7 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 		Return(map[string]interface{}{"message": map[string]interface{}{"ok": false}}, nil).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	select {
@@ -3183,7 +3183,7 @@ func TestRefresher_DefaultPlaylistReconcilesCacheWithoutRecasting(t *testing.T) 
 		close(synced)
 		return 1, nil
 	})
-	r := refresher.New(ctx, dp, poller, cdpClient, replay, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r := refresher.New(ctx, dp, poller, mocks.CommandSender{CDP: cdpClient}, replay, nil, wrapper.NewJSON(), nil, clock, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	defer r.Stop()
 	select {
@@ -3232,7 +3232,7 @@ func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) 
 		Return("success", nil).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
 	time.Sleep(300 * time.Millisecond)
@@ -3385,7 +3385,7 @@ func TestRefresher_StaticInlineFallbackKeepsDisplayedReplayScope(t *testing.T) {
 	// And nothing is re-sent, which is why the scope had to come from the
 	// player in the first place (gomock fails the test on an unexpected Send).
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	waitForReplaySync(t, synced)
 	r.Stop()
@@ -3459,7 +3459,7 @@ func TestRefresher_ResyncScopeToCurrentDisplayKeepsDisplayedReplayScope(t *testi
 		}).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mocks.CommandSender{CDP: mockCDP}, mockKioskReplay, nil, wrapper.NewJSON(), nil, mockClock, logger)
 	r.Start()
 	waitForReplaySync(t, synced)
 	r.Stop()

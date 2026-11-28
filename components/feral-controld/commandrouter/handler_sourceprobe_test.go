@@ -122,7 +122,7 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadButCached_CastsForReplay(
 	mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://origin.example/dead"}).Return(1, nil).Times(1)
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	expectDisplayPlaylistSuccess(ts, playlistURL,
@@ -171,7 +171,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeSyncFails_Rejects(
 		FetchPlayerStatus(gomock.Any()).
 		Return(nil, errors.New("player unavailable")).
 		Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
@@ -224,7 +224,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButScopeArmsNothing_Reject
 		FetchPlayerStatus(gomock.Any()).
 		Return(nil, errors.New("player unavailable")).
 		Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
@@ -255,7 +255,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CachedButNoReplayWired_Rejects(t
 
 	mockService := mocks.NewMockOfflineCacheService(ts.ctrl)
 	// No HasReplayableItem expectation: without replay the lookup is moot.
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockService, nil, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
@@ -290,7 +290,7 @@ func TestCommandHandler_Process_DisplayPlaylist_AllDeadNotCached_StillRejects(t 
 	// rejection stands, and it fires before the playback lock — no other
 	// kioskReplay expectations on purpose.
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, mockService, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().
@@ -387,7 +387,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RejectionSkipsReplayResync(t *te
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	// No EXPECT calls on purpose: the rejection path must never touch the
 	// playback lock, scope sync, or the corrective resync.
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, mocks.CommandSender{CDP: ts.mockCDP}, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockDP1.EXPECT().

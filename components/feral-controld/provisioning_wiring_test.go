@@ -44,8 +44,8 @@ func (s *spyNarrationUI) ShowSetupError(reason string) {
 	s.setupErrorReasons = append(s.setupErrorReasons, reason)
 }
 
-func (s *spyNarrationUI) ShowScanning() { s.calls = append(s.calls, "scanning") }
-func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string) {
+func (s *spyNarrationUI) ShowScanning(passive bool) { s.calls = append(s.calls, "scanning") }
+func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk, portalURL string, passive bool) {
 	s.calls = append(s.calls, "softap")
 	s.softAPPortalURLs = append(s.softAPPortalURLs, portalURL)
 }
@@ -323,8 +323,8 @@ func TestWireBootLifecycleHooksGatesOnBootWindow(t *testing.T) {
 	if boot.startupGate == nil {
 		t.Fatal("startup OTA gate must be wired on a boot-window start")
 	}
-	if boot.playerRecovery == nil {
-		t.Fatal("player recovery must be wired on a boot-window start")
+	if boot.playerRecovery != nil {
+		t.Fatal("legacy page recovery must not be wired for a native host")
 	}
 	if flows.probe == nil {
 		t.Fatal("the boot-window probe must be handed to the recovery flow so a parked recovery can expire")

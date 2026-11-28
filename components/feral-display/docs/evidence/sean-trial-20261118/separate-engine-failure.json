@@ -1,0 +1,17 @@
+{
+  "killedBrowserPid": 1113141,
+  "signal": "SIGKILL",
+  "namespace": "net:[4026532948]",
+  "hostNamespace": "net:[4026531833]",
+  "interfaces": "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n",
+  "capabilities": [
+    "CapEff:\t0000000000000000",
+    "CapBnd:\t0000000000000000",
+    "NoNewPrivs:\t1"
+  ],
+  "scope": "separate public-engine experiment, not the embedded CEF browser",
+  "sameHostInstance": true,
+  "sameGeneration": true,
+  "sameOccurrence": true,
+  "signedDeviceControl": true
+}

@@ -23,7 +23,7 @@ import (
 func TestChromiumMonitorFirstFailureUsesStartupGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
@@ -49,7 +49,7 @@ func TestChromiumMonitorFirstFailureUsesStartupGrace(t *testing.T) {
 func TestChromiumMonitorColdBootGraceSuppressesManyFailures(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
@@ -75,7 +75,7 @@ func TestChromiumMonitorColdBootGraceSuppressesManyFailures(t *testing.T) {
 func TestChromiumMonitorColdBootGraceExpiryTriggersRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
@@ -107,7 +107,7 @@ func TestChromiumMonitorColdBootGraceExpiryTriggersRestart(t *testing.T) {
 func TestChromiumMonitorPostRestartReentersStartupGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
@@ -158,7 +158,7 @@ func TestChromiumMonitorPostRestartReentersStartupGrace(t *testing.T) {
 func TestChromiumMonitorPostConnectHangTriggersRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
@@ -187,7 +187,7 @@ func TestChromiumMonitorPostConnectHangTriggersRestart(t *testing.T) {
 func TestChromiumMonitorActivatingKioskDefersRestart(t *testing.T) {
 	countFile := installActivatingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	// Pin a connected display so these escalation invariants are exercised for
 	// the reason under test (grace/hang), not accidentally suppressed by the
@@ -399,7 +399,7 @@ exit 0
 func TestChromiumMonitorHeadlessSuppressesEscalation(t *testing.T) {
 	restartFile, rebootFile := installCountingSystemctlWithReboot(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -431,7 +431,7 @@ func TestChromiumMonitorHeadlessSuppressesEscalation(t *testing.T) {
 func TestChromiumMonitorUnknownDisplayFailsOpen(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = t.TempDir() // empty -> glob matches nothing -> fail open
 
@@ -455,7 +455,7 @@ func TestChromiumMonitorUnknownDisplayFailsOpen(t *testing.T) {
 func TestChromiumMonitorDisplayReconnectReanchorsGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 
 	// Phase 1 — headless with grace already expired: no restart, latch headless.
@@ -577,7 +577,7 @@ exit 0
 func TestChromiumMonitorDevConsoleSuppressesEscalation(t *testing.T) {
 	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty2")
 
@@ -619,7 +619,7 @@ func TestChromiumMonitorDevConsoleSuppressesEscalation(t *testing.T) {
 func TestChromiumMonitorDevConsoleReturnReanchorsGrace(t *testing.T) {
 	restartFile, _, _, _ := installFallbackStubs(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	// Phase 1 — developer on tty2, grace long expired: suppressed.
@@ -674,7 +674,7 @@ func TestChromiumMonitorDevConsoleReturnReanchorsGrace(t *testing.T) {
 func TestChromiumMonitorBudgetExhaustionShowsFallback(t *testing.T) {
 	restartFile, stopFile, fallbackFile, rebootFile := installFallbackStubs(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -732,7 +732,7 @@ func TestChromiumMonitorBudgetExhaustionShowsFallback(t *testing.T) {
 func TestChromiumMonitorFallbackHoldExpiryRebootsOnce(t *testing.T) {
 	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -772,7 +772,7 @@ func TestChromiumMonitorRecoveryDuringFallbackClearsState(t *testing.T) {
 	_, _, _, rebootFile := installFallbackStubs(t)
 	endpoint, closeServer := okLocalHTTPEndpoint(t)
 	defer closeServer()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -826,7 +826,7 @@ func TestChromiumMonitorFallbackUnavailableRebootsImmediately(t *testing.T) {
 	}
 	endpoint := closedLocalHTTPEndpoint(t)
 	handler := NewCommandHandler(zap.NewNop(), nil)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), handler)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -865,7 +865,7 @@ func TestChromiumMonitorFallbackHoldAbandonedWhenHeadless(t *testing.T) {
 	handler.mu.Lock()
 	handler.fallbackShown = true
 	handler.mu.Unlock()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), handler)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -909,7 +909,7 @@ func TestChromiumMonitorFallbackHoldAbandonedWhenHeadless(t *testing.T) {
 func TestChromiumMonitorFallbackHoldDefersRebootForDevConsole(t *testing.T) {
 	_, _, _, rebootFile := installFallbackStubs(t)
 	endpoint := closedLocalHTTPEndpoint(t)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty2")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -978,7 +978,7 @@ func TestChromiumMonitorFallbackBusyRetriesWithoutReboot(t *testing.T) {
 	handler.mu.Lock()
 	handler.kioskOpInFlight = true
 	handler.mu.Unlock()
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), handler)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
@@ -1032,7 +1032,7 @@ func TestChromiumMonitorReconnectAfterAbandonedHoldRestartsKiosk(t *testing.T) {
 	restartFile, _, fallbackFile, rebootFile := installFallbackStubs(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	handler := NewCommandHandler(zap.NewNop(), nil)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), handler)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
 
@@ -1077,7 +1077,7 @@ func TestChromiumMonitorFallbackNotArmedWhenKioskStopFails(t *testing.T) {
 	}
 	endpoint := closedLocalHTTPEndpoint(t)
 	handler := NewCommandHandler(zap.NewNop(), nil)
-	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), handler)
+	monitor := newHTTPPolicyTestMonitor(endpoint, zap.NewNop(), handler)
 	monitor.ttyActiveFile = ttyActiveFixture(t, "tty1")
 	monitor.drmSysfsRoot = connectedDRMRoot(t)
 

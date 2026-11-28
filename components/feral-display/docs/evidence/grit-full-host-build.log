@@ -1,0 +1,44 @@
+-- Checking for module 'mpv>=2.6.0'
+--   Found mpv, version 2.6.0
+Bundled model-viewer 4.3.1 matches pinned package; license retained
+Pinned Draco and Basis decoder assets packaged locally
+-- Configuring done (0.4s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/feralfile/ff-native-debug/build
+[1/10] Building CXX object CMakeFiles/media-decode-tests.dir/tests/media_decode_test.cpp.o
+[2/10] Building CXX object CMakeFiles/ff-media-worker.dir/src/media_worker.cpp.o
+[3/10] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_main.cpp.o
+[4/10] Building CXX object CMakeFiles/ff-player-native.dir/src/cef_client.cpp.o
+[5/10] Building CXX object CMakeFiles/ff-player-native.dir/src/renderer_app.cpp.o
+[6/10] Linking CXX executable ff-media-worker
+[7/10] Linking CXX executable media-decode-tests
+[8/10] Building CXX object CMakeFiles/ff-player-native.dir/src/presentation.cpp.o
+[9/10] Building CXX object CMakeFiles/ff-player-native.dir/src/media_client.cpp.o
+[10/10] Linking CXX executable ff-player-native
+Test project /home/feralfile/ff-native-debug/build
+      Start  1: migration
+ 1/11 Test  #1: migration ........................   Passed    0.12 sec
+      Start  2: core
+ 2/11 Test  #2: core .............................   Passed    2.02 sec
+      Start  3: server
+ 3/11 Test  #3: server ...........................   Passed    0.00 sec
+      Start  4: input
+ 4/11 Test  #4: input ............................   Passed    0.00 sec
+      Start  5: scheduling
+ 5/11 Test  #5: scheduling .......................   Passed    1.01 sec
+      Start  6: recovery
+ 6/11 Test  #6: recovery .........................   Passed    0.01 sec
+      Start  7: modes
+ 7/11 Test  #7: modes ............................   Passed    0.01 sec
+      Start  8: playlist-update
+ 8/11 Test  #8: playlist-update ..................   Passed    1.01 sec
+      Start  9: overlay
+ 9/11 Test  #9: overlay ..........................   Passed    0.01 sec
+      Start 10: media-ipc
+10/11 Test #10: media-ipc ........................   Passed    0.00 sec
+      Start 11: media-decode
+11/11 Test #11: media-decode .....................   Passed    2.61 sec
+
+100% tests passed out of 11
+
+Total Test time (real) =   6.81 sec

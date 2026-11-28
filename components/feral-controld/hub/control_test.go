@@ -226,12 +226,17 @@ func TestEnvelopeOriginIsTheLANPeer(t *testing.T) {
 // raceCapturer mints an invitation (moves the stub's generation) while the
 // capture is in flight.
 type raceCapturer struct {
-	g    *stubGate
-	live bool
+	g        *stubGate
+	live     bool
+	enrolled bool
 }
 
 func (c *raceCapturer) Capture(context.Context, screenshot.Bounds) (*screenshot.Image, error) {
-	c.g.gen++
+	if c.enrolled {
+		c.g.state = control.StateEnrolled
+	} else {
+		c.g.gen++
+	}
 	c.g.protected = c.live
 	return &screenshot.Image{Data: []byte("png"), Width: 1, Height: 1}, nil
 }
@@ -253,4 +258,18 @@ func TestScreenshotDiscardedWhenInvitationRacesCapture(t *testing.T) {
 		assert.JSONEq(t, `{"error":{"code":"screen_protected"}}`, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "png")
 	}
+}
+
+func TestRawScreenshotChecksOwnershipAtDelivery(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	server := mocks.NewMockHTTPServer(ctrl)
+	mux := http.NewServeMux()
+	server.EXPECT().Handler().Return(mux).AnyTimes()
+	g := &stubGate{state: control.StateLegacy}
+	h := New(context.Background(), mocks.NewMockWS(ctrl), mocks.NewMockCommandHandler(ctrl), fixedStatus{},
+		&raceCapturer{g: g, enrolled: true}, server, wrapper.NewJSON(), zap.NewNop()).(*hub)
+	h.SetControl(g)
+	rec := serve(mux, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:1111/api/screenshot", nil))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.JSONEq(t, string(control.PublicErrorBody(control.CodeEnrollmentRequired)), rec.Body.String())
 }

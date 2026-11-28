@@ -1,0 +1,32 @@
+[
+  {
+    "capture": "00-softap_qr.png",
+    "dimensions": [
+      3840,
+      2160
+    ],
+    "decoded": [
+      "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+    ]
+  },
+  {
+    "capture": "01-softap_qr.png",
+    "dimensions": [
+      3840,
+      2160
+    ],
+    "decoded": [
+      "http://10.42.0.1/"
+    ]
+  },
+  {
+    "capture": "02-claim_qr.png",
+    "dimensions": [
+      3840,
+      2160
+    ],
+    "decoded": [
+      "https://example.org/claim?token=SYNTHETIC-TEST"
+    ]
+  }
+]

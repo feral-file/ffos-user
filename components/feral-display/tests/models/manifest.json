@@ -1,0 +1,42 @@
+{
+  "Box/glTF-Binary/Box.glb": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Binary/Box.glb",
+    "sha256": "ed52f7192b8311d700ac0ce80644e3852cd01537e4d62241b9acba023da3d54e",
+    "bytes": 1664
+  },
+  "Box/glTF-Draco/Box.gltf": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Draco/Box.gltf",
+    "sha256": "3c46acecdfa90b012ec9052d8a1dfa61358e6d56a9e333504189cc78a2de4d1b",
+    "bytes": 2427
+  },
+  "Box/glTF-Draco/Box.bin": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/glTF-Draco/Box.bin",
+    "sha256": "610dc6e08aba7c2720c8e4ec0578efd91cf2d88a5e638dab7811a22f0235bf2e",
+    "bytes": 120
+  },
+  "Box/LICENSE.md": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/LICENSE.md",
+    "sha256": "2759bbffe3b8aebe789958875a098045fe4039eb3e2291ef0fd09c65994bdddc",
+    "bytes": 771
+  },
+  "ABeautifulGame/glTF-Binary-KTX-ETC1S-Draco/ABeautifulGame.glb": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/ABeautifulGame/glTF-Binary-KTX-ETC1S-Draco/ABeautifulGame.glb",
+    "sha256": "d950162d41e0064be9dfac0c09d80c7a23719a37af37f08cd79385b8af0af0c1",
+    "bytes": 12105252
+  },
+  "ABeautifulGame/LICENSE.md": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/ABeautifulGame/LICENSE.md",
+    "sha256": "2f2bdb47880dcffc73bf532c69d48863c081708adc5f870ad21cfff6d7b9363e",
+    "bytes": 932
+  },
+  "Box/metadata.json": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/Box/metadata.json",
+    "sha256": "f5867d1cb319a739e434cce40177c7da65701e747198eef97da025610eac9af6",
+    "bytes": 624
+  },
+  "ABeautifulGame/metadata.json": {
+    "source": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/f0920f5b32d172a30efe3f9257e965918831e6ea/Models/ABeautifulGame/metadata.json",
+    "sha256": "80070530e19cba44b46bc0655ec94a2c67683d773697c9f17e3e5f5faffc4a91",
+    "bytes": 1065
+  }
+}

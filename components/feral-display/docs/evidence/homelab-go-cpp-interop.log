@@ -1,0 +1,96 @@
+Nov 17 20:41:43 homelab systemd[928]: Started [systemd-run] /home/feralfile/ff-player-native-build/playerlink.test -test.v.
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestPresentationURLPreservesPhoneQRHintWithoutArtworkCredentials
+Nov 17 20:41:43 homelab playerlink.test[1953824]: --- PASS: TestPresentationURLPreservesPhoneQRHintWithoutArtworkCredentials (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/object
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/duplicate_member
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/nested_duplicate
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/siblings_allowed
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/trailing_bytes
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/NaN_forbidden
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/truncated
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/UTF8_BOM
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/high_surrogate
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/low_surrogate
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/surrogate_pair
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/escaped_backslash
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/numeric_overflow
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/64_levels
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/65_levels
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/empty_object
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/zero_length_forbidden
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/oversize_rejected_before_body
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestSharedConformance/UTF-8_byte_length
+Nov 17 20:41:43 homelab playerlink.test[1953824]: --- PASS: TestSharedConformance (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/object (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/duplicate_member (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/nested_duplicate (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/siblings_allowed (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/trailing_bytes (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/NaN_forbidden (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/truncated (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/UTF8_BOM (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/high_surrogate (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/low_surrogate (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/surrogate_pair (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/escaped_backslash (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/numeric_overflow (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/64_levels (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/65_levels (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/empty_object (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/zero_length_forbidden (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/oversize_rejected_before_body (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestSharedConformance/UTF-8_byte_length (0.00s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/unknown_method
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/float_envelope_version
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/unknown_envelope_field
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/params_must_be_object
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/expired_deadline
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/wrong_runtime
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/wrong_generation
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/float_generation
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/wrong_revision
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/unknown_setting
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/volume_overflow
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/invalid_framing
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/pause_requires_boolean
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/invalid_loop
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/index_must_not_narrow
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/connectivity_requires_boolean
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/stale_input_target
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/overlay_owner_boundary
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/policy_must_be_complete
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/float_negotiation_version
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/incompatible_negotiation
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/zero_default_duration
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/numeric_item_id
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPInteroperability/numeric_playlist_id
+Nov 17 20:41:43 homelab playerlink.test[1953824]: --- PASS: TestCPPInteroperability (0.17s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/unknown_method (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/float_envelope_version (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/unknown_envelope_field (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/params_must_be_object (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/expired_deadline (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/wrong_runtime (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/wrong_generation (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/float_generation (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/wrong_revision (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/unknown_setting (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/volume_overflow (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/invalid_framing (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/pause_requires_boolean (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/invalid_loop (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/index_must_not_narrow (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/connectivity_requires_boolean (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/stale_input_target (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/overlay_owner_boundary (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/policy_must_be_complete (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/float_negotiation_version (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/incompatible_negotiation (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/zero_default_duration (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/numeric_item_id (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]:     --- PASS: TestCPPInteroperability/numeric_playlist_id (0.01s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]: === RUN   TestCPPWatchAndPersistentFence
+Nov 17 20:41:43 homelab playerlink.test[1953824]: --- PASS: TestCPPWatchAndPersistentFence (0.08s)
+Nov 17 20:41:43 homelab playerlink.test[1953824]: PASS

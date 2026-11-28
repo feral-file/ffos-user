@@ -5,8 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
-
 	"go.uber.org/zap"
 )
 
@@ -19,16 +17,17 @@ const (
 type CPUHandler struct {
 	mu                  sync.Mutex
 	logger              *zap.Logger
-	cdpClient           *cdp.Client
+	protect             func(context.Context, bool) error
 	highTempMonitoring  bool
+	thermalActive       bool
 	highTempStartTime   time.Time
 	criticalTemperature float64
 }
 
-func NewCPUHandler(logger *zap.Logger, cdpClient *cdp.Client) *CPUHandler {
+func NewCPUHandler(logger *zap.Logger, protect func(context.Context, bool) error) *CPUHandler {
 	return &CPUHandler{
 		logger:              logger,
-		cdpClient:           cdpClient,
+		protect:             protect,
 		highTempMonitoring:  false,
 		highTempStartTime:   time.Time{},
 		criticalTemperature: CPU_CRITICAL_TEMPERATURE,
@@ -41,10 +40,27 @@ func (c *CPUHandler) checkCPUTemperature(ctx context.Context, currentTemp float6
 
 	c.logger.Debug("CPU: Checking CPU temperature", zap.Float64("current_temp", currentTemp))
 
-	// If temperature is below threshold, reset monitoring if active
-	if currentTemp < c.criticalTemperature {
+	// Five-degree hysteresis prevents a repeated teardown/reload at 93 C.
+	if currentTemp < c.criticalTemperature-5 {
+		c.thermalActive = false
 		if c.highTempMonitoring {
 			c.resetMonitoring()
+		}
+		if c.protect != nil {
+			if err := c.protect(ctx, false); err != nil {
+				c.logger.Warn("CPU: could not clear thermal hold", zap.Error(err))
+			}
+		}
+		return
+	}
+	if currentTemp < c.criticalTemperature {
+		if !c.thermalActive && c.highTempMonitoring {
+			c.resetMonitoring()
+		}
+		if c.thermalActive && c.protect != nil {
+			if err := c.protect(ctx, true); err != nil {
+				c.logger.Warn("CPU: could not reaffirm thermal hold", zap.Error(err))
+			}
 		}
 		return
 	}
@@ -67,18 +83,15 @@ func (c *CPUHandler) checkCPUTemperature(ctx context.Context, currentTemp float6
 		return
 	}
 
-	// Temperature has been critical for too long, send notification if not already sent
+	c.thermalActive = true
+	// Reaffirm the level so a restarted player also enters the hold.
 	c.logger.Error("CPU: Temperature exceeded critical threshold for too long, sending notification",
 		zap.Float64("current_temp", currentTemp),
 		zap.Duration("duration", durHigh))
 
-	// Send critical temperature notification to website
-	if c.cdpClient != nil {
-		if err := c.cdpClient.SendCriticalCPUTemperatureNotification(ctx); err != nil {
-			c.logger.Error("Failed to send critical CPU temperature notification to website",
-				zap.Error(err))
-		} else {
-			c.logger.Info("CPU: Sent critical CPU temperature notification via CDP")
+	if c.protect != nil {
+		if err := c.protect(ctx, true); err != nil {
+			c.logger.Error("CPU: could not apply thermal hold", zap.Error(err))
 		}
 	}
 

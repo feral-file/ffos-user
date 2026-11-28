@@ -1,0 +1,56 @@
+[  5%] Built target frame-clock-tests
+[  8%] Building CXX object CMakeFiles/ff_core.dir/src/playback.cpp.o
+[ 11%] Linking CXX static library libff_core.a
+[ 37%] Built target ff_core
+[ 48%] Linking CXX executable core-tests
+[ 48%] Linking CXX executable ff-player-core
+[ 48%] Linking CXX executable server-tests
+[ 48%] Linking CXX executable ff-player-import
+[ 54%] Built target ff-player-import
+[ 54%] Built target core-tests
+[ 57%] Built target ff-player-core
+[ 60%] Built target server-tests
+[ 68%] Linking CXX executable modes-tests
+[ 68%] Linking CXX executable recovery-tests
+[ 68%] Linking CXX executable input-tests
+[ 71%] Building CXX object CMakeFiles/scheduling-tests.dir/tests/scheduling_test.cpp.o
+[ 77%] Built target input-tests
+[ 77%] Built target recovery-tests
+[ 80%] Built target modes-tests
+[ 88%] Linking CXX executable display-tests
+[ 88%] Linking CXX executable overlay-tests
+[ 88%] Linking CXX executable playlist-update-tests
+[ 94%] Built target playlist-update-tests
+[ 94%] Built target display-tests
+[ 97%] Built target overlay-tests
+[100%] Linking CXX executable scheduling-tests
+[100%] Built target scheduling-tests
+Test project /tmp/ff-native-ui-core
+      Start  1: frame-clock
+ 1/12 Test  #1: frame-clock ......................   Passed    0.00 sec
+      Start  2: matched-summary
+ 2/12 Test  #2: matched-summary ..................   Passed    0.35 sec
+      Start  3: migration
+ 3/12 Test  #3: migration ........................   Passed    0.58 sec
+      Start  4: core
+ 4/12 Test  #4: core .............................   Passed    2.55 sec
+      Start  5: server
+ 5/12 Test  #5: server ...........................   Passed    0.28 sec
+      Start  6: input
+ 6/12 Test  #6: input ............................   Passed    0.27 sec
+      Start  7: scheduling
+ 7/12 Test  #7: scheduling .......................   Passed    1.43 sec
+      Start  8: recovery
+ 8/12 Test  #8: recovery .........................   Passed    0.28 sec
+      Start  9: modes
+ 9/12 Test  #9: modes ............................   Passed    0.30 sec
+      Start 10: playlist-update
+10/12 Test #10: playlist-update ..................   Passed    1.46 sec
+      Start 11: overlay
+11/12 Test #11: overlay ..........................   Passed    0.27 sec
+      Start 12: display
+12/12 Test #12: display ..........................   Passed    0.28 sec
+
+100% tests passed out of 12
+
+Total Test time (real) =   8.06 sec

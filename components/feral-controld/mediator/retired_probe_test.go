@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
@@ -47,7 +46,7 @@ func TestMediator_ConnectivityEdgeArmsRetiredProbe(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	pr := &probingRelayer{MockRelayer: ts.mockRelayer}
-	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCDP, ts.mockCommandHandler,
+	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCommandHandler,
 		ts.mockExecutor, ts.mockRefresher, ts.mockJSON, ts.logger)
 	ts.mediator.SetConnectivityPushHook(func() {
 		select {
@@ -55,11 +54,11 @@ func TestMediator_ConnectivityEdgeArmsRetiredProbe(t *testing.T) {
 		default:
 		}
 	})
-	wireConnectivitySession(t, ts)
+	wireConnectivityPlayer(t, ts)
 
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "window.handleConnectivityChange(true)"}).
-		Return(map[string]interface{}{"result": "ok"}, nil).
+	ts.mockPlayer.EXPECT().
+		SetConnectivity(gomock.Any(), true).
+		Return(nil).
 		Times(1)
 	ts.mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
 	ts.mockRelayer.EXPECT().RetryableConnect(gomock.Any()).DoAndReturn(func(context.Context) error {
@@ -91,7 +90,7 @@ func TestMediator_ConnectivityEdgeReconnectsLastAndOnce(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 	pr := &probingRelayer{MockRelayer: ts.mockRelayer}
-	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCDP, ts.mockCommandHandler,
+	ts.mediator = mediator.New(ts.ctx, pr, ts.mockDbus, ts.mockCommandHandler,
 		ts.mockExecutor, ts.mockRefresher, ts.mockJSON, ts.logger)
 	ts.mediator.SetConnectivityPushHook(func() {
 		select {
@@ -99,11 +98,11 @@ func TestMediator_ConnectivityEdgeReconnectsLastAndOnce(t *testing.T) {
 		default:
 		}
 	})
-	wireConnectivitySession(t, ts)
+	wireConnectivityPlayer(t, ts)
 
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "window.handleConnectivityChange(true)"}).
-		Return(map[string]interface{}{"result": "ok"}, nil).
+	ts.mockPlayer.EXPECT().
+		SetConnectivity(gomock.Any(), true).
+		Return(nil).
 		AnyTimes()
 	ts.mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
 

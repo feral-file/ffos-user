@@ -1,0 +1,148 @@
+{
+  "unit": "ff-native-chrome-test.service",
+  "atNs": 1794971966964206893,
+  "processes": [
+    {
+      "pid": 965549,
+      "name": "chrome",
+      "Pss": 219752,
+      "Rss": 412836,
+      "Private_Clean": 40740,
+      "Private_Dirty": 88236,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965552,
+      "name": "chrome_crashpad",
+      "Pss": 1160,
+      "Rss": 3896,
+      "Private_Clean": 212,
+      "Private_Dirty": 364,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965554,
+      "name": "chrome_crashpad",
+      "Pss": 1001,
+      "Rss": 3492,
+      "Private_Clean": 104,
+      "Private_Dirty": 312,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965568,
+      "name": "chrome",
+      "Pss": 20450,
+      "Rss": 77728,
+      "Private_Clean": 12,
+      "Private_Dirty": 748,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965569,
+      "name": "chrome",
+      "Pss": 12624,
+      "Rss": 76068,
+      "Private_Clean": 116,
+      "Private_Dirty": 160,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965571,
+      "name": "chrome",
+      "Pss": 2668,
+      "Rss": 21532,
+      "Private_Clean": 0,
+      "Private_Dirty": 272,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965608,
+      "name": "chrome",
+      "Pss": 107821,
+      "Rss": 248456,
+      "Private_Clean": 8628,
+      "Private_Dirty": 16164,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965609,
+      "name": "chrome",
+      "Pss": 42464,
+      "Rss": 126628,
+      "Private_Clean": 2544,
+      "Private_Dirty": 22100,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965614,
+      "name": "chrome",
+      "Pss": 8156,
+      "Rss": 59464,
+      "Private_Clean": 152,
+      "Private_Dirty": 1880,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965676,
+      "name": "chrome",
+      "Pss": 58033,
+      "Rss": 158460,
+      "Private_Clean": 7188,
+      "Private_Dirty": 26980,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965692,
+      "name": "chrome",
+      "Pss": 26370,
+      "Rss": 116788,
+      "Private_Clean": 280,
+      "Private_Dirty": 8736,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965694,
+      "name": "chrome",
+      "Pss": 48483,
+      "Rss": 148816,
+      "Private_Clean": 6528,
+      "Private_Dirty": 17892,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965780,
+      "name": "chrome",
+      "Pss": 15374,
+      "Rss": 82532,
+      "Private_Clean": 0,
+      "Private_Dirty": 6620,
+      "SwapPss": 0
+    },
+    {
+      "pid": 965788,
+      "name": "chrome",
+      "Pss": 15384,
+      "Rss": 82536,
+      "Private_Clean": 0,
+      "Private_Dirty": 6636,
+      "SwapPss": 0
+    },
+    {
+      "pid": 976788,
+      "name": "chrome",
+      "Pss": 25501,
+      "Rss": 76708,
+      "Private_Clean": 16392,
+      "Private_Dirty": 2456,
+      "SwapPss": 0
+    }
+  ],
+  "totalsKiB": {
+    "Pss": 605241,
+    "Rss": 1695940,
+    "Private_Clean": 82896,
+    "Private_Dirty": 199556,
+    "SwapPss": 0
+  }
+}

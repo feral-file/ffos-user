@@ -1,0 +1,41 @@
+[
+  {
+    "pid": 1103151,
+    "cmd": "bwrap --unshare-user --unshare-net --unshare-pid --die-with-parent --ro-bind / / --dev-bind /dev /dev --proc /proc --tmpfs /tmp --bind /home/feralfile/ff-sean-offline-trial3 /home/feralfile/ff-sean-offline-trial3 /home/feralfile/ff-native-office-benchmark/chrome-linux64/chrome --headless=new --enable-gpu --no-first-run --no-default-browser-check --disable-background-networking --disable-extensions --disable-dev-shm-usage --enable-unsafe-webgpu --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE --disable-vulkan-surface --window-size=1920,1080 --user-data-dir=/home/feralfile/ff-sean-offline-trial3/profile --remote-debugging-pipe about:blank ",
+    "networkNamespace": "net:[4026531833]",
+    "hostNetworkNamespace": "net:[4026531833]",
+    "interfaces": "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 475054143  479327    0    0    0     0          0         0 475054143  479327    0    0    0     0       0          0\nenp1s0:       0       0    0    0    0     0          0         0        0       0    0   46    0     0       0          0\nwlp2s0: 54784861600 37125761    0 86577    0     0          0         0 1093129226 9608648    0    0    0     0       0          0\n",
+    "status": [
+      "Uid:\t1000\t1000\t1000\t1000\n",
+      "CapEff:\t0000000000000000\n",
+      "CapBnd:\t000001ffffffffff\n",
+      "NoNewPrivs:\t1\n"
+    ]
+  },
+  {
+    "pid": 1103152,
+    "cmd": "bwrap --unshare-user --unshare-net --unshare-pid --die-with-parent --ro-bind / / --dev-bind /dev /dev --proc /proc --tmpfs /tmp --bind /home/feralfile/ff-sean-offline-trial3 /home/feralfile/ff-sean-offline-trial3 /home/feralfile/ff-native-office-benchmark/chrome-linux64/chrome --headless=new --enable-gpu --no-first-run --no-default-browser-check --disable-background-networking --disable-extensions --disable-dev-shm-usage --enable-unsafe-webgpu --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE --disable-vulkan-surface --window-size=1920,1080 --user-data-dir=/home/feralfile/ff-sean-offline-trial3/profile --remote-debugging-pipe about:blank ",
+    "networkNamespace": "net:[4026532861]",
+    "hostNetworkNamespace": "net:[4026531833]",
+    "interfaces": "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n",
+    "status": [
+      "Uid:\t1000\t1000\t1000\t1000\n",
+      "CapEff:\t0000000000000000\n",
+      "CapBnd:\t0000000000000000\n",
+      "NoNewPrivs:\t1\n"
+    ]
+  },
+  {
+    "pid": 1103153,
+    "cmd": "/home/feralfile/ff-native-office-benchmark/chrome-linux64/chrome --headless=new --enable-gpu --no-first-run --no-default-browser-check --disable-background-networking --disable-extensions --disable-dev-shm-usage --enable-unsafe-webgpu --use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE --disable-vulkan-surface --window-size=1920,1080 --user-data-dir=/home/feralfile/ff-sean-offline-trial3/profile --remote-debugging-pipe --noerrdialogs --ozone-platform=headless --ozone-override-screen-size=800,600 about:blank ",
+    "networkNamespace": "net:[4026532861]",
+    "hostNetworkNamespace": "net:[4026531833]",
+    "interfaces": "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n",
+    "status": [
+      "Uid:\t1000\t1000\t1000\t1000\n",
+      "CapEff:\t0000000000000000\n",
+      "CapBnd:\t0000000000000000\n",
+      "NoNewPrivs:\t1\n"
+    ]
+  }
+]

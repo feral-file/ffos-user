@@ -1,0 +1,72 @@
+{
+  "physicalOutputVerified": false,
+  "runs": [
+    {
+      "file": "ff19-grit-chrome.json",
+      "arm": "chrome",
+      "outputIntervals": {
+        "count": 444,
+        "meanMs": 143.95734684684686,
+        "medianMs": 150.001,
+        "p95Ms": 166.667,
+        "p99Ms": 166.668,
+        "over100ms": 444
+      },
+      "rafTimestamps": {
+        "count": 420,
+        "meanMs": 143.8897619047619,
+        "medianMs": 149.90000000000873,
+        "p95Ms": 166.60000000000582,
+        "p99Ms": 166.70000000000437,
+        "standardDeviationMs": 10.9642043091956,
+        "over50ms": 420
+      },
+      "callbackDelivery": {
+        "count": 420,
+        "meanMs": 143.89190476196154,
+        "medianMs": 149.19999998807907,
+        "p95Ms": 165.7999999821186,
+        "p99Ms": 168
+      },
+      "cpuPercentOneCore": 6.865273338683149,
+      "cgroupMemoryMiB": 227.92578125,
+      "cgroupPeakMiB": 250.70703125
+    },
+    {
+      "file": "ff19-grit-public.json",
+      "arm": "native",
+      "outputIntervals": {
+        "count": 408,
+        "meanMs": 159.0697107843137,
+        "medianMs": 166.668,
+        "p95Ms": 316.669,
+        "p99Ms": 350.003,
+        "over100ms": 219
+      },
+      "rafTimestamps": {
+        "count": 380,
+        "meanMs": 158.72894736842105,
+        "medianMs": 166.6999999999971,
+        "p95Ms": 316.70000000000437,
+        "p99Ms": 350,
+        "standardDeviationMs": 135.40788052923045,
+        "over50ms": 204
+      },
+      "callbackDelivery": {
+        "count": 380,
+        "meanMs": 158.7428947369519,
+        "medianMs": 166.30000001192093,
+        "p95Ms": 321.2000000178814,
+        "p99Ms": 350.7000000178814
+      },
+      "cpuPercentOneCore": 18.927460157495833,
+      "cgroupMemoryMiB": 363.87890625,
+      "cgroupPeakMiB": 378.74609375,
+      "wholeRunCopiesIncludingWarmup": {
+        "gpuCopies": 727,
+        "cpuCopies": 0,
+        "coalescedFrames": 3
+      }
+    }
+  ]
+}

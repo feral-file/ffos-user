@@ -1,0 +1,33 @@
+Test project /home/feralfile/ff-native-debug/build
+      Start  1: frame-clock
+ 1/14 Test  #1: frame-clock ......................   Passed    0.01 sec
+      Start  2: migration
+ 2/14 Test  #2: migration ........................   Passed    0.29 sec
+      Start  3: core
+ 3/14 Test  #3: core .............................   Passed    2.04 sec
+      Start  4: server
+ 4/14 Test  #4: server ...........................   Passed    0.03 sec
+      Start  5: input
+ 5/14 Test  #5: input ............................   Passed    0.01 sec
+      Start  6: scheduling
+ 6/14 Test  #6: scheduling .......................   Passed    1.03 sec
+      Start  7: recovery
+ 7/14 Test  #7: recovery .........................   Passed    0.03 sec
+      Start  8: modes
+ 8/14 Test  #8: modes ............................   Passed    0.03 sec
+      Start  9: playlist-update
+ 9/14 Test  #9: playlist-update ..................   Passed    1.03 sec
+      Start 10: overlay
+10/14 Test #10: overlay ..........................   Passed    0.03 sec
+      Start 11: display
+11/14 Test #11: display ..........................   Passed    0.04 sec
+      Start 12: media-ipc
+12/14 Test #12: media-ipc ........................   Passed    0.01 sec
+      Start 13: media-decode
+13/14 Test #13: media-decode .....................   Passed    2.72 sec
+      Start 14: device-ui
+14/14 Test #14: device-ui ........................   Passed    2.14 sec
+
+100% tests passed out of 14
+
+Total Test time (real) =   9.47 sec

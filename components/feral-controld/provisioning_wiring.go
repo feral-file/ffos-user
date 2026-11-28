@@ -97,8 +97,8 @@ func (c *dbusConnectivity) Subscribe(fn func(online bool)) (unsubscribe func()) 
 const phoneLeftLine = "Your phone left the setup Wi-Fi. Scan the code to join again."
 
 type setupNarrationUI interface {
-	ShowScanning()
-	ShowSoftAPQR(ssid, psk, portalURL string)
+	ShowScanning(passive bool)
+	ShowSoftAPQR(ssid, psk, portalURL string, passive bool)
 	ShowSoftAPPortalQR(ssid, psk, portalURL string)
 	ShowSoftAPQRRetry(ssid, psk, portalURL, reason string)
 	ShowJoinFailed(reason string)
@@ -209,9 +209,7 @@ func wireBootLifecycleHooks(n *setupNotifier, ex any, stillWithinBootWindow, ota
 	if sg, ok := ex.(startupOTAGateFlow); ok {
 		n.startupGate = sg.MaybeRunStartupOTAGateOnOnline
 	}
-	if pr, ok := ex.(bootPlayerRecoveryFlow); ok {
-		n.playerRecovery = pr.MaybeRecoverPlayerOnBootOnline
-	}
+
 }
 
 // uptimeWithin reports whether the kernel is currently within `window` of
@@ -340,7 +338,7 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 		switch {
 		case d.Reason == "scanning":
 			n.narrating = true
-			n.ui.ShowScanning()
+			n.ui.ShowScanning(d.Passive)
 		case d.PSK != "" && d.ClientAttached:
 			// The raise's first portal request landed: a phone is on the
 			// hotspot. Repaint the same panel in its attached phase so the
@@ -363,7 +361,7 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			n.ui.ShowSoftAPQRRetry(d.SSID, d.PSK, d.PortalURL, d.JoinFailure)
 		case d.PSK != "":
 			n.narrating = true
-			n.ui.ShowSoftAPQR(d.SSID, d.PSK, d.PortalURL)
+			n.ui.ShowSoftAPQR(d.SSID, d.PSK, d.PortalURL, d.Passive)
 		case d.SSID != "":
 			n.narrating = true
 			n.ui.ShowJoinFailed(d.Reason)

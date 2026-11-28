@@ -7,6 +7,8 @@ alwaysApply: false
 
 # Architecture Rule
 
+**Critical: one FF1 display path.** Live, downloaded, and signed capsule artwork use the same player. CEF renders web works, and libmpv renders standalone media. Capsule engine pins are provenance for off-device reproduction. Never install or launch a second display engine for a work.
+
 `docs/architecture.md` is the canonical architecture contract for this repository, and it is filled in. Read it before cross-service changes.
 
 (This file previously said the contract "has not been finalized". That predated

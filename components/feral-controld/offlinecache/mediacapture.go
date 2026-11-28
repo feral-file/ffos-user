@@ -327,7 +327,7 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		return Resource{}, fmt.Errorf("write blob: %w", err)
 	}
 
-	return Resource{
+	resource := Resource{
 		FreshUntil: freshUntil,
 		URL:        sourceURL,
 		Status:     go_http.StatusOK,
@@ -348,7 +348,9 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		// must be replayed alongside the body or Chromium's own CORS
 		// enforcement can reject an otherwise byte-correct replay.
 		Headers: filterReplayableHeaders(headerFirstValues(resp.Header)),
-	}, nil
+	}
+	resource.captureBodyHeaders(resp)
+	return resource, nil
 }
 
 // headerFirstValues flattens an http.Header (which allows repeated

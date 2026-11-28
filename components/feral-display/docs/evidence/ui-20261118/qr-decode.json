@@ -1,0 +1,30 @@
+{
+  "final-raster/wifi-1920x1920.png": [
+    "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+  ],
+  "final-raster/claim-3840x2160.png": [
+    "https://example.org/claim?token=SYNTHETIC-TEST"
+  ],
+  "final-raster/claim-1920x1080.png": [
+    "https://example.org/claim?token=SYNTHETIC-TEST"
+  ],
+  "final-raster/claim-1080x1920.png": [
+    "https://example.org/claim?token=SYNTHETIC-TEST"
+  ],
+  "final-raster/claim-1920x1920.png": [
+    "https://example.org/claim?token=SYNTHETIC-TEST"
+  ],
+  "final-raster/wifi-3840x2160.png": [
+    "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+  ],
+  "final-raster/tombstone.png": [],
+  "final-raster/wifi-1080x1920.png": [
+    "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+  ],
+  "final-raster/wifi-1920x1080.png": [
+    "WIFI:T:WPA;S:FF1-test\\:\\;;P:fake\\;password;;"
+  ],
+  "native-ui-vulkan.png": [
+    "https://example.org/claim?token=SYNTHETIC-TEST"
+  ]
+}
