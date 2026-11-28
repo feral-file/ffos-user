@@ -16,7 +16,7 @@ Sizes are design pixels on a 720-high canvas, scaled by the screen's short edge,
 
 - Margin: 50 on every side. Background `#000000`, text `#EDEDED`, quiet text `#8A8A8A`.
 - Top right: the exhibition's name, which is the playlist's title ("S01:E01 · Test Exhibition #001"), 19, quiet, letter-spacing 0.02em. Left out for a lone work whose playlist title only repeats the work's; kept for a scheduled work, because the scheduler sends only today's work of an exhibition.
-- Bottom left: the artist in regular and the title in bold italic, both 44 at line height 1.12, in a column at most 560 wide.
+- Bottom left: the artist in regular and the title in bold italic, both 44 at line height 1.12, in a column at most 560 wide. If a collective's credits exceed the available height, the earliest credit lines clip so the work title remains in view.
 - Bottom right, when the playlist carries a link: a QR code 120 square, drawn in the text color on the black with no border, its foot on the baseline of the title's last line. "About this work" hangs 8 below it, 13, quiet, starting at the code's left edge.
 
 ## The link

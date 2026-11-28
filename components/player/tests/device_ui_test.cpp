@@ -58,6 +58,16 @@ int main(int argc,char** argv){
       int ink=0;for(int y=700;y<1080;++y)if(at(1920-75-178,y)==0xED)++ink;
       check(ink>40,"The code's left finder edge sits at the right margin, 120 units wide");
     }
+    {
+      auto collective=item;
+      for(int n=0;n<30;++n) collective.item["metadata"]["artists"].push_back("Alexandra Example");
+      const auto card=ff::render_title_card(collective,1920,1080);
+      int ink=0;for(int y=700;y<1080;++y)if(card.rgba[(size_t(y)*1920+1920-75-178)*4]==0xED)++ink;
+      check(ink>40,"Long credits keep the QR finder on screen");
+      collective.item["title"]="Another title";
+      check(ff::render_title_card(collective,1920,1080).rgba!=card.rgba,"Long credits keep the title visible");
+      save(card,std::string(argv[2])+"/collective-title-card.png");
+    }
     item.playlist.erase("links");
     item.playlist_title="Another exhibition";
     check(ff::render_title_card(item,1920,1080).rgba!=landscape.rgba,"The exhibition name belongs on the card");

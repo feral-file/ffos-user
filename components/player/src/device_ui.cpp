@@ -332,9 +332,8 @@ UIRaster render_title_card(const Occurrence& o,int width,int height) {
   const int label_width = std::max(1, int(std::min(560*unit, code ? available-qr_size-40*unit : double(available))));
   Text work(canvas.cr,(artists.empty() ? "" : escape(artists)+"\n")+"<b><i>"+escape(*label.title)+"</i></b>",
             44*unit,1.12,label_width,false);
-  const double work_top=std::max(padding,height-padding-work.css_height);
-  cairo_set_source_rgb(canvas.cr,ink,ink,ink);
-  work.paint(canvas.cr,padding,work_top);
+  const double work_top=height-padding-work.css_height;
+  double credit_area_top=padding;
   // The scheduler sends only today's work, even in a multi-day exhibition.
   const bool scheduled_exhibition = text_field(o.item, "displayAt") && o.playlist_title != *label.title;
   if (!o.playlist_title.empty() && (scheduled_exhibition || (o.playlist.contains("items") && o.playlist.at("items").size() > 1) ||
@@ -347,7 +346,16 @@ UIRaster render_title_card(const Occurrence& o,int width,int height) {
     pango_layout_set_attributes(exhibition.layout,attrs);pango_attr_list_unref(attrs);
     cairo_set_source_rgb(canvas.cr,muted,muted,muted);
     exhibition.paint(canvas.cr,padding,padding);
+    credit_area_top+=exhibition.css_height;
   }
+  // Keep the title and its QR baseline visible when the artists span more
+  // lines than the card can hold. Only the overflowing credit lines clip.
+  cairo_save(canvas.cr);
+  cairo_rectangle(canvas.cr,0,credit_area_top,width,std::max(0.0,height-credit_area_top));
+  cairo_clip(canvas.cr);
+  cairo_set_source_rgb(canvas.cr,ink,ink,ink);
+  work.paint(canvas.cr,padding,work_top);
+  cairo_restore(canvas.cr);
   if (code) {
     // The code's foot sits on the baseline of the last line of text; the
     // caption hangs below it.
