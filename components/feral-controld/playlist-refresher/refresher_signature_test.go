@@ -340,7 +340,7 @@ func TestRefresher_FutureOnlyCachedFallback_ClearsOnPromote(t *testing.T) {
 
 	playlistURL := "http://example.com/daily.json"
 	active.Set("showing", playlistURL, sigverify.StatusValid)
-	cachedRaw := []byte(`{"dpVersion":"1.1.0","id":"v2-cached","title":"t","items":[{"id":"tomorrow","source":"https://example.com/tomorrow","displayAt":"2026-07-23T00:00:00Z"}]}`)
+	cachedRaw := []byte(`{"dpVersion":"1.1.0","id":"11111111-1111-4111-8111-111111111111","title":"t","items":[{"id":"33333333-3333-4333-8333-333333333333","source":"https://example.com/tomorrow","displayAt":"2026-07-23T00:00:00Z"}]}`)
 
 	loaded := make(chan struct{}, 1)
 	ts.mockStatusPoller.EXPECT().

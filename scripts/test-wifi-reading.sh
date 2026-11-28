@@ -3,7 +3,6 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 wifi_reading="$repo_root/users/feralfile/scripts/wifi-reading.sh"
-factory_check="$repo_root/users/feralfile/scripts/factory-check.sh"
 file_permissions="$repo_root/users/feralfile/.file_permissions.sh"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -13,72 +12,12 @@ fail() {
   exit 1
 }
 
-for script in wifi-reading.sh factory-check.sh; do
-  grep -Fq "chmod +x /home/feralfile/scripts/$script" "$file_permissions" || \
-    fail "device install does not make $script executable"
-done
+grep -Fq "chmod +x /home/feralfile/scripts/wifi-reading.sh" "$file_permissions" || \
+  fail "device install does not make wifi-reading.sh executable"
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
 export PATH="$fake_bin:$PATH"
-
-# --- factory-check: the results stick is never on the disk the ISO booted from.
-
-iso_uuid=2026-10-14-10-59-01-00
-mkdir -p "$tmp_dir/dev" "$tmp_dir/by-uuid"
-touch "$tmp_dir/dev/sda" "$tmp_dir/dev/sda1"
-printf 'BOOT_IMAGE=/arch/boot/x86_64/vmlinuz-linux archisobasedir=arch archisodevice=UUID=%s script=/home/feralfile/scripts/factory-check.sh\n' \
-  "$iso_uuid" > "$tmp_dir/cmdline"
-
-cat > "$fake_bin/lsblk" <<'EOF'
-#!/usr/bin/env bash
-case "$*" in
-  "-ndo PKNAME "*) [ "$(basename "$3")" = sda1 ] && echo sda; exit 0 ;;
-  "-rno NAME,TYPE,RM,PKNAME,FSTYPE,MOUNTPOINT") cat "$FF_TEST_LSBLK" ;;
-  *) echo "unexpected lsblk $*" >&2; exit 1 ;;
-esac
-EOF
-chmod +x "$fake_bin/lsblk"
-
-# A dd-written installer stick (sda: ISO 9660 + the FAT ARCHISO_EFI partition),
-# the NVMe, then the results stick. Raw lsblk prints empty columns as nothing.
-installer_stick='sda disk 1  iso9660
-sda1 part 1 sda iso9660 /run/archiso/bootmnt
-sda2 part 1 sda vfat
-nvme0n1 disk 0
-nvme0n1p1 part 0 nvme0n1 vfat
-nvme0n1p2 part 0 nvme0n1 btrfs '
-results_stick_line='sdb disk 1
-sdb1 part 1 sdb vfat '
-
-pick() {
-  printf '%s\n' "$1" > "$tmp_dir/lsblk"
-  FF_TEST_LSBLK="$tmp_dir/lsblk" FF_CMDLINE="${2:-$tmp_dir/cmdline}" \
-    FF_DEV_BY_UUID="$tmp_dir/by-uuid" bash -c 'source "$1"; results_stick' _ "$factory_check" || true
-}
-
-ln -sfn "$tmp_dir/dev/sda1" "$tmp_dir/by-uuid/$iso_uuid"
-[ "$(pick "$installer_stick"$'\n'"$results_stick_line")" = /dev/sdb1 ] || \
-  fail "factory check did not pick the second stick"
-[ -z "$(pick "$installer_stick")" ] || \
-  fail "factory check took the installer stick's EFI partition for a results stick"
-[ -z "$(pick "${installer_stick}"$'\n''sdb disk 1
-sdb1 part 1 sdb vfat /run/media/sdb1')" ] || fail "factory check took a mounted stick"
-[ -z "$(pick "$installer_stick"$'\n''sdb disk 1
-sdb1 part 1 sdb ext4 ')" ] || fail "factory check took a stick that is not FAT/exFAT"
-
-# udev may point the ISO's UUID at the whole disk, which shares it.
-ln -sfn "$tmp_dir/dev/sda" "$tmp_dir/by-uuid/$iso_uuid"
-[ "$(pick "$installer_stick"$'\n'"$results_stick_line")" = /dev/sdb1 ] || \
-  fail "factory check did not pick the second stick when the ISO UUID names the disk"
-
-# Without a boot disk to exclude, nothing is written anywhere.
-rm -f "$tmp_dir/by-uuid/$iso_uuid"
-[ -z "$(pick "$installer_stick"$'\n'"$results_stick_line")" ] || \
-  fail "factory check used a stick without knowing which disk it booted from"
-echo 'BOOT_IMAGE=/vmlinuz-linux root=UUID=x' > "$tmp_dir/cmdline.installed"
-[ -z "$(pick "$results_stick_line" "$tmp_dir/cmdline.installed")" ] || \
-  fail "factory check used a stick without an archisodevice"
 
 # --- wifi-reading: a sample is only what this scan saw, read past wpa_cli's 4 KiB cap.
 

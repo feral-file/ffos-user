@@ -49,6 +49,14 @@ func setup(t *testing.T) *testSetup {
 
 	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false, true)
 
+	// Catalog editions are decoded one at a time through the JSON wrapper;
+	// decode those for real. Matched on the target type, so it never takes a
+	// call a test expects for a whole document.
+	mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.AssignableToTypeOf(&dp1playlist.PlaylistItem{})).
+		DoAndReturn(func(data []byte, v interface{}) error { return json.Unmarshal(data, v) }).
+		AnyTimes()
+
 	return &testSetup{
 		ctrl:          ctrl,
 		ctx:           ctx,
@@ -73,11 +81,15 @@ func createMockResponse(statusCode int, body string) *http.Response {
 }
 
 // Helper function to create a mock playlist JSON
+const item1ID = "44444444-4444-4444-8444-444444444444"
+
 func createPlaylistJSON() string {
 	return `{
+		"dpVersion": "1.1.0",
+		"title": "Test Playlist",
 		"items": [
 			{
-				"id": "item1",
+				"id": "` + item1ID + `",
 				"title": "Test Item 1",
 				"source": "http://example.com/video1.mp4",
 				"duration": 300,
@@ -93,9 +105,11 @@ func createPlaylistJSON() string {
 // Helper function to create a mock dynamic playlist JSON
 func createDynamicPlaylistJSON() string {
 	return `{
+		"dpVersion": "1.1.0",
+		"title": "Test Playlist",
 		"items": [
 			{
-				"id": "item1",
+				"id": "` + item1ID + `",
 				"title": "Test Item 1",
 				"source": "http://example.com/video1.mp4",
 				"duration": 300,
@@ -127,7 +141,7 @@ func createMockTokens() []ffindexer.Token {
 	return []ffindexer.Token{
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1234567890abcdef",
 			TokenNumber:     "1",
 			Display: &ffindexer.Display{
@@ -137,7 +151,7 @@ func createMockTokens() []ffindexer.Token {
 		},
 		{
 			Chain:           "tezos",
-			Standard:        "FA2",
+			Standard:        "fa2",
 			ContractAddress: "0xabcdef1234567890",
 			TokenNumber:     "2",
 			Display: &ffindexer.Display{
@@ -162,7 +176,7 @@ func createSimpleToken(tokenID, chain string, ownerAddr string, quantity int) ff
 
 	token := ffindexer.Token{
 		Chain:           chain,
-		Standard:        "ERC721",
+		Standard:        "erc721",
 		ContractAddress: "0x1234567890abcdef",
 		TokenNumber:     tokenNumber,
 		Display: &ffindexer.Display{
@@ -199,7 +213,7 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 			playlist := v.(*dp1.Playlist)
 			playlist.Items = []dp1playlist.PlaylistItem{
 				{
-					ID:       "item1",
+					ID:       item1ID,
 					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
 					Duration: float64Ptr(300),
@@ -215,7 +229,7 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 1)
-	assert.Equal(t, "item1", result.Items[0].ID)
+	assert.Equal(t, item1ID, result.Items[0].ID)
 	assert.Equal(t, "Test Item 1", result.Items[0].Title)
 	assert.Equal(t, 300.0, *result.Items[0].Duration)
 	assert.Equal(t, "open", result.Items[0].License)
@@ -246,7 +260,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 			playlist := v.(*dp1.Playlist)
 			playlist.Items = []dp1playlist.PlaylistItem{
 				{
-					ID:       "item1",
+					ID:       item1ID,
 					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
 					Duration: float64Ptr(300),
@@ -549,7 +563,10 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PaginationTwoPages(t *testi
 	assert.Equal(t, "Page2", result.Items[dp1.MAX_PLAYLIST_ITEMS_LIMIT].Title)
 }
 
-func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsMinimal(t *testing.T) {
+// An unscheduled display request carries the whole resolved list, as the
+// refresher will a moment later, never a first-50 cut: a startItem naming a
+// work past such a cut opened the display at item 0 (feral-file/feral-file#3636).
+func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsTheWholeResolvedList(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -582,7 +599,8 @@ func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsMinimal(t *testing
 
 	result, _, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist, nil)
 	assert.NoError(t, err)
-	assert.Len(t, result.Items, dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT)
+	require.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+	assert.Equal(t, "item-60", result.Items[60].Title, "order is the resolver's, unchanged")
 }
 
 func TestDP1_ProcessDynamicPlaylistForCast_ScheduledStopsAtCastLimit(t *testing.T) {
@@ -905,7 +923,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 
 			token := ffindexer.Token{
 				Chain:           tt.input,
-				Standard:        "ERC721",
+				Standard:        "erc721",
 				ContractAddress: "0x123",
 				TokenNumber:     "1",
 				Display: &ffindexer.Display{
@@ -1087,7 +1105,7 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 	mockTokens := []ffindexer.Token{
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1111111111111111",
 			TokenNumber:     "100",
 			Display: &ffindexer.Display{
@@ -1097,7 +1115,7 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 		},
 		{
 			Chain:           "tezos",
-			Standard:        "FA2",
+			Standard:        "fa2",
 			ContractAddress: "0x2222222222222222",
 			TokenNumber:     "200",
 			Display: &ffindexer.Display{
@@ -1157,7 +1175,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 	mockTokens := []ffindexer.Token{
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1111111111111111",
 			TokenNumber:     "100",
 			Display: &ffindexer.Display{
@@ -1167,7 +1185,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 		},
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x2222222222222222",
 			TokenNumber:     "200",
 			Display: &ffindexer.Display{
@@ -1179,7 +1197,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 		// This will generate the same ID as token 1
 		{
 			Chain:           "ethereum",
-			Standard:        "ERC721",
+			Standard:        "erc721",
 			ContractAddress: "0x1111111111111111", // Same as token 1
 			TokenNumber:     "100",                // Same as token 1
 			Display: &ffindexer.Display{
@@ -1220,19 +1238,10 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 }
 
 // TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation pins
-// the one behavior change the dp1-go v0.6.0 bump brought to a path this repo
-// already had: dynamicQuery acceptance (§4.5.1).
-//
-// v0.5.1's single-item overlay described only note/displayAt, so an
-// inlineManifest a resolver emitted was an undescribed key and passed
-// unexamined. v0.6.0 points that overlay at the unmodified ref-manifest schema,
-// so the field is now checked — and dp1-go's hydration loop returns on the
-// first invalid item rather than skipping it, which makes ONE bad manifest fail
-// the WHOLE display request. See processDynamicPlaylistSpec's doc for why that fail-closed
-// outcome is accepted rather than softened here.
-//
-// Both directions are pinned deliberately: a test that only asserted the
-// rejection would pass just as well if validation had become indiscriminate.
+// per-item acceptance of dynamicQuery results (§4.6.2): an item whose
+// inlineManifest does not conform is discarded and the valid ones are shown.
+// Both directions are pinned: a test that only asserted the discard would pass
+// just as well if validation had become indiscriminate.
 func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t *testing.T) {
 	// locale is one of the ref-manifest schema's four required fields
 	// (refVersion, id, created, locale), so dropping it is the smallest
@@ -1245,10 +1254,10 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t 
 	tests := []struct {
 		name           string
 		inlineManifest string
-		wantErr        bool
+		wantDiscard    bool
 	}{
 		{name: "valid manifest hydrates and is carried on the item", inlineManifest: validManifest},
-		{name: "malformed manifest fails the whole batch", inlineManifest: manifestMissingLocale, wantErr: true},
+		{name: "malformed manifest discards only its item", inlineManifest: manifestMissingLocale, wantDiscard: true},
 	}
 
 	for _, tt := range tests {
@@ -1282,18 +1291,86 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation(t 
 			}
 
 			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
-			if tt.wantErr {
-				// The second, manifest-less item is lost with the first: the
-				// batch is rejected whole, not filtered.
-				require.Error(t, err)
-				assert.Nil(t, result)
+			require.NoError(t, err)
+			if tt.wantDiscard {
+				require.Len(t, result.Items, 1)
+				assert.Equal(t, "NoManifest", result.Items[0].Title)
 				return
 			}
-
-			require.NoError(t, err)
 			require.Len(t, result.Items, 2)
 			assert.JSONEq(t, tt.inlineManifest, string(result.Items[0].InlineManifest))
 			assert.Empty(t, result.Items[1].InlineManifest)
+		})
+	}
+}
+
+// A discarded item shortens its page, so paging has to count it: otherwise one
+// bad item on a full page ends the walk and every later page is silently lost.
+// The total of discarded items is bounded, so a resolver repeating a partly
+// broken page cannot page forever, and a response with no valid item at all is
+// refused rather than displayed as an empty playlist.
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging(t *testing.T) {
+	page := func(valid, invalid int) string {
+		items := make([]string, 0, valid+invalid)
+		for range invalid {
+			items = append(items, `{"id":"`+uuid.New().String()+`","title":"bad","source":"https://media.example/x","contentRating":123}`)
+		}
+		for range valid {
+			items = append(items, `{"id":"`+uuid.New().String()+`","title":"ok","source":"https://media.example/a"}`)
+		}
+		return `{"data":{"items":[` + strings.Join(items, ",") + `]}}`
+	}
+	const full = dp1.MAX_PLAYLIST_ITEMS_LIMIT
+
+	tests := []struct {
+		name      string
+		pages     []string
+		wantItems int
+		wantErr   bool
+	}{
+		{name: "bad item on a full page keeps paging", pages: []string{page(full-1, 1), page(2, 0)}, wantItems: full + 1},
+		{name: "wholly invalid page ends the walk", pages: []string{page(full, 0), page(0, full)}, wantItems: full},
+		// A resolver ignoring {{offset}}: uncapped caller, so only the discard
+		// bound ends it. Times() fails the test on a third request.
+		{name: "repeating partly broken page stops at the discard bound", pages: []string{page(1, full-1), page(1, full-1)}, wantItems: 2},
+		{name: "no valid item at all is refused", pages: []string{page(0, full)}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			calls := 0
+			ts.mockHTTP.EXPECT().
+				Do(gomock.Any()).
+				DoAndReturn(func(*http.Request) (*http.Response, error) {
+					body := tt.pages[calls]
+					calls++
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+				}).Times(len(tt.pages))
+
+			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, dp1.Playlist{
+				Playlist: dp1playlist.Playlist{
+					DynamicQuery: &playlists.DynamicQuery{
+						Profile:  dp1playlist.ProfileGraphQLV1,
+						Endpoint: "https://example.com/graphql",
+						Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+						ResponseMapping: playlists.ResponseMapping{
+							ItemsPath:  "data.items",
+							ItemSchema: "dp1/1.0",
+						},
+					},
+				},
+			}, false)
+
+			if tt.wantErr {
+				assert.ErrorIs(t, err, dp1.ErrPlaylistInvalid)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, result.Items, tt.wantItems)
 		})
 	}
 }
@@ -1318,8 +1395,9 @@ func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffs
 // A resolver's hydrated items must not smuggle a contentRating of the WRONG
 // TYPE past the policy matrix. Controld adds no second validation pass: dp1-go's
 // own hydration validates every item against the content-rating extension
-// overlay (see processDynamicPlaylistSpec's ACCEPTED FAIL-CLOSED note), and this
-// pins that the classification still reaches the transports.
+// overlay and discards a failing one (see processDynamicPlaylistSpec). Here the
+// bad item is the only one, so this pins that the refusal and its
+// classification still reach the transports.
 //
 // Note the value under test is a NUMBER, not an unknown string. An unrecognized
 // STRING is not a rejection case at all: DP-1 §3.3 (display-protocol/dp1#52)

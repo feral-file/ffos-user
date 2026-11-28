@@ -176,6 +176,90 @@ func TestV2PlaintextRefusedByState(t *testing.T) {
 	}
 }
 
+// §7.2: the one plaintext request v2 admits runs only behind the executor's
+// precheck, which answers before the command and its side effects.
+func TestV2ShowCodeRequest(t *testing.T) {
+	const req = `{"command":"showPairingQRCode","request":{"show":true,"purpose":"enroll"}}`
+	code := func(msg json.RawMessage) string {
+		var e struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(msg, &e)
+		return e.Error.Code
+	}
+	tests := []struct {
+		name string
+		// hook is nil for an unwired gate.
+		hook     func(done *int) controlgate.ShowCodeHook
+		wantCode string
+		wantBody string
+		wantRuns int
+		wantDone int
+		runErr   error
+	}{
+		{name: "a failed run is released too", wantCode: control.CodeCommandFailed, wantRuns: 1, wantDone: 1, runErr: errors.New("boom"),
+			hook: func(done *int) controlgate.ShowCodeHook {
+				return func() (any, func(), string) { return nil, func() { *done++ }, "" }
+			}},
+		{name: "unwired hook refuses", wantCode: control.CodeEnrollmentRequired},
+		{name: "precheck refuses", wantCode: control.CodeRateLimited,
+			hook: func(*int) controlgate.ShowCodeHook {
+				return func() (any, func(), string) { return nil, nil, control.CodeRateLimited }
+			}},
+		{name: "precheck answers without running", wantBody: `{"ok":true}`,
+			hook: func(*int) controlgate.ShowCodeHook {
+				return func() (any, func(), string) { return map[string]bool{"ok": true}, nil, "" }
+			}},
+		{name: "precheck admits: runs, then done", wantBody: `{"ok":true,"ran":"showPairingQRCode"}`, wantRuns: 1, wantDone: 1,
+			hook: func(done *int) controlgate.ShowCodeHook {
+				return func() (any, func(), string) { return nil, func() { *done++ }, "" }
+			}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newV2Rig(t)
+			r.rec.err = tc.runErr
+			done := 0
+			if tc.hook != nil {
+				r.adapter.SetShowCodeHook(tc.hook(&done))
+			}
+			msg := r.cast(t, newFakePeer(), []byte(req))
+			if got := code(msg); got != tc.wantCode {
+				t.Fatalf("code %q, want %q (%s)", got, tc.wantCode, msg)
+			}
+			if tc.wantCode == "" && string(msg) != tc.wantBody {
+				t.Fatalf("body %s, want %s", msg, tc.wantBody)
+			}
+			if r.rec.count() != tc.wantRuns || done != tc.wantDone {
+				t.Fatalf("ran %d (want %d), done %d (want %d)", r.rec.count(), tc.wantRuns, done, tc.wantDone)
+			}
+		})
+	}
+}
+
+// The precheck is never consulted for a request the policy refuses: the
+// wrong shape, or an owned device.
+func TestV2ShowCodePrecheckOnlyAfterPolicy(t *testing.T) {
+	r := newV2Rig(t)
+	asked := 0
+	r.adapter.SetShowCodeHook(func() (any, func(), string) { asked++; return nil, func() {}, "" })
+	p := newFakePeer()
+	for _, req := range []string{
+		`{"command":"showPairingQRCode","request":{"show":false,"purpose":"enroll"}}`,
+		`{"command":"showPairingQRCode","request":{"show":true}}`,
+		`{"command":"connect","request":{"show":true,"purpose":"enroll"}}`,
+	} {
+		r.cast(t, p, []byte(req))
+	}
+	enrollOwner(t, r.g, r.a)
+	r.cast(t, p, []byte(`{"command":"showPairingQRCode","request":{"show":true,"purpose":"enroll"}}`))
+	if asked != 0 || r.rec.count() != 0 {
+		t.Fatalf("precheck asked %d times, %d commands ran", asked, r.rec.count())
+	}
+}
+
 // §13: a v2 frame labeled messageID "system" is a no-op, whatever it carries:
 // no reply, no execution, no binding.
 func TestV2SystemMessageIDIsNoop(t *testing.T) {

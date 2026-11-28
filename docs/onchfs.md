@@ -191,7 +191,10 @@ within three days of expiry.
 The display request path (`commandrouter`) calls `Ensure` after the content-policy filter and before the
 preflight, outside both locks:
 - It waits up to 15 s only when the work the display request opens on (item 0, or the one `startItem`
-  names, found as the player finds it: `id` first, then `source`) is onchfs; the rest land
+  names, found as the player finds it: `id` first, then `source`) is onchfs. A `startItem.source`
+  naming an onchfs work by its `onchfs://` URI or the dead gateway is first re-spelled as the
+  item's device-local source, for this wait and for the player (`commandrouter/onchfs_open.go`,
+  feral-file/feral-file#3636); the rest land
   in the background. A display request that opens on an ordinary work never waits, even with onchfs
   works further down and the chain RPCs unreachable (`commandrouter/onchfs_open.go`). At most three works are read at once; background reads may use two, and
   the work a display request waits for goes ahead of them (promoted if a refresh already queued it).

@@ -507,7 +507,7 @@ func TestCommandHandler_Process_DisplayPlaylist_InlineDP1Call_AllDead_RejectsCas
 			map[string]interface{}{"id": "a", "source": "https://origin.example/dead"},
 		},
 	}
-	playlistBytes := []byte(`{"items":[{"id":"a"}]}`)
+	playlistBytes := []byte(`{"dpVersion":"1.1.0","title":"t","items":[{"id":"a","source":"https://origin.example/dead"}]}`)
 	mockPlaylist := probeTestPlaylist("https://origin.example/dead")
 
 	ts.mockJSON.EXPECT().

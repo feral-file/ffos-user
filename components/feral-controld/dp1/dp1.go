@@ -8,8 +8,10 @@ import (
 	goio "io"
 	"maps"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/display-protocol/dp1-go/extension/contentrating"
 	"github.com/display-protocol/dp1-go/extension/playlists"
@@ -28,10 +30,19 @@ import (
 // Deliberately an allow-list of one shape — the pointer after "at '" — rather
 // than a redaction of known-bad substrings: anything the extractor does not
 // recognize is dropped, so a future validator message cannot leak by wording
-// this does not anticipate. A pointer is structural (indices and field names
-// from the schema), never document content, which matters because dp1-go's
-// format assertions print the offending VALUE whole and these errors are
-// returned verbatim to senders on both transports.
+// this does not anticipate. A pointer is structural (indices and member
+// names), never a document VALUE, which matters because dp1-go's format
+// assertions print the offending value whole and these errors are returned
+// verbatim to senders on both transports.
+//
+// A member name is sender-chosen, though: under a schema with
+// additionalProperties a pointer can carry a key of any length (a 4 MiB body
+// can make one pointer about 4 MiB), and every refusal is both replied and
+// logged. So each pointer is cut to maxPointerBytes, on a rune boundary,
+// with a trailing "…" marking the cut, and at most maxSchemaPointers distinct
+// pointers are returned (a body with many failing items or keys names only
+// the first ones): every sink, the reply included, stays about 10 × 259
+// bytes whatever the body.
 func ValidationPointers(err error) []string {
 	if err == nil {
 		return nil
@@ -59,12 +70,31 @@ func ValidationPointers(err error) []string {
 		if pointer == "" {
 			pointer = "/"
 		}
+		pointer = capPointer(pointer)
 		if !seen[pointer] {
 			seen[pointer] = true
 			out = append(out, pointer)
+			if len(out) == maxSchemaPointers {
+				break
+			}
 		}
 	}
 	return out
+}
+
+// maxPointerBytes bounds one reported pointer (see ValidationPointers). Real
+// DP-1 locations are a few dozen bytes; 256 keeps any of them whole.
+const maxPointerBytes = 256
+
+func capPointer(pointer string) string {
+	if len(pointer) <= maxPointerBytes {
+		return pointer
+	}
+	cut := maxPointerBytes
+	for cut > 0 && !utf8.RuneStart(pointer[cut]) {
+		cut--
+	}
+	return pointer[:cut] + "…"
 }
 
 // ErrPlaylistInvalid marks a fetched DP-1 document whose content-rating
@@ -187,15 +217,23 @@ func (p *Playlist) UnmarshalJSON(data []byte) error {
 	// every key that folds to "satellites" as raw bytes (never failing), and
 	// the real list is then read back by the exact key — the same approach as
 	// dp1-go's own decodePlaylist, which controld bypasses by decoding here.
+	// The signature members are shadowed the same way: a playlist needs no
+	// signature, so a wrong-typed one must not fail the decode (see
+	// decodeSignaturesLenient).
 	var decoded struct {
 		playlistJSON
 		SatellitesRaw json.RawMessage `json:"satellites,omitempty"`
+		SignatureRaw  json.RawMessage `json:"signature,omitempty"`
+		SignaturesRaw json.RawMessage `json:"signatures,omitempty"`
 	}
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	// Exact member names only: see stripCaseVariants.
+	exact := stripCaseVariants(data, reflect.TypeOf(playlistJSON{}))
+	if err := json.Unmarshal(exact, &decoded); err != nil {
 		return err
 	}
 	*p = Playlist(decoded.playlistJSON)
 	p.Satellites = decodeSatellitesExact(data)
+	p.Signature, p.Signatures = decodeSignaturesLenient(decoded.SignatureRaw, decoded.SignaturesRaw)
 	p.Items = mapOnchfsSources(p.Items) // see onchfs.go
 	p.Extra = unknownPlaylistMembers(data)
 	return nil
@@ -223,10 +261,9 @@ type DP1 interface {
 	ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error)
 
 	// ProcessPlaylistURLForCast processes a playlist URL for an initial
-	// displayPlaylist command. Dynamic playlists hydrate only to a bounded
-	// scheduling cap; if no item-level displayAt is discovered, the returned
-	// playlist is trimmed back to the legacy minimal size before sending to the
-	// player. Any seriesRegistry item in the result is already narrowed per
+	// displayPlaylist command. Dynamic playlists hydrate up to
+	// CAST_PLAYLIST_ITEMS_LIMIT, and the whole hydrated list is returned.
+	// Any seriesRegistry item in the result is already narrowed per
 	// deviceMode, the same resolveSeriesCastPlan a static dp1_call display request uses
 	// (feral-file/ffos-user#452) — the fetched document's own raw bytes are
 	// read for each item's seriesPlayback the same way a static display request's
@@ -256,7 +293,7 @@ type DP1 interface {
 	// and return the playlist quickly
 	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
 
-	// ProcessDynamicPlaylistForCast applies the initial-display bounded hydration
+	// ProcessDynamicPlaylistForCast applies the initial-display hydration
 	// policy described on ProcessPlaylistURLForCast, including the same
 	// series narrowing and returned CastPlan. A dynamically resolved item has
 	// no original document bytes, so its own seriesPlayback always reads as
@@ -409,36 +446,25 @@ func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playli
 	narrowed := *resolved
 	narrowed.Items = plan.Narrow(deviceMode)
 
-	// A scheduled result (some item carries displayAt) is left untrimmed and
-	// its plan uncapped: the scheduler needs every cohort's items to arm its
-	// own timers, and the 50-item cap below exists for an unscheduled SHORT
-	// initial display request, not a scheduled one of any length.
-	if hasDisplayAtItems(narrowed.Items) {
-		return &narrowed, plan, nil
-	}
-	if len(narrowed.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
-		// Already at or under the cap, so narrowed.Items needs no trim — but
-		// plan's own maxItems is still CAST_PLAYLIST_ITEMS_LIMIT (255) from
-		// the resolveSeriesCastPlan call above. A cached plan returned as-is
-		// would let a later setSeriesPlayback re-narrow (CastPlan.Narrow)
-		// reconstruct up to 255 items for a mode this initial display request never
-		// showed, making playback depend on which mode started the display request
-		// (feralfile-bot F2 on PR #454, 2026-11-10). Capping plan.maxItems
-		// here, same as the trim path below, keeps every later re-narrow
-		// bounded the same way regardless of which mode started the display request.
-		plan.maxItems = MINIMAL_PLAYLIST_ITEMS_LIMIT
-		return &narrowed, plan, nil
-	}
-	narrowed.Items = narrowed.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
-	// plan's own maxItems is still CAST_PLAYLIST_ITEMS_LIMIT (255) from the
-	// resolveSeriesCastPlan call above, but narrowed.Items was just capped
-	// further, to MINIMAL_PLAYLIST_ITEMS_LIMIT (50): a cached plan returned
-	// as-is would let a later setSeriesPlayback re-narrow (CastPlan.Narrow)
-	// reconstruct up to 255 items, silently re-growing the playlist past
-	// what this display request ever actually showed (run-reviewer F1 on PR #454,
-	// round 2, 2026-11-10). Capping plan.maxItems to match keeps a later
-	// re-narrow bounded the same way this initial display request was.
-	plan.maxItems = MINIMAL_PLAYLIST_ITEMS_LIMIT
+	// The display request carries the whole resolved list (up to
+	// CAST_PLAYLIST_ITEMS_LIMIT): for a playlist within that cap and without
+	// series items, the same list the playlist refresher resolves a moment
+	// later. (The refresher resolves uncapped and expands series without
+	// narrowing, so a longer list, or one carrying series under a non-full
+	// mode, still changes on its first refresh; those gaps are known and
+	// separate.) It used to be trimmed to the first
+	// MINIMAL_PLAYLIST_ITEMS_LIMIT items, a remnant of the first-page-only
+	// resolve this path once did to put a wall up quickly; by then the whole
+	// list had already been fetched, so the trim saved nothing, and the
+	// refresher sent the rest about a second later. What it cost: a startItem
+	// naming a work past the cut opened the display at item 0, and the player
+	// briefly held a list other than the one status was about to report
+	// (feral-file/feral-file#3636). Do not reintroduce a cut here that the
+	// refresher does not apply to the same playlist.
+	//
+	// plan keeps the cap it was resolved under, which bounds the list shown
+	// here, so a later setSeriesPlayback re-narrow cannot grow past what this
+	// display request could show (PR #454 review F1/F2).
 	return &narrowed, plan, nil
 }
 
@@ -470,69 +496,36 @@ func (d *dp1) resolveDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	return nil, fmt.Errorf("playlist has no dynamic query configuration")
 }
 
-// dp1ItemValidationMarker is the prefix dp1-go puts on a hydrated item that
-// fails its schema validation, content-rating overlay included.
-//
-// Matched as a STRING deliberately. dp1-go's validation sentinel
-// (dp1go.ErrValidation) lives in the module's ROOT package, and that package
-// imports its signing path: adding it as a direct import pulls go-ethereum,
-// gnark-crypto and ~30 related packages into this daemon and grows the binary
-// by ~1.4 MB (measured: 28.4 MB -> 29.8 MB), on a device where nothing else
-// needs any of it. That is a poor trade for classifying an error.
-//
-// The fragility is bounded and fails in the safe direction: if dp1-go's wording
-// changes, a malformed item falls back to the generic error this code returned
-// before, never to a wrong classification. TestDP1_ProcessDynamicPlaylist_
-// RejectsWrongTypedResolvedRatings pins the behavior.
-const dp1ItemValidationMarker = "invalid playlist item"
-
-// classifyHydrationError marks a resolver's malformed CONTENT as
-// playlistInvalid so the transports answer the documented classification;
-// transport and query failures stay generic.
-func classifyHydrationError(err error) error {
-	if err == nil || !strings.Contains(err.Error(), dp1ItemValidationMarker) {
-		return err
-	}
-	return fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
-}
-
-func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
-	for _, item := range items {
-		if item.DisplayAt != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // processDynamicPlaylistSpec resolves items using DP-1 playlists extension dynamicQuery and
 // github.com/display-protocol/dp1-go PlaylistItemsFromDynamicQuery. Pagination uses {{limit}} and
 // {{offset}} placeholders in dynamicQuery.query, matching MINIMAL/MAX batch sizes used by legacy.
 //
 // Replacement behavior matches legacy: playlist.Items is replaced by resolved dynamic items only (no merge with static items).
 //
-// ACCEPTED FAIL-CLOSED: dp1-go validates every hydrated item against the core
-// PlaylistItem schema plus the playlists-extension overlay, and its hydration
-// loop RETURNS on the first item that fails rather than skipping it — so one
-// malformed item fails the whole display request, and the error surfaces to the caller
-// (commandrouter returns it; the dp1_call branch has no cached fallback, only
-// the playlistUrl branch does). This is deliberate, but note it widened at
-// dp1-go v0.6.0: the single-item overlay now $refs the ref-manifest schema, so
-// an item's inlineManifest (§3.6) is checked too, where before it was an
-// undescribed key that passed unexamined. A resolver that starts emitting a
-// slightly non-conforming manifest therefore takes the whole playlist down,
-// not just its own item.
+// Invalid items: dp1-go validates every hydrated item against the core
+// PlaylistItem schema plus the playlists and content-rating overlays (an
+// item's inlineManifest included) and, since v0.9.0, DISCARDS one that fails
+// instead of failing the call (playlists extension §4.6.2). The valid items are
+// displayed; the discarded count and the first failure's JSON pointers are
+// logged, because neither the sender nor the wall is told the list is shorter.
+// Two things stay controld's job:
 //
-// Kept rather than softened, for two reasons. Skipping bad items would put a
-// silently shorter playlist on the wall — the controller asked for a playlist
-// and would be told it succeeded, with no signal that items went missing,
-// which is the worse failure for something whose whole job is showing a
-// specific set of works. And dp1-go owns the fetch/validate/decode loop, so
-// per-item recovery would mean reimplementing hydration here to get back a
-// behavior the spec does not ask for.
+//   - dp1-go's default report prints the validator's message, which quotes the
+//     offending value whole, so OnInvalidItem is always set and only pointers
+//     leave it (see ValidationPointers).
+//   - A response with items but not one valid among them is still refused as
+//     playlistInvalid: an empty playlist would be answered "ok, deferred" by
+//     the display path and leave the sender believing it was accepted.
 //
-// Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation,
-// which asserts both directions so a future change cannot quietly flip either.
+// The resolved items alone no longer say how long a page was, so paging counts
+// the discarded ones too; otherwise one bad item on a full page would drop every
+// later page. The walk also stops once MAX_PLAYLIST_ITEMS_LIMIT items have been
+// discarded in total: the uncapped callers have no other bound, and a resolver
+// that ignores {{offset}} and keeps answering a partly broken page would
+// otherwise never end.
+//
+// Pinned by TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_InlineManifestValidation
+// and TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_DiscardedItemKeepsPaging.
 //
 // The resolver is chosen by responseMapping.itemSchema. `dp1/*` (and an
 // absent schema, for documents published before anything checked it) is the
@@ -561,7 +554,11 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 
 	var accumulated []dp1playlist.PlaylistItem
 	offset := 0
+	discarded := 0
+	var firstDiscarded error
+	firstDiscardedIndex := 0
 	for {
+		discardedInPage := 0
 		params := dp1playlist.HydrationParams{
 			hydrationKeyLimit:  strconv.Itoa(limit),
 			hydrationKeyOffset: strconv.Itoa(offset),
@@ -572,23 +569,45 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			playlist.DynamicQuery,
 			params,
 			client,
-			&dp1playlist.DynamicQueryFetchOptions{AllowInsecureHTTP: d.debug})
+			&dp1playlist.DynamicQueryFetchOptions{
+				AllowInsecureHTTP: d.debug,
+				OnInvalidItem: func(index int, itemErr error) {
+					if firstDiscarded == nil {
+						firstDiscarded, firstDiscardedIndex = itemErr, offset+index
+					}
+					discardedInPage++
+				},
+			})
 		if err != nil {
-			return nil, classifyHydrationError(err)
+			return nil, err
 		}
+		discarded += discardedInPage
 		accumulated = append(accumulated, batch...)
 		if maxItems > 0 && len(accumulated) >= maxItems {
 			accumulated = accumulated[:maxItems]
 			break
 		}
 
-		if len(batch) < limit {
+		if len(batch)+discardedInPage < limit || discarded >= MAX_PLAYLIST_ITEMS_LIMIT {
 			break
 		}
 		if minimal && len(accumulated) >= MINIMAL_PLAYLIST_ITEMS_LIMIT {
 			break
 		}
 		offset += limit
+	}
+
+	if discarded > 0 {
+		pointers := ValidationPointers(firstDiscarded)
+		d.logger.Warn("Discarded invalid dynamicQuery items",
+			zap.String("playlist_id", playlist.ID),
+			zap.Int("discarded", discarded),
+			zap.Int("valid", len(accumulated)),
+			zap.Int("first_index", firstDiscardedIndex),
+			zap.Strings("first_pointers", pointers))
+		if len(accumulated) == 0 {
+			return nil, fmt.Errorf("%w: dynamic item at %s", ErrPlaylistInvalid, strings.Join(pointers, ", "))
+		}
 	}
 
 	playlist.Items = accumulated
@@ -641,13 +660,33 @@ func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlis
 	}
 
 	duration := defaultDurationSeconds(playlist)
-	newItems := buildPlaylistItems(duration, ffTokens)
+	newItems := d.conformingItems(playlist.ID, buildPlaylistItems(duration, ffTokens))
 
 	// Always replace the new items to keep the playlist up to date.
 	// FIXME: This line will ignore the case that playlist has both curated and dynamic items.
 	playlist.Items = newItems
 
 	return &playlist, nil
+}
+
+// conformingItems drops the items built from indexer tokens that fail the
+// schema (a token with no preview URL has no `source`). Only the item goes:
+// the rest of the playlist plays.
+func (d *dp1) conformingItems(playlistID string, items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
+	kept := make([]dp1playlist.PlaylistItem, 0, len(items))
+	for _, item := range items {
+		raw, err := json.Marshal(item)
+		if err == nil {
+			err = checkItem(raw)
+		}
+		if err != nil {
+			d.logger.Warn("dropping an indexer item that does not conform to the schema",
+				zap.String("playlist_id", playlistID), zap.String("item_id", item.ID), zap.Error(err))
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 func defaultDurationSeconds(playlist Playlist) float64 {
@@ -703,7 +742,9 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, json.RawMessage, error) {
 		return Playlist{}, nil, fmt.Errorf("%w: content rating extension at %s", ErrPlaylistInvalid, strings.Join(ValidationPointers(err), ", "))
 	}
 
-	AuditDocumentAsync(d.logger, "playlistUrl", bytes)
+	if err := CheckPlayable(d.logger, "playlistUrl", bytes); err != nil {
+		return Playlist{}, nil, err
+	}
 
 	var playlist Playlist
 	err = d.json.Unmarshal(bytes, &playlist)
@@ -794,6 +835,23 @@ func (d *dp1) httpClientAsHTTPClient() *http.Client {
 		Transport: httpClientTransport{d.httpClient},
 		Timeout:   wrapper.HTTPClientTimeout,
 	}
+}
+
+// decodeSignaturesLenient reads the two signature members, each absent when it
+// has the wrong shape: signatures never block playback, and CheckPlayable does
+// not judge them. The verdict is not affected, because sigverify reads the
+// bytes as received. The re-emitted document drops a malformed member.
+func decodeSignaturesLenient(legacyRaw, chainRaw json.RawMessage) (string, []dp1playlist.Signature) {
+	var legacy string
+	if json.Unmarshal(legacyRaw, &legacy) != nil {
+		legacy = ""
+	}
+	var chain []dp1playlist.Signature
+	if json.Unmarshal(chainRaw, &chain) != nil {
+		// A type error leaves the slice partly filled.
+		chain = nil
+	}
+	return legacy, chain
 }
 
 // decodeSatellitesExact reads "satellites" by its exact JSON key, leniently: a

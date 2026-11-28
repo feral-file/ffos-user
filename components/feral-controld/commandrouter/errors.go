@@ -149,6 +149,15 @@ func (e *PlaylistInvalidError) Error() string {
 	return "playlistInvalid: at " + strings.Join(e.Locations, ", ")
 }
 
+// playlistInvalid carries a dp1 schema refusal as the router's typed error.
+func playlistInvalid(err error) error {
+	var schema *dp1.SchemaError
+	if errors.As(err, &schema) {
+		return &PlaylistInvalidError{Locations: schema.Locations}
+	}
+	return err
+}
+
 func IsPlaylistInvalid(err error) bool {
 	var target *PlaylistInvalidError
 	if errors.As(err, &target) {

@@ -1413,6 +1413,10 @@ func TestPush_RetiresACutoverTheContentPolicyEmpties(t *testing.T) {
 			assert.Contains(t, expr, "retireBlockedCurrent",
 				"a fully blocked cohort must retire the current frame, not vanish")
 			assert.NotContains(t, expr, "day22", "no blocked item may be sent")
+			// ff-player reads retireBlockedCurrent only on the path
+			// request.refresh selects; without it an empty list is refused
+			// and the blocked work stays up.
+			assert.Contains(t, expr, `"refresh":true`)
 			return map[string]interface{}{"ok": true}, nil
 		},
 	).Times(1)

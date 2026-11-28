@@ -1,0 +1,44 @@
+{
+  "description": "Claim QR of a legacy device that dials relay v2: fields 0-9, then exp, the compressed SEC 1 device keys and the LAN host (§11)",
+  "url": "https://link.feralfile.com/device_connect/FF1-FIXTURE1|topic-fixture|true|feature%2Fclaim|3.1.0|pairing|B-nA1R9u1YFfuPIpp3___w|4kR-0SaJ9WxyLa8eyy-vcSQdKAXWNBwyTjrPb2NynnM|zcvu9gS-ZCl5bV9iKdPaLfRAoXW6xwVt27y1Nnpmcmw|772x9uI4OcVjB0inn2MHLA|1767225720|AuY6QDVvJS6DWLRAVw79oz4KVndugdKqlTds2cFAH8Ou|A5vww7vH06ZkvZRnhLig1KUl4hUAsDBFxDrZarRcZ_29|192.168.1.23",
+  "fields": [
+    "FF1-FIXTURE1",
+    "topic-fixture",
+    "true",
+    "feature%2Fclaim",
+    "3.1.0",
+    "pairing",
+    "B-nA1R9u1YFfuPIpp3___w",
+    "4kR-0SaJ9WxyLa8eyy-vcSQdKAXWNBwyTjrPb2NynnM",
+    "zcvu9gS-ZCl5bV9iKdPaLfRAoXW6xwVt27y1Nnpmcmw",
+    "772x9uI4OcVjB0inn2MHLA",
+    "1767225720",
+    "AuY6QDVvJS6DWLRAVw79oz4KVndugdKqlTds2cFAH8Ou",
+    "A5vww7vH06ZkvZRnhLig1KUl4hUAsDBFxDrZarRcZ_29",
+    "192.168.1.23"
+  ],
+  "invitation": "B-nA1R9u1YFfuPIpp3___w",
+  "expiresAt": 1767225720,
+  "host": "192.168.1.23",
+  "pins": {
+    "sig": "4kR-0SaJ9WxyLa8eyy-vcSQdKAXWNBwyTjrPb2NynnM",
+    "enc": "zcvu9gS-ZCl5bV9iKdPaLfRAoXW6xwVt27y1Nnpmcmw"
+  },
+  "profile": {
+    "v": 1,
+    "dev": "FF1-FIXTURE1",
+    "gen": "772x9uI4OcVjB0inn2MHLA",
+    "sig": {
+      "crv": "P-256",
+      "kty": "EC",
+      "x": "5jpANW8lLoNYtEBXDv2jPgpWd26B0qqVN2zZwUAfw64",
+      "y": "DT4WvFtjCo0h6XHTGMG7cmPVBYFqYFN3OYlIbUREyQg"
+    },
+    "enc": {
+      "crv": "P-256",
+      "kty": "EC",
+      "x": "m_DDu8fTpmS9lGeEuKDUpSXiFQCwMEXEOtlqtFxn_b0",
+      "y": "T-W2r4vBsiYSbwb7_C48ZPvr9yQufQZAvWQXsMpHGCU"
+    }
+  }
+}

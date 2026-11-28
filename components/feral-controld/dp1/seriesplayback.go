@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"reflect"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -513,12 +514,16 @@ func (d *dp1) readItemSeriesPlaybackModes(raw json.RawMessage, n int) []*SeriesP
 	var envelope struct {
 		Items []json.RawMessage `json:"items"`
 	}
-	if err := d.json.Unmarshal(raw, &envelope); err != nil {
+	// Exact member names only, as the typed decode reads them (see
+	// stripCaseVariants): otherwise an unknown "itemſ" list or "SeriesPlayback"
+	// member would set the mode of an item it does not belong to.
+	if err := d.json.Unmarshal(stripCaseVariants(raw, reflect.TypeOf(envelope)), &envelope); err != nil {
 		return modes
 	}
 	for i := 0; i < n && i < len(envelope.Items); i++ {
 		var item rawPlaylistItem
-		if err := d.json.Unmarshal(envelope.Items[i], &item); err != nil || item.SeriesPlayback == nil {
+		exact := stripCaseVariants(envelope.Items[i], reflect.TypeOf(item))
+		if err := d.json.Unmarshal(exact, &item); err != nil || item.SeriesPlayback == nil {
 			continue
 		}
 		if mode, ok := ParseSeriesPlaybackMode(*item.SeriesPlayback); ok {

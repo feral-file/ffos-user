@@ -2,9 +2,11 @@ package devicectl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,6 +68,24 @@ func TestFormatDeviceConnectURL_AppendsInvitation(t *testing.T) {
 	// Old parsers read indices 0, 1 and 3; the topic stays at index 1.
 	assert.Equal(t, formatDeviceConnectURL("FF1-X", "topic-abc", true, "main/stable", "1.2.3", "pairing"),
 		"https://link.feralfile.com/device_connect/FF1-X|topic-abc|true|main%2Fstable|1.2.3|pairing")
+}
+
+// The cross-language claim-QR vector (docs/ff1-control-v1.md §12) is built in
+// the control package from the documented field list; this pins the
+// production URL builder to the same bytes, so the string ff-app's parser is
+// tested against is the string a device paints.
+func TestFormatDeviceConnectURL_MatchesClaimQRFixture(t *testing.T) {
+	raw, err := os.ReadFile("../control/testdata/fixtures/claim_qr.json")
+	require.NoError(t, err)
+	var fx struct {
+		URL    string   `json:"url"`
+		Fields []string `json:"fields"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &fx))
+	require.Len(t, fx.Fields, 14)
+	f := fx.Fields
+	got := formatDeviceConnectURL(f[0], f[1], f[2] == "true", strings.ReplaceAll(f[3], "%2F", "/"), f[4], f[5], f[6:]...)
+	assert.Equal(t, fx.URL, got)
 }
 
 func TestClaimSettled_OwnerEnrolled(t *testing.T) {

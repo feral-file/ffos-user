@@ -245,36 +245,6 @@ func TestRevokeReportsRevokedCtl(t *testing.T) {
 	}
 }
 
-// §5.1: the first owner never enrolls over the device-ID relay (clients use
-// the LAN only, §14 rule 11; the legacy relayer is the §13 residual), and the
-// refusal spends nothing of the invitation.
-func TestFirstOwnerEnrollRefusedOnRelayV2(t *testing.T) {
-	d := newTestDevice(t)
-	inv, err := d.a.IssueInvitation()
-	if err != nil {
-		t.Fatal(err)
-	}
-	phone := newTestCtl(t, "phone")
-	try := func(route Route) ReplyClaims {
-		rc := d.claims(phone, OpEnroll)
-		rc.Enroll = phone.enroll(inv.Value)
-		adm, err := d.a.OpenFrom(d.seal(phone, rc), Origin{Route: route, Known: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return d.final(adm, rc)
-	}
-	if r := try(RouteRelayV2); r.Code != CodeInvitationInvalid {
-		t.Fatalf("v2 enroll: %+v", r)
-	}
-	if _, live := d.a.CurrentInvitation(); !live || d.a.State() != StateLegacy {
-		t.Fatal("v2 refusal consumed the invitation")
-	}
-	if r := try(RouteRelayer); !r.OK || d.a.State() != StateEnrolled {
-		t.Fatalf("legacy relayer enroll: %+v", r)
-	}
-}
-
 // §9: a reactivated or new grant is reported so a v2 binding left over from
 // before the revocation is dropped; an in-place role change is not.
 func TestRegisterReportsReactivatedCtl(t *testing.T) {

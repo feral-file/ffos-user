@@ -72,7 +72,8 @@ for relayer topic assignment:
   when the policy admits all of its items (see "Content policy effect on
   playlists" below). An optional `request.startItem`
   (`{ "id", "source" }`, either member optional) names the work the display request
-  opens on; controld forwards it to the player untouched and the player
+  opens on; controld forwards it to the player, re-spelling only an onchfs
+  `source` as the device-local source the item carries, and the player
   resolves it against the list it admits, starting at the beginning when the
   work is absent (contract in `api-design.md`).
 - `getMintPairingSession`, `startMintPairingSession`, `joinMintPairingChannel`,
@@ -227,6 +228,12 @@ retired device's `factoryReset` is the one exception, spec §8). The
 relayer column applies only to an image that still configures a legacy
 relayer (none from the 3.0.0 LAN-open build on, spec §15.4).
 
+Relay v2 (both channels, spec §10) has no column: every plaintext command
+there is refused with the public `{"error":{"code":…}}` of the state
+(`enrollment_required`, `envelope_required`, `locked`), except one request
+in `legacy`, `showPairingQRCode` with exactly
+`{"show":true,"purpose":"enroll"}` (see that command, and spec §7.2).
+
 A refused relayer plaintext command gets the RPC `message`
 `{"ok":false,"error":"envelope_required"|"locked","command":"<name>","message":"<text>"}`:
 `ok:false` and a flat string `error`, the shape every released client
@@ -332,6 +339,12 @@ Example:
 }
 ```
 
+`request.purpose`, optional: `"enroll"` with `show:true` asks a claimed
+`legacy` device (set up under 2.0.x, or released by its owner) to put the
+first-owner invitation on its claim QR (spec §11). A code requested this way
+on a claimed device comes down after 10 minutes on screen without an
+enroll; a later `showPairingQRCode` re-arms or clears that deadline.
+
 Current success response: `{"ok": true}`.
 
 Current error cases:
@@ -339,6 +352,18 @@ Current error cases:
 - Invalid `request.show` shape causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
+
+Relay v2: in `legacy` this command is the one plaintext request admitted,
+and only with `request` exactly `{"show":true,"purpose":"enroll"}` (those
+two members, `show` the literal `true`). `show:false`, a missing or other
+`purpose`, or any extra member is refused `enrollment_required`. Before the
+command runs the device applies a precheck (spec §7.2): not claimed →
+`enrollment_required`; a live code already on screen, or an earlier request
+still in its gate or paint → `{"ok":true}` with nothing run; three gate runs
+already started from v2 since the daemon started → `rate_limited`. A
+command failure is `command_failed`. Errors are the public
+`{"error":{"code":"…"}}` body in the RPC `message`. The reply is plaintext
+on a public channel and proves nothing to the sender.
 
 ### getDeviceStatus
 
@@ -611,7 +636,9 @@ document `invalid` before any cryptography runs: that entry is reported as
 `malformed signature` with the oversized field blanked, and its in-bounds
 siblings as `unverified`. The outcome is one of three `signatureStatus` values:
 `valid`
-(every `signatures[]` entry verifies), `invalid` (signatures present, at
+(every `signatures[]` entry verifies and at least one has role `feed` or
+`curator`, §7.1.1; otherwise `invalid` with reason
+`no feed or curator signature`), `invalid` (signatures present, at
 least one fails: tampered content, placeholder or wrong-key signature,
 unsupported `alg`, a `role` outside the DP-1 §7.1 set
 (`curator`, `feed`, `agent`, `institution`, `licensor`) reported as `malformed signature`, malformed entry), or `unsigned` (no `signatures[]`; a
@@ -643,6 +670,32 @@ Playlist URL example:
 }
 ```
 
+**Schema conformance.** Every document the device plays must conform to the
+DP-1 playlist schema (core with the playlists and content-rating extensions):
+an inline `dp1_call`, a fetched `playlistUrl`, a replay or series re-display
+controld builds, an offline cached copy, and a persisted inline `displayAt`
+source. One that does not is refused as `playlistInvalid`, naming JSON
+pointers only. One allowance: signatures are not judged (a missing or
+malformed one never blocks; see signature verification above). `items` may be
+empty only beside `dynamicQuery`, never beside the legacy `dynamicQueries`
+(inline documents aside, below). A series edition or a
+legacy indexer item that fails the schema is dropped on its own; if a series
+has no conforming edition its representative item plays. Member names are
+matched exactly, so a case variant (`"Source"`) is an unknown member. A
+document that names a member twice in one object is refused.
+A dpVersion of another major is logged, not refused.
+
+**Temporary, inline documents only** (a `dp1_call`, and what controld rebuilds
+or keeps from one): a playlist or item `id` that is not a UUID, a `created`
+with no timezone offset, a playlist `title` over 200 characters, and an empty
+`items` beside the legacy `dynamicQueries` are also accepted, because released ff-app builds send them. A `playlistUrl` document
+gets none of this. To be removed once ff-app's wire converter is fixed,
+shipped, and made the app's `required_version`
+(`components/feral-controld/dp1/inline_exemption.go`).
+
+The `signatures` block in the examples below is a placeholder that does not
+verify.
+
 Inline DP1 example:
 
 ```json
@@ -652,12 +705,24 @@ Inline DP1 example:
     "command": "displayPlaylist",
     "request": {
       "dp1_call": {
+        "dpVersion": "1.1.0",
+        "title": "Works",
         "items": [
           {
-            "id": "work-1",
+            "id": "7f0c2b52-3f6a-4a37-9a55-0d8d4a5b1c10",
             "title": "Work 1",
             "source": "https://cdn.example/work-1.mp4",
             "duration": 300
+          }
+        ],
+        "signatures": [
+          {
+            "alg": "ed25519",
+            "kid": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "ts": "2025-01-01T00:00:00Z",
+            "payload_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "role": "feed",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           }
         ]
       }
@@ -675,7 +740,19 @@ Dynamic DP1 example:
     "command": "displayPlaylist",
     "request": {
       "dp1_call": {
+        "dpVersion": "1.1.0",
+        "title": "Dynamic works",
         "items": [],
+        "signatures": [
+          {
+            "alg": "ed25519",
+            "kid": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "ts": "2025-01-01T00:00:00Z",
+            "payload_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "role": "feed",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }
+        ],
         "dynamicQuery": {
           "profile": "graphql-v1",
           "endpoint": "https://api.example/graphql",
@@ -764,7 +841,9 @@ Current error cases:
   `responseMapping.itemSchema` names a vendor shape this firmware has no
   mapper for, the error names the schema (`dynamicQuery: unsupported
   itemSchema "<schema>"`) and no request is made. This includes the
-  retired Raster wallet walk, `raster/tokensOwned/1.0`.
+  retired Raster wallet walk, `raster/tokensOwned/1.0`. A `dp1/*` response in
+  which no item is a valid DP-1 item fails as `playlistInvalid`; when only
+  some are invalid they are discarded and the command succeeds with the rest.
 - CDP send to Chromium fails.
 - Player response is not `{"message":{"ok":true}}`; this records playback
   failure metrics but the raw player response is still returned if CDP
@@ -3550,7 +3629,10 @@ cannot decode as a rating at all, so the playlist is rejected as
 `playlistInvalid`. That rejection names the failing field by **JSON pointer
 only** — `playlistInvalid: at /items/0/contentRating` — never the offending
 value: the underlying validator prints the value whole, and this text is
-returned verbatim to LAN and relayer callers. The
+returned verbatim to LAN and relayer callers. A pointer can still carry a
+member name the sender chose, so each one is cut to 256 bytes (ending in
+`…`) and at most 10 are named, to keep the reply and the log line small
+whatever the body. The
 rejection is carried as a typed error to both transports — HTTP 422 on the LAN
 hub, `"error":"playlistInvalid"` over the relayer — for inline `dp1_call` and
 for fetched `playlistUrl` documents alike. Inline bytes are validated before
@@ -3566,7 +3648,9 @@ refresh is left unprojected, rather than reclassified as `curated`. Guessing
 `personal`. Such a player has no policy mirror of its own either
 (`setContentPolicy` answers `unsupported`).
 
-`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag.
+`retireBlockedCurrent:true` is a narrow daemon-to-player, refresh-only flag. The
+player reads it only beside `refresh:true`, so the daemon sends the two together
+on every retirement, including ones whose `intent.action` is `now_display`.
 Controllers do not send it.
 
 ## Response Shape Recommendation for New Inbound Commands
@@ -3639,6 +3723,8 @@ Rules:
   control protocol on, plaintext on it is limited to the LAN-open set
   (controller tier) in every state, plus `showPairingQRCode` before an
   owner exists, and to nothing once the owner closes the switch; see
-  "Plaintext policy" above. With the protocol off (no control state and
+  "Plaintext policy" above. Relay v2 admits one plaintext request, the
+  exact "show your code" form of `showPairingQRCode`, before an owner
+  exists. With the protocol off (no control state and
   `control.enabled` false) the hub admits every command from a local
   source, as before the protocol.

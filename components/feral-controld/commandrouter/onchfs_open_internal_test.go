@@ -1,6 +1,7 @@
 package commandrouter
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -49,5 +50,72 @@ func TestOnchfsOpening(t *testing.T) {
 		got, wait := onchfsOpening(nil, nil)
 		assert.Empty(t, got)
 		assert.Zero(t, wait)
+	})
+}
+
+// The spellings a controller can name an onchfs work by (#3636): the raw URI
+// app 1.9.28 sends, the dead gateway URL app main sends, and the device-local
+// source a row built from a device status keeps. Each must come out as the
+// exact source of the item it names, which here carries the Tezos label its
+// provenance gave it, so the player's exact match finds it.
+func TestOnchfsStartItem(t *testing.T) {
+	const root = "1639e8c989cddd2c0f9e951b126a21b1964309854c0a8e0a9b1193a655c6712a"
+	edition1 := dp1.OnchfsSource("onchfs://tezos/" + root + "/?fxhash=1")
+	edition2 := dp1.OnchfsSource("onchfs://tezos/" + root + "/?fxhash=2")
+	plain := "https://origin.example/work.mp4"
+	items := []dp1playlist.PlaylistItem{{ID: "a", Source: plain}, {ID: "b", Source: edition2}, {ID: "c", Source: edition1}}
+
+	renamed := []struct {
+		name   string
+		source string
+	}{
+		{"raw URI, no chain", "onchfs://" + root + "/?fxhash=1"},
+		{"raw URI, no slash before the query", "onchfs://" + root + "?fxhash=1"},
+		{"raw URI, upper-case root", "onchfs://" + strings.ToUpper(root) + "/?fxhash=1"},
+		{"dead fxhash gateway", "https://onchfs.fxhash2.xyz/" + root + "/?fxhash=1"},
+		{"device-local, no chain label", dp1.OnchfsSource("onchfs://" + root + "/?fxhash=1")},
+	}
+	for _, tc := range renamed {
+		t.Run(tc.name, func(t *testing.T) {
+			in := map[string]interface{}{"id": "regenerated", "source": tc.source, "extra": true}
+			got := onchfsStartItem(items, in)
+			assert.Equal(t, map[string]interface{}{"id": "regenerated", "source": edition1, "extra": true}, got)
+			assert.Equal(t, tc.source, in["source"], "the caller's map is not written")
+			assert.Equal(t, 2, startItemIndex(items, got), "the opening lands on the named edition")
+		})
+	}
+
+	unchanged := []struct {
+		name      string
+		items     []dp1playlist.PlaylistItem
+		startItem interface{}
+	}{
+		{"absent", items, nil},
+		{"malformed", items, "c"},
+		{"no source", items, map[string]interface{}{"id": "c"}},
+		{"source not a string", items, map[string]interface{}{"source": 7}},
+		{"ordinary source", items, map[string]interface{}{"source": plain}},
+		{"exact source already", items, map[string]interface{}{"source": edition1}},
+		{"an edition not in the list", items, map[string]interface{}{"source": "onchfs://" + root + "/?fxhash=3"}},
+		{"not onchfs and not in the list", items, map[string]interface{}{"source": "https://elsewhere.example/x"}},
+		{"empty list", nil, map[string]interface{}{"source": "onchfs://" + root + "/?fxhash=1"}},
+	}
+	for _, tc := range unchanged {
+		t.Run("unchanged: "+tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.startItem, onchfsStartItem(tc.items, tc.startItem))
+		})
+	}
+
+	t.Run("a work that repeats: the first item holding it", func(t *testing.T) {
+		evm := dp1.OnchfsSource("onchfs://eip155:1/" + root + "/?fxhash=1")
+		twice := []dp1playlist.PlaylistItem{{ID: "a", Source: plain}, {ID: "b", Source: evm}, {ID: "c", Source: edition1}}
+		got := onchfsStartItem(twice, map[string]interface{}{"source": "onchfs://" + root + "/?fxhash=1"})
+		assert.Equal(t, map[string]interface{}{"source": evm}, got)
+	})
+	t.Run("an exact holder later in the list wins over an earlier re-spelling", func(t *testing.T) {
+		evm := dp1.OnchfsSource("onchfs://eip155:1/" + root + "/?fxhash=1")
+		list := []dp1playlist.PlaylistItem{{ID: "a", Source: evm}, {ID: "b", Source: edition1}}
+		in := map[string]interface{}{"source": edition1}
+		assert.Equal(t, in, onchfsStartItem(list, in), "the player matches the exact holder; nothing to re-spell")
 	})
 }

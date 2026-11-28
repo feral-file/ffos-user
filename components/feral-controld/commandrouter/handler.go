@@ -621,6 +621,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		if title == "" {
 			title = "Recently played"
 		}
+		// The playlist title is at most 200 characters; an item's is not
+		// bounded, and this document is controld's own to write.
+		if runes := []rune(title); len(runes) > dp1.MaxPlaylistTitle {
+			title = string(runes[:dp1.MaxPlaylistTitle])
+		}
 		// Extracting one item invalidates the original full-playlist
 		// signature. Preserve only the applicable defaults, which carry
 		// artist-level controls for this work; machine settings remain owned by
@@ -679,7 +684,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	}
 
 	if isOfflineCacheCommand(commandType) {
-		return h.handleOfflineCacheCommand(ctx, commandType, command.Arguments)
+		return h.handleOfflineCacheCommand(ctx, command)
 	}
 
 	if commandType == commands.CMD_GET_CONTENT_POLICY || commandType == commands.CMD_SET_CONTENT_POLICY {
@@ -945,23 +950,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 
 				// The bytes the document is decoded from AND verified on.
-				// Preferred: the caller's own `dp1_call` token, kept
-				// verbatim by the ingress decoders (Command.RawArguments) —
-				// a signer covered exactly those bytes. Fallback: a
-				// re-marshal of the decoded map, only for commands built
-				// in-process (OOM recovery, tests) that never had a wire
-				// form. The fallback is lossy in a way a verifier feels:
-				// encoding/json HTML-escapes `&`/`<`/`>`, six bytes each,
-				// which can inflate the document past
-				// sigverify.MaxDocumentBytes and report an honest document
-				// as invalid — so the wire token wins. (Its float64
-				// rounding of large integers is absorbed by JCS, see
-				// commands.Command.RawArguments.)
+				raw, _ := command.RawArgument("dp1_call")
+				// Assigned, not declared: a `:=` here would shadow the
+				// outer err this switch reports through.
 				var playlistBytes []byte
-				if raw, hasRaw := command.RawArgument("dp1_call"); hasRaw {
-					playlistBytes = raw
-				} else if playlistBytes, err = h.json.Marshal(playlistMap); err != nil {
-					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
+				if playlistBytes, err = h.inlinePlaylistBytes(raw, playlistMap); err != nil {
+					return nil, err
 				}
 
 				// Validate the RAW bytes before the typed decode. A
@@ -977,7 +971,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					err = &PlaylistInvalidError{Locations: dp1.ValidationPointers(err)}
 					return nil, err
 				}
-				dp1.AuditDocumentAsync(h.logger, "dp1_call", playlistBytes)
+				// Schema conformance, signatures aside. Replay and the series
+				// re-display re-enter here too. Inline documents carry the
+				// temporary ff-app exemption (dp1/inline_exemption.go).
+				if err = dp1.CheckInlineCast(h.logger, "dp1_call", playlistBytes); err != nil {
+					err = playlistInvalid(err)
+					return nil, err
+				}
 				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
@@ -1166,6 +1166,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// preflight, because it is network-bound. Every item already
 			// carries its device-local source (dp1/onchfs.go), which the
 			// scope sync below hashes the same way.
+			// A startItem naming an onchfs work by a spelling other than its
+			// device-local source is re-spelled as the item's own source,
+			// so the player (and onchfsOpening below) finds it; see
+			// onchfsStartItem. Against the policy-filtered list: a work the
+			// filter removed matches nothing and the display opens at its
+			// beginning, as it would have anyway. Independent of the reader
+			// being enabled, like the item rewrite it mirrors.
+			if startItem, ok := command.Arguments["startItem"]; ok {
+				command.Arguments["startItem"] = onchfsStartItem(playlist.Items, startItem)
+			}
 			if h.onchfs != nil {
 				items, wait := onchfsOpening(playlist.Items, command.Arguments["startItem"])
 				h.onchfs.Ensure(ctx, items, wait)

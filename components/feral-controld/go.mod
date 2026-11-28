@@ -7,7 +7,7 @@ require github.com/gorilla/websocket v1.5.3
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/corona10/goimagehash v1.1.0
-	github.com/display-protocol/dp1-go v0.8.0
+	github.com/display-protocol/dp1-go v0.9.0
 	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20261027140929-82d5ebae13e4
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
 	github.com/gabriel-vasile/mimetype v1.4.9

@@ -24,9 +24,18 @@ import (
 // every transport is wired exactly as before: no authority, no wrappers, no
 // policy.
 type controlWiring struct {
-	auth   *control.Authority
-	v2     relayer.Relayer
-	v2Gate *controlgate.RelayV2
+	auth *control.Authority
+	// v2 is the relay v2 carrier on the device-ID channel; nil when this
+	// device does not dial v2. It is dialed in every state: it carries the
+	// "show your code" request of an ownerless device and envelopes from
+	// Play sites (spec §10). v2Keyed is the carrier on the keyed channel,
+	// thumb(devSig), the only one ff-app and ff-cli use; it is set with v2
+	// unless the authority has no identity to derive it from (locked).
+	// Both feed v2Gate with the same route. See relay_v2.go for what
+	// "v2 connected" means with two carriers.
+	v2      relayer.Relayer
+	v2Keyed relayer.Relayer
+	v2Gate  *controlgate.RelayV2
 }
 
 // unknownDeviceID stands in when the hostname cannot be read but control
@@ -121,7 +130,7 @@ func (c *controlWiring) notificationHandles(r relayer.Relayer, w ws.WS, logger *
 		return r, w
 	}
 	wrapped := controlgate.WrapRelayer(r, c.auth, logger)
-	wrapped.V2Connected = func() bool { return c.v2 != nil && c.v2.IsConnected() }
+	wrapped.V2Connected = c.v2AnyConnected
 	wrapped.NotifyV2 = func(typ string, body json.RawMessage, snapshot bool) bool {
 		return c.v2Gate != nil && c.v2Gate.Publish(typ, body, snapshot)
 	}
@@ -148,16 +157,20 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		// Revocations and reactivations on the LAN or legacy relayer retire
 		// v2 bindings too (§9).
 		c.v2Gate.Watch(gate)
-		c.v2.OnRelayerMessage(c.v2Gate.Handle)
-		if lifecycle, ok := c.v2.(interface{ SetPeerDisconnectHandler(func(relayer.Peer)) }); ok {
-			lifecycle.SetPeerDisconnectHandler(c.v2Gate.Disconnected)
-		}
-		go func() {
-			if err := c.v2.RetryableConnect(ctx); err != nil && ctx.Err() == nil {
-				logger.Warn("V2 carrier connection failed", zap.Error(err))
+		// Both carriers feed the one v2 gate. A binding is keyed by the
+		// peer of one socket generation, so the two never collide.
+		for _, v2 := range c.v2Carriers() {
+			v2.OnRelayerMessage(c.v2Gate.Handle)
+			if lifecycle, ok := v2.(interface{ SetPeerDisconnectHandler(func(relayer.Peer)) }); ok {
+				lifecycle.SetPeerDisconnectHandler(c.v2Gate.Disconnected)
 			}
-		}()
-		go func() { <-ctx.Done(); c.v2.Close() }()
+			go func() {
+				if err := v2.RetryableConnect(ctx); err != nil && ctx.Err() == nil {
+					logger.Warn("V2 carrier connection failed", zap.Error(err))
+				}
+			}()
+			go func() { <-ctx.Done(); v2.Close() }()
+		}
 	}
 	if sink, ok := h.(interface{ SetControl(hub.ControlGate) }); ok {
 		sink.SetControl(gate)
@@ -174,16 +187,25 @@ func (c *controlWiring) wire(ctx context.Context, handler commandrouter.Handler,
 		ControlOwnerEnrolled()
 		ControlReleased()
 	}); ok {
-		ex.SetControl(controlgate.ClaimQR{Auth: c.auth})
-		// The authority refuses first-owner enroll on v2 (§5.1); the v2 gate
-		// gets the hook anyway so the claim QR cannot outlive its invitation
-		// if that ever changes.
+		ex.SetControl(controlgate.ClaimQR{Auth: c.auth, LANHost: controlgate.DefaultRouteIPv4})
+		// A first owner may enroll on any route, v2 included (§5.1), so
+		// every gate takes the claim QR down.
 		for _, g := range gates {
 			g.SetOwnerEnrolledHook(ex.ControlOwnerEnrolled)
 			g.SetReleasedHook(ex.ControlReleased)
 		}
 	} else {
 		logger.Error("Executor does not accept the control claim; invitation QR and retire disabled")
+	}
+	if c.v2Gate != nil {
+		// Unwired, the v2 gate refuses the request (see SetShowCodeHook).
+		if ex, ok := executor.(interface {
+			RelayShowCode() (reply any, done func(), code string)
+		}); ok {
+			c.v2Gate.SetShowCodeHook(ex.RelayShowCode)
+		} else {
+			logger.Error("Executor has no relay show-code precheck; the request stays refused on v2")
+		}
 	}
 }
 

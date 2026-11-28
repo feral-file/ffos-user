@@ -199,8 +199,10 @@ func TestCommandHandler_Process_DisplayPlaylist_Inline_VerifiesWireTokenNotRemar
 	doc := map[string]any{
 		"dpVersion": "1.1.0",
 		"id":        "amp-1",
-		"title":     strings.Repeat("&", sigverify.MaxDocumentBytes/5),
-		"items":     []any{map[string]any{"id": "i", "source": "https://example.com/a", "duration": 10, "license": "open"}},
+		"title":     "t",
+		// An unknown member carries the bulk: the schema caps the title.
+		"padding": strings.Repeat("&", sigverify.MaxDocumentBytes/5),
+		"items":   []any{map[string]any{"id": "i", "source": "https://example.com/a", "duration": 10, "license": "open"}},
 	}
 	unsignedBytes, err := json.Marshal(doc) // encoding/json escapes: NOT the wire form
 	require.NoError(t, err)
@@ -288,7 +290,7 @@ func TestCommandHandler_Process_DisplayPlaylist_LogsBoundedPlaylistID(t *testing
 	wireVerification(ts)
 
 	hugeID := strings.Repeat("x", 1<<20)
-	raw := []byte(`{"dpVersion":"1.1.0","id":"` + hugeID + `","title":"t","items":[]}`)
+	raw := []byte(`{"dpVersion":"1.1.0","id":"` + hugeID + `","title":"t","items":[{"source":"https://example.com/a"}]}`)
 	command := inlineCast(ts, raw, inlineTyped(hugeID))
 	ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
@@ -492,7 +494,7 @@ func TestCommandHandler_Process_ScheduledCast_SurvivesReconnectRepush(t *testing
 	})
 
 	// Static inline schedule: one cohort active now, one tomorrow.
-	raw := []byte(`{"dpVersion":"1.1.0","id":"sched-1","title":"t","items":[]}`)
+	raw := []byte(`{"dpVersion":"1.1.0","id":"sched-1","title":"t","items":[{"source":"https://example.com/now"}]}`)
 	typed := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID: "sched-1",
 		Items: []dp1playlist.PlaylistItem{

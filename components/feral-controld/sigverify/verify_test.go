@@ -318,7 +318,7 @@ func TestVerify_TooManySignatures_RefusedWithoutCrypto(t *testing.T) {
 func TestVerify_AtCap_StillVerified(t *testing.T) {
 	doc := unsignedDoc()
 	for i := 0; i < sigverify.MaxSignatures; i++ {
-		signWith(t, doc, newKey(t), dp1playlist.RoleAgent)
+		signWith(t, doc, newKey(t), dp1playlist.RoleFeed)
 	}
 
 	v := sigverify.Verify(mustJSON(t, doc))
@@ -450,14 +450,88 @@ func TestVerify_RoleOutsideDP1Enum(t *testing.T) {
 }
 
 // TestVerify_EveryDP1RoleIsValid pins the accepted set: the five core roles
-// (publisher is a Channels role, not a playlist one).
+// (publisher is a Channels role, not a playlist one), each next to the feed
+// signature §7.1.1 requires.
 func TestVerify_EveryDP1RoleIsValid(t *testing.T) {
 	for _, role := range []string{"curator", "feed", "agent", "institution", "licensor"} {
 		t.Run(role, func(t *testing.T) {
 			doc := unsignedDoc()
+			signWith(t, doc, newKey(t), "feed")
 			signWith(t, doc, newKey(t), role)
 
 			assert.Equal(t, sigverify.StatusValid, sigverify.Verify(mustJSON(t, doc)).Status)
 		})
+	}
+}
+
+// TestVerify_RequiresFeedOrCurator: §7.1.1 needs one of the two. Every entry
+// still reports OK; only the document verdict changes.
+func TestVerify_RequiresFeedOrCurator(t *testing.T) {
+	for _, tt := range []struct {
+		role string
+		want sigverify.Status
+	}{
+		{"feed", sigverify.StatusValid},
+		{"curator", sigverify.StatusValid},
+		{"agent", sigverify.StatusInvalid},
+		{"institution", sigverify.StatusInvalid},
+		{"licensor", sigverify.StatusInvalid},
+	} {
+		t.Run(tt.role, func(t *testing.T) {
+			doc := unsignedDoc()
+			signWith(t, doc, newKey(t), tt.role)
+
+			v := sigverify.Verify(mustJSON(t, doc))
+
+			assert.Equal(t, tt.want, v.Status)
+			require.Len(t, v.Signers, 1)
+			assert.True(t, v.Signers[0].OK)
+			if tt.want == sigverify.StatusInvalid {
+				assert.Equal(t, sigverify.ReasonNoFeedOrCurator, v.Reason)
+			}
+		})
+	}
+}
+
+// TestVerify_ReadsSignaturesByExactName: a case variant is an unknown member,
+// not the signature list.
+func TestVerify_ReadsSignaturesByExactName(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), "feed")
+	doc["Signatures"] = doc["signatures"]
+	delete(doc, "signatures")
+
+	assert.Equal(t, sigverify.StatusUnsigned, sigverify.Verify(mustJSON(t, doc)).Status)
+}
+
+// A variant beside the real member must not be judged in its place.
+func TestVerify_VariantBesideSignaturesIsInvalid(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), "feed")
+	real := mustJSON(t, doc["signatures"])
+	other := unsignedDoc()
+	signWith(t, other, newKey(t), "feed")
+	raw := `{"dpVersion":"1.1.0","title":"t","items":[],"signatures":` + string(real) +
+		`,"Signatures":` + string(mustJSON(t, other["signatures"])) + `}`
+
+	assert.Equal(t, sigverify.StatusInvalid, sigverify.Verify([]byte(raw)).Status)
+}
+
+// An empty or null variant is what dp1-go would read, as "no signatures". The
+// verdict is invalid, not unsigned, in either member order.
+func TestVerify_EmptyVariantBesideSignaturesIsInvalid(t *testing.T) {
+	doc := unsignedDoc()
+	signWith(t, doc, newKey(t), "feed")
+	real := `"signatures":` + string(mustJSON(t, doc["signatures"]))
+
+	for _, variant := range []string{`"Signatures":[]`, `"Signatures":null`, `"SIGNATURES":7`} {
+		for _, members := range []string{real + "," + variant, variant + "," + real} {
+			raw := `{"dpVersion":"1.1.0","title":"t","items":[],` + members + `}`
+
+			v := sigverify.Verify([]byte(raw))
+
+			assert.Equal(t, sigverify.StatusInvalid, v.Status, raw)
+			assert.Equal(t, sigverify.ReasonMalformed, v.Reason, raw)
+		}
 	}
 }
