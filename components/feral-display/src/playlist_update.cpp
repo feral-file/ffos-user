@@ -95,11 +95,12 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   if(timed_owner)next["playlistUrl"]=previous_plan["playlistUrl"];
  const bool plan_changed=state_.value("cohortPlan",Json(nullptr))!=plan;
  next["cohortPlan"]=plan;
-  const bool retire_selected=selected_&&refresh_blocks(*selected_,items,next);
+  const auto& labels = plan.is_null() ? items : plan["playlist"]["items"];
+  const bool retire_selected=selected_&&refresh_blocks(*selected_,labels,next);
   // An outgoing occurrence from a different cast keeps its own context and
   // labels; this refresh has no authority to relabel that other document.
   const bool same_presented=presented_&&presented_->cast_id==cast_id_;
-  const bool retire_presented=same_presented&&refresh_blocks(*presented_,items,next);
+  const bool retire_presented=same_presented&&refresh_blocks(*presented_,labels,next);
   const bool retire=p.value("retireBlockedCurrent",false)||retire_selected||retire_presented;
   bool any=items.empty();for(const auto& item:items)any|=allowed(item,next);
   // When fresh labels block the current work, retirement must not be undone
@@ -107,7 +108,8 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   require(any||retire,"content_blocked","No refreshed item is allowed; current playback retained");
   int index=match_slot(old_items,state_["index"].get<int>(),items);
   const bool keep=index>=0&&selected_&&!retire&&state_["context"]==context;
-  const bool defer=!items.empty()&&selected_&&!retire&&index<0&&
+  const bool can_finish = plan.is_null() || (presented_ && selected_ && presented_->id == selected_->id);
+  const bool defer=can_finish&&!items.empty()&&selected_&&!retire&&index<0&&
     match_slot(old_items,state_["index"].get<int>(),items,false)<0&&state_["context"]==context;
   auto id=uuid();
   next["pendingUpdate"]=nullptr;

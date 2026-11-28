@@ -112,11 +112,16 @@ int main(){
       const auto current = p.desired()->id;
       p.committed(current);
       p.presented(current);
+      p.tick(1002, 2001);
+      const auto in_flight = p.desired()->id;
+      check(in_flight != current, "Fixture needs an incoming slot while the first is still visible");
       const auto replacement = source["items"][1];
       auto relabeled = source["items"][0];
       relabeled["contentRating"] = "mature";
       const ff::Json refresh = {{"items",{replacement, relabeled}}, {"activationTimes",{60000, 70000}}};
       p.command("playback.update", refresh);
+      p.committed(in_flight);
+      p.presented(in_flight);
       p.tick(2001, 3000);
       check(p.desired()->id == current, "Slot duration must not start a future work early");
       p.ended(current);
@@ -165,6 +170,11 @@ int main(){
       } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong deferred selection error"); }
       p.tick(1002, 2001);
       check(p.desired() && p.desired()->item == eligible, "Slot boundary must apply the already eligible work");
+      current = p.desired()->id; p.committed(current); p.presented(current);
+      auto restricted = eligible; restricted["contentRating"] = "mature";
+      p.command("playback.update", {{"items",{restricted,future}},{"activationTimes",{60000,nullptr}}});
+      check(!p.visible() && p.desired() && p.desired()->item == future,
+            "A future label must immediately retire a blocked outgoing frame");
     }
     {
       ff::Store store(path+".future-refresh");ff::Playback p(store);

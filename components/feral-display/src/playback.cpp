@@ -493,7 +493,9 @@ Json Playback::command(std::string_view method, const Json& p) {
       const auto blocked = [&](const std::optional<Occurrence>& o) {
         return o && o->cast_id == cast_id_ && refresh_blocks(*o,items,policy);
       };
-      const bool retire=p.value("retireBlockedCurrent",false) || items.empty() ||
+      const bool retain_frame = presented_ && presented_->cast_id == cast_id_;
+      const bool restore_frame = retain_frame && (!selected_ || selected_->id != presented_->id);
+      const bool retire=!retain_frame || p.value("retireBlockedCurrent",false) || items.empty() ||
                         blocked(selected_) || blocked(presented_);
       const auto update_id=uuid();
       next["updateOutcome"]={{"id",update_id},{"outcome","applied"},{"contentBlocked",false}};
@@ -505,10 +507,24 @@ Json Playback::command(std::string_view method, const Json& p) {
         next["playlistUrl"]=plan["playlistUrl"];
         update_order(next,0);
         next["stopped"]=true;
+      } else if (restore_frame) {
+        // A refresh can arrive after the next slot starts loading but before it
+        // reaches the screen. Only the frame already on screen may finish.
+        next["playlist"] = presented_->playlist;
+        next["context"] = presented_->context;
+        next["playlistUrl"] = presented_->playlist_url;
+        update_order(next, presented_->index);
       }
       next["cohortPlan"]=plan;
       persist(std::move(next));++generation_;
       if (retire) select();
+      else if (restore_frame) {
+        clear_recovery();
+        eos_pending_ = false;
+        presentation_failure_ = media_status_ = nullptr;
+        engine_status_ = packaged_engine_;
+        selected_ = presented_;
+      }
       return {{"outcome","applied"},{"generation",generation_},{"revision",revision_},{"updateId",update_id}};
     }
     auto params=p;params.erase("activationTimes");params["items"]=list["items"];
