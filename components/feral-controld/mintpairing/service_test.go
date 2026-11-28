@@ -2085,10 +2085,11 @@ func TestHideSession_ConcurrentShowsNeverDesyncFromTheControllersCurrentOwner(t 
 
 		before := len(cdpClient.displayRequestsSnapshot())
 		s.hideSession(active)
-		time.Sleep(10 * time.Millisecond)
 		_, stillHas := s.ctrl.Current()
 		assert.False(t, stillHas, "round %d: hideSession must clear the screen this active still genuinely owns", round)
-		assert.Greater(t, len(cdpClient.displayRequestsSnapshot()), before, "round %d: hideSession must not silently no-op on a stale handle", round)
+		require.Eventually(t, func() bool {
+			return displayObserved(cdpClient.displayRequestsSnapshot()[before:], "hidden", "", "")
+		}, time.Second, time.Millisecond, "round %d: hideSession must send its clear to the player", round)
 	}
 }
 
