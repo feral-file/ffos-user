@@ -20,7 +20,7 @@ std::string CacheReply::replay_mode(bool online) const {
   auto mode = metadata.value("replayMode", "");
   if (mode == "needsRecapture") {
     require(online, "cache_policy_unavailable", "Downloaded browser capture needs recapture for original response headers");
-    return "";
+    return metadata.value("liveDocument", false) ? "liveDocument" : "";
   }
   require(mode.empty() || mode == "isolated" || mode == "mixed", "cache_protocol", "Unknown artwork cache mode");
   return mode;
@@ -211,6 +211,13 @@ struct Pool {
         require(known_header_versions && capsule_id.empty() && !record.contains("capsule") &&
                 (source.starts_with("https://") || source.starts_with("http://")) && !virtual_cache_source(source),
                 "bundle", "Downloaded browser capture needs recapture for original response headers");
+        // An HTML or SVG document can have a media-looking URL or playlist
+        // hint. Let CEF inspect the fresh response before any decoder handoff.
+        auto mime = type.substr(0, type.find(';'));
+        g_strstrip(mime.data());
+        reply.metadata["liveDocument"] = !g_ascii_strcasecmp(mime.c_str(), "text/html") ||
+            !g_ascii_strcasecmp(mime.c_str(), "application/xhtml+xml") ||
+            !g_ascii_strcasecmp(mime.c_str(), "image/svg+xml");
         reply.metadata["replayMode"] = "needsRecapture";
         return;
       }

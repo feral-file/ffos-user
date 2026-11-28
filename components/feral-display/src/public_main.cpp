@@ -283,7 +283,7 @@ extern "C" int ff_host(int argc, char** argv) {
           artwork_cache.stop_warming();
           auto cache_mode = resolve_source(*desired);
           const auto render_item = resolution.capture ? resolution.capture->render_item(desired->item) : desired->item;
-          if (cache_mode && ff::native_media(render_item))
+          if (cache_mode && *cache_mode != "liveDocument" && ff::native_media(render_item))
             media.emplace(desired->id,
                           std::make_unique<ff::MediaClient>(playback, presentation, *desired,
                                                             worker, bundle_root, *cache_mode, &artwork_cache, resolution.capture));

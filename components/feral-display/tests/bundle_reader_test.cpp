@@ -96,7 +96,7 @@ int main() {
   std::ofstream(record_file)<<record;
   auto legacy = read(url,empty,false,true);
   check(legacy.error.empty() && !legacy.capture && !legacy.metadata.contains("streams"));
-  check(legacy.replay_mode(true).empty());
+  check(legacy.replay_mode(true) == "liveDocument");
   try {
     legacy.replay_mode(false);
     throw std::runtime_error("Legacy browser capture allowed offline");
@@ -104,6 +104,20 @@ int main() {
     check(std::string(e.what()).find("recapture") != std::string::npos);
   }
   check(!read(asset,empty,false,false).error.empty());
+  const auto original_url = url;
+  for (const auto& alternate : {original_url + ".png", std::string("https://site.onchfs.invalid/work")}) {
+    url = alternate;
+    auto named = record;
+    named["item"]["source"] = named["resources"][0]["url"] = url;
+    std::ofstream(root/"items"/(digest(url)+".json")) << named;
+    auto reply = read(url,empty,false,true);
+    if (ff::virtual_cache_source(url)) {
+      check(!reply.error.empty());
+    } else {
+      check(ff::native_media(named.at("item")) && reply.replay_mode(true) == "liveDocument");
+    }
+  }
+  url = original_url;
   record["capsule"] = {{"archiveSHA256", std::string(64,'c')}};
   std::ofstream(record_file)<<record;
   check(!read(url,empty,false,true).error.empty());

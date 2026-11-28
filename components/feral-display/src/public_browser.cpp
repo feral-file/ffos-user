@@ -96,8 +96,8 @@ PublicBrowser::PublicBrowser(Playback& p, Presentation& ui, Occurrence o,
     auto path = navigation_url_.substr(0, navigation_url_.find_first_of("?#"));
     std::transform(path.begin(), path.end(), path.begin(),
                    [](unsigned char c) { return std::tolower(c); });
-    bundled_ = decoration_ || render_item.value("mimeType", "").starts_with("model/") ||
-               path.ends_with(".glb") || path.ends_with(".gltf");
+    bundled_ = decoration_ || (cache_mode != "liveDocument" && (render_item.value("mimeType", "").starts_with("model/") ||
+               path.ends_with(".glb") || path.ends_with(".gltf")));
     bundle_prefix_ = "https://ff-player.internal/" + uuid() + "/";
     auto bounds = presentation_.bounds(occurrence_.display);
     // Setup decoration and inset artwork need host composition. Fullscreen
