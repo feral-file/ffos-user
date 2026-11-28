@@ -203,7 +203,21 @@ struct Pool {
           return query.value("mimeType", record.at("item").value("mimeType", ""));
         return type;
       };
-      auto type = response_mime(*entry);
+      // The signed URL may redirect or carry a misleading file extension.
+      if (loaded && !record.value("automatic", false)) {
+        for (int hop = 0; entry->contains("redirectTo"); ++hop) {
+          require(hop < 15, "bundle", "Too many capture redirects");
+          const auto target = redirect_url(entry->at("url"), *entry);
+          const auto& resources = record.at("resources");
+          auto next = std::find_if(resources.begin(), resources.end(), [&](const auto& resource) {
+            return resource.value("url", "") == target && resource.value("method", "GET") == "GET";
+          });
+          if (next == resources.end()) break;
+          entry = &*next;
+        }
+      }
+      const auto type = response_mime(*entry);
+      if (loaded && !record.value("automatic", false)) loaded->entry_mime = type;
       if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
         if (record.value("automatic", false)) return;
         // An ordinary website can be fetched afresh, without exposing any bytes
@@ -220,20 +234,6 @@ struct Pool {
             !g_ascii_strcasecmp(mime.c_str(), "image/svg+xml");
         reply.metadata["replayMode"] = "needsRecapture";
         return;
-      }
-      // The signed URL may redirect or carry a misleading file extension.
-      if (loaded && !record.value("automatic", false)) {
-        for (int hop = 0; entry->contains("redirectTo"); ++hop) {
-          require(hop < 15, "bundle", "Too many capture redirects");
-          const auto target = redirect_url(entry->at("url"), *entry);
-          const auto& resources = record.at("resources");
-          auto next = std::find_if(resources.begin(), resources.end(), [&](const auto& resource) {
-            return resource.value("url", "") == target && resource.value("method", "GET") == "GET";
-          });
-          if (next == resources.end()) break;
-          entry = &*next;
-        }
-        type = loaded->entry_mime = response_mime(*entry);
       }
       if (loaded) loaded->root = pin_blobs(root, record, job.inbox);
       root = capture->root;

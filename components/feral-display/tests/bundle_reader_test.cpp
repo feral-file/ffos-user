@@ -92,6 +92,8 @@ int main() {
   std::ofstream(record_file)<<record;
   check(read(url,empty,false,true).error.empty());
   check(!read(url+"/analytics",empty,false,false,"POST").error.empty());
+  record["resources"][0].erase("contentType");  // Redirects do not carry a document MIME.
+  record["resources"][1]["contentType"] = "text/html";
   record["resources"][1].erase("browserPolicyVersion");
   std::ofstream(record_file)<<record;
   auto legacy = read(url,empty,false,true);
@@ -105,7 +107,7 @@ int main() {
   }
   check(!read(asset,empty,false,false).error.empty());
   const auto original_url = url;
-  for (const auto& alternate : {original_url + ".png", std::string("https://site.onchfs.invalid/work")}) {
+  for (const auto& alternate : {original_url + ".png", original_url + ".glb", std::string("https://site.onchfs.invalid/work")}) {
     url = alternate;
     auto named = record;
     named["item"]["source"] = named["resources"][0]["url"] = url;
@@ -114,7 +116,7 @@ int main() {
     if (ff::virtual_cache_source(url)) {
       check(!reply.error.empty());
     } else {
-      check(ff::native_media(named.at("item")) && reply.replay_mode(true) == "liveDocument");
+      check(reply.replay_mode(true) == "liveDocument" && !reply.capture);
     }
   }
   url = original_url;
