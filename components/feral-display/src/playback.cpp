@@ -260,12 +260,14 @@ void Playback::select(bool recovering,bool skipping_failure) {
   int index = state_["index"].get<int>();
   require(index >= 0 && index < static_cast<int>(items.size()), "storage_corrupt", "Selection is outside playlist");
   if (!allowed(items[index], state_)) {
+    if (waiting_for_refresh_activation()) { presented_.reset(); return; }
     auto found = std::find_if(items.begin(), items.end(), [&](const Json& item) { return allowed(item, state_); });
     if (found == items.end()) { presented_.reset(); return; }
     auto next = state_; next["index"] = index = static_cast<int>(found - items.begin()); persist(std::move(next));
   }
   auto defaults=state_["playlist"].value("defaults",Json::object());
-  selected_ = Occurrence{uuid(), items[index], resolve_display(state_["settings"], defaults, items[index]), index, generation_, "loading", "", false,
+  const auto& item = state_["playlist"]["items"][index];
+  selected_ = Occurrence{uuid(), item, resolve_display(state_["settings"], defaults, item), index, generation_, "loading", "", false,
     defaults,state_["context"].get<std::string>(),state_["playlist"].value("title",""),state_["playlist"].value("curator",""),
     state_["playlist"],state_.value("playlistUrl", ""),cast_id_};
   if(!recovering)autoplay_hold_ = !global_policy_.at("autoplay").get<bool>() || !selected_->display.value("autoplay", true);
@@ -323,6 +325,8 @@ int Playback::prepare_replace(Json& next,const Json& p){
       auto list=cohort(plan,wall,active);plan["activeAt"]=active;
       if(list["items"].empty()){
         next=state_;reselection=false;
+        // Replaying boot intent must preserve a hold already imposed on the outgoing list.
+        plan["started"] = !waiting_for_refresh_activation();
         // Keep the current artwork until activation, but retire superseded
         // pending owners now. They must not erase this newly accepted plan.
         for(auto key:{"schedule","scheduleOutcome","pendingUpdate","updateOutcome"})next[key]=nullptr;

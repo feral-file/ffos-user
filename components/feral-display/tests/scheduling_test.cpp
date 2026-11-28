@@ -102,7 +102,11 @@ int main(){
       ff::Store store(path+".first-timed-refresh");
       ff::Playback p(store);
       p.tick(1, 1000);
+      p.system_boot("first");
+      ff::Json policy = {{"version",1},{"showMatureContent",true},{"strictPersonal",false},{"blockUnratedCurated",false}};
+      p.command("policy.set", policy);
       auto source = playlist();
+      source["items"][0]["contentRating"] = "mature";
       source["items"][0]["display"] = {{"loop", false}};
       const std::string url = "https://example.org/exhibition";
       p.command("playback.replace", {{"playlist",source},{"playlistUrl",url},{"boot",true}});
@@ -123,12 +127,16 @@ int main(){
       } catch (const ff::Error& error) {
         check(error.code == "invalid_params", "Wrong error for ineligible slot");
       }
+      p.system_boot("next");
       p.tick(59000, 59999);
       check(p.visible() && p.visible()->id == current && p.desired()->id == current,
             "First timed refresh must keep the outgoing work until activation");
       check(p.state()["cohortPlan"]["playlistUrl"] == url &&
             p.state()["boot"]["activationTimes"] == refresh["activationTimes"],
             "First timed refresh must preserve the source and refresh boot intent");
+      policy["showMatureContent"] = false;
+      p.command("policy.set", policy);
+      check(!p.desired() && !p.visible(), "Policy must retire the outgoing slot without selecting a future work");
       p.tick(59001, 60000);
       check(p.desired() && p.desired()->item == replacement, "First scheduled work must activate on time");
       p.command("playback.stop", ff::Json::object());
