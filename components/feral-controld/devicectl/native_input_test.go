@@ -248,3 +248,19 @@ func TestNativeInputDevice(t *testing.T) {
 		}
 	}
 }
+
+func TestPhoneKeyboardUsages(t *testing.T) {
+	for _, tc := range []struct {
+		code, usage int
+		shift       bool
+		text        string
+	}{
+		{8, 42, false, ""}, {9, 43, false, ""}, {13, 40, false, "\r"}, {27, 41, false, ""}, {32, 44, false, " "},
+		{'A', 4, true, "A"}, {'0', 39, false, "0"}, {'!', 30, true, "!"}, {'-', 45, false, "-"}, {':', 51, true, ":"}, {'?', 56, true, "?"}, {127, 0, false, ""},
+	} {
+		usage, shift, text := phoneKey(tc.code)
+		if usage != tc.usage || shift != tc.shift || text != tc.text {
+			t.Errorf("code %d mapped to (%d,%t,%q)", tc.code, usage, shift, text)
+		}
+	}
+}

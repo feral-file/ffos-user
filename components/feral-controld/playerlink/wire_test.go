@@ -6,13 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSharedConformance(t *testing.T) {
@@ -313,6 +317,152 @@ func testCPPRequestFixtures(t *testing.T, path string) {
 			if response.Error == nil || response.Error.Code != fixture.Error {
 				t.Fatalf("wanted %s, got %+v", fixture.Error, response)
 			}
+		})
+	}
+}
+
+func TestWatchRejectsInconsistentHostState(t *testing.T) {
+	type notification struct {
+		Version          int    `json:"v"`
+		Event            string `json:"event"`
+		Previous, Cursor uint64
+		Snapshot         Snapshot
+	}
+	good := Snapshot{Instance: "host", Generation: 1, Revision: 4, Host: "responsive"}
+	for _, tc := range []struct {
+		name    string
+		hello   Hello
+		initial Snapshot
+		cursor  uint64
+		event   *notification
+		want    string
+	}{
+		{"version mismatch", Hello{Version: 2}, good, 4, nil, "negotiation mismatch"},
+		{"initial identity", Hello{Version: 1, Instance: "host", Snapshot: good}, Snapshot{}, 4, nil, "invalid host identity"},
+		{"subscribe cursor", Hello{Version: 1, Instance: "host", Snapshot: good}, good, 3, nil, "initial cursor mismatch"},
+		{"repeated event", Hello{Version: 1, Instance: "host", Snapshot: good}, good, 4, &notification{Version: 1, Event: "state", Previous: 4, Cursor: 4, Snapshot: good}, "event identity/cursor mismatch"},
+		{"invalid event", Hello{Version: 1, Instance: "host", Snapshot: good}, good, 4, &notification{Version: 1, Event: "state", Previous: 4, Cursor: 5, Snapshot: Snapshot{}}, "invalid host identity"},
+		{"disconnected stream", Hello{Version: 1, Instance: "host", Snapshot: good}, good, 4, nil, "native watch:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("/tmp", "ff-watch-")
+			require.NoError(t, err)
+			defer func() { _ = os.RemoveAll(dir) }()
+			path := filepath.Join(dir, "host.sock")
+			l, err := net.Listen("unix", path)
+			require.NoError(t, err)
+			defer func() { _ = l.Close() }()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				for _, v := range []any{tc.hello, map[string]any{"cursor": tc.cursor, "snapshot": tc.initial}} {
+					var request Request
+					if ReadFrame(conn, &request) != nil {
+						return
+					}
+					if WriteFrame(conn, map[string]any{"v": Version, "id": request.ID, "result": v}) != nil {
+						return
+					}
+				}
+				if tc.event != nil {
+					_ = WriteFrame(conn, tc.event)
+				}
+			}()
+			client := New(path)
+			deliveries := 0
+			err = client.Watch(t.Context(), func(d SnapshotDelivery) { deliveries++; require.True(t, d.Initial) })
+			require.ErrorContains(t, err, tc.want)
+			if tc.hello.Version == Version && tc.initial.Validate() == nil && tc.initial.Revision == tc.cursor {
+				require.Equal(t, 1, deliveries)
+			} else {
+				require.Zero(t, deliveries)
+			}
+			<-done
+		})
+	}
+}
+
+func TestNativeFrameTransportErrors(t *testing.T) {
+	for _, input := range []string{"", `{"a":1}{}`, `{"a":`, `"\uZZZZ"`, `"\ud800\u0041"`, `"\u123`, `{"x":"` + string([]byte{255}) + `"}`} {
+		require.Error(t, ValidateJSON([]byte(input)))
+	}
+	var output bytes.Buffer
+	require.Error(t, WriteFrame(&output, make(chan int)))
+	require.Error(t, WriteFrame(&output, strings.Repeat("x", MaxFrameBytes)))
+	require.ErrorIs(t, WriteFrame(shortFrameWriter{io.ErrClosedPipe}, "a"), io.ErrClosedPipe)
+	require.ErrorIs(t, WriteFrame(shortFrameWriter{}, "a"), io.ErrShortWrite)
+	for _, frame := range [][]byte{{0}, {0, 0, 0, 2, 'x'}, {0, 0, 0, 1, '?'}, {0, 0, 0, 1, '1'}} {
+		var target map[string]any
+		require.Error(t, ReadFrame(bytes.NewReader(frame), &target))
+	}
+}
+
+type shortFrameWriter struct{ err error }
+
+func (w shortFrameWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestSnapshotRejectsInconsistentOccurrences(t *testing.T) {
+	valid := Snapshot{Instance: "host", Host: "responsive", Revision: 2, Generation: 2}
+	for _, tc := range []struct {
+		name  string
+		apply func(*Snapshot)
+		want  string
+	}{
+		{"future selection", func(s *Snapshot) { s.Selected = &Occurrence{ID: "future", Generation: 3} }, "occurrence identity"},
+		{"uncommitted presentation", func(s *Snapshot) { s.Presented = &Occurrence{ID: "work", Generation: 1, Stage: "presented"} }, "incomplete presentation"},
+		{"orphaned composition", func(s *Snapshot) { s.Composition = &Composition{Occurrence: "other"} }, "composition identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { s := valid; tc.apply(&s); require.ErrorContains(t, s.Validate(), tc.want) })
+	}
+}
+
+func TestCommandClientRejectsInvalidHostReplies(t *testing.T) {
+	good := Hello{Version: 1, Instance: "host", Snapshot: Snapshot{Instance: "host", Generation: 3}}
+	for _, tc := range []struct {
+		name   string
+		hello  Hello
+		method string
+		params map[string]any
+		fence  *Preconditions
+		reply  any
+		want   string
+	}{
+		{"wrong handshake version", Hello{Version: 2}, "state.get", nil, nil, nil, "inconsistent negotiation"},
+		{"capsule unavailable", good, "playback.replace", nil, &Preconditions{RequiredCapability: "offlineCapsule.v1"}, nil, "unsupported"},
+		{"setup overlay unavailable", good, "overlay.set", map[string]any{"owner": "setup"}, nil, nil, "unsupported"},
+		{"host switched", good, "state.get", nil, nil, map[string]any{"instance": "other"}, "identity changed"},
+		{"invalid generation", good, "state.get", nil, nil, map[string]any{"generation": 0}, "generation"},
+		{"invalid result type", good, "state.get", nil, nil, []int{5}, "unmarshal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A connected pipe isolates negotiation and receipt handling from filesystem setup.
+			client := New("")
+			c, server := net.Pipe()
+			client.connection = c
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer func() { _ = server.Close() }()
+				for _, result := range []any{tc.hello, tc.reply} {
+					var req Request
+					if ReadFrame(server, &req) != nil {
+						return
+					}
+					if WriteFrame(server, map[string]any{"v": Version, "id": req.ID, "result": result}) != nil {
+						return
+					}
+				}
+			}()
+			err := client.Call(t.Context(), tc.method, tc.params, nil, tc.fence)
+			require.ErrorContains(t, err, tc.want)
+			require.Nil(t, client.connection)
+			require.Empty(t, client.instance)
+			<-done
 		})
 	}
 }
