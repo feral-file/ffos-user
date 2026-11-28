@@ -181,16 +181,12 @@ extern "C" int ff_host(int argc, char** argv) {
           // Never infer live permission from an unavailable broker: the same
           // source may have a manual, network-isolated capture. In particular,
           // controld restart/startup order must not change its trust boundary.
-          ff::require(reply.error.empty(), "cache_policy_unavailable",
-                      "Cannot resolve artwork cache mode: " + reply.error);
-          auto mode = reply.metadata.value("replayMode", "");
-          ff::require(mode.empty() || mode == "isolated" || mode == "mixed", "cache_protocol",
-                      "Unknown artwork cache mode");
+          auto mode = reply.replay_mode(playback.online());
           ff::require(capsule_id.empty() || (mode == "isolated" && reply.capture),
                       "bundle", "Required capsule capture is unavailable");
           resolution.capture = reply.capture;
           resolution.streams = reply.metadata.value("streams", ff::Json::object());
-          resolution.mode = (mode == "isolated" || mode == "mixed") ? mode : "";
+          resolution.mode = mode;
         } else if (std::chrono::steady_clock::now() - resolution.started > std::chrono::seconds(6))
           throw ff::Error("cache_policy_unavailable", "Timed out resolving artwork cache mode");
         if (resolution.mode) resolution.inbox->active = false;
@@ -287,7 +283,7 @@ extern "C" int ff_host(int argc, char** argv) {
           artwork_cache.stop_warming();
           auto cache_mode = resolve_source(*desired);
           const auto render_item = resolution.capture ? resolution.capture->render_item(desired->item) : desired->item;
-          if (cache_mode && ff::native_media(render_item))
+          if (cache_mode && *cache_mode != "liveDocument" && ff::native_media(render_item))
             media.emplace(desired->id,
                           std::make_unique<ff::MediaClient>(playback, presentation, *desired,
                                                             worker, bundle_root, *cache_mode, &artwork_cache, resolution.capture));

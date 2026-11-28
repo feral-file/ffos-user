@@ -23,6 +23,7 @@ struct CacheReply {
   Json metadata;
   std::shared_ptr<const CaptureSnapshot> capture;
   std::string body;
+  std::string replay_mode(bool online) const;
 };
 struct CacheInbox {
   std::atomic<bool> active{true};

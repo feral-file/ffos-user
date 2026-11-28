@@ -67,7 +67,11 @@ func nativeReplayRecordReady(record *ItemRecord) bool {
 		return true
 	}
 	for _, r := range record.Resources {
-		if r.BrowserPolicyVersion != 2 || !r.freshAt(time.Now()) {
+		// Unsupported writes are coverage misses. The player never replays them.
+		if safeIdempotentMethods[r.EffectiveMethod()] && r.BrowserPolicyVersion != 2 {
+			return false
+		}
+		if !r.freshAt(time.Now()) {
 			return false
 		}
 	}

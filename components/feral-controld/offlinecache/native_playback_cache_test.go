@@ -32,6 +32,7 @@ func TestNativePlaylistCacheCountsPlayableSourcesOnce(t *testing.T) {
 		want      int
 	}{
 		{"complete web capture", []Resource{entry, asset}, 1},
+		{"headerless POST is a coverage miss", []Resource{entry, asset, {Method: "POST", URL: source + "/analytics"}}, 1},
 		{"missing entry", []Resource{asset}, 0},
 		{"expired subresource", []Resource{entry, expired}, 0},
 		{"legacy subresource headers", []Resource{entry, oldHeaders}, 0},
