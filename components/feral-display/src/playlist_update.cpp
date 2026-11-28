@@ -166,8 +166,12 @@ bool Playback::apply_pending_update(std::optional<int> requested_slot){
   bool any=items.empty();int index=0;
   if (requested_slot) {
     // Controller indices refer to the visible cast; resolve its slot in the eligible projection.
-    index = match_slot(state_["playlist"]["items"], *requested_slot, items);
-    require(index >= 0, "invalid_params", "Selected work is outside the eligible cohort");
+    const auto& plan = state_["cohortPlan"];
+    const int full_index = match_slot(state_["playlist"]["items"], *requested_slot, plan["playlist"]["items"]);
+    const auto& times = plan["activationTimes"];
+    const auto eligible = [&](const Json& time) { return time.is_null() || time == plan["activeAt"]; };
+    require(full_index >= 0 && eligible(times[full_index]), "invalid_params", "Selected work is outside the eligible cohort");
+    index = static_cast<int>(std::count_if(times.begin(), times.begin() + full_index, eligible));
     require(allowed(items[index], next), "content_blocked", "Selected work is blocked");
     any = true;
   } else {

@@ -180,13 +180,17 @@ int main(){
       ff::Store store(path+".explicit-eligible"); ff::Playback p(store);
       p.tick(1, 1000);
       auto source = playlist(); source["items"][0]["duration"] = 0;
+      auto duplicate = source["items"][1]; duplicate["duration"] = 3;
+      source["items"].push_back(duplicate);
       p.command("playback.replace", {{"playlist",source}});
       auto current = p.desired()->id; p.committed(current); p.presented(current);
-      const auto eligible = source["items"][1];
-      auto future = eligible; future["source"] = "https://example.org/later";
-      p.command("playback.update", {{"items",{eligible,future}},{"activationTimes",{nullptr,60000}}});
-      p.command("playback.select", {{"index",1}});
-      check(p.desired() && p.desired()->item == eligible && p.desired()->index == 0,
+      p.command("playback.update", {{"items",{source["items"][1], duplicate}},{"activationTimes",{60000,nullptr}}});
+      try {
+        p.command("playback.select", {{"index",1}});
+        throw std::runtime_error("Future duplicate passed eligibility through its sibling");
+      } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong duplicate selection error"); }
+      p.command("playback.select", {{"index",2}});
+      check(p.desired() && p.desired()->item == duplicate && p.desired()->index == 0,
             "Explicit selection of an eligible old slot must resolve against the refreshed playlist");
     }
     {
