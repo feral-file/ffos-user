@@ -490,13 +490,10 @@ Json Playback::command(std::string_view method, const Json& p) {
       const auto& items = plan["playlist"]["items"];
       auto policy = state_;
       policy["context"] = plan["context"];
-      const auto blocked = [&](const std::optional<Occurrence>& o) {
-        return o && o->cast_id == cast_id_ && refresh_blocks(*o,items,policy);
-      };
       const bool retain_frame = presented_ && presented_->cast_id == cast_id_;
       const bool restore_frame = retain_frame && (!selected_ || selected_->id != presented_->id);
       const bool retire=!retain_frame || p.value("retireBlockedCurrent",false) || items.empty() ||
-                        blocked(selected_) || blocked(presented_);
+                        refresh_blocks(*presented_,items,policy);
       const auto update_id=uuid();
       next["updateOutcome"]={{"id",update_id},{"outcome","applied"},{"contentBlocked",false}};
       refresh_boot(next, previous["playlist"], plan["playlist"], plan["context"], plan);
