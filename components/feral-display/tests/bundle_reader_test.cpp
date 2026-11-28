@@ -94,7 +94,28 @@ int main() {
   check(!read(url+"/analytics",empty,false,false,"POST").error.empty());
   record["resources"][1].erase("browserPolicyVersion");
   std::ofstream(record_file)<<record;
+  auto legacy = read(url,empty,false,true);
+  check(legacy.error.empty() && !legacy.capture && !legacy.metadata.contains("streams"));
+  check(legacy.replay_mode(true).empty());
+  try {
+    legacy.replay_mode(false);
+    throw std::runtime_error("Legacy browser capture allowed offline");
+  } catch (const ff::Error& e) {
+    check(std::string(e.what()).find("recapture") != std::string::npos);
+  }
+  check(!read(asset,empty,false,false).error.empty());
+  record["capsule"] = {{"archiveSHA256", std::string(64,'c')}};
+  std::ofstream(record_file)<<record;
   check(!read(url,empty,false,true).error.empty());
+  record.erase("capsule");
+  record["resources"][1]["browserPolicyVersion"] = 3;
+  std::ofstream(record_file)<<record;
+  check(!read(url,empty,false,true).error.empty());
+  record["resources"][1]["browserPolicyVersion"] = 2;
+  std::ofstream(record_file)<<record;
+  auto refreshed = read(url,empty,false,true);
+  check(refreshed.capture && refreshed.replay_mode(false) == "isolated" &&
+        refreshed.replay_mode(true) == "isolated");
   const std::string archive(64, 'b');
   const std::string mount = "https://" + archive.substr(0,32) + "." + archive.substr(32) + ".capsule.invalid/";
   // A signed replay with an extensionless source uses the same MIME handoff

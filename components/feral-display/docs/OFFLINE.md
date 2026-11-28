@@ -9,8 +9,10 @@ collection in its existing offline store. The player reads that store directly.
 The host binds replay to the current artwork manifest. Explicit captures run in
 a network-isolated worker. Automatic captures may use eligible fresh responses
 and fall back to live artwork requests under the current network policy.
-Legacy media blobs remain playable. A downloaded HTML capture that lacks the
-original response headers on replayable requests requires recapture before its scripts can execute.
+Legacy media blobs remain playable. When an older website download lacks original
+response headers, an online cast opens the website through the normal live path.
+Offline playback requires a fresh download. Signed capsules and virtual origins
+retain their network isolation.
 Unsupported writes remain coverage misses. A missing analytics POST does not invalidate a
 captured GET. The downloader uses software WebGPU to discover work dependencies. When a
 dedicated worker must remain paused, its entry script can be fetched independently through

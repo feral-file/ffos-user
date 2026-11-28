@@ -15,6 +15,16 @@
 #include <thread>
 #include <vector>
 namespace ff {
+std::string CacheReply::replay_mode(bool online) const {
+  require(error.empty(), "cache_policy_unavailable", "Cannot resolve artwork cache mode: " + error);
+  auto mode = metadata.value("replayMode", "");
+  if (mode == "needsRecapture") {
+    require(online, "cache_policy_unavailable", "Downloaded browser capture needs recapture for original response headers");
+    return "";
+  }
+  require(mode.empty() || mode == "isolated" || mode == "mixed", "cache_protocol", "Unknown artwork cache mode");
+  return mode;
+}
 CaptureSnapshot::~CaptureSnapshot() {
   if (!root.empty()) retire_browser_profile(root);
 }
@@ -163,6 +173,7 @@ struct Pool {
       }
       const Json* entry = nullptr;
       bool browser_ready = true;
+      bool known_header_versions = true;
       for (const auto& resource : record.at("resources")) {
         if (resource.value("method", "GET") == "GET" &&
             (resource.value("url", "") == source || resource.value("url", "") == record.value("entry", source)))
@@ -170,8 +181,11 @@ struct Pool {
         // Unsupported methods are recorded as coverage misses without response headers.
         // They are never replayed. Only a replayable response can invalidate the bundle.
         const auto method = resource.value("method", "GET");
-        if ((method == "GET" || method == "HEAD" || method == "OPTIONS") &&
-            resource.value("browserPolicyVersion", 0) != 2) browser_ready = false;
+        if (method == "GET" || method == "HEAD" || method == "OPTIONS") {
+          const int version = resource.value("browserPolicyVersion", 0);
+          if (version != 2) browser_ready = false;
+          if (version < 0 || version > 2) known_header_versions = false;
+        }
         if (record.value("automatic", false)) {
           auto expiry = g_date_time_new_from_iso8601(resource.value("freshUntil", "").c_str(), nullptr);
           bool fresh = expiry && g_date_time_to_unix(expiry) > std::time(nullptr);
@@ -191,7 +205,13 @@ struct Pool {
       };
       auto type = response_mime(*entry);
       if (!browser_ready && !native_media(Json{{"source", source}, {"mimeType", type}})) {
-        require(record.value("automatic", false), "bundle", "Downloaded browser capture needs recapture for original response headers");
+        if (record.value("automatic", false)) return;
+        // An ordinary website can be fetched afresh, without exposing any bytes
+        // or headers from the old download. A capsule or virtual origin cannot.
+        require(known_header_versions && capsule_id.empty() && !record.contains("capsule") &&
+                (source.starts_with("https://") || source.starts_with("http://")) && !virtual_cache_source(source),
+                "bundle", "Downloaded browser capture needs recapture for original response headers");
+        reply.metadata["replayMode"] = "needsRecapture";
         return;
       }
       // The signed URL may redirect or carry a misleading file extension.
