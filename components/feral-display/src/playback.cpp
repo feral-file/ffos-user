@@ -475,6 +475,7 @@ Json Playback::command(std::string_view method, const Json& p) {
     plan["context"]=p.value("context",plan["context"].get<std::string>());validate_plan(plan);validate_playlist(plan["playlist"]);
     Json active;auto list=cohort(plan,clock_started_?wall_now_:wall_ms(),active);plan["activeAt"]=active;
     if(list["items"].empty()){
+      plan["started"] = false;
       auto next=state_;
       const auto& items = plan["playlist"]["items"];
       auto policy = state_;
@@ -603,6 +604,8 @@ Json Playback::command(std::string_view method, const Json& p) {
     fields(p, {"index"}); require(!next["playlist"].is_null() && p.contains("index") && p["index"].is_number_integer(), "invalid_params", "Missing playlist or index");
     require(p["index"] >= 0 && p["index"] <= 4096, "invalid_params", "Invalid playlist index");
     int index = p["index"].get<int>();
+    require(!waiting_for_refresh_activation() || index == next["index"], "invalid_params",
+            "Only the outgoing artwork is eligible before the scheduled refresh");
     require(index >= 0 && index < static_cast<int>(next["playlist"]["items"].size()), "invalid_params", "Index out of bounds");
     require(allowed(next["playlist"]["items"][index], next), "content_blocked", "Selected work is blocked");
     next["index"] = index; next["stopped"] = false; reselection = true;
@@ -777,8 +780,14 @@ double Playback::duration() const {
     return state_["settings"]["durationSeconds"].get<double>();
   return selected_->item.value("duration", 0.0);
 }
+bool Playback::waiting_for_refresh_activation() const {
+  const auto plan = state_.find("cohortPlan");
+  return plan != state_.end() && !plan->is_null() && !plan->value("started", true);
+}
 void Playback::advance(bool skipping_failure) {
-  if (!selected_ || state_["paused"] == true) return;
+  // The old list only supplies the outgoing frame. Its next slot may itself
+  // be a work the refreshed source has scheduled for later.
+  if (!selected_ || state_["paused"] == true || waiting_for_refresh_activation()) return;
   if(apply_pending_update())return;
   auto next = state_; const auto& items = next["playlist"]["items"];
   auto order = next["order"].get<std::vector<int>>();
@@ -845,6 +854,7 @@ void Playback::tick(int64_t monotonic_ms, int64_t wall_time_ms) {
         // A cohort boundary advances the current cast; it must not cancel a
         // later explicit schedule accepted while that cast was playing.
         next["schedule"]=state_["schedule"];
+        if (applied) plan["started"] = true;
         next["cohortPlan"]=plan;next["scheduleOutcome"]=outcome;persist(std::move(next));++generation_;++revision_;
         if(applied){cast_id_=uuid();select();}
       }

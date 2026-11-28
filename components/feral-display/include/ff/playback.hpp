@@ -126,6 +126,7 @@ class Playback {
   void clear_recovery();
   void persist(Json next);
   void select(bool recovering = false, bool skipping_failure = false);
+  bool waiting_for_refresh_activation() const;
   void advance(bool skipping_failure = false);
   void execute_schedule(int64_t wall_time_ms);
   void replace(Json& next, const Json& params);

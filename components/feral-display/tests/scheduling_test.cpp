@@ -103,21 +103,33 @@ int main(){
       ff::Playback p(store);
       p.tick(1, 1000);
       auto source = playlist();
+      source["items"][0]["display"] = {{"loop", false}};
       const std::string url = "https://example.org/exhibition";
       p.command("playback.replace", {{"playlist",source},{"playlistUrl",url},{"boot",true}});
       const auto current = p.desired()->id;
       p.committed(current);
       p.presented(current);
       const auto replacement = source["items"][1];
-      const ff::Json refresh = {{"items",{replacement}}, {"activationTimes",{2000}}};
+      const ff::Json refresh = {{"items",{replacement}}, {"activationTimes",{60000}}};
       p.command("playback.update", refresh);
-      p.tick(2, 1999);
+      p.tick(2001, 3000);
+      check(p.desired()->id == current, "Slot duration must not start a future work early");
+      p.ended(current);
+      p.tick(2002, 3001);
+      check(p.desired()->id == current, "End of media must not start a future work early");
+      try {
+        p.command("playback.select", {{"index", 1}});
+        throw std::runtime_error("Future work selected through the old list");
+      } catch (const ff::Error& error) {
+        check(error.code == "invalid_params", "Wrong error for ineligible slot");
+      }
+      p.tick(59000, 59999);
       check(p.visible() && p.visible()->id == current && p.desired()->id == current,
             "First timed refresh must keep the outgoing work until activation");
       check(p.state()["cohortPlan"]["playlistUrl"] == url &&
             p.state()["boot"]["activationTimes"] == refresh["activationTimes"],
             "First timed refresh must preserve the source and refresh boot intent");
-      p.tick(3, 2000);
+      p.tick(59001, 60000);
       check(p.desired() && p.desired()->item == replacement, "First scheduled work must activate on time");
       p.command("playback.stop", ff::Json::object());
       try {
