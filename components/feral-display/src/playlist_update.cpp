@@ -21,13 +21,23 @@ int match_slot(const Json& old_items, int old_index, const Json& items, bool sou
   for(size_t i=0;i<items.size();++i)if(same(items[i])&&ordinal--==0)return static_cast<int>(i);
   return -1;
 }
+
+const Json& refreshed_slot(const Json& old, int index, const Json& items) {
+  int mapped = match_slot(old, index, items);
+  if (mapped < 0) mapped = match_slot(old, index, items, false);
+  return mapped < 0 ? old[index] : items[mapped];
+}
+}
+
+bool Playback::held_slot_blocked(const Json& playlist, int index, const Json& state) const {
+  if (!waiting_for_refresh_activation()) return false;
+  const auto& plan = state["cohortPlan"];
+  return !allowed(refreshed_slot(playlist["items"], index, plan["playlist"]["items"]),
+                  {{"policy", state["policy"]}, {"context", plan["context"]}});
 }
 
 bool Playback::refresh_blocks(const Occurrence& occurrence, const Json& items, const Json& policy) const {
-  const auto& old = occurrence.playlist["items"];
-  int index = match_slot(old, occurrence.index, items);
-  if (index < 0) index = match_slot(old, occurrence.index, items, false);
-  return !allowed(index < 0 ? occurrence.item : items[index], policy);
+  return !allowed(refreshed_slot(occurrence.playlist["items"], occurrence.index, items), policy);
 }
 
 void Playback::refresh_boot(Json& next, const Json& old_playlist, const Json& refreshed,
@@ -105,6 +115,7 @@ Json Playback::update_playlist(const Json& p,const Json& plan) {
   refresh_boot(next, source,
                plan.is_null() ? playlist : plan["playlist"], context, plan);
   if(defer){
+    if (!plan.is_null()) next["cohortPlan"]["started"] = false;
     next["pendingUpdate"]={{"id",id},{"playlist",playlist},{"context",context}};
   }else{
     next["playlist"]=playlist;
@@ -159,6 +170,7 @@ bool Playback::apply_pending_update(){
     next["updateOutcome"]={{"id",pending["id"]},{"outcome","failed"},{"contentBlocked",true}};
     persist(std::move(next));return false;
   }
+  if (!next.value("cohortPlan", Json(nullptr)).is_null()) next["cohortPlan"]["started"] = true;
   update_order(next,index);if(items.empty())next["stopped"]=true;
   persist(std::move(next));++generation_;select();return true;
 }

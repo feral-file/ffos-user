@@ -106,7 +106,6 @@ int main(){
       ff::Json policy = {{"version",1},{"showMatureContent",true},{"strictPersonal",false},{"blockUnratedCurated",false}};
       p.command("policy.set", policy);
       auto source = playlist();
-      source["items"][0]["contentRating"] = "mature";
       source["items"][0]["display"] = {{"loop", false}};
       const std::string url = "https://example.org/exhibition";
       p.command("playback.replace", {{"playlist",source},{"playlistUrl",url},{"boot",true}});
@@ -114,7 +113,9 @@ int main(){
       p.committed(current);
       p.presented(current);
       const auto replacement = source["items"][1];
-      const ff::Json refresh = {{"items",{replacement}}, {"activationTimes",{60000}}};
+      auto relabeled = source["items"][0];
+      relabeled["contentRating"] = "mature";
+      const ff::Json refresh = {{"items",{replacement, relabeled}}, {"activationTimes",{60000, 70000}}};
       p.command("playback.update", refresh);
       p.tick(2001, 3000);
       check(p.desired()->id == current, "Slot duration must not start a future work early");
@@ -128,6 +129,8 @@ int main(){
         check(error.code == "invalid_params", "Wrong error for ineligible slot");
       }
       p.system_boot("next");
+      check(p.snapshot()["presentedOwnsCast"] == true, "Restoring the same source must retain refresh ownership");
+      p.command("playback.update", refresh);
       p.tick(59000, 59999);
       check(p.visible() && p.visible()->id == current && p.desired()->id == current,
             "First timed refresh must keep the outgoing work until activation");
@@ -146,6 +149,22 @@ int main(){
       } catch (const ff::Error& error) {
         check(error.code == "stale_generation", "Stopped source must reject timed refreshes");
       }
+    }
+    {
+      ff::Store store(path+".mixed-refresh"); ff::Playback p(store);
+      p.tick(1, 1000);
+      auto source = playlist();
+      p.command("playback.replace", {{"playlist",source}});
+      auto current = p.desired()->id; p.committed(current); p.presented(current);
+      auto eligible = source["items"][0]; eligible["source"] = "https://example.org/c";
+      const auto future = source["items"][1];
+      p.command("playback.update", {{"items",{eligible,future}},{"activationTimes",{nullptr,60000}}});
+      try {
+        p.command("playback.select", {{"index",1}});
+        throw std::runtime_error("Future work selected through a deferred mixed cohort");
+      } catch (const ff::Error& error) { check(error.code == "invalid_params", "Wrong deferred selection error"); }
+      p.tick(1002, 2001);
+      check(p.desired() && p.desired()->item == eligible, "Slot boundary must apply the already eligible work");
     }
     {
       ff::Store store(path+".future-refresh");ff::Playback p(store);

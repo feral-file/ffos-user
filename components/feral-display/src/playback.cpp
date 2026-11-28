@@ -259,7 +259,7 @@ void Playback::select(bool recovering,bool skipping_failure) {
   if (items.empty()) { presented_.reset(); return; }
   int index = state_["index"].get<int>();
   require(index >= 0 && index < static_cast<int>(items.size()), "storage_corrupt", "Selection is outside playlist");
-  if (!allowed(items[index], state_)) {
+  if (!allowed(items[index], state_) || held_slot_blocked(state_["playlist"], index, state_)) {
     if (waiting_for_refresh_activation()) { presented_.reset(); return; }
     auto found = std::find_if(items.begin(), items.end(), [&](const Json& item) { return allowed(item, state_); });
     if (found == items.end()) { presented_.reset(); return; }
@@ -325,8 +325,6 @@ int Playback::prepare_replace(Json& next,const Json& p){
       auto list=cohort(plan,wall,active);plan["activeAt"]=active;
       if(list["items"].empty()){
         next=state_;reselection=false;
-        // Replaying boot intent must preserve a hold already imposed on the outgoing list.
-        plan["started"] = !waiting_for_refresh_activation();
         // Keep the current artwork until activation, but retire superseded
         // pending owners now. They must not erase this newly accepted plan.
         for(auto key:{"schedule","scheduleOutcome","pendingUpdate","updateOutcome"})next[key]=nullptr;
@@ -408,8 +406,16 @@ void Playback::system_boot(const std::string& id){
     }
     if (stale_index) next["boot"]["index"] = 0;
   }
+  // The retained frame still owns refreshes when boot restores the same deferred source.
+  bool same_hold = false;
+  if (action == 1 && waiting_for_refresh_activation()) {
+    auto& restored = next["cohortPlan"];
+    restored["started"] = false;
+    same_hold = restored == state_["cohortPlan"];
+    restored["started"] = !same_hold;
+  }
   next["systemBootId"]=id;persist(std::move(next));
-  if(action){++generation_;cast_id_=uuid();if(action==2)select();}
+  if(action){++generation_;if(!same_hold)cast_id_=uuid();if(action==2)select();}
 }
 
 Json Playback::command(std::string_view method, const Json& p) {
@@ -611,7 +617,8 @@ Json Playback::command(std::string_view method, const Json& p) {
     require(!waiting_for_refresh_activation() || index == next["index"], "invalid_params",
             "Only the outgoing artwork is eligible before the scheduled refresh");
     require(index >= 0 && index < static_cast<int>(next["playlist"]["items"].size()), "invalid_params", "Index out of bounds");
-    require(allowed(next["playlist"]["items"][index], next), "content_blocked", "Selected work is blocked");
+    require(allowed(next["playlist"]["items"][index], next) && !held_slot_blocked(next["playlist"], index, next),
+            "content_blocked", "Selected work is blocked");
     next["index"] = index; next["stopped"] = false; reselection = true;
   } else if (method == "playback.refresh") { fields(p, {}); require(selected_.has_value(), "no_artwork", "No active artwork to refresh"); reselection = true; }
   else if (method == "playback.stop" || method == "playback.cancel") { fields(p, {}); next["stopped"] = true; next["cohortPlan"]=nullptr; next["schedule"]=nullptr; next["pendingUpdate"]=nullptr; next["updateOutcome"]=nullptr; reselection = generation = true; }
@@ -640,7 +647,8 @@ Json Playback::command(std::string_view method, const Json& p) {
     fields(p, {"version", "showMatureContent", "strictPersonal", "blockUnratedCurated"});
     require(p.contains("version")&&p["version"].is_number_integer()&&p["version"] == 1, "invalid_params", "Unsupported content policy version");
     next["policy"] = {{"version", 1}, {"showMatureContent", boolean(p, "showMatureContent")}, {"strictPersonal", boolean(p, "strictPersonal")}, {"blockUnratedCurated", boolean(p, "blockUnratedCurated")}};
-    reselection = !selected_ || !allowed(selected_->item, next);
+    reselection = !selected_ || !allowed(selected_->item, next) ||
+                  (selected_->cast_id == cast_id_ && held_slot_blocked(selected_->playlist, selected_->index, next));
   } else if (method == "schedule.set" || method == "boot.set") {
     fields(p, {"playlist", "context", "atMs", "clear", "index", "playlistUrl", "activationTimes"});
     auto key = method == "boot.set" ? "boot" : "schedule";
@@ -664,7 +672,8 @@ Json Playback::command(std::string_view method, const Json& p) {
     // while a new cast loads. Policy retirement must inspect that occurrence,
     // not borrow the incoming cast's potentially more permissive context.
     auto presented_policy=state_;presented_policy["context"]=presented_->context;
-    if(!allowed(presented_->item,presented_policy)){release_input();presented_.reset();}
+    if(!allowed(presented_->item,presented_policy) ||
+       (presented_->cast_id == cast_id_ && held_slot_blocked(presented_->playlist, presented_->index, state_))){release_input();presented_.reset();}
   }
   if (method == "playback.pause") autoplay_hold_ = false;
   if (method == "settings.set") {
@@ -791,8 +800,8 @@ bool Playback::waiting_for_refresh_activation() const {
 void Playback::advance(bool skipping_failure) {
   // The old list only supplies the outgoing frame. Its next slot may itself
   // be a work the refreshed source has scheduled for later.
-  if (!selected_ || state_["paused"] == true || waiting_for_refresh_activation()) return;
-  if(apply_pending_update())return;
+  if (!selected_ || state_["paused"] == true) return;
+  if(apply_pending_update() || waiting_for_refresh_activation())return;
   auto next = state_; const auto& items = next["playlist"]["items"];
   auto order = next["order"].get<std::vector<int>>();
   if (order.size() != items.size()) { order.resize(items.size()); std::iota(order.begin(), order.end(), 0); }
