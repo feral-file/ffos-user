@@ -242,3 +242,22 @@ func TestAutomaticRefresh_RejectedByClaimQRLogsNoWarning(t *testing.T) {
 	assert.Equal(t, kindClaimQR, cur.Kind, "the claim QR must keep the screen")
 	assert.Zero(t, logs.Len(), "a correctly-rejected Automatic refresh must not log at Warn")
 }
+
+func TestNativeResyncReplaysCurrentPairingOverlay(t *testing.T) {
+	painter := &setupRecorder{}
+	s := newTestService()
+	ctrl := overlay.New(painter)
+	s.SetController(ctrl)
+	ResyncNative(nil)
+	ResyncNative(s)
+	require.Empty(t, painter.snapshot())
+	listener := &setupRecorderListener{}
+	s.active = &activePairing{listener: listener}
+	view := overlay.Overlay{Kind: "mint:pairing_code"}
+	_, _, err := ctrl.Show(t.Context(), listener, view, overlay.Owner)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(painter.snapshot()) == 1 }, time.Second, time.Millisecond)
+	ResyncNative(s)
+	require.Eventually(t, func() bool { return len(painter.snapshot()) == 2 }, time.Second, time.Millisecond)
+	require.Equal(t, []string{"show:mint:pairing_code", "show:mint:pairing_code"}, painter.snapshot())
+}

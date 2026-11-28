@@ -731,3 +731,18 @@ func TestHostReconnectReplaysIntentAndClearsUnobservedStatus(t *testing.T) {
 		t.Fatal("watch failed to stop")
 	}
 }
+
+func TestPassiveSetupRetriesOnceOnOlderHost(t *testing.T) {
+	p := newFakePlayer()
+	p.err = &playerlink.RemoteError{Code: "invalid_params", Message: "unknown passive flag"}
+	s := New(p, nil)
+	s.version = "3.2.0"
+	req := map[string]any{"state": stateScanning, "passive": true}
+	err := s.trySend(t.Context(), req)
+	require.ErrorIs(t, err, p.err)
+	require.Len(t, p.requests, 2)
+	require.Equal(t, true, p.requests[0]["passive"])
+	require.NotContains(t, p.requests[1], "passive")
+	require.Equal(t, "3.2.0", p.requests[1]["version"])
+	require.Equal(t, true, req["passive"])
+}

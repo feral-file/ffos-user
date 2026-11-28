@@ -3,11 +3,14 @@ package offlinecache
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/png"
+	"maps"
 	"testing"
 	"time"
 
@@ -238,4 +241,217 @@ func TestCapsuleReplayRedirectChain(t *testing.T) {
 			require.Equal(t, capsuleDigest(nil), record.Resources[2].SHA256)
 		})
 	}
+}
+
+func TestCapsuleReplayRejectsIncompleteEditions(t *testing.T) {
+	const source = "https://example.org/artwork"
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	archive, _ := capsuleFixture(t, source, "artwork", "did:key:z"+base58.Encode(append([]byte{0xed, 1}, pub...)), priv)
+	original, err := readCapsuleFiles(archive)
+	require.NoError(t, err)
+	const playlist = "playlist.json"
+	const reference = "meta/render/reference.json"
+	const engine = "meta/engine/chromium.json"
+	const capture = "meta/capture/resources.json"
+	for _, tc := range []struct {
+		name, file, old, new, reason string
+	}{
+		{"no works", playlist, "", `{"items":[]}`, "static playlist"},
+		{"future work", playlist, `"source"`, `"displayAt":"2030-01-01T00:00:00Z","source"`, "directly playable"},
+		{"missing reference", reference, "", `{}`, "invalid capsule replay reference"},
+		{"mixed capture modes", reference, `"replay"`, `"files"`, "cannot also claim"},
+		{"unknown capture mode", reference, `"replay"`, `"other"`, "unsupported capsule reference mode"},
+		{"incomplete capture", capture, `"complete":true`, `"complete":false`, "complete original-URL"},
+		{"different origin", capture, source, "https://example.org/different", "complete original-URL"},
+		{"missing engine version", engine, "155.0.8059.84", "", "invalid capsule engine pin"},
+		{"different engine versions", playlist, `"assetsSHA256"`, `"engineVersion":{"chromium":"other"},"assetsSHA256"`, "version claims disagree"},
+		{"different frame hashes", reference, "0x0000000000000000", "0x0000000000000001", "frame claims disagree"},
+		{"wrong frame dimensions", engine, `"width":1`, `"width":2`, "reference frame checksum mismatch"},
+		{"missing reference frame", "meta/render/reference.png", "", "", "reference frame checksum mismatch"},
+		{"wrong asset bytes", "assets/" + capsuleDigest([]byte("artwork")), "", "other", "asset checksum mismatch"},
+		{"unlisted asset", "assets/extra", "", "other", "unlisted asset"},
+		{"playlist asset mismatch", playlist, capsuleDigest([]byte("artwork")), capsuleDigest(nil), "playlist assets disagree"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := maps.Clone(original)
+			if tc.old == "" {
+				files[tc.file] = []byte(tc.new)
+			} else {
+				require.Contains(t, string(files[tc.file]), tc.old)
+				files[tc.file] = bytes.Replace(files[tc.file], []byte(tc.old), []byte(tc.new), 1)
+			}
+			_, record, _, err := capsuleReplay(capsuleDigest(archive), files)
+			require.ErrorContains(t, err, tc.reason)
+			require.Nil(t, record)
+		})
+	}
+}
+
+func TestCapsuleImportAvailabilityAndStorage(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, pub...))
+	const source = "https://example.org/sculpture"
+	archive, signature := capsuleFixture(t, source, "edition", signer, priv)
+	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zap.NewNop())
+	cache := NewService(store, nil, nil, nil, wrapper.NewJSON(), 0, 0, nil, AdmissionOptions{}, zap.NewNop()).(*service)
+	_, err = cache.ImportCapsule(t.Context(), archive, signature, signer)
+	require.ErrorIs(t, err, ErrServiceNotStarted)
+	cache.started.Store(true)
+	_, err = cache.ImportCapsule(t.Context(), nil, signature, signer)
+	require.ErrorContains(t, err, "compressed size")
+	key := SourceKey(source)
+	cache.state[key] = StateDownloading
+	_, err = cache.ImportCapsule(t.Context(), archive, signature, signer)
+	require.ErrorIs(t, err, ErrItemBusy)
+	delete(cache.state, key)
+	cache.maxDiskBytes = 1
+	_, err = cache.ImportCapsule(t.Context(), archive, signature, signer)
+	require.ErrorIs(t, err, errCacheDiskPressure)
+	_, err = store.LoadItem(key)
+	require.ErrorIs(t, err, ErrItemNotFound)
+	cache.maxDiskBytes = 32 << 20
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = cache.ImportCapsule(ctx, archive, signature, signer)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = cache.ImportCapsule(t.Context(), archive, signature, signer)
+	require.NoError(t, err)
+}
+
+func TestCapsuleSignatureRequiresMatchingSigner(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, pub...))
+	archive, sidecar := capsuleFixture(t, "https://example.org/edition", "frame", signer, priv)
+	id := capsuleDigest(archive)
+	validSig := ed25519.Sign(priv, []byte("sha256:"+id))
+	wrongSig := ed25519.Sign(priv, []byte("a different edition"))
+	invalidSidecar := bytes.Replace(sidecar, []byte(base64.RawURLEncoding.EncodeToString(validSig)), []byte(base64.RawURLEncoding.EncodeToString(wrongSig)), 1)
+	for _, tc := range []struct {
+		name, signer string
+		sidecar      json.RawMessage
+		reason       string
+	}{
+		{"invalid signature", signer, invalidSidecar, "does not match"},
+		{"missing signer", "", sidecar, "requires an Ed25519"},
+		{"invalid key", "did:key:z0", sidecar, "invalid capsule signer"},
+		{"unknown signature algorithm", signer, bytes.ReplaceAll(sidecar, []byte("ed25519"), []byte("unknown")), "does not match"},
+		{"different archive", signer, bytes.ReplaceAll(sidecar, []byte(id), []byte(capsuleDigest(nil))), "does not name"},
+		{"oversize signature", signer, make([]byte, MaxCapsuleSignatureBytes+1), "size limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.ErrorContains(t, verifyCapsuleSignature(id, tc.sidecar, tc.signer), tc.reason)
+		})
+	}
+}
+
+func TestCapsuleArchiveMembers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers []*tar.Header
+		want    string
+	}{
+		{"directory and member", []*tar.Header{{Name: "assets/", Typeflag: tar.TypeDir}, {Name: "assets/art", Typeflag: tar.TypeReg}}, ""},
+		{"duplicate name", []*tar.Header{{Name: "playlist.json", Typeflag: tar.TypeReg}, {Name: "playlist.json", Typeflag: tar.TypeReg}}, "duplicate member"},
+		{"unsupported member", []*tar.Header{{Name: "alternative", Typeflag: tar.TypeLink, Linkname: "art"}}, "non-regular member"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var archive bytes.Buffer
+			enc, err := zstd.NewWriter(&archive)
+			require.NoError(t, err)
+			w := tar.NewWriter(enc)
+			for _, header := range tc.headers {
+				require.NoError(t, w.WriteHeader(header))
+			}
+			require.NoError(t, w.Close())
+			require.NoError(t, enc.Close())
+			files, err := readCapsuleFiles(archive.Bytes())
+			if tc.want != "" {
+				require.ErrorContains(t, err, tc.want)
+				require.Nil(t, files)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			require.Contains(t, files, "assets/art")
+		})
+	}
+	_, err := readCapsuleFiles([]byte("incomplete archive"))
+	require.Error(t, err)
+}
+
+func TestCapsuleResponseHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		r      Resource
+		reason string
+	}{
+		{"invalid name", Resource{Headers: map[string]string{"bad name": "value"}}, "invalid capsule resource header"},
+		{"duplicate field", Resource{Headers: map[string]string{"Vary": "Origin", "vary": "Accept"}}, "duplicate capsule resource header"},
+		{"invalid content type", Resource{ContentType: "invalid\nvalue"}, "invalid capsule content type"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resource := tc.r
+			require.ErrorContains(t, capsuleHeaderFields(&resource), tc.reason)
+		})
+	}
+}
+
+func TestNamedCapsuleUsesMountForNonHTTPSource(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, pub...))
+	archive, _ := capsuleFixture(t, "ipfs://fixture", "edition", signer, priv)
+	files, err := readCapsuleFiles(archive)
+	require.NoError(t, err)
+	delete(files, "meta/capture/resources.json")
+	digest := capsuleDigest([]byte("edition"))
+	files["assets/start.custom"] = files["assets/"+digest]
+	delete(files, "assets/"+digest)
+	const path = "meta/render/reference.json"
+	var ref map[string]any
+	require.NoError(t, json.Unmarshal(files[path], &ref))
+	ref["mode"] = "files"
+	ref["entry"] = "start.custom"
+	ref["assets"] = map[string]string{"start.custom": digest}
+	files[path], err = json.Marshal(ref)
+	require.NoError(t, err)
+	id := capsuleDigest(archive)
+	raw, rec, _, err := capsuleReplay(id, files)
+	require.NoError(t, err)
+	require.Equal(t, rec.Entry, rec.Item.Source)
+	require.Contains(t, rec.Entry, ".capsule.invalid/start.custom")
+	require.Contains(t, string(raw), rec.Entry)
+	require.Contains(t, string(files["playlist.json"]), "ipfs://fixture")
+	require.Equal(t, "application/octet-stream", rec.Resources[0].ContentType)
+}
+
+type capsuleRecordWriteFailure struct {
+	Store
+	err error
+}
+
+func (s capsuleRecordWriteFailure) SaveItem(*ItemRecord) error { return s.err }
+
+func TestCapsuleImportCleansUpAfterFailedRecordWrite(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	signer := "did:key:z" + base58.Encode(append([]byte{0xed, 1}, pub...))
+	const source = "https://example.org/capsule"
+	archive, signature := capsuleFixture(t, source, "edition", signer, priv)
+	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zap.NewNop())
+	writeError := errors.New("record write failed")
+	s := NewService(capsuleRecordWriteFailure{Store: store, err: writeError}, nil, nil, nil, wrapper.NewJSON(), 0, 0, nil, AdmissionOptions{}, zap.NewNop()).(*service)
+	s.started.Store(true)
+	_, err = s.ImportCapsule(t.Context(), archive, signature, signer)
+	require.ErrorIs(t, err, writeError)
+	_, err = store.LoadItem(SourceKey(source))
+	require.ErrorIs(t, err, ErrItemNotFound)
+	for _, id := range []string{capsuleDigest(archive), capsuleDigest([]byte("edition"))} {
+		_, err = store.BlobSize(id)
+		require.Error(t, err)
+	}
+	require.NotEqual(t, StateReady, s.state[SourceKey(source)])
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Model a rotated, 2x-scaled Cage output. grim's -s applies to its
@@ -43,4 +45,39 @@ cat "$CAPTURE_FIXTURE"
 	if err != nil || got.Width != 270 || got.Height != 480 {
 		t.Fatalf("capture failed or wrong geometry: %v", err)
 	}
+}
+
+func TestNativeCaptureReportsUnavailableOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, grim string
+		want              error
+	}{
+		{"query failed", "exit 1", "", ErrUnavailable},
+		{"unreadable outputs", "echo broken", "", nil},
+		{"disabled output", `echo '[{"enabled":false}]'`, "", ErrUnavailable},
+		{"no current mode", `echo '[{"enabled":true,"modes":[{"current":false}]}]'`, "", ErrUnavailable},
+		{"cannot capture output", `echo '[{"name":"DP-1","enabled":true,"modes":[{"width":10,"height":10,"current":true}]}]'`, "exit 1", ErrUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("PATH", dir)
+			for name, script := range map[string]string{"wlr-randr": tc.query, "grim": tc.grim} {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+script+"\n"), 0700)) //nolint:gosec // Private executable test fixtures.
+			}
+			image, err := NewNative().Capture(t.Context(), Bounds{Height: 480})
+			require.Nil(t, image)
+			require.Error(t, err)
+			if tc.want != nil {
+				require.ErrorIs(t, err, tc.want)
+			}
+		})
+	}
+	n := NewNative()
+	n.slot <- struct{}{}
+	_, err := n.Capture(t.Context(), Bounds{Height: 480})
+	require.ErrorIs(t, err, ErrBusy)
+	_, err = n.Capture(t.Context(), Bounds{Height: -1})
+	require.Error(t, err)
+	_, err = n.CaptureArtwork(t.Context(), 1)
+	require.ErrorIs(t, err, ErrUnavailable)
 }

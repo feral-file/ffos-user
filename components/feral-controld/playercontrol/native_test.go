@@ -165,3 +165,83 @@ func TestNativeDeviceCommands(t *testing.T) {
 		})
 	}
 }
+
+type playbackResponse struct {
+	state                playerlink.Snapshot
+	readErr, errorOnCall error
+	body                 string
+}
+
+func (p playbackResponse) Snapshot(context.Context) (playerlink.Snapshot, error) {
+	return p.state, p.readErr
+}
+func (p playbackResponse) Call(_ context.Context, _ string, _, out any, _ *playerlink.Preconditions) error {
+	if p.errorOnCall != nil {
+		return p.errorOnCall
+	}
+	return json.Unmarshal([]byte(p.body), out)
+}
+
+func TestNativeReadinessAndRefusals(t *testing.T) {
+	good := playerlink.Snapshot{Instance: "host", Generation: 4, Revision: 3, Host: "responsive"}
+	for _, tc := range []struct {
+		name    string
+		player  Player
+		command commands.Type
+		code    string
+	}{
+		{"unwired", nil, commands.CMD_DISPLAY_PLAYLIST, "unavailable"},
+		{"default unavailable", playbackResponse{state: good}, commands.CMD_DISPLAY_DEFAULT_PLAYLIST, "unavailable"},
+		{"policy unavailable", playbackResponse{state: good, errorOnCall: errors.New("offline")}, commands.CMD_GET_CONTENT_POLICY, "unavailable"},
+		{"malformed policy", playbackResponse{state: good, body: `"wrong"`}, commands.CMD_GET_CONTENT_POLICY, "invalid_response"},
+		{"missing host", playbackResponse{readErr: errors.New("offline")}, commands.CMD_DISPLAY_PLAYLIST, "unavailable"},
+		{"invalid host", playbackResponse{}, commands.CMD_DISPLAY_PLAYLIST, "unavailable"},
+		{"unknown receipt", playbackResponse{state: good, body: `{"outcome":"loading"}`}, commands.CMD_DISPLAY_PLAYLIST, "outcome_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Native{Player: tc.player}
+			cmd := cast()
+			cmd.Type = tc.command
+			reply, err := n.Send(t.Context(), cmd)
+			require.NoError(t, err)
+			require.Equal(t, tc.code, reply.(map[string]any)["message"].(map[string]any)["code"])
+			if tc.player == nil {
+				require.False(t, n.Ready(t.Context()))
+				return
+			}
+			fence, err := n.Fence(t.Context())
+			require.Equal(t, n.Ready(t.Context()), err == nil)
+			if err == nil {
+				require.Equal(t, good.Preconditions(), fence)
+			}
+		})
+	}
+	n := &Native{Player: playbackResponse{state: good, body: `{"showMatureContent":false}`}}
+	v, err := n.Send(t.Context(), commands.Command{Type: commands.CMD_GET_CONTENT_POLICY})
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"showMatureContent": false}, v.(map[string]any)["message"].(map[string]any)["contentPolicy"])
+}
+
+func TestNativeStartItemPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start map[string]any
+		index any
+	}{
+		{"prefer edition ID", map[string]any{"id": "second", "source": "https://example.org/first"}, 1},
+		{"fall back to source", map[string]any{"id": "missing", "source": "https://example.org/first"}, 0},
+		{"no match", map[string]any{"source": "absent"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := cast()
+			cmd.Arguments["startItem"] = tc.start
+			cmd.Arguments["onlyIfNoPlaylist"] = true
+			cmd.Arguments["dp1_call"] = map[string]any{"items": []any{map[string]any{"id": "first", "source": "https://example.org/first"}, map[string]any{"id": "second", "source": "https://example.org/second"}}}
+			method, p, err := castOperation(cmd)
+			require.NoError(t, err)
+			require.Equal(t, "playback.replace", method)
+			require.Equal(t, tc.index, p["index"])
+			require.Equal(t, true, p["onlyIfNoPlaylist"])
+		})
+	}
+}
